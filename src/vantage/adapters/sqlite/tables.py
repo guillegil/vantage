@@ -42,6 +42,13 @@ runs = Table(
     Column("root_dir", Text, nullable=True),
     Column("totals", JSON, nullable=False),
     Column("last_heartbeat_at", DateTime, nullable=True),
+    # Additive/optional (spec Domain 1 -- Run-Level Selection Metadata;
+    # design SS2). Populated by the `run_started` projector; all nullable so
+    # thin/legacy producers and pre-existing rows are unaffected.
+    Column("seed", Integer, nullable=True),
+    Column("seed_source", Text, nullable=True),
+    Column("marker_expr", Text, nullable=True),
+    Column("keyword_expr", Text, nullable=True),
 )
 
 test_results = Table(
@@ -55,6 +62,16 @@ test_results = Table(
     Column("phases", JSON, nullable=False),
     Column("longrepr", Text, nullable=True),
     Column("started_at", DateTime, nullable=True),
+    # Additive/optional (spec Domain 1 -- Test-Level Structured Identity and
+    # Parameters; Domain 6 -- Base Test ID Cross-Run Stability; design SS2).
+    # `base_test_id` is indexed -- it's the cross-run grouping key for
+    # future compare-runs read-paths.
+    Column("base_test_id", String, nullable=True, index=True),
+    Column("relpath", Text, nullable=True),
+    Column("lineno", Integer, nullable=True),
+    Column("originalname", Text, nullable=True),
+    Column("parameters", JSON, nullable=True),
+    Column("fixture_names", JSON, nullable=True),
 )
 
 artifacts = Table(
