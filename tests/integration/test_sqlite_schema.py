@@ -39,6 +39,11 @@ def test_runs_table_columns() -> None:
         "root_dir",
         "totals",
         "last_heartbeat_at",
+        # Additive/optional (spec Domain 1 -- Run-Level Selection Metadata).
+        "seed",
+        "seed_source",
+        "marker_expr",
+        "keyword_expr",
     }
     assert _columns("runs") == expected
     assert [c.name for c in metadata.tables["runs"].primary_key.columns] == ["run_id"]
@@ -54,8 +59,25 @@ def test_test_results_table_columns() -> None:
         "phases",
         "longrepr",
         "started_at",
+        # Additive/optional (spec Domain 1 -- Test-Level Structured Identity
+        # and Parameters; Domain 6 -- Base Test ID Cross-Run Stability).
+        "base_test_id",
+        "relpath",
+        "lineno",
+        "originalname",
+        "parameters",
+        "fixture_names",
     }
     assert _columns("test_results") == expected
+
+
+def test_test_results_base_test_id_is_indexed() -> None:
+    indexed_columns = {
+        column.name
+        for index in metadata.tables["test_results"].indexes
+        for column in index.columns
+    }
+    assert "base_test_id" in indexed_columns
 
 
 def test_artifacts_table_columns() -> None:
