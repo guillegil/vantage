@@ -53,6 +53,11 @@ class Run:
     root_dir: str | None = None
     totals: Mapping[str, int] = field(default_factory=dict)
     last_heartbeat_at: datetime | None = None
+    # Additive/optional (spec Domain 1 -- Run-Level Selection Metadata).
+    seed: int | None = None
+    seed_source: str | None = None
+    marker_expr: str | None = None
+    keyword_expr: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +70,9 @@ class Phase:
     name: str
     outcome: str
     duration: float
+    # Additive/optional -- per-stream captured stdout/stderr/log, folded here
+    # rather than a new top-level contract field (design SS1, SS7).
+    captures: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +92,14 @@ class TestResult:
     phases: Mapping[str, Phase] = field(default_factory=dict)
     longrepr: str | None = None
     started_at: datetime | None = None
+    # Additive/optional (spec Domain 1 -- Test-Level Structured Identity and
+    # Parameters; Domain 6 -- Base Test ID Cross-Run Stability).
+    base_test_id: str | None = None
+    relpath: str | None = None
+    lineno: int | None = None
+    originalname: str | None = None
+    parameters: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    fixture_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 CONTRACT_VERSION = 1
 
@@ -48,6 +48,14 @@ class RunStartedPayload(BaseModel):
     env_snapshot: dict[str, str]
     user: str
     root_dir: str
+    # Additive/optional (spec Domain 1 -- Run-Level Selection Metadata; and
+    # decision #278.9 -- standalone-run self-registration in A3). Absence
+    # MUST NOT fail validation; CONTRACT_VERSION stays 1.
+    testpath: str | None = None
+    seed: int | None = None
+    seed_source: str | None = None
+    marker_expr: str | None = None
+    keyword_expr: str | None = None
 
 
 class RunDiscoveredPayload(BaseModel):
@@ -60,6 +68,15 @@ class TestFinishedPayload(BaseModel):
     duration: float
     phases: dict[str, dict[str, Any]]
     longrepr: str | None = None
+    # Additive/optional (spec Domain 1 -- Test-Level Structured Identity and
+    # Parameters). Absence MUST NOT fail validation; CONTRACT_VERSION stays
+    # 1. Per-stage captures fold into `phases` above -- no new field needed.
+    base_test_id: str | None = None
+    relpath: str | None = None
+    lineno: int | None = None
+    originalname: str | None = None
+    parameters: dict[str, dict[str, str]] = Field(default_factory=dict)
+    fixture_names: list[str] = Field(default_factory=list)
 
 
 class RunFinishedPayload(BaseModel):

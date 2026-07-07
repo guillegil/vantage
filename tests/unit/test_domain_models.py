@@ -48,6 +48,27 @@ def test_run_defaults_are_unset() -> None:
     assert run.totals == {}
 
 
+def test_run_accepts_enriched_selection_metadata() -> None:
+    run = _make_run(
+        seed=42,
+        seed_source="pytest-strategies",
+        marker_expr="slow",
+        keyword_expr="test_foo",
+    )
+    assert run.seed == 42
+    assert run.seed_source == "pytest-strategies"
+    assert run.marker_expr == "slow"
+    assert run.keyword_expr == "test_foo"
+
+
+def test_run_defaults_enriched_selection_metadata_to_none() -> None:
+    run = _make_run()
+    assert run.seed is None
+    assert run.seed_source is None
+    assert run.marker_expr is None
+    assert run.keyword_expr is None
+
+
 def _make_phase(**overrides: object) -> Phase:
     defaults: dict[str, object] = {"name": "call", "outcome": "passed", "duration": 0.01}
     defaults.update(overrides)
@@ -58,6 +79,18 @@ def test_phase_rejects_mutation() -> None:
     phase = _make_phase()
     with pytest.raises(dataclasses.FrozenInstanceError):
         phase.outcome = "failed"  # type: ignore[misc]
+
+
+def test_phase_defaults_captures_to_none() -> None:
+    phase = _make_phase()
+    assert phase.captures is None
+
+
+def test_phase_accepts_captures() -> None:
+    phase = _make_phase(
+        captures={"stdout": "hi", "stderr": "", "log": "", "truncated": False}
+    )
+    assert phase.captures == {"stdout": "hi", "stderr": "", "log": "", "truncated": False}
 
 
 def _make_test_result(**overrides: object) -> TestResult:
@@ -82,6 +115,33 @@ def test_test_result_rejects_mutation() -> None:
 def test_test_result_records_producer_reported_outcome_verbatim() -> None:
     result = _make_test_result(outcome="xfail")
     assert result.outcome == "xfail"
+
+
+def test_test_result_defaults_enriched_identity_fields_to_empty() -> None:
+    result = _make_test_result()
+    assert result.base_test_id is None
+    assert result.relpath is None
+    assert result.lineno is None
+    assert result.originalname is None
+    assert result.parameters == {}
+    assert result.fixture_names == ()
+
+
+def test_test_result_accepts_enriched_identity_and_parameters() -> None:
+    result = _make_test_result(
+        base_test_id="abc123",
+        relpath="tests/test_x.py",
+        lineno=10,
+        originalname="test_y",
+        parameters={"a": {"value_repr": "1", "type": "int"}},
+        fixture_names=("tmp_path", "monkeypatch"),
+    )
+    assert result.base_test_id == "abc123"
+    assert result.relpath == "tests/test_x.py"
+    assert result.lineno == 10
+    assert result.originalname == "test_y"
+    assert result.parameters == {"a": {"value_repr": "1", "type": "int"}}
+    assert result.fixture_names == ("tmp_path", "monkeypatch")
 
 
 def _make_artifact(**overrides: object) -> Artifact:
