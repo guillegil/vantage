@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vantage"
+version = "0.1.0"
+description = "A web platform and API for pytest -- launch, monitor live, schedule, and compare test runs from a single vantage point."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "Guillermo Gil" }]
+dependencies = [
+    "sqlalchemy>=2.0",
+    "pydantic>=2",
+    "alembic",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "mypy",
+]
+# Populated at api-core-launch (slice 2): fastapi, uvicorn, apscheduler, etc.
+# Kept as an explicit empty extra now so collector-only installs never pull
+# server dependencies (see docs/architecture.md).
+server = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vantage"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--strict-markers --strict-config"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = ["src"]
+disallow_untyped_defs = true
+warn_unused_configs = true
