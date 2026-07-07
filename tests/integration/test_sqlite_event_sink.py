@@ -133,6 +133,125 @@ def test_emit_appends_audit_row_for_every_processed_event(engine: Engine) -> Non
     assert rows[0]["event_type"] == "run_started"
 
 
+def test_emit_run_finished_appends_audit_row_without_projecting(engine: Engine) -> None:
+    # run_finished is a registered, validating event type but has no
+    # projector in this slice (design §6 handoff -- run lifecycle
+    # transitions belong to later slices); it must still land in the
+    # `events` audit trail since `events.seq` is the SSE poll cursor.
+    SqliteRunRepository(engine).create(_pending_run())
+    sink = SqliteEventSink(engine)
+
+    sink.emit(
+        _envelope(
+            event_type="run_finished",
+            timestamp=datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC),
+            payload={"exit_code": 0, "totals": {"passed": 3, "failed": 0}},
+        )
+    )
+
+    with engine.connect() as connection:
+        event_rows = (
+            connection.execute(select(events).where(events.c.run_id == "run-1"))
+            .mappings()
+            .all()
+        )
+        run_row = (
+            connection.execute(select(runs).where(runs.c.run_id == "run-1")).mappings().one()
+        )
+        test_result_rows = (
+            connection.execute(select(test_results).where(test_results.c.run_id == "run-1"))
+            .mappings()
+            .all()
+        )
+
+    assert len(event_rows) == 1
+    row = event_rows[0]
+    assert row["schema_version"] == CONTRACT_VERSION
+    assert row["event_type"] == "run_finished"
+    assert row["payload"] == {"exit_code": 0, "totals": {"passed": 3, "failed": 0}}
+    # audit-only: the run row is untouched -- no projector wires exit_code,
+    # finished_at, or state for run_finished in this slice.
+    assert run_row["state"] == RunState.PENDING.value
+    assert run_row["exit_code"] is None
+    assert run_row["finished_at"] is None
+    assert len(test_result_rows) == 0
+
+
+def test_emit_run_heartbeat_appends_audit_row_without_projecting(engine: Engine) -> None:
+    SqliteRunRepository(engine).create(_pending_run())
+    sink = SqliteEventSink(engine)
+
+    sink.emit(
+        _envelope(
+            event_type="run_heartbeat",
+            timestamp=datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC),
+            payload={"at": "2026-01-01T00:00:05+00:00"},
+        )
+    )
+
+    with engine.connect() as connection:
+        event_rows = (
+            connection.execute(select(events).where(events.c.run_id == "run-1"))
+            .mappings()
+            .all()
+        )
+        run_row = (
+            connection.execute(select(runs).where(runs.c.run_id == "run-1")).mappings().one()
+        )
+
+    assert len(event_rows) == 1
+    row = event_rows[0]
+    assert row["schema_version"] == CONTRACT_VERSION
+    assert row["event_type"] == "run_heartbeat"
+    assert row["payload"] == {"at": "2026-01-01T00:00:05+00:00"}
+    # audit-only: last_heartbeat_at is not wired to a projector in this
+    # slice either.
+    assert run_row["state"] == RunState.PENDING.value
+    assert run_row["last_heartbeat_at"] is None
+
+
+def test_emit_audit_only_events_keep_seq_monotonically_increasing(engine: Engine) -> None:
+    # events.seq is the load-bearing SSE poll cursor (design §5); the
+    # audit-only event types (run_finished, run_heartbeat) must participate
+    # in the same monotonic sequence as projected events, in emit order.
+    SqliteRunRepository(engine).create(_pending_run())
+    sink = SqliteEventSink(engine)
+
+    sink.emit(_envelope())  # run_started -- projected
+    sink.emit(
+        _envelope(
+            event_type="run_finished",
+            timestamp=datetime(2026, 1, 1, 0, 0, 5, tzinfo=UTC),
+            payload={"exit_code": 0, "totals": {"passed": 1, "failed": 0}},
+        )
+    )
+    sink.emit(
+        _envelope(
+            event_type="run_heartbeat",
+            timestamp=datetime(2026, 1, 1, 0, 0, 6, tzinfo=UTC),
+            payload={"at": "2026-01-01T00:00:06+00:00"},
+        )
+    )
+
+    with engine.connect() as connection:
+        rows = (
+            connection.execute(
+                select(events).where(events.c.run_id == "run-1").order_by(events.c.seq)
+            )
+            .mappings()
+            .all()
+        )
+
+    assert [row["event_type"] for row in rows] == [
+        "run_started",
+        "run_finished",
+        "run_heartbeat",
+    ]
+    seqs = [row["seq"] for row in rows]
+    assert seqs == sorted(seqs)
+    assert len(set(seqs)) == 3
+
+
 def test_emit_unknown_event_type_is_skipped_and_does_not_block_next_event(engine: Engine) -> None:
     SqliteRunRepository(engine).create(_pending_run())
     sink = SqliteEventSink(engine)
