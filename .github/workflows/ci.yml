@@ -1,6 +1,6 @@
 name: CI
 
-on:
+"on":
   push:
     branches: [main]
   pull_request:
@@ -17,17 +17,17 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Create virtual environment
-        run: uv venv --python 3.12 .venv
-
-      - name: Install project (dev extra)
-        run: uv pip install -e ".[dev]" --python .venv/bin/python
+      - name: Install project (locked, dev extra)
+        run: uv sync --locked --extra dev --python 3.12
 
       - name: Run pytest
-        run: .venv/bin/python -m pytest
+        run: uv run --extra dev pytest
 
       - name: Run ruff
-        run: .venv/bin/ruff check .
+        run: uv run --extra dev ruff check .
 
       - name: Run mypy
-        run: .venv/bin/mypy src
+        run: uv run --extra dev mypy src
+
+      - name: Build wheel (packaging guard)
+        run: uv build --wheel
