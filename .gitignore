@@ -25,3 +25,6 @@ frontend/dist/
 # IDE
 .vscode/
 .idea/
+
+# Engram memory sync (local only — repo is public)
+.engram/
