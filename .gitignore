@@ -19,9 +19,6 @@ venv/
 .coverage
 htmlcov/
 
-# uv
-uv.lock
-
 # Frontend build output (force-included at package build time, see docs/architecture.md)
 frontend/dist/
 
