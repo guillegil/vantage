@@ -54,6 +54,10 @@ extend-exclude = ["docs/adr"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "S"]
 
+[tool.ruff.lint.per-file-ignores]
+# `assert` is how pytest tests fail; S101 exists for production code.
+"**/tests/**" = ["S101"]
+
 [tool.mypy]
 python_version = "3.10"
 strict = true
