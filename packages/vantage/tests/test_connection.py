@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from vantage.storage.connection import open_database
@@ -37,21 +38,32 @@ def _statements_missing_if_not_exists(sql: str) -> list[str]:
 def _spy_on_executescript(
     monkeypatch: pytest.MonkeyPatch,
 ) -> list[str]:
-    """Patch `sqlite3.Connection.executescript` to record every script it runs.
+    """Patch `sqlite3.connect` to hand back a connection subclass that records
+    every script `executescript` runs.
 
+    `sqlite3.Connection` is a C extension type -- its methods are read-only
+    and cannot be monkeypatched directly, either on the class or on an
+    instance. Subclassing it and injecting the subclass via `connect`'s own
+    `factory` parameter is the supported way to observe its calls.
     `_apply_schema` is the only thing in `connection.py` that calls
     `executescript` -- PRAGMAs and the schema-presence check both go through
     plain `execute`, so a call recorded here is unambiguously a DDL
     application, and zero calls unambiguously means none happened.
     """
     captured: list[str] = []
-    real_executescript = sqlite3.Connection.executescript
 
-    def _spy(self: sqlite3.Connection, sql_script: str) -> sqlite3.Cursor:
-        captured.append(sql_script)
-        return real_executescript(self, sql_script)
+    class _SpyConnection(sqlite3.Connection):
+        def executescript(self, sql_script: str) -> sqlite3.Cursor:
+            captured.append(sql_script)
+            return super().executescript(sql_script)
 
-    monkeypatch.setattr(sqlite3.Connection, "executescript", _spy)
+    real_connect = sqlite3.connect
+
+    def _spy_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        kwargs.setdefault("factory", _SpyConnection)
+        return cast(sqlite3.Connection, real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect)
     return captured
 
 

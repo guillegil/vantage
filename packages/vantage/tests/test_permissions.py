@@ -8,13 +8,12 @@ behaviour this project has not decided.
 
 from __future__ import annotations
 
-import logging
 import os
 import sqlite3
 import stat
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from vantage.storage.connection import open_database
@@ -62,7 +61,7 @@ def test_database_file_created_0600_before_connect(
 
     def _spy_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
         captured_modes.append(_mode(db_path))
-        return real_connect(*args, **kwargs)
+        return cast(sqlite3.Connection, real_connect(*args, **kwargs))
 
     monkeypatch.setattr(sqlite3, "connect", _spy_connect)
 
