@@ -81,7 +81,19 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ---
 
-## Phase 1: A1 — Domain & Port (`vantage`, server) — PR1
+## Phase 1: A1 — Domain & Port (`vantage`, server)
+
+> **Landed 2026-08-15 at 530 authored lines against a ~380 forecast and a 400
+> budget — accepted as `size:exception`.** The overage is `test_architecture.py`'s
+> triangulation tests for the sibling-subpackage hazard and the 72-line shared
+> `vantage_port_contract.py` that PR5 reuses.
+>
+> The obvious cut — port and architecture test in one PR, contract suite and
+> in-memory adapter in another — was **rejected on the same ground as PR2's**:
+> RQ-30's first criterion *is* the contract suite passing against an
+> implementation, so splitting them would leave the requirement unverifiable at
+> the moment the first PR merged. A requirement and its proof do not get
+> separated to fit a budget that exists to protect comprehension. — PR1
 
 - [x] 1.1 RED — `packages/vantage/tests/importwalk.py` (shared `ast` walker) + `packages/vantage/tests/test_architecture.py`: assert every `vantage.core` import resolves to stdlib (RQ-26.1) and the non-vacuity guard — ≥3 modules examined, `domain/execution.py` and `ports/storage.py` among them (RQ-26.2). Fails today (files don't exist). `@pytest.mark.req("RQ-26")`.
 - [x] 1.2 GREEN — Create `core/domain/execution.py` (`Identity`, `Execution` frozen/slotted dataclasses per the design's Interfaces section) and `core/ports/storage.py` (`ExecutionStore` Protocol). 1.1 passes.
