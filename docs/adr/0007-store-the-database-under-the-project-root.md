@@ -15,11 +15,13 @@ The server has no `rootdir`. It is not necessarily running inside a project
 directory, and it may serve many projects at once, so every argument below
 about worktrees, clones and CI checkouts has lost its subject.
 
-The question *where does the server put its SQLite file* is real and still
-unanswered, but it is a different question with different reasoning, and it
-gets its own ADR when the server exists. What survives from this one is a
-single observation: `~/.cache` is documented as safe to delete, and a run
-recorded three months ago cannot be regenerated.
+The question *where does the server put its SQLite file* is real and is
+answered in
+[`docs/adr/0010-store-the-server-database-in-the-user-data-directory.md`](0010-store-the-server-database-in-the-user-data-directory.md),
+by a different question with different reasoning. What survives from this
+one is a single observation, carried into that ADR: `~/.cache` is
+documented as safe to delete, and a run recorded three months ago cannot be
+regenerated.
 
 ## Context
 

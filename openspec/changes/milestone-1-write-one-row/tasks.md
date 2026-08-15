@@ -410,8 +410,15 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 > was put to the user as a forecast-with-proposed-split decision instead of
 > being resolved unilaterally, per the same `ask-on-risk` policy the
 > Revision 2 note above already invoked for PR2/PR6/old-PR9's overages.
-> Decision pending; this task stays unchecked until it lands, either in
-> this PR (accepted overage) or as a small follow-up.
+>
+> **Resolved: split into PR9b.** PR9 landed at 390 lines with 4.7 unchecked;
+> PR9b is this one-file follow-up, on its own branch
+> (`milestone-1-write-one-row-pr9b`), carrying only
+> `docs/adr/0010-store-the-server-database-in-the-user-data-directory.md`
+> (89 lines) plus a one-sentence forward-pointer added to ADR-0007's
+> `## Status` section so the two ADRs cross-reference in both directions.
+> No code, test or `pyproject.toml` change — the 400-line budget was never
+> at risk for this slice on its own.
 
 - [x] 4.1 RED — `test_resolution.py`: `resolve_server_config` precedence `--database` > `VANTAGE_DATABASE` > `$XDG_DATA_HOME/vantage/vantage.db` (default `~/.local/share/vantage/vantage.db`) — plain function calls, no server, no I/O.
 - [x] 4.2 GREEN — `core/config/resolution.py`: `ConfigSource(str, Enum)` — **never `StrEnum`**; frozen `ServerConfig`; `resolve_server_config(...)`, pure.
@@ -419,7 +426,33 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 - [x] 4.4 GREEN — closed by 4.2's purity (no I/O in resolution) + a startup check in `cli.py` that surfaces the read-only-parent failure before serving.
 - [x] 4.5 RED — **threat-matrix "Network exposure"**: `--host 0.0.0.0` emits a startup warning naming the missing authentication; the default (`127.0.0.1`) does not.
 - [x] 4.6 GREEN — `service/cli.py::main` — argparse (`--database`, `--host`, `--port`), default bind `127.0.0.1:8765`; `[project.scripts] vantage = "vantage.service.cli:main"` and `fastapi`/`uvicorn` deps added to `packages/vantage/pyproject.toml`.
-- [ ] 4.7 Write `docs/adr/0010-store-the-server-database-in-the-user-data-directory.md` — Nygard, `Status: Proposed`. **Blocked on the budget decision above — not started.**
+- [x] 4.7 Write `docs/adr/0010-store-the-server-database-in-the-user-data-directory.md` — Nygard, `Status: Proposed`.
+
+> **Landed 2026-08-15 (PR9b), 89 authored lines** for the ADR itself, against
+> a ~60–75 forecast set by ADR-0007/ADR-0011 precedent — slightly over
+> because D11's four-option table (chosen default plus three rejected
+> alternatives, `$XDG_STATE_HOME` among them) and the pure-resolution /
+> platform-limitation consequences the launch prompt required both needed
+> full paragraphs to state honestly rather than compressed to a bullet.
+>
+> **The ADR-7 ↔ ADR-10 relationship is stated in both directions.** ADR-10's
+> Context section explains what changed under ADR-9 that made ADR-7's
+> `rootdir`-anchored answer inapplicable, and ADR-7's `## Status` section
+> was edited (one paragraph, not a rewrite) to name ADR-10 by path now that
+> it exists, replacing the "gets its own ADR when the server exists"
+> placeholder with an actual link — the forward-pointer ADR-7 promised and
+> could not yet deliver when it was written.
+>
+> All three rejected alternatives from D11's table carried across with
+> their real reasons: `$XDG_STATE_HOME` (the spec frames STATE as *not*
+> important enough for DATA, and three months of run history is), `~/.cache`
+> (documented safe to delete — ADR-7's own surviving argument, now aimed at
+> the server), and `./vantage.db` (a supervisor-started long-lived process
+> usually has `cwd=/`).
+>
+> `uv run ruff format --check .` and `uv run ruff check .` unaffected;
+> `uv run --extra dev pytest -q` still 66 passed. No code, test or
+> `pyproject.toml` touched. — PR9b
 
 ## Phase 5: D1 — Inert Plugin (`pytest-vantage`) — PR10
 
