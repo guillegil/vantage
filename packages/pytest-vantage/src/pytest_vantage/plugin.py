@@ -75,11 +75,20 @@ def _activation_requested(config: pytest.Config) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """The always-imported hook. Activation check only for now (RQ-2): absent
-    ``--vantage``, this function does nothing -- no recorder is registered,
-    no socket is opened. The xdist worker guard lands next, ahead of this
-    check (design.md D2).
+    """The always-imported hook. Two gates, in this order, before anything
+    else may run (design.md D2):
+
+    1. Under xdist, every worker re-runs this hook -- unguarded, ``-n 4``
+       would leave four workers' recorders plus the controller's, breaking
+       RQ-1's "exactly one run entry" (RQ-27's xdist half of the matrix).
+       The guard is the FIRST statement: before the activation check and
+       before anything could register a recorder or open a socket.
+    2. Only then is activation checked. Absent ``--vantage``, this function
+       does nothing further: no recorder is registered, no socket is opened
+       (RQ-2).
     """
+    if hasattr(config, "workerinput"):
+        return
     if not _activation_requested(config):
         return
     # The recorder is registered here from PR11 onward, once it exists.
