@@ -398,13 +398,28 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ## Phase 4: C — Server Configuration & CLI (`vantage`, server) — PR9
 
-- [ ] 4.1 RED — `test_resolution.py`: `resolve_server_config` precedence `--database` > `VANTAGE_DATABASE` > `$XDG_DATA_HOME/vantage/vantage.db` (default `~/.local/share/vantage/vantage.db`) — plain function calls, no server, no I/O.
-- [ ] 4.2 GREEN — `core/config/resolution.py`: `ConfigSource(str, Enum)` — **never `StrEnum`**; frozen `ServerConfig`; `resolve_server_config(...)`, pure.
-- [ ] 4.3 RED — **threat-matrix "Path authority"**: resolution creates no directory as a side effect; a read-only parent fails loudly at startup, not silently at first write.
-- [ ] 4.4 GREEN — closed by 4.2's purity (no I/O in resolution) + a startup check in `cli.py` that surfaces the read-only-parent failure before serving.
-- [ ] 4.5 RED — **threat-matrix "Network exposure"**: `--host 0.0.0.0` emits a startup warning naming the missing authentication; the default (`127.0.0.1`) does not.
-- [ ] 4.6 GREEN — `service/cli.py::main` — argparse (`--database`, `--host`, `--port`), default bind `127.0.0.1:8765`; `[project.scripts] vantage = "vantage.service.cli:main"` and `fastapi`/`uvicorn` deps added to `packages/vantage/pyproject.toml`.
-- [ ] 4.7 Write `docs/adr/0010-store-the-server-database-in-the-user-data-directory.md` — Nygard, `Status: Proposed`.
+> **Budget checkpoint (2026-08-15).** 4.1–4.6 landed at 390 authored lines
+> (excluding `uv.lock`/`openspec/`) against this slice's ~260-line forecast
+> — over forecast but still inside the 400-line hard cap, with 10 lines of
+> headroom left. `docs/adr/0010-…md` (4.7) did not fit in what remained: a
+> Nygard ADR with D11's four-option table and rejected alternatives
+> (`$XDG_STATE_HOME` among them) is ~60–75 lines by this repository's own
+> precedent (ADR-0007 is 73, ADR-0011 is 60), which would put the slice
+> ~50–65 lines over the cap. The launch instructions explicitly forbid
+> trimming the ADR (or the tests) to fit, so 4.7 was **not started** and
+> was put to the user as a forecast-with-proposed-split decision instead of
+> being resolved unilaterally, per the same `ask-on-risk` policy the
+> Revision 2 note above already invoked for PR2/PR6/old-PR9's overages.
+> Decision pending; this task stays unchecked until it lands, either in
+> this PR (accepted overage) or as a small follow-up.
+
+- [x] 4.1 RED — `test_resolution.py`: `resolve_server_config` precedence `--database` > `VANTAGE_DATABASE` > `$XDG_DATA_HOME/vantage/vantage.db` (default `~/.local/share/vantage/vantage.db`) — plain function calls, no server, no I/O.
+- [x] 4.2 GREEN — `core/config/resolution.py`: `ConfigSource(str, Enum)` — **never `StrEnum`**; frozen `ServerConfig`; `resolve_server_config(...)`, pure.
+- [x] 4.3 RED — **threat-matrix "Path authority"**: resolution creates no directory as a side effect; a read-only parent fails loudly at startup, not silently at first write.
+- [x] 4.4 GREEN — closed by 4.2's purity (no I/O in resolution) + a startup check in `cli.py` that surfaces the read-only-parent failure before serving.
+- [x] 4.5 RED — **threat-matrix "Network exposure"**: `--host 0.0.0.0` emits a startup warning naming the missing authentication; the default (`127.0.0.1`) does not.
+- [x] 4.6 GREEN — `service/cli.py::main` — argparse (`--database`, `--host`, `--port`), default bind `127.0.0.1:8765`; `[project.scripts] vantage = "vantage.service.cli:main"` and `fastapi`/`uvicorn` deps added to `packages/vantage/pyproject.toml`.
+- [ ] 4.7 Write `docs/adr/0010-store-the-server-database-in-the-user-data-directory.md` — Nygard, `Status: Proposed`. **Blocked on the budget decision above — not started.**
 
 ## Phase 5: D1 — Inert Plugin (`pytest-vantage`) — PR10
 
