@@ -106,6 +106,27 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### A2a — Schema & Manifest (PR2)
 
+> **Landed 2026-08-15 at 632 authored lines** — `schema.sql` 262, the manifest
+> 370 — against a ~450 forecast that was itself already an accepted exception.
+> The forecast under-read the manifest: `design.md` abbreviated six of the nine
+> non-`run` tables as inline bullets, and documenting **125 columns** properly
+> costs what it costs.
+>
+> **No cut exists.** Splitting by table group leaves the schema partial and the
+> inspection incomplete, which is the same objection that kept schema and
+> manifest together in the first place.
+>
+> **Generating the manifest from `schema.sql` is a trap, not a shortcut.** It
+> would shrink the hand-written surface and make drift impossible — and it would
+> make the inspection compare the schema against itself. The manifest earns its
+> place by being an *independent* statement of what should exist. Generating it
+> turns RQ-29's verification into the same vacuity failure this project has
+> already caught twice.
+>
+> Inspection reproduced independently by the orchestrator: 10 tables, 13
+> indexes, 125 columns, and re-applying `schema.sql` to an existing database
+> issues no error — RQ-29.2 holds. — PR2
+
 - [x] 2.1 Inspection (RQ-29, not Test) — Write `packages/vantage/src/vantage/storage/schema.sql` (ten tables, thirteen indexes per the design's manifest) **and** `docs/schema-manifest.md` together, as one deliverable; record the fresh-database-vs-manifest comparison in the manifest itself. Comment `<!-- RQ-29 -->` on the comparison section — this is the verification of record, not a test, and it is not split from the schema it verifies.
 
 ### A2b — Rot-detector (PR3)
