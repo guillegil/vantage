@@ -270,10 +270,74 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### B2a — 422-Handler & Basic Rejections (PR7)
 
-- [ ] 3.3 RED — **design risk, FastAPI's default 422 handler leaks input**: `test_rejection.py::test_422_response_never_echoes_input_or_pydantic_types` — asserts the response body has no `"input"` key, no exception class name, no traceback text. `@pytest.mark.req("RQ-42")`.
-- [ ] 3.4 GREEN — `service/errors.py`: replace FastAPI's `RequestValidationError` handler; every rejection shapes as `{"error": <code>, "detail": <sentence>, "fields": ["run.started_at", …]}` — dotted paths only.
-- [ ] 3.5 RED — `test_rejection.py` remaining basic scenarios: missing field → `422` naming `run.started_at`; non-JSON body → `400 invalid_json`; oversized body → `413`, `count_executions() == 0`; wrong/absent `Content-Type` → `415`. `@pytest.mark.req("RQ-42")`.
-- [ ] 3.6 GREEN — media-type check before body read; `MAX_REPORT_BYTES` cap enforced before the read completes; JSON parse-error handling — all routed through `errors.py`'s single shape.
+> **Landed 2026-08-15 at 374 authored lines** (372 insertions + 2 deletions
+> across four commits) — inside the 400-line budget, above the ~250 ln
+> forecast because the route had to be restructured away from automatic
+> FastAPI body binding, not just have an exception handler added (see 3.6).
+>
+> **3.3's RED confirmed for the exact hazard flagged pre-apply.** Posting
+> `run.started_at = "NOT-A-DATE"` against PR6's route (still automatic
+> `payload: SessionReport` binding at that point) returned a `422` whose
+> body contained the literal string `"NOT-A-DATE"` twice — once under
+> `"input"`, once inside `"ctx"` — confirmed by running the test before
+> writing `errors.py`, not assumed.
+>
+> **3.4's `errors.py` builds every rejection body from scratch** —
+> `RejectionError` and four subclasses (`InvalidReportError`,
+> `InvalidJsonError`, `PayloadTooLargeError`, `UnsupportedMediaTypeError`),
+> one `_rejection_body()` function, two registered handlers (`RejectionError`
+> itself, and FastAPI's `RequestValidationError` as a safety net for
+> anything still validated through automatic parameter binding elsewhere).
+> Nothing pydantic hands back — `input`, `ctx`, `url`, exception `type`
+> strings — is ever forwarded; dotted field paths are rebuilt from `loc`
+> tuples with the `"body"` transport segment dropped.
+>
+> **3.5's RED landed four new scenarios; only three were genuinely red.**
+> The missing-field case (`del report["run"]["started_at"]`) already passed
+> immediately after 3.4, because FastAPI's own `RequestValidationError` path
+> already covered it — not a fabricated pass, a real consequence of 3.4's
+> handler being general. The other three failed for the intended reason:
+> non-JSON body returned `422` (routed through the same
+> `RequestValidationError` path as a schema error, not yet distinguished
+> from one); oversized body returned `201` (no cap existed at all); wrong
+> `Content-Type` returned `422`; **absent** `Content-Type` also returned
+> `422` rather than the `201` anticipated pre-apply — httpx's `TestClient`
+> sends no `Content-Type` header at all when given raw `content=` bytes, and
+> FastAPI's own body-location resolution treated that case as a schema
+> failure with an empty field path, not a silent accept. Still a valid RED:
+> the assertion of record (`415`) failed because the media-type check did
+> not exist yet, regardless of which wrong status came back instead.
+>
+> **3.6 required restructuring the route, not just adding checks.** `POST
+> /api/v1/runs` no longer declares `payload: SessionReport` as an automatic
+> body parameter — that would let FastAPI buffer and parse the whole body
+> before this route's own code runs at all, which is the exact ordering
+> hazard flagged pre-apply. `_require_json_media_type` reads `Content-Type`
+> off the header alone, before any body byte is touched.
+> `_read_bounded_body` streams `request.stream()` chunk by chunk and raises
+> `PayloadTooLargeError` the instant the running buffer exceeds
+> `MAX_REPORT_BYTES`, **without asking the stream for another chunk** — that
+> raise is the one line doing the actual protecting, and it does not trust
+> `Content-Length`, which can be absent, wrong, or a lie. JSON parsing and
+> pydantic validation happen only after both checks pass, so a rejection at
+> any step leaves `count_executions() == 0`.
+>
+> **Not fully verified by this PR, stated not hidden.** `TestClient`'s ASGI
+> transport hands the whole in-memory body to `request.stream()` already
+> assembled; nothing in this PR's tests can observe the socket-level
+> "stopped reading mid-transfer" behaviour the streaming loop is written to
+> provide — only that rejection responses correlate with
+> `count_executions() == 0`. A raw socket that proves the read genuinely
+> stops early is PR8's `test_truncated_body_raw_socket` (task 3.7), not this
+> one.
+>
+> 51/51 tests pass (45 carried forward + 6 new in `test_rejection.py`);
+> `ruff check`, `ruff format --check`, `mypy --strict` all clean. — PR7
+
+- [x] 3.3 RED — **design risk, FastAPI's default 422 handler leaks input**: `test_rejection.py::test_422_response_never_echoes_input_or_pydantic_types` — asserts the response body has no `"input"` key, no exception class name, no traceback text. `@pytest.mark.req("RQ-42")`.
+- [x] 3.4 GREEN — `service/errors.py`: replace FastAPI's `RequestValidationError` handler; every rejection shapes as `{"error": <code>, "detail": <sentence>, "fields": ["run.started_at", …]}` — dotted paths only.
+- [x] 3.5 RED — `test_rejection.py` remaining basic scenarios: missing field → `422` naming `run.started_at`; non-JSON body → `400 invalid_json`; oversized body → `413`, `count_executions() == 0`; wrong/absent `Content-Type` → `415`. `@pytest.mark.req("RQ-42")`.
+- [x] 3.6 GREEN — media-type check before body read; `MAX_REPORT_BYTES` cap enforced before the read completes; JSON parse-error handling — all routed through `errors.py`'s single shape.
 
 ### B2b — Truncation & Contract Docs (PR8)
 
