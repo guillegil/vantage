@@ -116,6 +116,28 @@ class InvalidJsonError(RejectionError):
         super().__init__("The request body is not valid JSON.")
 
 
+class IncompleteBodyError(RejectionError):
+    """The client disconnected before sending the whole body (RQ-3.2,
+    RQ-42's "Body truncated midway" scenario).
+
+    Raised in `service/routes/runs.py`'s `_read_bounded_body` when
+    `request.stream()` raises `starlette.requests.ClientDisconnect` --
+    itself a real signal from a real disconnected socket, not something
+    this service invents. A client that has already gone away can never
+    observe this response (design.md D12's own note on the point); the
+    value of turning the disconnect into a `RejectionError` instead of
+    letting it propagate unhandled is that it completes cleanly through
+    this module's one exception-handling path, rather than reaching
+    uvicorn's own ASGI exception wrapper as an unhandled error.
+    """
+
+    status_code = 400
+    error = "incomplete_body"
+
+    def __init__(self) -> None:
+        super().__init__("The request body was truncated before it was fully received.")
+
+
 class PayloadTooLargeError(RejectionError):
     """The body exceeds `MAX_REPORT_BYTES` (threat matrix, unbounded body)."""
 
@@ -169,6 +191,7 @@ def register_error_handlers(app: FastAPI) -> None:
 
 __all__ = [
     "MAX_REPORT_BYTES",
+    "IncompleteBodyError",
     "InvalidJsonError",
     "InvalidReportError",
     "PayloadTooLargeError",

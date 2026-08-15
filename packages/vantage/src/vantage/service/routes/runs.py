@@ -22,7 +22,9 @@ threat matrix requires:
    raises the instant the running total exceeds `MAX_REPORT_BYTES`, without
    asking the stream for another chunk. That is the one line doing the
    actual protecting -- it does not trust `Content-Length`, which can be
-   absent, wrong, or simply a lie.
+   absent, wrong, or simply a lie. A client that disconnects mid-transfer
+   (RQ-3) surfaces here too, as `starlette.requests.ClientDisconnect`,
+   converted to `IncompleteBodyError` rather than left to propagate.
 3. Only once a complete, capped byte string exists is it parsed as JSON,
    then validated against `SessionReport`.
 
@@ -38,10 +40,12 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+from starlette.requests import ClientDisconnect
 
 from vantage.core.domain.execution import Execution, Identity
 from vantage.service.errors import (
     MAX_REPORT_BYTES,
+    IncompleteBodyError,
     InvalidJsonError,
     InvalidReportError,
     PayloadTooLargeError,
@@ -80,16 +84,31 @@ async def _read_bounded_body(request: Request) -> bytes:
     or an outright lie, and none of those excuse buffering an unbounded
     body. The check below runs on every chunk actually received, so the
     buffer is structurally incapable of growing past `MAX_REPORT_BYTES`.
+
+    A client that disconnects before sending the whole body -- a process
+    killed mid-write (RQ-3.1), a network partition mid-transfer (RQ-3.2) --
+    surfaces here as `starlette.requests.ClientDisconnect`, raised from
+    inside `request.stream()` itself. Catching it and converting it to
+    `IncompleteBodyError` is what keeps this the one exception-handling
+    path every rejection goes through (design.md D5); the alternative is
+    letting it propagate unhandled out of the ASGI application, which is
+    exactly what task 3.7's raw-socket test caught before this existed.
+    Either way `count_executions()` stays at zero: no streaming parse, no
+    partial-parse path, nothing is written before this function returns a
+    complete body.
     """
     buffer = bytearray()
-    async for chunk in request.stream():
-        buffer += chunk
-        if len(buffer) > MAX_REPORT_BYTES:
-            # THE LINE THAT PROTECTS: raised the moment the running total
-            # crosses the cap, before the loop asks `request.stream()` for
-            # another chunk -- the read stops here, it does not continue
-            # and check afterwards.
-            raise PayloadTooLargeError()
+    try:
+        async for chunk in request.stream():
+            buffer += chunk
+            if len(buffer) > MAX_REPORT_BYTES:
+                # THE LINE THAT PROTECTS: raised the moment the running
+                # total crosses the cap, before the loop asks
+                # `request.stream()` for another chunk -- the read stops
+                # here, it does not continue and check afterwards.
+                raise PayloadTooLargeError()
+    except ClientDisconnect as exc:
+        raise IncompleteBodyError() from exc
     return bytes(buffer)
 
 
