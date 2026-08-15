@@ -189,10 +189,34 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### A2d — SQLite Adapter & Concurrency (PR5)
 
-- [ ] 2.9 RED — `test_sqlite_store.py`: `SqliteExecutionStore` against `ExecutionStoreContract` from 1.5 — completes RQ-30.1 (both adapters now pass the same contract).
-- [ ] 2.10 GREEN — `sqlite_store.py::record_execution` — `INSERT … ON CONFLICT(id) DO NOTHING`, boolean return from the INSERT's own row count (D3, no preceding `SELECT`).
-- [ ] 2.11 RED — `test_concurrency.py`: two threads POSTing distinct ids into one store instance → two rows, distinct identifiers. `@pytest.mark.req("RQ-38")` (criterion 1 only, per scope).
-- [ ] 2.12 GREEN — process-wide `threading.Lock` held across the transaction; `isolation_level=None` + explicit `BEGIN IMMEDIATE … COMMIT`; `PRAGMA journal_mode=WAL` with delete-mode fallback logged once; `synchronous=FULL`; `foreign_keys=ON`; `sqlite3.connect(path, timeout=5.0)`.
+> **Landed 2026-08-15 at 196 authored lines against a ~210 forecast.** Inside
+> budget.
+>
+> **Disclosed deviation, honestly reported rather than staged:** 2.11's
+> concurrency test could not be written as a true RED against 2.10's minimal
+> implementation *and stay RED for the reason the task names* without first
+> reverting to check whether a lock was actually necessary. A first pass
+> combined 2.10 and 2.12's work in one step; that was caught before
+> committing, unwound, and redone in order. With `check_same_thread=False`
+> not yet added (2.12's job, not 2.10's), 2.11 failed exactly as the task
+> predicts — `sqlite3.ProgrammingError: SQLite objects created in a thread
+> can only be used in that same thread` — a genuine RED, not a fabricated
+> one. 2.12 then added the lock, the `check_same_thread=False` connection,
+> `timeout=5.0` and `synchronous=FULL` together, and the same test went
+> GREEN. — PR5
+>
+> **Triangulation note.** RQ-38's scope for this milestone is criterion 1
+> only (two distinct ids, two rows) — the spec names one scenario, and the
+> shared `ExecutionStoreContract` (RQ-30.1) already triangulates
+> `record_execution`/`get_execution`/`count_executions` across four
+> independent cases run against this same adapter. No second concurrency
+> scenario was added on top of that; RQ-38 criteria 2 and 3 are explicitly
+> out of scope (they count results, which this milestone does not write).
+
+- [x] 2.9 RED — `test_sqlite_store.py`: `SqliteExecutionStore` against `ExecutionStoreContract` from 1.5 — completes RQ-30.1 (both adapters now pass the same contract).
+- [x] 2.10 GREEN — `sqlite_store.py::record_execution` — `INSERT … ON CONFLICT(id) DO NOTHING`, boolean return from the INSERT's own row count (D3, no preceding `SELECT`).
+- [x] 2.11 RED — `test_concurrency.py`: two threads POSTing distinct ids into one store instance → two rows, distinct identifiers. `@pytest.mark.req("RQ-38")` (criterion 1 only, per scope).
+- [x] 2.12 GREEN — process-wide `threading.Lock` held across the transaction; `isolation_level=None` + explicit `BEGIN IMMEDIATE … COMMIT`; `PRAGMA journal_mode=WAL` with delete-mode fallback logged once; `synchronous=FULL`; `foreign_keys=ON`; `sqlite3.connect(path, timeout=5.0)`.
 
 ## Phase 3: B — Session Ingestion Endpoint (`vantage`, server) — PR6–PR8
 

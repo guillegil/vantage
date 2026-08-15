@@ -49,8 +49,16 @@ def open_database(path: Path) -> sqlite3.Connection:
         os.chmod(artifacts_dir, 0o700)
         _create_database_file_or_warn(path)
 
-    conn = sqlite3.connect(str(path), isolation_level=None)
+    # `check_same_thread=False`: the server runs this handler in a
+    # threadpool (D8), so several threads share one connection object.
+    # `timeout=5.0`: the cross-process half of D8's concurrency net -- a
+    # *second process* contending for the write lock waits rather than
+    # failing instantly with `SQLITE_BUSY`.
+    conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False, timeout=5.0)
     conn.execute("PRAGMA foreign_keys = ON")
+    # RQ-3 asks for all-or-nothing; one fsync per session is a cost nothing
+    # notices (D8).
+    conn.execute("PRAGMA synchronous = FULL")
     _enable_wal(conn)
 
     if not _schema_already_applied(conn):
