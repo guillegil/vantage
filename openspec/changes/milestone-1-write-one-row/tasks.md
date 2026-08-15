@@ -106,7 +106,7 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### A2a — Schema & Manifest (PR2)
 
-- [ ] 2.1 Inspection (RQ-29, not Test) — Write `packages/vantage/src/vantage/storage/schema.sql` (ten tables, thirteen indexes per the design's manifest) **and** `docs/schema-manifest.md` together, as one deliverable; record the fresh-database-vs-manifest comparison in the manifest itself. Comment `<!-- RQ-29 -->` on the comparison section — this is the verification of record, not a test, and it is not split from the schema it verifies.
+- [x] 2.1 Inspection (RQ-29, not Test) — Write `packages/vantage/src/vantage/storage/schema.sql` (ten tables, thirteen indexes per the design's manifest) **and** `docs/schema-manifest.md` together, as one deliverable; record the fresh-database-vs-manifest comparison in the manifest itself. Comment `<!-- RQ-29 -->` on the comparison section — this is the verification of record, not a test, and it is not split from the schema it verifies.
 
 ### A2b — Rot-detector (PR3)
 
