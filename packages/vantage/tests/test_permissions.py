@@ -8,6 +8,7 @@ behaviour this project has not decided.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import stat
@@ -69,3 +70,58 @@ def test_database_file_created_0600_before_connect(
     conn.close()
 
     assert captured_modes == [0o600]
+
+
+@pytest.mark.req("RQ-40")
+def test_artifact_store_directory_created_0700(tmp_path: Path, permissive_umask: None) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+
+    conn = open_database(db_path)
+    conn.close()
+
+    artifacts_dir = db_path.parent / "artifacts"
+    assert artifacts_dir.is_dir()
+    assert _mode(artifacts_dir) == 0o700
+
+
+@pytest.mark.req("RQ-40")
+def test_existing_permissive_database_still_records_and_warns(
+    tmp_path: Path, permissive_umask: None, caplog: pytest.LogCaptureFixture
+) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+    db_path.parent.mkdir(parents=True)
+    db_path.touch()
+    os.chmod(db_path, 0o644)
+
+    with caplog.at_level(logging.WARNING):
+        conn = open_database(db_path)
+    conn.execute(
+        "INSERT INTO run (id, received_at, started_at) VALUES (?, ?, ?)",
+        ("a" * 32, "2026-08-15T09:00:00+00:00", "2026-08-15T09:00:00+00:00"),
+    )
+    row = conn.execute("SELECT COUNT(*) FROM run").fetchone()
+    conn.close()
+
+    # Never silently rewritten -- an operator may have widened the mode on purpose.
+    assert _mode(db_path) == 0o644
+    assert row == (1,)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("644" in message for message in warnings)
+
+
+@pytest.mark.req("RQ-40")
+def test_wal_and_shm_sidecars_created_0600(tmp_path: Path, permissive_umask: None) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+
+    conn = open_database(db_path)
+    try:
+        wal_path = db_path.with_name(db_path.name + "-wal")
+        shm_path = db_path.with_name(db_path.name + "-shm")
+
+        assert wal_path.exists()
+        assert shm_path.exists()
+        assert _mode(wal_path) == 0o600
+        assert _mode(shm_path) == 0o600
+    finally:
+        conn.close()

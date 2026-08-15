@@ -150,11 +150,23 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### A2c — Connection & Permissions (PR4)
 
-- [ ] 2.4 RED — `test_connection.py`: `open_database` applies `schema.sql` inside one `BEGIN IMMEDIATE`, every DDL statement `IF NOT EXISTS`; reopening an existing database issues no DDL (RQ-29.2). Fails: `connection.py` doesn't exist.
-- [ ] 2.5 RED — **design risk, 0600 creation order (D9)**: `test_permissions.py::test_database_file_created_0600_before_connect` — umask-022 fixture; patch `sqlite3.connect` to snapshot the file's mode at call time, assert it is already `0600` (i.e. `os.open(O_CREAT|O_EXCL|O_RDWR, 0o600)` ran and closed before `connect` ever touches the path). `@pytest.mark.req("RQ-40")`.
-- [ ] 2.6 GREEN — `connection.py::open_database` per D9: `os.makedirs(parent, 0o700, exist_ok=True)` + explicit `os.chmod(parent, 0o700)`; `os.open(O_CREAT|O_EXCL|O_RDWR, 0o600)` then close then `sqlite3.connect`; DDL applied in one `BEGIN IMMEDIATE`; `artifacts/` created the same way; existing file → `os.stat`, warn if `mode & 0o077`, continue. 2.4 and 2.5 pass.
-- [ ] 2.7 RED — `test_permissions.py` remaining scenarios: artefact-store dir `0700`; existing `0644` db still records + warns naming the mode; `-wal`/`-shm` sidecars asserted `0600` under umask 022. `@pytest.mark.req("RQ-40")`.
-- [ ] 2.8 GREEN — closes 2.7 (covered by 2.6); add explicit sidecar `chmod` fallback if the sidecar-mode assertion fails on the test platform.
+> **Landed 2026-08-15.** 2.6's `open_database` implemented D9 whole, including
+> point 5 (WAL mode and the sidecar `chmod` fallback) — D9's own numbered list
+> treats the sidecar concern as one decision, not two, and 2.6's task text
+> itself is "per D9", not "per D9 points 1–4". The consequence: 2.7's three
+> RED tests (artefact-store dir `0700`, existing-`0644`-db warns, `-wal`/`-shm`
+> sidecars at `0600`) all passed on first run against 2.6's implementation —
+> none were actually RED. Reported plainly rather than staged to fail: 2.8
+> made no production-code change; it is verification-only, the same pattern
+> already used at 5.8/6.6. `git log` shows two commits either side of 2.6 for
+> honesty about the two genuinely-RED tasks (2.4, 2.5) that did fail first. —
+> PR4
+
+- [x] 2.4 RED — `test_connection.py`: `open_database` applies `schema.sql` inside one `BEGIN IMMEDIATE`, every DDL statement `IF NOT EXISTS`; reopening an existing database issues no DDL (RQ-29.2). Fails: `connection.py` doesn't exist.
+- [x] 2.5 RED — **design risk, 0600 creation order (D9)**: `test_permissions.py::test_database_file_created_0600_before_connect` — umask-022 fixture; patch `sqlite3.connect` to snapshot the file's mode at call time, assert it is already `0600` (i.e. `os.open(O_CREAT|O_EXCL|O_RDWR, 0o600)` ran and closed before `connect` ever touches the path). `@pytest.mark.req("RQ-40")`.
+- [x] 2.6 GREEN — `connection.py::open_database` per D9: `os.makedirs(parent, 0o700, exist_ok=True)` + explicit `os.chmod(parent, 0o700)`; `os.open(O_CREAT|O_EXCL|O_RDWR, 0o600)` then close then `sqlite3.connect`; DDL applied in one `BEGIN IMMEDIATE`; `artifacts/` created the same way; existing file → `os.stat`, warn if `mode & 0o077`, continue. 2.4 and 2.5 pass.
+- [x] 2.7 RED — `test_permissions.py` remaining scenarios: artefact-store dir `0700`; existing `0644` db still records + warns naming the mode; `-wal`/`-shm` sidecars asserted `0600` under umask 022. `@pytest.mark.req("RQ-40")`.
+- [x] 2.8 GREEN — closes 2.7 (covered by 2.6); add explicit sidecar `chmod` fallback if the sidecar-mode assertion fails on the test platform.
 
 ### A2d — SQLite Adapter & Concurrency (PR5)
 
