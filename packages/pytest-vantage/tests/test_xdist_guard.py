@@ -56,7 +56,6 @@ class _ControllerConfigDouble:
 @pytest.mark.req("RQ-27")
 def test_worker_input_returns_before_registration() -> None:
     config = _WorkerConfigDouble()
-
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
 
@@ -64,7 +63,6 @@ def test_worker_input_returns_before_registration() -> None:
 @pytest.mark.req("RQ-27")
 def test_no_worker_input_still_runs_the_activation_check() -> None:
     config = _ControllerConfigDouble()
-
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
     assert config.options_read == ["vantage"]
