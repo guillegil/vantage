@@ -3,7 +3,9 @@ schema: spec-driven
 
 context: |
   SOURCE OF TRUTH: Notion, not this repository. The project row is PROJ-1 in the Projects
-  database; requirements are RQ-1..RQ-39, features FT-1..FT-8, decisions are ADRs.
+  database; requirements are RQ-1..RQ-42, features FT-1..FT-8, decisions are ADRs.
+  specs/requirements.md mirrors the Milestone 1 subset verbatim, generated one way --
+  read it rather than pasting requirement text into prompts.
   A SECOND Notion page titled "Vantage" exists under the Projects hub and is SUPERSEDED —
   it says hexagonal, three packages and REQ-1-xx/NFR-1-xx identifiers. Do not plan from it.
   See CLAUDE.md for the one-query way to read all requirements and for this warning in full.
@@ -12,13 +14,17 @@ context: |
   typing.Protocol, never abstract base classes, so an adapter satisfies a port without
   importing the core.
 
-  Packaging: uv workspace, four published packages (ADR-4), one lockfile at the root.
-    vantage-core     depends on nothing at all      (RQ-26: standard library only)
-    vantage-storage  depends on the core only       (sqlite3 is standard library)
-    vantage-pytest   core + storage + pytest        (the plugin)
-    vantage-service  the only package allowed a third-party dependency
-  The storage adapter is its own package on purpose: inside the plugin it would force
-  vantage-service to depend on vantage-pytest to read the database it serves.
+  Packaging: uv workspace, TWO published distributions (ADR-4), one lockfile at the root.
+    pytest-vantage   the plugin. pytest and the standard library, nothing else (RQ-24)
+    vantage          the server, holding three internal packages:
+                       vantage.core     -- stdlib only (RQ-26)
+                       vantage.storage  -- depends on core alone
+                       vantage.service  -- the only one allowed a third-party dependency
+  Write model (ADR-9): the plugin NEVER opens a database. It reports finished sessions
+  over HTTP to POST /api/v1/runs and the server performs every write. That is what keeps
+  the plugin dependency-free and what makes a plugin in another language possible.
+  The two release independently on prefixed tags; the contract between them is the
+  versioned API path, not their version numbers.
 
   Storage: standard-library sqlite3 with hand-written SQL, no ORM (ADR-6). Schema created
   complete at first use including later-phase columns; no migration framework in Phase 1

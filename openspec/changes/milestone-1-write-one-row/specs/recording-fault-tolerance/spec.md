@@ -2,56 +2,71 @@
 
 ## Purpose
 
-Defines the two failure paths the recorder must survive without disrupting
-the host pytest session: an internal error while recording, and a database
-path that cannot be opened for writing at all.
+Defines the failure paths a reporting session must survive without
+disrupting the host pytest run: an internal error while reporting (including
+a server that accepts a connection and never answers), and a server that
+cannot be reached at all, found before any test runs.
+
+**Component:** `pytest-vantage` (plugin) — both requirements are exercised
+entirely on the client side of the HTTP boundary; no assertion here depends
+on server behavior beyond a simulated response or its absence.
 
 ## Requirements
 
-### Requirement: Non-disruptive internal failure
+### Requirement: Non-disruptive failure (RQ-21)
 
-If the system raises an internal error while recording, then the system
+If the system raises an internal error while recording, then the plugin
 MUST emit a warning and MUST let the pytest session terminate with the exit
-status it would have had otherwise.
+status it would have had otherwise. A server that accepts the connection and
+never responds MUST NOT hang the session past a bounded timeout.
 
-#### Scenario: Passing suite survives a write failure
-
-- GIVEN a recording path patched to raise on write
+#### Scenario: Passing suite survives an internal error
+- GIVEN a reporting path patched to raise
 - WHEN a suite of passing tests is run
 - THEN pytest exits with status 0 and emits one warning
 
 #### Scenario: Failing suite still reports failure
-
-- GIVEN a recording path patched to raise on write
+- GIVEN a reporting path patched to raise
 - WHEN a suite containing one failing test is run
 - THEN pytest exits with status 1 and emits one warning
 
-#### Scenario: Every recorder hook is fault-isolated
+#### Scenario: Server accepts then closes without responding
+- GIVEN a server that accepts the connection and then closes it without responding
+- WHEN a suite of passing tests is run
+- THEN pytest exits with status 0 and emits one warning
 
-- GIVEN a recording path patched to raise on every hook it implements
+#### Scenario: Server accepts and never answers
+- GIVEN a server that accepts the connection and never responds
+- WHEN a suite of passing tests is run
+- THEN pytest exits with status 0 within the configured timeout plus five seconds
+
+#### Scenario: Every hook is fault-isolated
+- GIVEN a reporting path patched to raise on every hook it implements
 - WHEN a suite of passing tests is run
 - THEN pytest exits with status 0 and the session reports no internal error
 
-### Requirement: Unwritable database path
+### Requirement: Unreachable server (RQ-37)
 
-If the configured database path cannot be opened for writing, then the
-system MUST emit a warning naming that path and MUST let the pytest session
-run to completion unrecorded.
+If the configured server cannot be reached, then the plugin MUST emit a
+warning naming that server and MUST let the pytest session run to
+completion unrecorded.
 
-#### Scenario: Read-only directory
+#### Scenario: Nothing listening
+- GIVEN a configured server address where nothing is listening
+- WHEN a suite of passing tests is run
+- THEN pytest exits with status 0 and emits one warning naming the address
 
-- GIVEN a database path inside a read-only directory
-- WHEN a suite of passing tests is run with that path configured
-- THEN pytest exits with status 0 and emits one warning naming the path
+#### Scenario: Host does not resolve
+- GIVEN a configured server address whose host does not resolve
+- WHEN a suite of passing tests is run
+- THEN pytest exits with status 0 and emits one warning naming the address
 
-#### Scenario: Missing directory
+#### Scenario: Server drops out mid-session
+- GIVEN a server that becomes unreachable after the session has started but before the report is sent
+- WHEN the suite finishes
+- THEN pytest exits with the status it would have had and emits one warning
 
-- GIVEN a database path inside a directory that does not exist
-- WHEN a suite of passing tests is run with that path configured
-- THEN pytest exits with status 0 and emits one warning naming the path
-
-#### Scenario: File exists but is not a valid database
-
-- GIVEN a database path whose file exists but is not a valid database
-- WHEN a suite of passing tests is run with that path configured
-- THEN pytest exits with status 0 and emits one warning naming the path
+#### Scenario: One warning, not one per test
+- GIVEN a configured server that is unreachable
+- WHEN a suite of 200 tests is run
+- THEN exactly one warning is emitted rather than one per test

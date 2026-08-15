@@ -128,6 +128,27 @@ rather than by guessing. **RQ-42 requires storing nothing from a report it
 cannot understand**, which is what makes RQ-3 achievable at all: *observable in
 full or not at all* cannot hold if a partial parse leaves a partial row.
 
+## Capabilities
+
+`openspec/specs/` is empty, so every capability is new and none is a delta.
+These are the names `sdd-spec` wrote files under and the names `sdd-tasks`
+groups work by — do not invent a different decomposition.
+
+| Capability | Requirements | Component |
+| --- | --- | --- |
+| `run-recording` | RQ-1, RQ-31, RQ-3, RQ-38 (criterion 1) | server |
+| `session-ingestion` | RQ-41, RQ-42 | server |
+| `recording-schema` | RQ-29 | server |
+| `storage-permissions` | RQ-40 | server |
+| `opt-in-activation` | RQ-2 | plugin |
+| `recording-fault-tolerance` | RQ-21, RQ-37 | plugin |
+| `architecture-boundaries` | RQ-24, RQ-26, RQ-30 | both |
+| `runtime-support` | RQ-27, RQ-28 | both |
+
+### Modified capabilities
+
+None.
+
 ## Scope
 
 ### In scope
