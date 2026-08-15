@@ -4,7 +4,22 @@ Date: 2026-08-14
 
 ## Status
 
-Proposed
+**Deprecated** on 2026-08-15, before it was ever accepted. Its context no
+longer exists.
+
+This ADR decided where **the plugin** puts its database, and anchored the
+answer on **pytest's `rootdir`**. Under ADR-9 the plugin never opens a
+database at all: it reports over HTTP and the server performs every write.
+
+The server has no `rootdir`. It is not necessarily running inside a project
+directory, and it may serve many projects at once, so every argument below
+about worktrees, clones and CI checkouts has lost its subject.
+
+The question *where does the server put its SQLite file* is real and still
+unanswered, but it is a different question with different reasoning, and it
+gets its own ADR when the server exists. What survives from this one is a
+single observation: `~/.cache` is documented as safe to delete, and a run
+recorded three months ago cannot be regenerated.
 
 ## Context
 
