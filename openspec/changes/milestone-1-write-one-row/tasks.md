@@ -456,14 +456,67 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ## Phase 5: D1 — Inert Plugin (`pytest-vantage`) — PR10
 
-- [ ] 5.1 RED — `test_opt_in.py`: differential — run bare vs `-p no:vantage`, byte-identical project trees; socket-level assertion that no connection is attempted with no recording option present. `@pytest.mark.req("RQ-2")`.
-- [ ] 5.2 GREEN — `plugin.py::pytest_addoption` (`--vantage`, `--vantage-server=URL`, `--vantage-timeout=S`; ini `vantage_server`/`vantage_timeout`; env `VANTAGE_SERVER`) + `pytest_configure` activation check only — no recorder registered yet, no socket opened.
-- [ ] 5.3 RED — **design risk, D2's xdist guard**: `test_xdist_guard.py::test_worker_input_returns_before_registration` — a config double carrying `workerinput` (simulating an xdist worker); assert `pytest_configure` returns before any registration or preflight socket call. `@pytest.mark.req("RQ-1")` (protects "exactly one run entry" under `-n 4`) and `@pytest.mark.req("RQ-27")` (the xdist half of the matrix).
-- [ ] 5.4 GREEN — `plugin.py::pytest_configure`: `if hasattr(config, "workerinput"): return` before the activation check.
-- [ ] 5.5 RED — **threat-matrix "Outbound request target"**: address resolution refuses `file:///etc/passwd`, `ftp://…`, and a bare host with no scheme, each with a named rejection message.
-- [ ] 5.6 GREEN — `config.py::resolve_and_validate_address` — `http`/`https` scheme allow-list only.
-- [ ] 5.7 RED — `test_plugin_imports.py`: shared `importwalk` (from `packages/vantage/tests/importwalk.py`, via the root `pythonpath`) over `pytest_vantage` — every import resolves to stdlib or `pytest`. `@pytest.mark.req("RQ-24")` (criterion 2).
-- [ ] 5.8 GREEN — verification-only; 5.2/5.6 introduce no non-stdlib/non-pytest import, so 5.7 passes without further change.
+- [x] 5.1 RED — `test_opt_in.py`: differential — run bare vs `-p no:vantage`, byte-identical project trees; socket-level assertion that no connection is attempted with no recording option present. `@pytest.mark.req("RQ-2")`.
+- [x] 5.2 GREEN — `plugin.py::pytest_addoption` (`--vantage`, `--vantage-server=URL`, `--vantage-timeout=S`; ini `vantage_server`/`vantage_timeout`; env `VANTAGE_SERVER`) + `pytest_configure` activation check only — no recorder registered yet, no socket opened.
+- [x] 5.3 RED — **design risk, D2's xdist guard**: `test_xdist_guard.py::test_worker_input_returns_before_registration` — a config double carrying `workerinput` (simulating an xdist worker); assert `pytest_configure` returns before any registration or preflight socket call. `@pytest.mark.req("RQ-1")` (protects "exactly one run entry" under `-n 4`) and `@pytest.mark.req("RQ-27")` (the xdist half of the matrix).
+- [x] 5.4 GREEN — `plugin.py::pytest_configure`: `if hasattr(config, "workerinput"): return` before the activation check.
+- [x] 5.5 RED — **threat-matrix "Outbound request target"**: address resolution refuses `file:///etc/passwd`, `ftp://…`, and a bare host with no scheme, each with a named rejection message.
+- [x] 5.6 GREEN — `config.py::resolve_and_validate_address` — `http`/`https` scheme allow-list only.
+- [x] 5.7 RED — `test_plugin_imports.py`: shared `importwalk` (from `packages/vantage/tests/importwalk.py`, via the root `pythonpath`) over `pytest_vantage` — every import resolves to stdlib or `pytest`. `@pytest.mark.req("RQ-24")` (criterion 2).
+- [x] 5.8 GREEN — verification-only; 5.2/5.6 introduce no non-stdlib/non-pytest import, so 5.7 passes without further change.
+
+> **Landed 2026-08-15 (PR10), 400 authored lines** against a ~340 forecast —
+> right at the hard cap, same as PR8. Two commit-level deviations from the
+> plan, both self-caught and corrected before the affected task's RED
+> commit landed, not discovered downstream:
+>
+> - **5.2's first draft folded the xdist guard in early.** Task 5.2's own
+>   text ("activation check only") already scoped it out, but the
+>   implementation initially added `if hasattr(config, "workerinput"):
+>   return` alongside the activation check, which would have left 5.3's RED
+>   test with nothing to fail against. Caught before writing 5.3 by
+>   re-reading 5.2's task text; corrected with one small `fix(pytest-vantage)`
+>   commit that pulled the guard back out, restoring a genuine RED for 5.3.
+> - **5.1's differential test needed a second pass to hold.** The first
+>   version copied `pytester`'s own working directory as the "bare" side of
+>   the comparison; `runpytest_subprocess` stashes captured `stdout`/`stderr`
+>   and a `runpytest-*` basetemp directory inside that same directory as
+>   debug instrumentation, and a `.pyc`'s header embeds its source's mtime —
+>   both are noise unrelated to the plugin that a naive tree-diff mistakes
+>   for a plugin-caused difference. Fixed by comparing two independently
+>   freshly-written directories (never a copy of pytester's own run
+>   directory) with bytecode caching disabled for both. No assertion was
+>   weakened — the fix removed false-positive noise sources, not the
+>   comparison itself.
+>
+> **`pytest_plugins = ["pytester"]` had to live at the workspace root**,
+> not inside `packages/pytest-vantage/tests/conftest.py` as first written —
+> pytest rejects enabling an internal plugin from a non-root conftest when
+> the whole workspace is collected together (it works when a single
+> package's test path is targeted directly, which is why the mistake did
+> not surface until the full-suite run). `conftest.py` is now a new
+> workspace-root file; its only effect is making the `pytester` fixture
+> available, and nothing outside `pytest-vantage`'s tests requests it.
+>
+> **5.7's "RED" is honest but not a failing assertion.** By the time it is
+> written, `plugin.py` and `config.py` already import nothing but stdlib
+> and `pytest` (5.2/5.6 landed first), so the walk's own assertions pass
+> immediately — exactly what 5.8 says would happen. The real gap 5.7 closed
+> was `mypy`: `from importwalk import walk_package` failed with
+> `Cannot find implementation or library stub for module named "importwalk"`
+> until `packages/vantage/tests` was added to the root `mypy_path` (it
+> previously listed only the two `src` directories). That one-line
+> `pyproject.toml` addition is what task 5.7 actually landed; 5.8 is
+> verification-only exactly as planned, confirmed by re-running the full
+> gate suite with no further code change.
+>
+> `resolve_and_validate_address` (5.6) is a standalone, tested unit at this
+> point — not yet called from `pytest_configure`. Wiring it into activation
+> lands with the recorder in PR11 (design.md, D2a, task 6.4), per the
+> rollout's own sequencing.
+>
+> 66 → 77 tests (+11), full suite `uv run --extra dev pytest`, `ruff
+> check`/`format --check` and `mypy --strict` all clean. — PR10
 
 ## Phase 6: D2 — Reporting & Failure Paths (`pytest-vantage`) — PR11–PR12
 
