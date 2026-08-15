@@ -222,8 +222,51 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### B1 — Ingestion Happy Path (PR6)
 
-- [ ] 3.1 RED — `test_ingestion.py`: well-formed report → `201` + run stored with identifier in body; replay of the same `run.id` → `200 duplicate`, still one row; unversioned path (`/runs`, `/api/runs`) → `404`. Against an injected `InMemoryExecutionStore` (no dependency on PR2–PR5 — matches the design's ordering note). `@pytest.mark.req("RQ-41")`.
-- [ ] 3.2 GREEN — `service/schemas.py` (`RunReport` with `extra="forbid"`, envelope `SessionReport` with `extra="ignore"`, `Acknowledgement`); `service/routes/runs.py` (`POST /api/v1/runs`, D3 idempotency); `service/app.py` (factory taking an injected `ExecutionStore`, mounts `/api/v1` only, nothing unversioned).
+> **Landed 2026-08-15 at 256 authored lines against a ~260 forecast** — inside
+> the 400 budget. RED committed separately from GREEN (92 lines: the test
+> file plus the `fastapi`/`httpx2` dependency additions), then GREEN (164
+> lines: `schemas.py`, `routes/runs.py`, `app.py`) in its own commit — the
+> two-commit split PR5's report flagged as a lesson from PR5 not to repeat.
+>
+> **Confirmed RED for the right reason.** `uv run --extra dev pytest
+> packages/vantage/tests/test_ingestion.py` failed at collection with
+> `ModuleNotFoundError: No module named 'vantage.service.app'` — the
+> production module did not exist yet, not a fixture or environment problem.
+> The rest of the suite (41 tests) was re-run with `--ignore` on the new file
+> to confirm nothing else regressed while the new module was still missing.
+>
+> **`fastapi` is the repository's first third-party dependency**, added to
+> `packages/vantage/pyproject.toml`'s `dependencies` (currently `["fastapi>=0.115"]`).
+> `fastapi.testclient.TestClient` needed a second package this ecosystem now
+> calls `httpx2` (a 2026 rename; `starlette.testclient` still accepts the old
+> `httpx` with a deprecation warning) — added to the workspace root's `dev`
+> extras only, never to `vantage`'s own `dependencies`, since it is a test
+> tool, not something the server imports at runtime.
+>
+> **The 201-vs-200 decision reuses PR5's boolean, without a second check.**
+> The route calls `store.record_execution(...)` exactly once and branches on
+> its return value — no `SELECT` first, so the HTTP layer does not
+> reintroduce the check-then-act race PR5's `ON CONFLICT` already removed at
+> the SQL layer.
+>
+> **`app.py` takes an injected `ExecutionStore` and never imports
+> `vantage.storage.sqlite_store`** — the tests wire `InMemoryExecutionStore`
+> only, proving the port is a real seam (design.md's ordering note: B does
+> not depend on A2). `vantage serve` (PR9) is what will resolve and inject a
+> real `SqliteExecutionStore`.
+>
+> **The `extra=` asymmetry between `RunReport` (`"forbid"`) and
+> `SessionReport` (`"ignore"`) is explained in `schemas.py`'s module
+> docstring**, not left for a future reader to "fix": an unknown field inside
+> `run` is a client bug (RQ-42's territory); an unknown envelope section is
+> an older server meeting a newer plugin, which ADR-4's two-distribution
+> split exists to make an ordinary, non-breaking event.
+>
+> `mypy --strict`, `ruff check`, `ruff format --check` all clean; 45/45 tests
+> pass (41 carried forward + 4 new). — PR6
+
+- [x] 3.1 RED — `test_ingestion.py`: well-formed report → `201` + run stored with identifier in body; replay of the same `run.id` → `200 duplicate`, still one row; unversioned path (`/runs`, `/api/runs`) → `404`. Against an injected `InMemoryExecutionStore` (no dependency on PR2–PR5 — matches the design's ordering note). `@pytest.mark.req("RQ-41")`.
+- [x] 3.2 GREEN — `service/schemas.py` (`RunReport` with `extra="forbid"`, envelope `SessionReport` with `extra="ignore"`, `Acknowledgement`); `service/routes/runs.py` (`POST /api/v1/runs`, D3 idempotency); `service/app.py` (factory taking an injected `ExecutionStore`, mounts `/api/v1` only, nothing unversioned).
 
 ### B2a — 422-Handler & Basic Rejections (PR7)
 
