@@ -131,6 +131,20 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### A2b — Rot-detector (PR3)
 
+> **Landed 2026-08-15 at 337 authored lines against a ~110 forecast** — 3x the
+> estimate, but comfortably inside the 400 budget, so a forecast miss rather
+> than a budget trigger. The estimate did not account for symmetric
+> triangulation: catching drift in *both* directions across tables, columns and
+> named indexes is three dimensions times two directions, which strict TDD turns
+> into six dedicated tests on top of the three that run against the real files.
+>
+> **Verified by mutation, not by reading.** The orchestrator injected an
+> undocumented column into the real `schema.sql`; two tests failed
+> (`..._in_both_directions` and `..._recorded_ground_truth`) and passed again on
+> restore. It caught the direction a naive detector misses — a column the schema
+> has and the manifest does not — which is the actual rot RQ-29 exists to
+> prevent. — PR3
+
 - [x] 2.2 RED — `test_schema_manifest.py`: parses the manifest's column table, applies `schema.sql` via a plain `sqlite3.connect(":memory:").executescript(...)` (not `open_database` — no dependency on connection.py/PR4), and compares against `PRAGMA table_info` per table. Fails: the comparison helper does not exist yet. Comment `# Rot-detector supporting RQ-29 (Inspection at docs/schema-manifest.md is the verification of record)`, no `pytest.mark.req` (Inspection is not a Test-type verification).
 - [x] 2.3 GREEN — implement the manifest-parsing/comparison helper (lives in the test module; never shipped). 2.2 passes.
 
