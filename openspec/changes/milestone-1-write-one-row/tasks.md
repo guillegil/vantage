@@ -83,12 +83,12 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ## Phase 1: A1 — Domain & Port (`vantage`, server) — PR1
 
-- [ ] 1.1 RED — `packages/vantage/tests/importwalk.py` (shared `ast` walker) + `packages/vantage/tests/test_architecture.py`: assert every `vantage.core` import resolves to stdlib (RQ-26.1) and the non-vacuity guard — ≥3 modules examined, `domain/execution.py` and `ports/storage.py` among them (RQ-26.2). Fails today (files don't exist). `@pytest.mark.req("RQ-26")`.
-- [ ] 1.2 GREEN — Create `core/domain/execution.py` (`Identity`, `Execution` frozen/slotted dataclasses per the design's Interfaces section) and `core/ports/storage.py` (`ExecutionStore` Protocol). 1.1 passes.
-- [ ] 1.3 RED — `test_execution.py`: `Identity` rejects anything but 32 lowercase hex chars; `Execution.finished_at` is nullable and the type is frozen.
-- [ ] 1.4 GREEN — `__post_init__` validation on `Identity` (satisfied by 1.2's dataclass; this task closes any gap 1.3 finds).
-- [ ] 1.5 RED — `vantage_port_contract.py` (`ExecutionStoreContract`, shared fixture module, never `test_*`, never shipped) + `test_memory_store.py`: core suite passes against an in-memory adapter (RQ-30.1, in-memory half); core package imports no storage implementation (RQ-30.2 — also covered by 1.1's D10 sibling-subpackage rejection). `@pytest.mark.req("RQ-30")`.
-- [ ] 1.6 GREEN — `storage/memory.py::InMemoryExecutionStore`. 1.5 passes (RQ-30.1 fully proven once PR5 adds the sqlite half).
+- [x] 1.1 RED — `packages/vantage/tests/importwalk.py` (shared `ast` walker) + `packages/vantage/tests/test_architecture.py`: assert every `vantage.core` import resolves to stdlib (RQ-26.1) and the non-vacuity guard — ≥3 modules examined, `domain/execution.py` and `ports/storage.py` among them (RQ-26.2). Fails today (files don't exist). `@pytest.mark.req("RQ-26")`.
+- [x] 1.2 GREEN — Create `core/domain/execution.py` (`Identity`, `Execution` frozen/slotted dataclasses per the design's Interfaces section) and `core/ports/storage.py` (`ExecutionStore` Protocol). 1.1 passes.
+- [x] 1.3 RED — `test_execution.py`: `Identity` rejects anything but 32 lowercase hex chars; `Execution.finished_at` is nullable and the type is frozen.
+- [x] 1.4 GREEN — `__post_init__` validation on `Identity` (satisfied by 1.2's dataclass; this task closes any gap 1.3 finds).
+- [x] 1.5 RED — `vantage_port_contract.py` (`ExecutionStoreContract`, shared fixture module, never `test_*`, never shipped) + `test_memory_store.py`: core suite passes against an in-memory adapter (RQ-30.1, in-memory half); core package imports no storage implementation (RQ-30.2 — also covered by 1.1's D10 sibling-subpackage rejection). `@pytest.mark.req("RQ-30")`.
+- [x] 1.6 GREEN — `storage/memory.py::InMemoryExecutionStore`. 1.5 passes (RQ-30.1 fully proven once PR5 adds the sqlite half).
 
 ## Phase 2: A2 — Schema & SQLite Adapter (`vantage`, server) — PR2–PR5
 
