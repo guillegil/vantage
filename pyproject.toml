@@ -18,6 +18,9 @@ dev = [
     "mypy>=1.11",
     "deptry>=0.16",
     "pip-audit>=2.7",
+    # `fastapi.testclient.TestClient` needs it (PR6); dev-only, never a
+    # runtime dependency of `vantage` itself.
+    "httpx2>=1.0",
 ]
 
 # This root pyproject.toml is the uv workspace root, not a published

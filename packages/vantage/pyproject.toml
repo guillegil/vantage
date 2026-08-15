@@ -10,11 +10,14 @@ license = "MIT"
 requires-python = ">=3.10,<3.14"
 authors = [{ name = "Guillermo Gil" }]
 
-# Empty in Milestone 1. The server's web framework arrives with the ingestion
-# endpoint; SQLite comes from the standard library (ADR-6), so nothing is
-# needed before then. This package is the only one RQ-24 does not constrain --
-# it is installed deliberately by someone who wants a server.
-dependencies = []
+# The repository's first third-party dependency (design.md D12 -- the ADR
+# itself, 0011, lands with PR8's docs, not here). SQLite comes from the
+# standard library (ADR-6), so `fastapi` -- and the Pydantic v2 it brings --
+# is needed only from the ingestion endpoint (PR6) onward. `vantage` is the
+# one package RQ-24 does not constrain: it is installed deliberately by
+# someone who wants to run a server. `uvicorn` arrives with the `vantage
+# serve` CLI (PR9), not here.
+dependencies = ["fastapi>=0.115"]
 
 [project.optional-dependencies]
 # The extra names the wire protocol, not the vendor: Supabase, Neon, RDS and
