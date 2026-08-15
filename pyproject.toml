@@ -70,6 +70,7 @@ warn_unused_configs = true
 mypy_path = [
     "packages/pytest-vantage/src",
     "packages/vantage/src",
+    "packages/vantage/tests",
 ]
 
 [tool.deptry]
