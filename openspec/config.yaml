@@ -1,0 +1,92 @@
+# openspec/config.yaml
+schema: spec-driven
+
+context: |
+  SOURCE OF TRUTH: Notion, not this repository. The project row is PROJ-1 in the Projects
+  database; requirements are RQ-1..RQ-39, features FT-1..FT-8, decisions are ADRs.
+  A SECOND Notion page titled "Vantage" exists under the Projects hub and is SUPERSEDED —
+  it says hexagonal, three packages and REQ-1-xx/NFR-1-xx identifiers. Do not plan from it.
+  See CLAUDE.md for the one-query way to read all requirements and for this warning in full.
+
+  Architecture: CLEAN, not hexagonal (ADR-3 rejects hexagonal by name). Ports are
+  typing.Protocol, never abstract base classes, so an adapter satisfies a port without
+  importing the core.
+
+  Packaging: uv workspace, four published packages (ADR-4), one lockfile at the root.
+    vantage-core     depends on nothing at all      (RQ-26: standard library only)
+    vantage-storage  depends on the core only       (sqlite3 is standard library)
+    vantage-pytest   core + storage + pytest        (the plugin)
+    vantage-service  the only package allowed a third-party dependency
+  The storage adapter is its own package on purpose: inside the plugin it would force
+  vantage-service to depend on vantage-pytest to read the database it serves.
+
+  Storage: standard-library sqlite3 with hand-written SQL, no ORM (ADR-6). Schema created
+  complete at first use including later-phase columns; no migration framework in Phase 1
+  (ADR-5, RQ-29). SQLite is the first adapter, not the only one — RQ-30 requires it
+  replaceable without touching the core.
+
+  Runtime: Python 3.10 through 3.13, with and without pytest-xdist (RQ-27). The 3.10 floor
+  is binding: StrEnum and datetime.UTC are 3.11+ and must not be used.
+
+  Validation: Pydantic v2 belongs at system boundaries and lives in vantage-service ONLY.
+  attrs is also third-party and also service-side. core, storage and pytest use dataclasses
+  from the standard library and hand-written validation over stdlib json (RQ-24).
+
+  Testing: `uv run --extra dev pytest`; ruff (S rules replace bandit); mypy strict; deptry;
+  pip-audit. Every verifying test carries @pytest.mark.req("RQ-xx"); --strict-markers is on,
+  so the marker must be declared in the workspace root config.
+
+  State: the tree is being reset. src/vantage and tests/ were written for a different product
+  (live run supervision, Phase 3) and are deleted rather than migrated. README.md,
+  pyproject.toml and docs/architecture.md still describe that older plan until slice A
+  rewrites them. Do not treat anything under src/ as a pattern to follow.
+
+  Naming: no domain class name may start with Test — pytest collects it. The aggregate is
+  Execution, its identity is Identity.
+
+rules:
+  proposal:
+    - Include a rollback plan for risky or schema-affecting changes
+    - Cross-check scope against the RQ/FT databases under PROJ-1 in Notion before scoping,
+      never against the superseded narrative page
+    - State the changed-line forecast against the review budget; do not silently exceed it
+  specs:
+    - Use Given/When/Then for scenarios
+    - Every scenario traces to a named acceptance criterion of a named RQ; never invent an
+      obligation the requirement does not state, and never silently drop a criterion
+    - Verification methods are Test, Analysis, Inspection or Demonstration — do not write an
+      assertion where the requirement asks for a measurement or an inspection artifact
+  design:
+    - Document architecture decisions with rationale; anything costing more than a sprint to
+      reverse becomes an ADR rather than a design note
+    - Respect RQ-26 (core imports only standard-library modules) and RQ-24 (installing the
+      plugin adds only distributions published by this project — its own, plural, are fine)
+    - Do not restate a decision already recorded in an ADR; reference it
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+    - Call out any task requiring the pytest entry-point registration, so the user never has
+      to edit a conftest
+  apply:
+    guidelines:
+      - Respect the four-package boundaries; vantage-core imports only the standard library,
+        enforced by an AST architecture test that also asserts it examined something
+      - Keep vantage-core, vantage-storage and vantage-pytest free of third-party runtime
+        dependencies (RQ-24)
+      - The schema is created complete at first use, including later-phase columns (RQ-29),
+        and no Phase 1 release alters an existing database
+      - Never use StrEnum or datetime.UTC — the floor is Python 3.10
+    tdd: true
+    test_command: "uv run --extra dev pytest"
+  verify:
+    test_command: "uv run --extra dev pytest"
+    build_command: "uv build --wheel"
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
+    - Update the corresponding Notion pages after archiving. Keeping Notion current is a
+      shared responsibility the agent carries too, and it covers creating, amending and
+      retiring requirements, features and ADRs — not just reading them
+    - When correcting an artifact held in both OpenSpec files and Engram, correct BOTH.
+      A stale Engram observation is more dangerous than a stale file, because phase agents
+      are told to search Engram first and a file at least shows its age in git history
