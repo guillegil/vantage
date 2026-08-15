@@ -28,3 +28,7 @@ frontend/dist/
 
 # Engram memory sync (local only — repo is public)
 .engram/
+
+# Tool caches (generated, not source)
+.atl/
+.codegraph/
