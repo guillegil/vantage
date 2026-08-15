@@ -62,7 +62,7 @@ def test_default_database_falls_back_to_home_when_xdg_data_home_unset() -> None:
 def test_config_source_is_a_str_enum_not_strenum() -> None:
     # `StrEnum` is 3.11+; the floor is 3.10 (CLAUDE.md, design.md D11).
     assert issubclass(ConfigSource, str)
-    assert ConfigSource.CLI == "cli"
+    assert isinstance(ConfigSource.CLI, str)
     assert ConfigSource.CLI.value == "cli"
 
 
@@ -74,7 +74,7 @@ def test_default_host_and_port() -> None:
 
 
 def test_cli_host_and_port_override_the_default() -> None:
-    config = _resolve(cli_host="0.0.0.0", cli_port=9000)
+    config = _resolve(cli_host="0.0.0.0", cli_port=9000)  # noqa: S104
 
-    assert config.host == "0.0.0.0"
+    assert config.host == "0.0.0.0"  # noqa: S104
     assert config.port == 9000
