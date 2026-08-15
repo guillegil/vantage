@@ -1106,6 +1106,7 @@ version = "0.1.0"
 source = { editable = "packages/vantage" }
 dependencies = [
     { name = "fastapi" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -1117,6 +1118,7 @@ postgres = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "psycopg", extras = ["binary"], marker = "extra == 'postgres'", specifier = ">=3.1" },
+    { name = "uvicorn", specifier = ">=0.30" },
 ]
 provides-extras = ["postgres"]
 
@@ -1137,7 +1139,6 @@ dev = [
     { name = "pip-audit" },
     { name = "pytest" },
     { name = "ruff" },
-    { name = "uvicorn" },
 ]
 
 [package.metadata]
@@ -1149,7 +1150,6 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-vantage", editable = "packages/pytest-vantage" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.30" },
     { name = "vantage", editable = "packages/vantage" },
 ]
 provides-extras = ["dev"]

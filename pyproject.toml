@@ -21,13 +21,11 @@ dev = [
     # `fastapi.testclient.TestClient` needs it (PR6); dev-only, never a
     # runtime dependency of `vantage` itself.
     "httpx2>=1.0",
-    # Drives `create_app()` over a real TCP socket for the raw-socket
-    # truncation test (PR8, task 3.7) -- `TestClient`'s ASGI transport hands
-    # the whole body to `request.stream()` already assembled in memory, so
-    # it can never observe a socket stopping mid-transfer. Dev-only: PR9's
-    # `vantage serve` CLI is what adds it to `packages/vantage/pyproject.toml`
-    # as a runtime dependency, together with `[project.scripts]`.
-    "uvicorn>=0.30",
+    # No standalone `uvicorn` entry here (PR8 carried one, dev-only, for the
+    # raw-socket truncation test): PR9 made `uvicorn` a runtime dependency
+    # of `packages/vantage/pyproject.toml`, and this workspace root already
+    # depends on `vantage`, so a second declaration here would only be able
+    # to drift from the one that matters.
 ]
 
 # This root pyproject.toml is the uv workspace root, not a published
