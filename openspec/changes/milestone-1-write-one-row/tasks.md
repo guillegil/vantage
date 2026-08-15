@@ -150,6 +150,25 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### A2c — Connection & Permissions (PR4)
 
+> **Landed 2026-08-15 at 357 authored lines against a ~260 forecast** — inside
+> the 400 budget. 36 tests pass.
+>
+> **Verified by measurement.** Under a deliberately permissive umask of 022:
+> parent `0700`, database `0600`, `-wal` `0600`, `-shm` `0600`, artefacts
+> `0700`. The ordering holds too — `os.open(O_CREAT|O_EXCL, 0o600)` runs before
+> `sqlite3.connect` ever sees the path.
+>
+> **A sharper reading of RQ-29.2 than the design had.** Relying on `schema.sql`'s
+> own `IF NOT EXISTS` was the obvious route and it is wrong: `IF NOT EXISTS`
+> makes reapplication *harmless*, not *absent*, and the criterion says no
+> schema-altering statement is **issued**. A `meta`-table sentinel now skips the
+> application entirely on reopen.
+>
+> **Disclosed deviation:** 2.7's tests were green on first run rather than RED,
+> because 2.6 implemented decision D9 whole — including the sidecar concern D9
+> itself groups with file creation. 2.8 therefore changed no production code.
+> Reported rather than papered over with an artificial failure. — PR4
+
 > **Landed 2026-08-15.** 2.6's `open_database` implemented D9 whole, including
 > point 5 (WAL mode and the sidecar `chmod` fallback) — D9's own numbered list
 > treats the sidecar concern as one decision, not two, and 2.6's task text
