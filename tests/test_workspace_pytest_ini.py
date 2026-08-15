@@ -17,7 +17,8 @@ from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_SECTION = "[tool.pytest.ini_options]"
-EXPECTED_PACKAGE_COUNT = 4
+# Two published distributions (ADR-4): pytest-vantage and vantage.
+EXPECTED_PACKAGE_COUNT = 2
 
 
 def _package_pyproject_files() -> list[Path]:

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vantage"
+version = "0.1.0"
+description = "Vantage server: records test runs reported over HTTP and serves their history."
+license = "MIT"
+requires-python = ">=3.10,<3.14"
+authors = [{ name = "Guillermo Gil" }]
+
+# Empty in Milestone 1. The server's web framework arrives with the ingestion
+# endpoint; SQLite comes from the standard library (ADR-6), so nothing is
+# needed before then. This package is the only one RQ-24 does not constrain --
+# it is installed deliberately by someone who wants a server.
+dependencies = []
+
+[project.optional-dependencies]
+# The extra names the wire protocol, not the vendor: Supabase, Neon, RDS and
+# CockroachDB all speak PostgreSQL and all arrive through this one.
+postgres = ["psycopg[binary]>=3.1"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vantage"]

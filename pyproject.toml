@@ -7,10 +7,8 @@ license = "MIT"
 requires-python = ">=3.10,<3.14"
 authors = [{ name = "Guillermo Gil" }]
 dependencies = [
-    "vantage-core",
-    "vantage-storage",
-    "vantage-pytest",
-    "vantage-service",
+    "pytest-vantage",
+    "vantage",
 ]
 
 [project.optional-dependencies]
@@ -23,33 +21,32 @@ dev = [
 ]
 
 # This root pyproject.toml is the uv workspace root, not a published
-# distribution -- it carries no [build-system]. Each package under
-# packages/ is its own published distribution with its own build backend.
+# distribution -- it carries no [build-system]. Two distributions are
+# published from packages/ (ADR-4), released independently through prefixed
+# tags: pytest-vantage-vX.Y.Z and vantage-vX.Y.Z.
 [tool.uv.workspace]
 members = ["packages/*"]
 
 [tool.uv.sources]
-vantage-core = { workspace = true }
-vantage-storage = { workspace = true }
-vantage-pytest = { workspace = true }
-vantage-service = { workspace = true }
+pytest-vantage = { workspace = true }
+vantage = { workspace = true }
 
 # The only [tool.pytest.ini_options] in the workspace (D9). pytest reads
 # exactly one ini file, resolved from rootdir; a package that declared its
 # own would silently shadow this one when run from inside that package.
-# A guard test (A1.4) enforces the invariant by scanning every package
+# A guard test enforces the invariant by scanning every package
 # pyproject.toml for this section.
 [tool.pytest.ini_options]
 markers = [
     "req(id): the requirement (RQ-nn) this test verifies",
 ]
 addopts = "--strict-markers"
-pythonpath = ["packages/vantage-core/tests"]
+pythonpath = ["packages/vantage/tests"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["docs/adr"]
+extend-exclude = ["docs/adr", "web"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "S"]
@@ -63,18 +60,12 @@ python_version = "3.10"
 strict = true
 warn_unused_configs = true
 mypy_path = [
-    "packages/vantage-core/src",
-    "packages/vantage-storage/src",
-    "packages/vantage-pytest/src",
-    "packages/vantage-service/src",
+    "packages/pytest-vantage/src",
+    "packages/vantage/src",
 ]
 
 [tool.deptry]
-# Each package is scanned from its own directory; this root config sets
-# workspace-wide defaults. DSL/dev tooling never counts as a runtime
-# dependency, and vantage-core/vantage-storage/vantage-pytest must add no
-# third-party runtime dependency at all (RQ-24).
+# pytest-vantage must declare nothing but pytest and import nothing outside
+# the standard library (RQ-24). vantage.core must import only the standard
+# library (RQ-26); both are also checked by the AST architecture test.
 ignore_notebooks = true
-
-[tool.deptry.per_rule_ignores]
-DEP002 = ["pytest-cov"]
