@@ -10,6 +10,10 @@ wiring `SqliteExecutionStore`. `vantage serve` (PR9) is what resolves a real
 **Mounts `/api/v1` and nothing else.** RQ-41's third criterion is served by
 absence: there is no unversioned route and no redirect from one. A router
 included with any other prefix, or none, would answer where it must 404.
+
+**Every rejection is shaped by `service/errors.py`**, registered here once,
+so no route can answer a rejection in a different shape (design.md D5,
+RQ-42).
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 
 from vantage.core.ports.storage import ExecutionStore
+from vantage.service.errors import register_error_handlers
 from vantage.service.routes.runs import router as runs_router
 
 
@@ -25,4 +30,5 @@ def create_app(store: ExecutionStore) -> FastAPI:
     app = FastAPI()
     app.state.store = store
     app.include_router(runs_router, prefix="/api/v1")
+    register_error_handlers(app)
     return app
