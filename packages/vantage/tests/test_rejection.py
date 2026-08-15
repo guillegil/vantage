@@ -138,3 +138,34 @@ def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecution
 
     assert response.status_code == 415
     assert store.count_executions() == 0
+
+
+@pytest.mark.req("RQ-42")
+def test_forbidden_extra_field_name_is_not_echoed(client: TestClient) -> None:
+    """A rejected *value* is never echoed -- but for an `extra_forbidden`
+    error the offending path segment is a key the CLIENT chose, and echoing
+    it reflects arbitrary client bytes back verbatim. Unbounded in length,
+    and free to carry CR/LF straight into whatever logs the rejection.
+    """
+    report = _well_formed_report()
+    report["run"]["AKIAIOSFODNN7EXAMPLE\r\nFAKE-LOG-LINE"] = "x"
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 422
+    assert "AKIAIOSFODNN7EXAMPLE" not in response.text
+    assert "FAKE-LOG-LINE" not in response.text
+    for field in response.json()["fields"]:
+        assert "\r" not in field and "\n" not in field
+
+
+@pytest.mark.req("RQ-42")
+def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -> None:
+    """A 50 KiB key must not come back as a 50 KiB field path."""
+    report = _well_formed_report()
+    report["run"]["K" * 50_000] = "x"
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 422
+    assert max(len(field) for field in response.json()["fields"]) < 128
