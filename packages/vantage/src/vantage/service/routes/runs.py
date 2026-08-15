@@ -1,4 +1,4 @@
-"""`POST /api/v1/runs` -- session report ingestion (RQ-41, design.md D3).
+"""`POST /api/v1/runs` -- session report ingestion (RQ-41, RQ-42, design.md D3, D5).
 
 **The 201-vs-200 decision comes from the boolean `record_execution` already
 returns.** `record_execution` is `INSERT ... ON CONFLICT(id) DO NOTHING`,
@@ -7,19 +7,51 @@ preceding `SELECT`. This route does not ask the store whether the id exists
 and then decide: that would reintroduce, at the HTTP layer, precisely the
 check-then-act race the storage adapter's `ON CONFLICT` avoids at the SQL
 layer. One call, one boolean, one branch.
+
+**The media type and size checks both run before the body is touched.**
+This route does *not* declare `payload: SessionReport` as a parameter --
+that would make FastAPI parse and fully buffer the body itself before this
+function's first line ever runs, which is exactly the ordering hazard RQ-42
+warns against: a check performed after the bytes are already buffered has
+protected nothing. Instead the body is read by hand, in the order the
+threat matrix requires:
+
+1. `Content-Type` is read off the header alone (`_require_json_media_type`)
+   -- zero body bytes have been touched yet.
+2. `_read_bounded_body` streams the body through `request.stream()` and
+   raises the instant the running total exceeds `MAX_REPORT_BYTES`, without
+   asking the stream for another chunk. That is the one line doing the
+   actual protecting -- it does not trust `Content-Length`, which can be
+   absent, wrong, or simply a lie.
+3. Only once a complete, capped byte string exists is it parsed as JSON,
+   then validated against `SessionReport`.
+
+Nothing is written before all three steps succeed, so a rejection at any
+step leaves `count_executions() == 0`.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from vantage.core.domain.execution import Execution, Identity
+from vantage.service.errors import (
+    MAX_REPORT_BYTES,
+    InvalidJsonError,
+    InvalidReportError,
+    PayloadTooLargeError,
+    UnsupportedMediaTypeError,
+)
 from vantage.service.schemas import Acknowledgement, RunReport, SessionReport
 
 router = APIRouter()
+
+_JSON_MEDIA_TYPE = "application/json"
 
 
 def _to_execution(run: RunReport) -> Execution:
@@ -33,8 +65,49 @@ def _to_execution(run: RunReport) -> Execution:
     )
 
 
+def _require_json_media_type(request: Request) -> None:
+    """Reject on the `Content-Type` header alone, before any body byte is read."""
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type != _JSON_MEDIA_TYPE:
+        raise UnsupportedMediaTypeError(media_type or "<absent>")
+
+
+async def _read_bounded_body(request: Request) -> bytes:
+    """Stream the body, aborting before the buffer can exceed the cap.
+
+    Deliberately does not rely on `Content-Length`: it can be absent, wrong,
+    or an outright lie, and none of those excuse buffering an unbounded
+    body. The check below runs on every chunk actually received, so the
+    buffer is structurally incapable of growing past `MAX_REPORT_BYTES`.
+    """
+    buffer = bytearray()
+    async for chunk in request.stream():
+        buffer += chunk
+        if len(buffer) > MAX_REPORT_BYTES:
+            # THE LINE THAT PROTECTS: raised the moment the running total
+            # crosses the cap, before the loop asks `request.stream()` for
+            # another chunk -- the read stops here, it does not continue
+            # and check afterwards.
+            raise PayloadTooLargeError()
+    return bytes(buffer)
+
+
 @router.post("/runs")
-def create_run(payload: SessionReport, request: Request) -> JSONResponse:
+async def create_run(request: Request) -> JSONResponse:
+    _require_json_media_type(request)
+    body = await _read_bounded_body(request)
+
+    try:
+        payload_dict = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise InvalidJsonError() from exc
+
+    try:
+        payload = SessionReport.model_validate(payload_dict)
+    except ValidationError as exc:
+        raise InvalidReportError.from_errors(exc.errors()) from exc
+
     store = request.app.state.store
     execution = _to_execution(payload.run)
 
