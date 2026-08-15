@@ -341,10 +341,60 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### B2b — Truncation & Contract Docs (PR8)
 
-- [ ] 3.7 RED — `test_rejection.py::test_truncated_body_raw_socket`: a raw socket promises N bytes, sends fewer, closes; ASGI `ClientDisconnect` → `400 incomplete_body`; `count_executions() == 0`. `@pytest.mark.req("RQ-42")` and `@pytest.mark.req("RQ-3")` (criterion 2).
-- [ ] 3.8 GREEN — `ClientDisconnect` handling in the body-read path; nothing is written before the whole body is validated (no streaming parse, no partial-parse path).
-- [ ] 3.9 Write `docs/api/v1-ingestion.md` — the plugin↔server contract published per ADR-4.
-- [ ] 3.10 Write `docs/adr/0011-serve-the-ingestion-api-with-fastapi-on-uvicorn.md` — Nygard, `Status: Proposed`.
+> **Landed 2026-08-15 at exactly 400 authored lines against a ~350
+> forecast** (225 RED + 60 GREEN + 59 ADR + 56 API doc), inside the
+> 400-line hard cap the launch prompt set — the docs did overrun their
+> own naive share of the budget, as flagged pre-apply, and were
+> tightened twice to land exactly on the cap rather than over it.
+>
+> **The raw socket is real, not simulated.** `test_truncated_body_raw_socket`
+> binds `127.0.0.1:0` (OS-assigned ephemeral port, read back via
+> `getsockname()`), runs `create_app(store)` inside a real `uvicorn.Server`
+> on a background thread against that already-bound, already-listening
+> socket, and drives it with a plain `socket.socket()` client: sends a
+> `Content-Length: 500` header, writes ~50 bytes of body, then
+> `shutdown(SHUT_WR)`. `TestClient`'s ASGI transport (every other test in
+> this file) hands the whole body to `request.stream()` already
+> assembled in memory and cannot exercise this at all — confirmed by
+> reading uvicorn's own `h11_impl.py` and by first observing the current
+> (pre-3.8) code raise a genuine `starlette.requests.ClientDisconnect`
+> against the real socket, not fabricated.
+>
+> **Why the assertion is a log check, not a response body.** Once
+> uvicorn's transport observes a disconnected peer, its ASGI `send()`
+> silently drops every further message (`h11_impl.py`:
+> `if self.disconnected: return`) — unconditionally, whether or not this
+> service catches the disconnect. A client that has already gone away
+> can never receive an HTTP response, by construction of the protocol;
+> this was verified empirically with a throwaway probe script before
+> committing to the design, not assumed. What 3.8 actually changes,
+> and what the test actually proves, is whether the disconnect
+> propagates out of the ASGI application as an unhandled exception
+> (uvicorn logs `"Exception in ASGI application"` with a traceback --
+> the RED state) or is caught and completes cleanly through this
+> service's own rejection path (no such log line -- GREEN). A
+> `threading.Event` set from an ASGI middleware wrapper gives the test a
+> real completion signal instead of a blind sleep; 5 consecutive runs
+> were deterministic in both states.
+>
+> **RQ-3 criterion 2's assertion (`count_executions() == 0`) was already
+> true pre-3.8**, structurally: `_read_bounded_body` raises before the
+> buffer is ever handed to `json.loads`, so nothing about 3.8 changes
+> whether a write happens — only whether the disconnect is handled
+> gracefully. It is kept as the assertion of record because it is what
+> the requirement actually asks, even though it does not by itself
+> distinguish RED from GREEN in this particular test.
+>
+> 54/54 tests pass (53 carried forward + 1 new); `ruff check`,
+> `ruff format --check`, `mypy --strict` all clean. `uvicorn` added to
+> the workspace root's `dev` extras only (dev-only test dependency; PR9's
+> `vantage serve` CLI owns adding it to `packages/vantage/pyproject.toml`
+> as a runtime dependency). — PR8
+
+- [x] 3.7 RED — `test_rejection.py::test_truncated_body_raw_socket`: a raw socket promises N bytes, sends fewer, closes; ASGI `ClientDisconnect` → `400 incomplete_body`; `count_executions() == 0`. `@pytest.mark.req("RQ-42")` and `@pytest.mark.req("RQ-3")` (criterion 2).
+- [x] 3.8 GREEN — `ClientDisconnect` handling in the body-read path; nothing is written before the whole body is validated (no streaming parse, no partial-parse path).
+- [x] 3.9 Write `docs/api/v1-ingestion.md` — the plugin↔server contract published per ADR-4.
+- [x] 3.10 Write `docs/adr/0011-serve-the-ingestion-api-with-fastapi-on-uvicorn.md` — Nygard, `Status: Proposed`.
 
 ## Phase 4: C — Server Configuration & CLI (`vantage`, server) — PR9
 
