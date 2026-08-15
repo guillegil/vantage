@@ -15,17 +15,161 @@ Applies `schema.sql` with a plain `sqlite3.connect(":memory:").executescript`
 PR4 and which this test must not depend on.
 """
 
-# Rot-detector supporting RQ-29 (Inspection at docs/schema-manifest.md is the verification of record)
+# Rot-detector supporting RQ-29 (Inspection at docs/schema-manifest.md is the verification of record)  # noqa: E501
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import textwrap
+from dataclasses import dataclass
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCHEMA_SQL = _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"
 _MANIFEST = _REPO_ROOT / "docs" / "schema-manifest.md"
+
+_TABLE_HEADING = re.compile(r"^### `(\w+)`")
+_COLUMN_ROW = re.compile(r"^\|\s*`([A-Za-z0-9_]+)`\s*(†)?\s*\|")
+_INDEX_ITEM = re.compile(r"^\d+\.\s+\*{0,2}`(\w+)\(([^)]+)\)`")
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaSnapshot:
+    """A table/column/named-index inventory, from either side of the comparison."""
+
+    tables: dict[str, frozenset[str]]
+    indexes: frozenset[tuple[str, tuple[str, ...]]]
+
+
+@dataclass(frozen=True, slots=True)
+class SchemaDiff:
+    """Drift between a manifest snapshot and a schema snapshot, in both directions."""
+
+    tables_only_in_manifest: frozenset[str]
+    tables_only_in_schema: frozenset[str]
+    columns_only_in_manifest: dict[str, frozenset[str]]
+    columns_only_in_schema: dict[str, frozenset[str]]
+    indexes_only_in_manifest: frozenset[tuple[str, tuple[str, ...]]]
+    indexes_only_in_schema: frozenset[tuple[str, tuple[str, ...]]]
+
+    @property
+    def is_clean(self) -> bool:
+        return not (
+            self.tables_only_in_manifest
+            or self.tables_only_in_schema
+            or self.columns_only_in_manifest
+            or self.columns_only_in_schema
+            or self.indexes_only_in_manifest
+            or self.indexes_only_in_schema
+        )
+
+
+def parse_manifest_schema(text: str) -> SchemaSnapshot:
+    """Parse the manifest's per-table column tables and its `## Indexes` list.
+
+    A dagger (`†`) on a column row documents the `<name>_truncated` sibling
+    column *alongside* it rather than as its own row (the manifest's own
+    "Conventions" section) -- so a daggered column expands to both names
+    here, matching what `schema.sql` actually declares.
+    """
+    tables: dict[str, set[str]] = {}
+    indexes: set[tuple[str, tuple[str, ...]]] = set()
+    current_table: str | None = None
+    in_indexes_section = False
+
+    for line in text.splitlines():
+        if line.startswith("## Indexes"):
+            in_indexes_section = True
+            current_table = None
+            continue
+        if line.startswith("## "):
+            in_indexes_section = False
+            current_table = None
+            continue
+
+        if in_indexes_section:
+            match = _INDEX_ITEM.match(line)
+            if match is not None:
+                table, raw_columns = match.group(1), match.group(2)
+                columns = tuple(part.strip() for part in raw_columns.split(","))
+                indexes.add((table, columns))
+            continue
+
+        heading = _TABLE_HEADING.match(line)
+        if heading is not None:
+            current_table = heading.group(1)
+            tables.setdefault(current_table, set())
+            continue
+
+        if current_table is None:
+            continue
+
+        column = _COLUMN_ROW.match(line)
+        if column is not None:
+            name, unbounded_marker = column.group(1), column.group(2)
+            tables[current_table].add(name)
+            if unbounded_marker:
+                tables[current_table].add(f"{name}_truncated")
+
+    return SchemaSnapshot(
+        tables={name: frozenset(cols) for name, cols in tables.items()},
+        indexes=frozenset(indexes),
+    )
+
+
+def introspect_sqlite_schema(conn: sqlite3.Connection) -> SchemaSnapshot:
+    """Read the tables/columns/named-indexes an already-applied connection has.
+
+    Excludes `sqlite_%` tables (the implicit `sqlite_sequence` an
+    `AUTOINCREMENT` column creates) and `sqlite_autoindex_%` indexes (the
+    anonymous indexes SQLite creates for inline `PRIMARY KEY`/`UNIQUE`
+    constraints) -- neither is part of what the manifest documents.
+    """
+    table_rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    tables: dict[str, frozenset[str]] = {}
+    for (name,) in table_rows:
+        columns = conn.execute(f"PRAGMA table_info({name})").fetchall()
+        tables[name] = frozenset(row[1] for row in columns)
+
+    index_rows = conn.execute(
+        "SELECT name, tbl_name FROM sqlite_master "
+        "WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'"
+    ).fetchall()
+    indexes: set[tuple[str, tuple[str, ...]]] = set()
+    for index_name, table_name in index_rows:
+        info = conn.execute(f"PRAGMA index_info({index_name})").fetchall()
+        index_columns = tuple(row[2] for row in sorted(info, key=lambda row: row[0]))
+        indexes.add((table_name, index_columns))
+
+    return SchemaSnapshot(tables=tables, indexes=frozenset(indexes))
+
+
+def diff_schema_snapshots(manifest: SchemaSnapshot, actual: SchemaSnapshot) -> SchemaDiff:
+    """Compare a manifest-derived snapshot against a schema-derived one, both ways."""
+    manifest_tables = frozenset(manifest.tables)
+    actual_tables = frozenset(actual.tables)
+
+    columns_only_in_manifest: dict[str, frozenset[str]] = {}
+    columns_only_in_schema: dict[str, frozenset[str]] = {}
+    for table in manifest_tables & actual_tables:
+        only_manifest = manifest.tables[table] - actual.tables[table]
+        only_schema = actual.tables[table] - manifest.tables[table]
+        if only_manifest:
+            columns_only_in_manifest[table] = only_manifest
+        if only_schema:
+            columns_only_in_schema[table] = only_schema
+
+    return SchemaDiff(
+        tables_only_in_manifest=manifest_tables - actual_tables,
+        tables_only_in_schema=actual_tables - manifest_tables,
+        columns_only_in_manifest=columns_only_in_manifest,
+        columns_only_in_schema=columns_only_in_schema,
+        indexes_only_in_manifest=manifest.indexes - actual.indexes,
+        indexes_only_in_schema=actual.indexes - manifest.indexes,
+    )
 
 
 def _apply_schema(sql: str) -> sqlite3.Connection:
@@ -122,8 +266,7 @@ _BASE_SCHEMA = textwrap.dedent(
 def test_diff_catches_a_column_the_manifest_documents_but_the_schema_lacks() -> None:
     manifest_text = _BASE_MANIFEST.replace(
         "| `name` | TEXT NOT NULL | — | M1 |\n",
-        "| `name` | TEXT NOT NULL | — | M1 |\n"
-        "| `description` | TEXT NULL | — | M1 |\n",
+        "| `name` | TEXT NOT NULL | — | M1 |\n| `description` | TEXT NULL | — | M1 |\n",
     )
 
     diff = _diff_of(manifest_text, _BASE_SCHEMA)

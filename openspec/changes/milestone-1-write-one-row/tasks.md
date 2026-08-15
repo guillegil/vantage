@@ -132,7 +132,7 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 ### A2b — Rot-detector (PR3)
 
 - [x] 2.2 RED — `test_schema_manifest.py`: parses the manifest's column table, applies `schema.sql` via a plain `sqlite3.connect(":memory:").executescript(...)` (not `open_database` — no dependency on connection.py/PR4), and compares against `PRAGMA table_info` per table. Fails: the comparison helper does not exist yet. Comment `# Rot-detector supporting RQ-29 (Inspection at docs/schema-manifest.md is the verification of record)`, no `pytest.mark.req` (Inspection is not a Test-type verification).
-- [ ] 2.3 GREEN — implement the manifest-parsing/comparison helper (lives in the test module; never shipped). 2.2 passes.
+- [x] 2.3 GREEN — implement the manifest-parsing/comparison helper (lives in the test module; never shipped). 2.2 passes.
 
 ### A2c — Connection & Permissions (PR4)
 
