@@ -6,10 +6,17 @@ Runs the app factory (`vantage.service.app.create_app`) against an injected
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import socket
+import threading
+import time
 from typing import Any
 
 import pytest
+import uvicorn
 from fastapi.testclient import TestClient
+from starlette.types import ASGIApp, Receive, Scope, Send
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 
@@ -169,3 +176,214 @@ def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -
 
     assert response.status_code == 422
     assert max(len(field) for field in response.json()["fields"]) < 128
+
+
+# --- Raw-socket truncation (task 3.7) ---------------------------------------
+#
+# Everything above drives `create_app` through `fastapi.testclient.TestClient`,
+# whose ASGI transport hands the whole submitted body to `request.stream()`
+# already assembled in memory (PR7's stated, honest gap). No test built on
+# `TestClient` can ever observe a socket stopping mid-transfer, so it cannot
+# prove the streaming cap in `_read_bounded_body` -- the loop that raises
+# before asking `request.stream()` for another chunk -- actually stops a
+# real, slow-feeding connection. This section runs a real `uvicorn` server on
+# a real, already-bound TCP socket and drives it byte-for-byte instead.
+
+
+class _RawSocketServer:
+    """A real `uvicorn` server bound to an ephemeral loopback port.
+
+    The listening socket is created and bound here, *before* uvicorn ever
+    sees it (`socket.bind(("127.0.0.1", 0))`, then `getsockname()` for the
+    OS-assigned port) so the actual port is known ahead of time without
+    guessing or hardcoding one -- the same reason `port=0` was requested:
+    the test must survive a machine where an arbitrary fixed port is
+    already taken.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(128)
+        self.port = self._sock.getsockname()[1]
+
+        config = uvicorn.Config(app, host="127.0.0.1", log_level="warning", lifespan="off")
+        self._server = uvicorn.Server(config)
+        self._loop = asyncio.new_event_loop()
+        self._thread = threading.Thread(
+            target=self._run, name="vantage-test-raw-socket-server", daemon=True
+        )
+
+    def _run(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_until_complete(self._server.serve(sockets=[self._sock]))
+
+    def __enter__(self) -> _RawSocketServer:
+        self._thread.start()
+        while not self._server.started:
+            time.sleep(0.001)
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._server.should_exit = True
+        # A failing assertion above must not leave a listener behind to
+        # poison a later test -- join with a bound, not forever.
+        self._thread.join(timeout=5)
+
+
+class _AsgiCompletionSignal:
+    """Wraps the ASGI app to know, deterministically, when one full request
+    cycle has returned -- successfully or by raising.
+
+    This is a genuine ASGI middleware layer (the same shape any Starlette
+    middleware takes): it awaits the real app unmodified and only observes
+    when that call returns, it never fabricates a `receive()` event or an
+    exception. It exists so the test can `Event.wait(timeout=...)` for the
+    real request-handling coroutine to finish instead of guessing with a
+    fixed sleep -- there is no other externally observable "done" signal,
+    because a client that already disconnected can also never observe the
+    server's response by definition.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+        self.completed = threading.Event()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await self._app(scope, receive, send)
+        finally:
+            self.completed.set()
+
+
+class _ListLogHandler(logging.Handler):
+    """A `logging.Handler` that appends every record it receives to a list.
+
+    Not `logging.Handler().emit = list.append` -- mypy (correctly) rejects
+    monkeypatching a bound method with a differently-shaped callable, and a
+    real subclass is barely more code.
+    """
+
+    def __init__(self, records: list[logging.LogRecord]) -> None:
+        super().__init__()
+        self._records = records
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self._records.append(record)
+
+
+class _UvicornErrorCapture:
+    """Captures ERROR+ records from the `uvicorn.error` logger directly.
+
+    uvicorn's default logging config (`uvicorn.config.LOGGING_CONFIG`) sets
+    `"uvicorn": {..., "propagate": False}` on `uvicorn.error`'s parent --
+    pytest's `caplog`, which attaches to the root logger, would silently see
+    nothing this module logs no matter what actually happens. Attaching
+    directly to `uvicorn.error` sidesteps that and is the only reliable way
+    to observe whether uvicorn's own ASGI exception wrapper
+    (`run_asgi`'s `except BaseException as exc: self.logger.error(...)`) ever
+    fired for this request.
+    """
+
+    def __init__(self) -> None:
+        self._logger = logging.getLogger("uvicorn.error")
+        self.records: list[logging.LogRecord] = []
+        self._handler = _ListLogHandler(self.records)
+
+    def __enter__(self) -> _UvicornErrorCapture:
+        self._previous_level = self._logger.level
+        self._logger.setLevel(logging.ERROR)
+        self._logger.addHandler(self._handler)
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._logger.removeHandler(self._handler)
+        self._logger.setLevel(self._previous_level)
+
+
+@pytest.mark.req("RQ-42")
+@pytest.mark.req("RQ-3")
+def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
+    """RQ-3 criterion 2 ("its report is truncated in transit ... the
+    database holds none of that session's results rather than a prefix of
+    them") and RQ-42's "Body truncated midway" scenario, proven against a
+    REAL socket -- see the module-level note above for why `TestClient`
+    cannot exercise this.
+
+    A raw client connects, sends a `Content-Length` that promises far more
+    bytes than it ever writes, then half-closes its own write direction
+    (`shutdown(SHUT_WR)`) without sending the rest -- exactly what a process
+    killed mid-write, or a network partition mid-transfer, looks like from
+    the server's side. Starlette's `request.stream()` detects this and
+    raises a genuine `starlette.requests.ClientDisconnect` from inside the
+    real streaming read loop in `_read_bounded_body` -- not constructed by
+    hand, not injected through a fabricated `receive()`, the actual
+    exception a real disconnect produces.
+
+    **Why the assertion is "no unhandled-exception log", not "a 400
+    response body".** Once uvicorn's own transport has observed the peer
+    disconnect, its ASGI `send()` implementation silently drops every
+    further message (`h11_impl.py`: `if self.disconnected: return`) --
+    this is unconditional ASGI-server behaviour, true whether or not this
+    service catches `ClientDisconnect`, and it means no HTTP response body
+    can ever reach a client that has already gone away, by construction of
+    the protocol. What DOES differ, and is what task 3.8 changes, is
+    whether the disconnect is handled inside this service's own code
+    (silent, clean completion) or left to propagate out of the ASGI
+    application entirely, which is what makes uvicorn log an "Exception in
+    ASGI application" error with a full traceback. RQ-42's "reject and
+    store nothing" is what task 3.7/3.8 can prove end-to-end for a real
+    socket: the response-body half of RQ-42 is already covered, against
+    the same code path, by `test_non_json_body_is_400` and its siblings
+    above -- this test's job is the part only a real socket can prove.
+    """
+    app = create_app(store)
+    signal = _AsgiCompletionSignal(app)
+    error_capture = _UvicornErrorCapture()
+
+    with _RawSocketServer(signal) as server, error_capture:
+        report_id = "c" * 32
+        # Deliberately short: promises 500 bytes via Content-Length, sends a
+        # small fraction of that, then stops.
+        truncated_body = ('{"run": {"id": "' + report_id + '", "started_at"').encode()
+        promised_length = 500
+        request_head = (
+            f"POST /api/v1/runs HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{server.port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {promised_length}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode()
+
+        client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_sock.settimeout(5)
+        try:
+            client_sock.connect(("127.0.0.1", server.port))
+            client_sock.sendall(request_head + truncated_body)
+            assert len(truncated_body) < promised_length
+            client_sock.shutdown(socket.SHUT_WR)
+            try:
+                received = client_sock.recv(4096)
+            except OSError:
+                received = b""
+        finally:
+            client_sock.close()
+
+        # Block until the real request-handling coroutine has actually
+        # returned -- see `_AsgiCompletionSignal`'s docstring for why this
+        # is a real completion signal, not a fixed sleep.
+        completed = signal.completed.wait(timeout=5)
+
+    assert completed, "the server never finished handling the truncated request"
+    # A client that has already disconnected cannot, by construction of the
+    # protocol, ever observe a response body -- see the test docstring.
+    assert received == b""
+    # RQ-3 criterion 2, the assertion of record: nothing is written for a
+    # truncated session, not a prefix of it.
+    assert store.count_executions() == 0
+    assert not error_capture.records, (
+        "an unhandled ClientDisconnect reached uvicorn's ASGI exception "
+        f"wrapper instead of being handled: {error_capture.records}"
+    )
