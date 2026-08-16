@@ -8,11 +8,11 @@ Proposed
 
 ## Context
 
-`vantage-storage` needs to write to and read from a SQLite database. Python
+`vantage.storage` needs to write to and read from a SQLite database. Python
 ships `sqlite3` in the standard library; SQLAlchemy (with or without
 Alembic for migrations) is the alternative the deleted `src/vantage` tree
 used, and it is exactly what RQ-24 (zero third-party runtime dependencies
-in `vantage-core`, `vantage-storage` and `vantage-pytest`) rules out for
+in `vantage.core`, `vantage.storage` and `pytest-vantage`) rules out for
 this package.
 
 An ORM's usual case -- mapping rows to objects across a schema that
@@ -41,6 +41,6 @@ Use stdlib `sqlite3` directly, with hand-written SQL in
   provided.
 - `PRAGMA` handling, connection lifecycle (WAL mode, busy timeout,
   `BEGIN IMMEDIATE`) and adapter code are all hand-rolled in
-  `vantage_storage/connection.py`, each a place a future contributor
+  `vantage/storage/connection.py`, each a place a future contributor
   unfamiliar with SQLite's concurrency model could get wrong in a way an
   ORM's connection pool might have hidden.

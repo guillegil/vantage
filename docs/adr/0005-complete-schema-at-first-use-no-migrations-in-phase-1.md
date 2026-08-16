@@ -24,8 +24,8 @@ nothing until there is a database worth preserving across a schema change.
 
 ## Decision
 
-`vantage-storage/src/vantage_storage/schema.sql` declares all ten tables
-and twelve indexes documented in the RQ-29 schema manifest
+`packages/vantage/src/vantage/storage/schema.sql` declares all ten tables
+and thirteen indexes documented in the RQ-29 schema manifest
 (`docs/schema-manifest.md`) at once, executed with stdlib `sqlite3` the
 first time a database is created. Later milestones write code that
 populates the columns their requirements own; they do not alter the schema.
