@@ -112,9 +112,20 @@ jobs:
         run: |
           sudo groupadd -f nonet
           sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT
+          # The runner's stock sudoers rule grants passwordless sudo for
+          # running as another USER, but not as another GROUP, so `sudo -g`
+          # alone prompts for a password and the step dies in ten seconds.
+          echo "$(id -un) ALL=(ALL:ALL) NOPASSWD:ALL" \
+            | sudo tee /etc/sudoers.d/99-vantage-nonet >/dev/null
 
+      # Same user, different group -- deliberately not root. RQ-40's tests
+      # assert 0600 file modes, and root bypasses permission checks, so a
+      # root run would turn those into false passes.
       - name: Run the suite with outbound networking blocked  # RQ-28
-        run: sudo -g nonet --preserve-env=PATH,HOME uv run --no-sync pytest
+        run: >
+          sudo -u "$(id -un)" -g nonet
+          --preserve-env=PATH,HOME,UV_CACHE_DIR
+          uv run --no-sync pytest
 
   # RQ-24: installing pytest-vantage into an environment that already has
   # pytest adds exactly one distribution -- no third-party dependency rides
