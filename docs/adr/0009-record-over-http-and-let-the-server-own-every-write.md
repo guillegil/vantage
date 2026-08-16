@@ -4,7 +4,7 @@ Date: 2026-08-15
 
 ## Status
 
-Proposed
+Accepted on 2026-08-16, when PR #19 merged Milestone 1 into `main`.
 
 ## Context
 
