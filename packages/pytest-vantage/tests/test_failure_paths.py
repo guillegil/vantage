@@ -18,9 +18,11 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from collections.abc import Callable
 
 import pytest
+from pytest_vantage.boundary import VantageWarning, _warn, fault_isolated
 from pytest_vantage.plugin import _preflight_reachable
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
@@ -114,6 +116,15 @@ def _accept_then_close(conn: socket.socket) -> None:
     """
 
 
+def _accept_and_hang(conn: socket.socket) -> None:
+    """RQ-21's "accepts and never responds" scenario. The sleep is far
+    longer than any timeout a test configures -- the client's own
+    ``--vantage-timeout`` is what must end this, never this function
+    returning on its own.
+    """
+    time.sleep(30)
+
+
 # --- Unit: the preflight probe itself (task 6.8) ----------------------------
 
 
@@ -130,6 +141,115 @@ def test_preflight_reachable_is_false_on_unresolvable_host() -> None:
 def test_preflight_reachable_is_true_when_something_listens() -> None:
     with _StubServer(_accept_then_close) as server:
         assert _preflight_reachable(server.address, timeout=1.0) is True
+
+
+# --- Unit: the fault-isolation decorator itself (RQ-21 "every hook is
+# fault-isolated") ------------------------------------------------------------
+#
+# `Recorder`'s own hook bodies offer no seam to make BOTH
+# `pytest_report_header` and `pytest_sessionfinish` raise independently
+# without monkeypatching the already-decorated method itself, which would
+# bypass the very code this scenario exists to prove. A direct unit test
+# against the decorator proves the same contract for real, and does so
+# without depending on which of `Recorder`'s hooks happens to run first.
+
+
+class _Instrumented:
+    def __init__(self, config: object) -> None:
+        self._config = config
+        self._disabled = False
+        self.calls = 0
+
+    @fault_isolated
+    def raises(self) -> None:
+        self.calls += 1
+        raise RuntimeError("boom")
+
+    @fault_isolated
+    def raises_keyboard_interrupt(self) -> None:
+        raise KeyboardInterrupt
+
+
+@pytest.mark.req("RQ-21")
+def test_fault_isolated_catches_exception_and_latches_after_first_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings_seen: list[str] = []
+    monkeypatch.setattr(
+        "pytest_vantage.boundary._warn",
+        lambda config, message: warnings_seen.append(message),
+    )
+    instance = _Instrumented(config=None)
+
+    instance.raises()
+    instance.raises()
+
+    # The second call never reached the raising body at all -- the latch,
+    # not a second catch, is what keeps this at one warning.
+    assert instance.calls == 1
+    assert len(warnings_seen) == 1
+
+
+def test_fault_isolated_never_catches_keyboard_interrupt() -> None:
+    instance = _Instrumented(config=None)
+
+    with pytest.raises(KeyboardInterrupt):
+        instance.raises_keyboard_interrupt()
+
+
+# --- Unit: `_warn`'s fallback chain ------------------------------------------
+
+
+def test_warn_emits_a_vantage_warning_by_default() -> None:
+    with pytest.warns(VantageWarning, match="something went wrong"):
+        _warn(None, "vantage: something went wrong")  # type: ignore[arg-type]
+
+
+def test_warn_falls_back_to_the_terminal_reporter_when_warnings_are_errors() -> None:
+    """`filterwarnings = ["error"]` (or `-W error`) turns
+    `warnings.warn(VantageWarning(...))` into a raised exception instead of
+    an ordinary warning -- design.md D6 requires the message to still reach
+    the user rather than let a reporting failure crash the session that
+    exact way. `warnings.catch_warnings` + `simplefilter("error")` recreates
+    that configuration directly, independent of how this suite's own
+    `pyproject.toml` happens to be set up.
+    """
+    lines: list[str] = []
+
+    class _ReporterDouble:
+        def write_line(self, message: str) -> None:
+            lines.append(message)
+
+    class _PluginManagerDouble:
+        def get_plugin(self, name: str) -> object:
+            assert name == "terminalreporter"
+            return _ReporterDouble()
+
+    class _ConfigDouble:
+        pluginmanager = _PluginManagerDouble()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _warn(_ConfigDouble(), "vantage: something went wrong")  # type: ignore[arg-type]
+
+    assert lines == ["vantage: something went wrong"]
+
+
+def test_warn_falls_back_to_stderr_when_no_terminal_reporter_is_registered(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _PluginManagerDouble:
+        def get_plugin(self, name: str) -> object:
+            return None
+
+    class _ConfigDouble:
+        pluginmanager = _PluginManagerDouble()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _warn(_ConfigDouble(), "vantage: something went wrong")  # type: ignore[arg-type]
+
+    assert "vantage: something went wrong" in capsys.readouterr().err
 
 
 # --- RQ-37: the server cannot be reached at all (task 6.7) -------------------
@@ -236,3 +356,85 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
 
     assert process.returncode == 0
     assert (stdout.decode() + stderr.decode()).count("VantageWarning:") == 1
+
+
+# --- RQ-21: something goes wrong while reporting (task 6.9) -----------------
+
+
+@pytest.mark.req("RQ-21")
+def test_reporting_error_preserves_passing_exit_status_and_warns_once(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In-process (`pytester.runpytest`), not a subprocess: forcing a
+    generic internal error -- not a network failure -- needs the monkeypatch
+    to land in the same process pytest actually runs the session in.
+    Patches `pytest_vantage.recorder.send`, the name `Recorder` actually
+    calls, not `pytest_vantage.transport.send` -- `recorder.py` imports the
+    function by name at module load, so patching the origin module's
+    attribute after that binding has already happened would have no effect.
+    """
+
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("pytest_vantage.recorder.send", _raise)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    assert _combined_output(result).count("VantageWarning:") == 1
+
+
+@pytest.mark.req("RQ-21")
+def test_reporting_error_preserves_failing_exit_status_and_warns_once(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("pytest_vantage.recorder.send", _raise)
+    pytester.makepyfile(test_sample="def test_it():\n    assert False\n")
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(failed=1)
+    assert result.ret == 1
+    assert _combined_output(result).count("VantageWarning:") == 1
+
+
+@pytest.mark.req("RQ-21")
+def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester) -> None:
+    with _StubServer(_accept_then_close) as server:
+        pytester.makepyfile(test_sample=_PASSING_TEST)
+        result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    assert _combined_output(result).count("VantageWarning:") == 1
+
+
+@pytest.mark.req("RQ-21")
+def test_server_accepts_and_never_answers_finishes_within_timeout_plus_five_seconds(
+    pytester: pytest.Pytester,
+) -> None:
+    with _StubServer(_accept_and_hang) as server:
+        pytester.makepyfile(test_sample=_PASSING_TEST)
+        started = time.monotonic()
+        result = pytester.runpytest_subprocess(
+            "--vantage",
+            f"--vantage-server={server.address}",
+            "--vantage-timeout=1.0",
+            timeout=15,
+        )
+        elapsed = time.monotonic() - started
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    assert elapsed < 1.0 + 5.0
+    assert _combined_output(result).count("VantageWarning:") == 1
