@@ -361,3 +361,37 @@ code paths in the tree are two in-process stdlib calls.
 Round 1 and round 2 each found a real blocker. **Round 3 does not.** The eight WARNINGs and
 nine SUGGESTIONs are caveats with named homes, not defects that make the change dishonest to
 close.
+
+---
+
+## Coda: the commit this report was written into
+
+Added at archive time, because the archive pass found this report describing a
+commit that is not the one being archived — the fourth instance of the same
+defect the three rounds each caught.
+
+This report says **Tip verified: `9691444`**. That was true of the *analysis*,
+not of the *file*: at `9691444` the tracked copy still held round 2's text
+(`blockers: 2`, tip `a5f18f1`). Round 3's content reached the tree one commit
+later, in **`dc5ce4a`** — so this report has never, until now, described the
+commit it lives in.
+
+`dc5ce4a` is not idle. It closes round 3's own findings: **N1**, the fail-open
+counter read that could have reported success without reading anything;
+**N2**, the missing `ip6tables` rule that left an address family blocked but
+unmeasured; **S3**, **S4** and **S5**. Round 3 classified all five as caveats
+rather than blockers, and they were fixed instead of merely recorded.
+
+**No fourth formal verification round ran against `dc5ce4a`.** What exists for
+it instead:
+
+- all seven local gates re-run green — 108 tests serially and under `-n 4`,
+  `ruff format --check`, `ruff check`, `mypy` (49 files), `deptry` (48 files),
+  both wheels
+- CI run **31962736969** on `dc5ce4a`: **success**, all twelve jobs, with
+  `networking-disabled` logging a positive control of 2 packets and a suite
+  counter of 0
+
+That is evidence, not a verification round, and the difference is recorded here
+rather than smoothed over. The archive commit `85b61fb` sits one further commit
+on and changes no code — it moves this folder and merges the specs.

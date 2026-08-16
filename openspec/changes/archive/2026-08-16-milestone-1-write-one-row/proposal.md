@@ -1,6 +1,6 @@
 # Proposal: Milestone 1 — Write one row
 
-**Change:** `milestone-1-write-one-row` · **Phase:** 1 · **Status:** for review
+**Change:** `milestone-1-write-one-row` · **Phase:** 1 · **Status:** accepted, delivered and archived 2026-08-16
 **Source of truth:** PROJ-1 and the `RQ` / `FT` / ADR databases in Notion.
 All 40 requirements are `Draft`.
 
