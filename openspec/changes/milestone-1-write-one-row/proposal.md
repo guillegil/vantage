@@ -252,7 +252,7 @@ Each maps to a requirement's own acceptance criterion.
 - [ ] **RQ-30** — the core suite passes unchanged against the in-memory adapter.
 - [ ] **RQ-38 (criterion 1)** — two concurrent sessions leave two run entries.
 - [ ] **RQ-40** — the database is created `0600` and the store `0700` under a permissive umask.
-- [ ] `grep -r "RQ-01"` reaches the test that proves it, and likewise for every requirement above.
+- [x] `grep -r "RQ-1"` reaches the test that proves it, and likewise for every requirement above. (The id was written `RQ-01` here and matched nothing; requirement ids are unpadded.)
 
 ## Open items
 

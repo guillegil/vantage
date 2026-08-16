@@ -749,7 +749,8 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 > `-A OUTPUT -j REJECT`) is deleted, and calling it standard practice did
 > not survive contact with a runner: a blanket OUTPUT REJECT also severs
 > the runner agent's own control-plane egress, and the first attempt hung
-> for twenty-six minutes before being cancelled by hand.
+> for twenty-six minutes before being cancelled by hand. The job has since
+> been through six runs.
 >
 > **`deptry` findings were resolved by naming the false positives, not by
 > a blanket ignore.** `uv run --extra dev deptry .` at the tip reported 27
@@ -940,3 +941,67 @@ zero — that counter is the scenario's subject — and runs a deliberate
 connection to TEST-NET-3 first to prove the counter moves. Without that
 positive control a zero would be indistinguishable from a rule that never
 armed, which is exactly how the three earlier failures presented.
+
+## Known open items at archive
+
+Verification round 3 returned zero blockers. These are the findings it judged
+acceptable to archive **provided they are written down**, which is what this
+section is for. Each is a real limit of what this milestone proves, not a
+to-do someone forgot.
+
+### Scope of the RQ-28 demonstration
+
+The `networking-disabled` job asserts that the rejecting rule's packet counter
+is zero after the suite, with a positive control proving the counter moves.
+Two limits on that claim, both now handled in `ci.yml` but worth stating:
+
+- The measurement counts **TCP**. Non-TCP is blocked but uncounted, because
+  the suite resolves one deliberately unresolvable host and DNS is UDP.
+- `--gid-owner` sees only processes in the suite's group. It cannot see egress
+  a helper daemon might perform on the suite's behalf. Verified by inspection
+  that no such path exists — the only outbound calls are
+  `socket.create_connection` in `plugin.py` and `urllib` in `transport.py`,
+  both in-process — but that is an argument, not a measurement.
+
+The honest claim: *no non-loopback TCP connection was attempted by any process
+in the suite's group, on a rule proven live in the same job.*
+
+### Requirements proven at a narrower scope than their scenario states
+
+- **RQ-38.1** is tested at the storage layer (two threads into one store), not
+  through the server as design.md envisaged (two threads POSTing into one
+  uvicorn instance). The idempotency guarantee is where the test is; the
+  server path is inferred.
+- **RQ-31.1**'s scenario says "a session of at least two seconds". The test
+  runs a trivial one-test suite, so it proves ordering, not duration.
+- **RQ-3** criteria 1 and 3 are deferred to M2 — recorded in design.md but
+  **not** in `specs/run-recording/spec.md`, unlike RQ-38's deferral in the
+  same file. The spec is the more likely thing to be read.
+
+### Assertions weaker than they look
+
+- `test_every_recorder_hook_is_fault_isolated` asserts each hook carries
+  `__wrapped__`, which means "wrapped by something", not "wrapped by
+  `fault_isolated`". A different decorator would satisfy it.
+- `Recorder`'s `finished_at > started_at` would pass against a faked constant
+  clock offset. Judged sabotage rather than regression, and left.
+- `isoformat_utc` hardcodes `+00:00` and converts nothing, so a non-UTC
+  datetime would be mislabelled. Every call site passes UTC.
+
+### Behaviour with no requirement covering it
+
+- A session killed with **SIGKILL** leaves no row at all. Nothing in the
+  thirty-nine requirements covers it. Needs a decision in Notion.
+- A **collection error exits 2**, so it is recorded `interrupted: true` and is
+  indistinguishable from Ctrl-C. Confirmed by assertion in
+  `test_failed_collection_still_writes_one_row`.
+- The XDG database default is a Linux convention; Windows and macOS fall back
+  to `~/.local/share/vantage/vantage.db`. Recorded in ADR-0010 as a known
+  consequence, not decided.
+- All six `RunReport` fields are required **and** extras are forbidden, so the
+  run object cannot gain a field without forcing `/api/v2`.
+
+### CI
+
+- The `networking-disabled` job grants blanket `NOPASSWD:ALL` to write its
+  sudoers rule. Acceptable on a disposable runner, not a pattern to copy.

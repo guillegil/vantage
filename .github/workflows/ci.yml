@@ -123,6 +123,11 @@ jobs:
           # is UDP, so counting it would make the assertion below fail for a
           # reason that has nothing to do with reporting.
           sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT
+          # IPv6 blocked too. The counter below reads the IPv4 chain only,
+          # so without this an IPv6 connection would be neither blocked nor
+          # counted and the assertion would still print zero -- the measured
+          # family and the blocked family have to be the same set.
+          sudo ip6tables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT
           # The runner's stock sudoers rule grants passwordless sudo for
           # running as another USER, but not as another GROUP, so `sudo -g`
           # alone prompts for a password and the step dies in ten seconds.
@@ -167,9 +172,20 @@ jobs:
       # visible in the rule's own counter.
       - name: Assert the suite attempted no outbound connection  # RQ-28
         run: |
+          # `pipefail`, and an empty read treated as failure rather than as
+          # zero. Without both, this is fail-OPEN: a pipeline's status is
+          # awk's, awk succeeds on empty input, and `${attempted:-0}` then
+          # turns a failed `iptables -L` into the answer the requirement
+          # wants to hear. The one assertion RQ-28 rests on must not be able
+          # to read nothing and call it success.
+          set -o pipefail
           attempted="$(sudo iptables -L VANTAGE_NONET -v -n -x | awk '/REJECT/ {print $1; exit}')"
-          echo "non-loopback TCP connections the suite attempted: ${attempted:-0}"
-          if [ "${attempted:-0}" -ne 0 ]; then
+          if [ -z "$attempted" ]; then
+            echo "could not read the rule counter; absence of evidence is not evidence" >&2
+            exit 1
+          fi
+          echo "non-loopback TCP connections the suite attempted: $attempted"
+          if [ "$attempted" -ne 0 ]; then
             sudo iptables -L VANTAGE_NONET -v -n -x
             echo "expected none; RQ-28 says nothing beyond the local server is contacted" >&2
             exit 1

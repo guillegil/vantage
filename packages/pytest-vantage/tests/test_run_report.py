@@ -146,8 +146,14 @@ def test_failed_collection_still_writes_one_row(
 ) -> None:
     pytester.makepyfile(test_broken="import this_module_does_not_exist_anywhere_at_all\n")
 
-    pytester.runpytest_subprocess("--vantage", f"--vantage-server={vantage_server.address}")
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}"
+    )
 
+    # The precondition, asserted rather than assumed: without it this passes
+    # just as well against a session that collected cleanly, and the scenario
+    # is specifically about the one that did not.
+    assert result.ret == pytest.ExitCode.INTERRUPTED
     assert len(vantage_server.executions()) == 1
 
 

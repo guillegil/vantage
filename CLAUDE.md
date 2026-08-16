@@ -68,12 +68,16 @@ This is the opposite of requirements, where Notion leads.
 
 ## State of the tree
 
-The repository is being reset. The `src/vantage` tree and the `tests/` tree were
-written for a different product — live run supervision, which is Phase 3 — and are
-being deleted rather than migrated. `README.md`, `pyproject.toml` and
-`docs/architecture.md` still describe that older plan and are stale until rewritten.
+The reset is done. `src/vantage` and the old `tests/` tree — written for live run
+supervision, which is Phase 3 — no longer exist; the tree is `packages/pytest-vantage`
+and `packages/vantage` under one uv workspace, and `pyproject.toml` and
+`docs/architecture.md` were rewritten for it. Anything you read describing a
+`src/` layout, four distributions, or a plugin that opens a database predates
+ADR-4 and ADR-9 and is history, not instruction.
 
-Do not treat anything currently under `src/` as a pattern to follow.
+Milestone 1 (`milestone-1-write-one-row`) is complete: the plugin records a
+session over HTTP and the server writes the row. CI runs the 3.10–3.13 × xdist
+matrix on `main` and every `milestone-*` branch.
 
 ## Architecture
 

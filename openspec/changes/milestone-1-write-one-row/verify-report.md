@@ -1,351 +1,363 @@
 ```yaml
 schema: gentle-ai.verify-result/v1
-evidence_revision: sha256:76712c7f375a5283f79010bb5e4633690af26d588636bc9b4cb12d2dc6067296
+evidence_revision: sha256:618d49fa07643cb8764fcd748987f9a52437547be312cff26a5fe0026a0ba2ec
 verdict: fail
-blockers: 2
-critical_findings: 2
-requirements: 12/16
-scenarios: 40/45
+blockers: 0
+critical_findings: 0
+requirements: 13/16
+scenarios: 41/45
 test_command: uv run --extra dev pytest -q
 test_exit_code: 0
-test_output_hash: sha256:4d4b5c1d880a58f7b071a7945f5f2524dbfa1a6e9dd3957309ec0283b7dcd451
+test_output_hash: sha256:6d904d34f755e18ce9b1a3ed70a6fad986368070e99fa55ceac96114621eca98
 build_command: uv build --wheel --all-packages -o dist
 build_exit_code: 0
 build_output_hash: sha256:f2f3c5e1f8ecb9750f5f4e83656ca5832eac798357198243aa22519ab0727136
 ```
 
-## Verification Report — round 2
+## Verification Report — round 3
 
 **Change**: milestone-1-write-one-row
-**Tip verified**: `a5f18f1` on `milestone-1-write-one-row-pr14`, working tree clean,
-identical to `origin/milestone-1-write-one-row-pr14` (`git diff` empty)
+**Tip verified**: `9691444` on `milestone-1-write-one-row-pr14`, working tree clean,
+identical to `origin/milestone-1-write-one-row-pr14` (`git ls-remote` matches)
 **Version**: 8 capability specs, 16 requirements, 45 scenarios
 **Mode**: Strict TDD
-**Round**: 2. Round 1 verified `8b0d666` and returned `fail` with 2 CRITICAL.
-This document replaces that one in place.
+**Round**: 3. Round 1 verified `8b0d666` (fail, 2 CRITICAL). Round 2 verified `a5f18f1`
+(fail, 2 CRITICAL: C3, C4). This document replaces both in place — one report, not three.
 
-### What changed since round 1
+Round 3 is deliberately narrow: confirm C3 and C4 are closed, look adversarially at the
+two new commits, and decide archive readiness.
 
-Four commits landed after the round-1 tip. **No production source changed in any of
-them** (`git diff --name-only 8b0d666..a5f18f1 | rg /src/` is empty). The whole delta
-is `.github/workflows/ci.yml`, two test files, `tasks.md` and this report.
+### What changed since round 2
+
+Two commits. `git diff --name-only a5f18f1..HEAD` is three files: `.github/workflows/ci.yml`,
+`tasks.md`, `verify-report.md`. **No production source and no test file changed** — the
+`src/` and `tests/` filter returns nothing. The 108 tests verified in round 2 are the same
+108 tests here.
 
 | Commit | Touches | Effect |
 |---|---|---|
-| `e9dff96` | ci.yml, tasks.md, verify-report.md, 2 test files | closes C1, W3, W4; first W6 attempt |
-| `76bf43c` | ci.yml, `test_failure_paths.py` | `stdin=DEVNULL` cross-version fix; owner-based iptables rule; `timeout-minutes` on every job |
-| `0f74cef` | ci.yml | sudoers rule so `sudo -g` does not prompt |
-| `a5f18f1` | ci.yml | absolute `uv` path under sudo's `secure_path` |
+| `c181719` | ci.yml, tasks.md, verify-report.md | closes C4 (counter + positive control) and C3 (superseded paragraph, commit table) |
+| `9691444` | tasks.md | closes the recording recursion; adds the two missing rows and the invariant |
 
 ### Completeness
 
 | Metric | Value |
 |---|---|
-| Tasks total | 62 |
-| Tasks complete | 62 |
-| Tasks incomplete | 0 (`rg -c '^- \[ \]' tasks.md` = 0) |
+| Tasks total | 61 |
+| Tasks complete | 61 |
+| Tasks incomplete | 0 |
+
+Round 2's report said 62. `grep -c '^- \[x\]' tasks.md` = 61, `grep -c '^- \[ \]'` = 0,
+`grep -cE '^[[:space:]]*- \[.\]'` = 61. **Round 2's total was wrong by one; this is my
+error, corrected here.** The conclusion is unaffected: nothing is unchecked.
 
 ### Build & Tests Execution — all seven gates re-run on this tip
 
 | Gate | Command | Exit | Result |
 |---|---|---|---|
-| Tests | `uv run --extra dev pytest -q` | 0 | **108 passed in 11.02s** |
-| Tests (xdist) | `uv run --extra dev pytest -q -n 4` | 0 | **108 passed in 5.41s** |
+| Tests | `uv run --extra dev pytest -q` | 0 | **108 passed in 11.32s** |
+| Tests (xdist) | `uv run --extra dev pytest -q -n 4` | 0 | **108 passed in 5.30s** |
 | Format | `uv run --extra dev ruff format --check .` | 0 | 49 files already formatted |
 | Lint | `uv run --extra dev ruff check .` | 0 | All checks passed! |
 | Types | `uv run --extra dev mypy .` | 0 | Success: no issues found in 49 source files |
-| Deps | `uv run --extra dev deptry .` | 0 | Success! No dependency issues found (48 files) |
+| Deps | `uv run --extra dev deptry .` | 0 | Success! No dependency issues found (48 files scanned) |
 | Build | `uv build --wheel --all-packages -o dist` | 0 | `pytest_vantage-0.1.0` + `vantage-0.1.0` wheels |
 
-107 → 108 tests: the one addition is W3's closure. **Coverage**: not configured in this
-workspace — skipped, not a failure.
+The build output hash is byte-identical to round 2's
+(`f2f3c5e1f8ecb9750f5f4e83656ca5832eac798357198243aa22519ab0727136`) — the build is
+reproducible across rounds. **Coverage**: not configured in this workspace — skipped, not
+a failure.
 
-### CI evidence — verified directly, not accepted on report
+### CI evidence — verified directly with `gh`, not accepted on report
 
-`gh run list` / `gh run view`. The final run is **31960833652**, conclusion `success`,
-event `push`, workflow `CI`, `headBranch` `milestone-1-write-one-row-pr14`,
-`headSha` **`a5f18f15b6ed18a4bdbfce8ddecc0cedafd5f8a8`** — byte-identical to the local
-tip and to `origin/…-pr14`. Because the trigger is `push`, the workflow GitHub executed
-is the one at that commit, i.e. the one in this tree.
+The session named run **31961652741** (head `c181719`). That run is green, but it is not
+the tip. **`gh run list` shows a later run, `31961831576`, whose `headSha` is
+`9691444fd0ede3de063059bda2b00076064bbdc5` — the exact tip.** All 12 jobs `success`.
+Round 3 verifies against that run, because a run on the parent proves the parent.
 
-All **12** jobs green. The 29-second wall clock is parallel scheduling, not a skipped
-matrix — every job is individually listed with its own duration and ID.
+| Job | ID | Conclusion |
+|---|---|---|
+| `test (3.10\|3.11\|3.12\|3.13, with\|without)` | ×8 | success |
+| `python-3-9-install-refused` | 95200846392 | success |
+| `networking-disabled` | 95200846401 | success |
+| `clean-environment-install` | 95200846436 | success |
+| `quality` | 95200846509 | success |
 
-| Job | ID | Time | Non-vacuity check performed |
-|---|---|---|---|
-| `test (3.10, with)` … `(3.13, with)` | ×4 | 21-24s | log shows `plugins: vantage-0.1.0, anyio, xdist-3.8.0`; **108 passed** |
-| `test (3.10, without)` … `(3.13, without)` | ×4 | 21-24s | `Uninstalled 1 package`; plugins line **has no xdist**; **107 passed, 1 skipped** |
-| `python-3-9-install-refused` | 95198457591 | 10s | log shows uv's real refusal text: *"the current Python version (3.9.25) does not satisfy Python>=3.10,<3.14"* — refused by `requires-python`, not by an unrelated error |
-| `networking-disabled` | 95198457579 | 22s | suite ran under `sudo -g nonet`; **108 passed in 13.13s** |
-| `clean-environment-install` | 95198457419 | 7s | diff asserts exactly 1 added / 0 removed |
-| `quality` | 95198457431 | 15s | ruff format, ruff check, mypy --strict, deptry, build |
+Branch run history, for the record: `31958927951` cancelled (the 26-minute hang),
+`31960093651` failure, `31960708544` failure, `31960833652` success, `31961652741` success,
+`31961831576` success.
 
-The "without xdist" leg is genuinely without xdist and genuinely different (107+1 skipped
-vs 108) — the matrix is not eight copies of the same run.
+### RQ-28 scenario 2 — demonstrated or not
 
-The matrix also earned its keep on first contact: 3.10, 3.11 and 3.12 all failed, 3.13
-passed. `pytester.popen` opens a stdin pipe and closes it; `communicate()` calls
-`flush()` on it before 3.13. `stdin=subprocess.DEVNULL` is the correct minimal fix and
-weakens nothing.
+**DEMONSTRATED, with a named scope.**
 
-### Re-assessment of the two round-1 CRITICAL findings
+Run **31961831576**, job **`networking-disabled` (95200846401)**, three log lines in order:
 
-**C1 — closed, verified.** `tasks.md` L860-893 now carries a "Closing commit —
-`8b0d666`" subsection naming both corrected files, why they sat outside task 8.2's
-two-file scope, and why they were closed rather than carried past archive. The record
-now matches the tree. **But the same defect recurred one generation later — see C3.**
+```text
+17:31:12.7682239Z  packets the control attempt got rejected: 2
+17:31:26.5815429Z  ============================= 108 passed in 12.90s ==============================
+17:31:26.6837761Z  non-loopback TCP connections the suite attempted: 0
+```
 
-**C2 — closed in substance, 3 of its 4 scenarios genuinely demonstrated.** The branches
-are pushed (`origin` now carries `pr11`…`pr14`), CI has executed for real, and the run's
-head commit is the tip. RQ-27's two scenarios and RQ-28's first scenario are now backed
-by named, inspected job logs. **RQ-28's second scenario is not — see C4.** This is a
-much narrower finding than round-1 C2, and it is a different one: not "the artefact
-never ran" but "the artefact that ran does not measure what the scenario asks for".
+Each of round 2's four objections, re-adjudicated:
+
+1. **"Rejection is not observation" — CLOSED.** The rejecting TCP rule now lives in its own
+   chain (`VANTAGE_NONET`), and the job reads that chain's packet counter back after the
+   suite. The counter is the scenario's subject.
+2. **"The suite cannot fail on a rejected attempt" — CLOSED, and closed in the right place.**
+   The objection was that the *suite* is structurally incapable of being the observer:
+   `plugin.py:96` is a bare `except OSError: return False`, so REJECT, NXDOMAIN and a closed
+   port are one code path, and `fault_isolated` (`boundary.py:93`) does the same on the send
+   path by design. A weaker fix would have added an assertion inside the suite. This one moved
+   the observation into the kernel's packet counter, which no application-level exception
+   handler can reach. That is the correct structural answer, not a workaround.
+3. **"No positive control" — CLOSED, and it is fail-closed.** A deliberate connect to
+   `203.0.113.1:80` (TEST-NET-3, RFC 5737 — reserved, never routable) runs first, from inside
+   the blocked group, and the step exits 1 unless the counter moved. It read **2**. The
+   counter is then zeroed immediately before the suite (`iptables -Z VANTAGE_NONET &&` in the
+   same `&&` chain as the run), so the zero read 14 seconds later is bounded by a proven-live
+   rule on both sides.
+4. **"`--gid-owner` cannot see egress performed on the suite's behalf by a process outside the
+   group" — still structurally true, but no longer material for TCP.** I re-checked the
+   outbound surface directly rather than reasoning from the commit message. The only paths
+   that leave this process are `socket.create_connection` in `_preflight_reachable`
+   (`plugin.py:95`) and `urllib` in `transport.py:34`. Both are in-process; both inherit the
+   `nonet` gid through `sudo -g`, which sets the primary group for the whole process tree. There
+   is no proxy, agent or helper daemon that could connect on the suite's behalf. The one genuine
+   out-of-group carrier is the system stub resolver, and that is DNS over UDP — which the job
+   documents as blocked-but-uncounted, deliberately, because the suite resolves one unresolvable
+   host on purpose. A name lookup is not a connection to an address, and that lookup targets
+   RFC 2606's reserved `.invalid` TLD. **Objection 4 survives as a scoping statement, not as a
+   defect.**
+
+**What the counter does not cover, and must be recorded:** it is IPv4 (see N2), TCP (by design,
+documented in the job), and in-group (objection 4) only. The honest claim the archive should
+carry is: *no non-loopback IPv4 TCP connection was attempted by any process in the suite's
+group, measured on a rule proven live in the same job.* That is a real demonstration of
+scenario 2 for the only class of connection this system can make. Every address the suite
+actually dials is `127.0.0.1`; `example.com` is monkeypatched at
+`pytest_vantage.plugin.socket.create_connection` and never dialled
+(`test_failure_paths.py:363`); `this-host-does-not-exist.invalid` fails in `getaddrinfo`
+before any connect.
+
+### C3 — closed, or closed in appearance?
+
+**Closed, genuinely.** Three independent checks:
+
+1. **The superseded paragraph.** `tasks.md` L731-744 still carries the original PR13 text —
+   correctly, as history — and L746-752 immediately marks it *"Superseded — the job has since
+   run four times, and the shape described above was wrong"*, quotes the deleted rule
+   (`-A OUTPUT -o lo -j ACCEPT` then `-A OUTPUT -j REJECT`) as deleted, and retracts the
+   "standard practice" claim by naming the 26-minute hang that disproved it. All three
+   statements round 2 called false are now explicitly retracted at the point of use. Marking
+   superseded is better than deleting: deleting would erase why the wrong shape was chosen.
+2. **The commit record.** All four previously-unrecorded commits (`e9dff96`, `76bf43c`,
+   `0f74cef`, `a5f18f1`) now have rows at L907-911, with one-line accounts I spot-checked
+   against their diffs.
+3. **The mechanical check, run.** `git log --oneline 670b613..HEAD` yields exactly seven
+   commits: `9691444`, `c181719`, `a5f18f1`, `0f74cef`, `76bf43c`, `e9dff96`, `8b0d666`. The
+   table (L907-913) has exactly seven rows covering exactly those seven — six by hash, the tip
+   by subject line `docs(tasks): close the recording recursion`, which matches `9691444`'s
+   subject exactly. **The invariant holds at the tip, including for both commits that landed
+   after the table was first written**: `c181719`'s row and the tip's row were both added by
+   `9691444`, which is precisely why `c181719` could carry its own hash and `9691444` could not.
+
+The recursion fix is correct and I would not have proposed a better one. One documented
+weakness, not a defect: an `--amend` preserving the subject leaves the row matching while
+pointing at different content. That tradeoff is stated in the file.
+
+Residue: N3 and N4 below.
+
+### C4 — closed, or closed in appearance?
+
+**Closed in substance**, for the reasons in the RQ-28 section: the assertion moved from a
+place that could not fail to a place the suite cannot influence, and it is bracketed by a
+fail-closed positive control. Residue is N1 and N2 below — both scoping and robustness, and
+neither can manufacture the observed result, because the chain was proven armed at 17:31:12
+and read zero at 17:31:26 with nothing privileged running in between.
+
+### New defects in the two new commits
+
+**N1 (WARNING) — the assertion that carries the scenario is fail-open; the positive control
+is fail-closed.**
+
+```bash
+attempted="$(sudo iptables -L VANTAGE_NONET -v -n -x | awk '/REJECT/ {print $1; exit}')"
+if [ "${attempted:-0}" -ne 0 ]; then ... exit 1; fi
+```
+
+The step shell is `/usr/bin/bash -e` (confirmed in the job log), with **no `pipefail`**. A
+pipeline's exit status is `awk`'s, and `awk` succeeds on empty input, so a failing or
+empty-reading `iptables -L` leaves `attempted` empty, `${attempted:-0}` becomes `0`, and the
+step **passes**. The identical construct in the positive control is safe only because it
+compares `-lt 1`, which an empty read fails. So the one assertion that can silently read
+nothing and call it success is the one the requirement rests on. The positive control bounds
+this in practice — the chain demonstrably existed and counted fourteen seconds earlier, and
+only an unprivileged pytest ran in between — which is why this is a WARNING and not a repeat
+of C4. One-line closure: `set -o pipefail` and reject an empty read explicitly.
+
+**N2 (WARNING) — no `ip6tables`; the measurement is IPv4-only and nothing says so.**
+`grep -c ip6tables .github/workflows/ci.yml` = 0. A TCP connection over IPv6 would be neither
+blocked nor counted, and the job would still print zero. Nothing in the suite exercises it
+(every dialled address is an IPv4 literal or fails before connect), and GitHub-hosted runners
+have no IPv6 egress, so this is not a live hole. But the comment block explains the TCP /
+non-TCP split carefully and is silent on address family, which lets a reader take the counter
+for a complete one.
+
+**N3 (SUGGESTION) — `tasks.md` L746 says the job "has since run four times"; it has now run
+six.** Same shape as C3 — a count written at one instant going stale — at negligible severity,
+and the invariant section covers only the commit table, not this sentence.
+
+**N4 (WARNING, discharged by this report) — the demonstration evidence for RQ-28 scenario 2
+was not recorded in any SDD artifact.** `tasks.md`'s new section "RQ-28's second scenario, and
+why a green job was not enough" describes the *mechanism* and names no run, no job and no log
+line, though the row for `a5f18f1` sets the precedent by naming `31960833652`. RQ-28 is a
+**Must** verified by **Demonstration**; a demonstration whose evidence is not identifiable is
+the latent form of round-1's C2. **This report discharges it**: run `31961831576`, job
+`95200846401` and the three exact log lines are recorded above, and this report is itself a
+persisted SDD artifact. Recommended but not required: copy the run ID into that `tasks.md`
+section so it is durable in the file the implementer reads.
+
+**N5 (SUGGESTION) — the positive control validates one destination.** A pre-existing `ACCEPT`
+earlier in `OUTPUT` for some other destination would shadow the counting rule for it. On a
+GitHub-hosted runner `OUTPUT` is policy-ACCEPT and effectively empty, and the job never dumps
+`iptables -L OUTPUT` to prove it. Speculative; one `iptables -L OUTPUT -v -n -x` echoed once
+would settle it for the record.
+
+**N6 (SUGGESTION) — round 2's task total was 61, not 62.** My error; corrected above.
 
 ### Are RQ-27 and RQ-28 demonstrated? (Demonstration, not Test)
 
-| Requirement | Scenario | Demonstrated? | Run / job |
-|---|---|---|---|
-| RQ-27 | CI matrix green, 8 combinations | **YES** | run `31960833652`, jobs `test (3.10\|3.11\|3.12\|3.13, with\|without)` — all 8 green, xdist presence/absence confirmed in each log |
-| RQ-27 | 3.9 install refused, not broken at import | **YES** | run `31960833652`, job `python-3-9-install-refused` (95198457591); refusal text names `requires-python` |
-| RQ-28 | Recording succeeds with networking disabled | **YES, with a caveat** | run `31960833652`, job `networking-disabled` (95198457579), 108 passed with all non-loopback egress rejected for the suite's group |
-| RQ-28 | No outbound connection beyond the local server is **attempted** | **NO** | same job — it blocks, it does not observe. See C4. |
-
-RQ-27 is demonstrated without reservation. RQ-28 is half demonstrated.
-
-### Spec Compliance Matrix (deltas from round 1 only)
-
-Unchanged rows are as recorded in round 1 and were re-confirmed by the 108-test run.
-
-| Req | Scenario | Round 1 | Round 2 | Why |
+| Requirement | Scenario | Round 2 | Round 3 | Run / job |
 |---|---|---|---|---|
-| RQ-2 | No server needed, no warning either | PARTIAL (W4) | **COMPLIANT** | `assert_outcomes(passed=1, warnings=0)` — the omitted count was the whole gap |
-| RQ-21 | Every hook is fault-isolated | PARTIAL (W3) | **COMPLIANT** | `test_every_recorder_hook_is_fault_isolated` enumerates `dir(Recorder)` for `pytest_*` and asserts `__wrapped__` on each, with a non-vacuity guard |
-| RQ-27 | CI matrix green | UNDEMONSTRATED | **DEMONSTRATED** | run 31960833652 |
-| RQ-27 | 3.9 refused | UNDEMONSTRATED | **DEMONSTRATED** | job 95198457591 |
-| RQ-28 | Recording with networking disabled | UNDEMONSTRATED | **DEMONSTRATED** | job 95198457579 |
-| RQ-28 | No outbound connection attempted | UNDEMONSTRATED | **UNDEMONSTRATED** | C4 — the job rejects, it does not log |
-| RQ-31 | Completed session, end > start | PARTIAL (W5) | PARTIAL (W5) | unchanged |
-| RQ-38.1 | Two concurrent sessions | PARTIAL (W1) | PARTIAL (W1) | unchanged |
-| RQ-3.1 / RQ-3.3 | 500-result counts | DEFERRED | DEFERRED | unchanged |
+| RQ-27 | CI matrix green, 8 combinations | YES | **YES** | run `31961831576`, 8 `test (…)` jobs green |
+| RQ-27 | 3.9 install refused, not broken at import | YES | **YES** | job `python-3-9-install-refused` (95200846392) |
+| RQ-28 | Recording succeeds with networking disabled | YES | **YES** | job `networking-disabled` (95200846401), 108 passed |
+| RQ-28 | No outbound connection beyond the local server is **attempted** | NO | **YES, scoped** | same job; control 2, counter 0. IPv4/TCP/in-group — see N1, N2 |
 
-**Compliance summary**: **40/45** scenarios (was 35/45). **12/16** requirements complete
-(was 9/16). Remaining: RQ-3 (2 deferred to M2), RQ-31 (W5), RQ-38 (W1), RQ-28 (C4).
+### Spec Compliance Matrix (deltas from round 2 only)
+
+| Req | Scenario | Round 2 | Round 3 | Why |
+|---|---|---|---|---|
+| RQ-28 | No outbound connection attempted | UNDEMONSTRATED | **DEMONSTRATED (scoped)** | counter read back, positive control armed it |
+| RQ-31 | Completed session, end > start | PARTIAL (W5) | PARTIAL (W5) | unchanged; no test file changed since round 2 |
+| RQ-38.1 | Two concurrent sessions | PARTIAL (W1) | PARTIAL (W1) | unchanged |
+| RQ-3.1 / RQ-3.3 | 500-result counts | DEFERRED | DEFERRED | scoped out in the spec's own prose |
+
+All other rows are as recorded in round 2 and were re-confirmed by the 108-test run at this tip.
+
+**Compliance summary**: **41/45** scenarios (was 40). **13/16** requirements complete (was 12).
+Remaining: RQ-3 (2 scenarios deferred to M2 by the spec text), RQ-31 (W5), RQ-38 (W1).
 
 ### Traceability Invariant (CLAUDE.md)
 
-Re-run with literal `grep -r` for all 16 ids; every one reaches its proving artefact.
-Counts range 9 files (RQ-31, RQ-38) to 53 (RQ-2). RQ-28 reaches
-`.github/workflows/ci.yml` L80/L110/L111/L127 — note again that `rg` skips dotted
-directories by default, so `rg RQ-28` from the root misses it while `grep -r` (the
-literal invariant) does not. **Verdict on the invariant: holds.**
+Re-run with literal `grep -r` for the actual sixteen ids in the specs — RQ-1, RQ-2, RQ-3,
+RQ-21, RQ-24, RQ-26, RQ-27, RQ-28, RQ-29, RQ-30, RQ-31, RQ-37, RQ-38, RQ-40, RQ-41, RQ-42.
+Every one reaches its proving artefact; counts range 9 files (RQ-31, RQ-38, RQ-41) to 53
+(RQ-2). RQ-28 reaches `.github/workflows/ci.yml`. Note again that `rg` skips dotted
+directories by default, so `rg RQ-28` from the root misses the workflow while `grep -r` — the
+literal invariant — does not. **Verdict on the invariant: holds.**
 
 ### TDD Compliance
 
 | Check | Result | Details |
 |---|---|---|
-| TDD evidence reported | Yes | RED/GREEN pairs across the chain, re-confirmed |
+| TDD evidence reported | Yes | RED/GREEN pairs across the chain, unchanged since round 2 |
 | All tasks have tests | Yes | except documentation-only phases 7/8 (Standard mode, correct) |
 | RED confirmed | Yes | every named test file exists |
-| GREEN confirmed | Yes | 108/108 pass at the tip, serial and under `-n 4`, and on 3.10-3.13 in CI |
-| Triangulation | Adequate | unchanged from round 1 |
+| GREEN confirmed | Yes | 108/108 at the tip, serial and `-n 4`, and on 3.10-3.13 in CI |
+| Triangulation | Adequate | unchanged |
 | Safety net | Yes | full suite re-run recorded at each slice |
 
-### Assertion Quality — adversarial pass on the four post-round-1 commits
+### Test Layer Distribution
 
-The question asked was whether a fix rushed to make CI green weakened an assertion.
-Every changed line was read. **It did not.** Both test edits move in the strengthening
-direction:
+| Layer | Tests | Notes |
+|---|---|---|
+| Unit | majority | direct calls into `plugin`, `boundary`, `config`, `storage` |
+| Integration | substantial | `pytester` subprocess runs against a real local `VantageTestServer` |
+| E2E / CI demonstration | 12 jobs | run `31961831576` |
+| **Total** | **108** | serial and under `-n 4` |
 
-- `test_opt_in.py`: `assert_outcomes(passed=1)` → `assert_outcomes(passed=1, warnings=0)`.
-  Strictly stronger; the comment states exactly why the omitted argument was the gap.
-- `test_failure_paths.py` +22: a **new** test, not a relaxation. Its non-vacuity guard
-  (`assert hooks, "…the check would pass vacuously"`) is the right guard for an
-  enumerate-and-assert test.
-- `test_failure_paths.py` +7 (`76bf43c`): a comment and `stdin=subprocess.DEVNULL`. No
-  assertion touched. Independently confirmed the surrounding test still asserts exit
-  status preservation and exactly one warning.
+### Assertion Quality
 
-I re-verified W3's premise by introspection rather than trusting the commit message:
-`Recorder` exposes exactly `pytest_report_header` and `pytest_sessionfinish`, both carry
-`__wrapped__`, and `fault_isolated` applies `functools.wraps`. The test is load-bearing.
+No test file changed since round 2 (`git diff --name-only a5f18f1..HEAD` contains no test
+path), so round 2's adversarial pass stands unmodified: **0 CRITICAL, 0 WARNING**. The two
+new commits touch CI and documentation only and weaken no assertion — the CI change adds two
+assertions where there were none.
 
-**Assertion quality: 0 CRITICAL, 0 WARNING** in the new code. (Round 1's two warnings,
-W4 and W5, were one closure and one still-open item; W5 is a scenario-GIVEN mismatch,
-not an assertion defect.)
+### Quality Metrics
 
-### Issues Found
+**Linter**: no errors (`ruff check` clean, `ruff format --check` clean on 49 files).
+**Type checker**: no errors (`mypy` strict, 49 source files).
+**Dependencies**: `deptry` clean over 48 files.
 
-#### CRITICAL
+### Archive adjudication — every open finding
 
-**C3 — the round-1 C1 defect recurred, on the same artefact, about RQ-28.**
+Nothing on this list blocks. Each is either a caveat with a named home, or withdrawn.
 
-`tasks.md` L731-749 (the PR13 landed summary) still reads:
-
-> The job itself (`sudo iptables -A OUTPUT -o lo -j ACCEPT` then `-A OUTPUT -j REJECT`,
-> then the full suite with `--no-sync`) is standard practice on GitHub-hosted Ubuntu
-> runners … but is the one job in this PR that rests on that standard practice rather
-> than on a local reproduction.
-
-Three things in that passage are now false at the tree:
-
-1. **The rule quoted is not the rule in the tree.** `ci.yml` L114 is
-   `sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT`. The
-   two-rule ACCEPT/REJECT form was deleted by `76bf43c`.
-2. **"standard practice" was disproven, not confirmed.** That exact rule hung run
-   `31958927951` for 26 minutes until it was cancelled by hand. The record still
-   presents it as the safe conventional choice.
-3. **"rests on standard practice rather than a local reproduction"** — it now rests on
-   four real CI executions, three red and one green.
-
-Additionally, **none of the four commits `e9dff96`, `76bf43c`, `0f74cef`, `a5f18f1` is
-recorded in any SDD artifact** — no task, no landed summary, no "Flagged, Not Actioned"
-entry. `76bf43c` modified a test file, so this is not documentation-only drift. This is
-structurally the same failure C1 named: work lands after the record is written, and the
-record silently becomes false. The irony is on the page — the section closing C1 ends
-"Recorded here because the verification pass found this commit contradicting this very
-section", and the very next commit re-opened the gap.
-
-Severity matches round 1's C1 by the same standard: RQ-28 is a **Must** verified by
-**Demonstration**, and this is the record of that demonstration. Archiving freezes a
-record that misquotes the demonstrating artefact and denies that it ever ran.
-Documentation-only, minutes to fix.
-
-**C4 — the `networking-disabled` job passes for a weaker reason than RQ-28's second
-scenario asks for. It cannot detect what that scenario is about.**
-
-The scenario is: *GIVEN the system running with **outbound connections logged**, WHEN a
-suite is recorded, THEN no connection to any address other than the configured local
-server is **attempted**.*
-
-The job neither logs nor observes. It installs a REJECT rule and reads nothing back.
-Four independent reasons the green result does not establish the scenario:
-
-1. **Rejection is not observation.** The scenario constrains *attempts*. `-j REJECT`
-   with no `-j LOG` companion, and no post-run read of the rule's byte/packet counters,
-   produces no record of whether anything was attempted.
-2. **The suite is structurally incapable of failing when an attempt is rejected.**
-   `plugin.py:94-98` — `_preflight_reachable` wraps `socket.create_connection` in a bare
-   `except OSError: return False`. A REJECTed connect raises `OSError`; so does
-   NXDOMAIN; so does a closed port. All three are the same code path, and all three
-   leave the suite green. `fault_isolated` (RQ-21) does the same for the send path by
-   design. `tasks.md` L740-744 already says this out loud about the
-   `this-host-does-not-exist.invalid` test. A stray outbound attempt would therefore be
-   swallowed, warned about once, and pass.
-3. **No positive control.** Nothing proves the rule was ever armed or ever matched a
-   packet. A green job is equally consistent with "rule correct, nothing attempted" and
-   "rule silently not matching" — for instance if `sudo -g` stopped setting the egid the
-   owner match keys on. The job's three prior failures were all sudo/PATH plumbing; the
-   rule's *matching behaviour* has never been shown to do anything.
-4. **The rule's reach is narrower than the scenario's claim.** `-m owner --gid-owner`
-   matches only sockets owned by the `nonet` group. Egress performed on the suite's
-   behalf by another process — the system stub resolver being the obvious one — is
-   outside the group and outside the rule.
-
-None of this makes scenario 1 wrong: the suite really did record over loopback with all
-non-loopback egress rejected for its own group, and the loopback exemption is faithful
-to RQ-28's "beyond the configured local server". Scenario 1 stands. Scenario 2 does not.
-
-**Closure is small and closes the W-level gap at the same time**: after the suite, run
-`sudo iptables -L OUTPUT -v -n -x` and assert the REJECT rule's packet counter is **0**.
-That converts "blocked" into "logged and observed", which is literally the scenario's
-GIVEN. Pair it with a positive control — `sudo -g nonet curl -m 5 https://example.com`
-must fail **and** must increment that counter — so the zero is meaningful rather than
-vacuous.
-
-#### WARNING
-
-Round-1 warnings, re-adjudicated:
-
-| # | Round 1 | Round 2 | Basis |
+| # | Finding | Verdict | Where it must be written |
 |---|---|---|---|
-| W1 | RQ-38 tested a layer below the spec | **OPEN, unchanged** | `test_concurrency.py:30-39` still drives `store.record_execution` directly; no server, no HTTP |
-| W2 | RQ-3's deferral in design.md but not the spec | **OPEN, unchanged** | `run-recording/spec.md` L88-89 carries RQ-38's deferral explicitly; RQ-3 at L57 still carries none |
-| W3 | No test that *every* hook is fault-isolated | **CLOSED** | new enumerating test, premise independently re-verified |
-| W4 | RQ-2's "no warning" half unasserted | **CLOSED** | `warnings=0` |
-| W5 | RQ-31.1's "at least two seconds" GIVEN unmet | **OPEN, unchanged** | spec L48 still says two seconds; fixture suite is still one trivial test |
-| W6 | `networking-disabled` will fail for a runner reason | **CLOSED — and it was correct** | it did fail, exactly as predicted, hanging run `31958927951` for 26 minutes. The group-owner rewrite is a better fix than the `ESTABLISHED` exemption round 1 suggested, because the runner agent reconnects and a reconnect is a NEW connection |
-
-New at this round:
-
-- **W7 — the `networking-disabled` job grants blanket passwordless sudo.**
-  `ci.yml` L118-119 writes `<user> ALL=(ALL:ALL) NOPASSWD:ALL` to
-  `/etc/sudoers.d/99-vantage-nonet`. Only `NOPASSWD: /usr/bin/sudo -g nonet …` is
-  needed. On an ephemeral runner that already has passwordless root this is not a
-  privilege escalation and not a blocker, but it is wider than the comment above it
-  claims ("running as another GROUP") and would be wrong to copy into a persistent
-  runner.
-- **W8 — the W3 test asserts "wrapped by something", not "wrapped by `fault_isolated`".**
-  `hasattr(getattr(Recorder, name), "__wrapped__")` is satisfied by any
-  `functools.wraps`-based decorator. Today that is only `fault_isolated`, and the
-  mutation proof holds. A future hook decorated with an unrelated `@wraps` decorator
-  would pass this test while breaking RQ-21. Tightening it to compare
-  `getattr(Recorder, name).__module__` or to assert the latch behaviour would close it.
-
-#### SUGGESTION
-
-All six round-1 suggestions were re-checked against the tip. **All six remain open**;
-none was actioned and none needed to be.
-
-- **S1** — `isoformat_utc` (`recorder.py:44`) still `strftime`s a literal `+00:00` and
-  calls no `astimezone`; a naive datetime would be labelled UTC silently. Confirmed: no
-  `astimezone` anywhere in the module.
-- **S2** — a collection error still exits 2 and is therefore recorded
-  `interrupted: true`, indistinguishable from Ctrl-C. `_INTERRUPTED_EXIT_STATUS = 2`,
-  `recorder.py:87`.
-- **S3** — `proposal.md` still has **15** unchecked success criteria, and L255 still
-  reads `grep -r "RQ-01"`, which matches nothing (ids are `RQ-1`).
-- **S4** — `openspec/config.yaml:45` and `CLAUDE.md:71` still say the tree "is being
-  reset" and to distrust `src/`. The reset completed; `src/` is gone.
-- **S5** — `test_failed_collection_still_writes_one_row` (`test_run_report.py:143-151`)
-  still asserts only `len(vantage_server.executions()) == 1`, never that collection
-  actually failed. One `assert result.ret == 2` pins it.
-- **S6** — `design.md`'s Open Questions are all still unchecked and two are still stale.
-
-Newly noted:
-
-- **S7** — every CI job now carries `timeout-minutes: 15`. That is the right lesson from
-  the 26-minute hang and worth keeping; noted so it is not removed as noise later.
-
-### Known open items — still genuinely recorded
-
-The four items round 1 confirmed are all still recorded. One changed status: the
-`networking-disabled` job is no longer unexecuted, which is precisely why the record
-describing it is now wrong (C3). The other three — the `finished_at` constant-offset
-weakness, XDG being a Linux convention, and SIGKILL leaving no row — are unchanged and
-still carry their recorded judgements.
+| W1 | RQ-38 verified at the store layer, not through HTTP | **caveat** | `specs/run-recording/spec.md`, under the RQ-38 requirement |
+| W2 | RQ-3's deferral less explicit than RQ-38's | **caveat** | `specs/run-recording/spec.md`, RQ-3's closing parenthetical |
+| W5 | RQ-31.1's "at least two seconds" GIVEN unmet | **caveat** | `specs/run-recording/spec.md` at that scenario, or `tasks.md` known-open items |
+| W7 | blanket `NOPASSWD:ALL` in the networking job | **caveat** | comment on that line in `.github/workflows/ci.yml` |
+| W8 | `__wrapped__` proves "wrapped by something" | **caveat** | docstring of `test_every_recorder_hook_is_fault_isolated` (`test_failure_paths.py:562`) |
+| N1 | final assertion fail-open (no `pipefail`) | **caveat** | `.github/workflows/ci.yml` at the assert step |
+| N2 | no `ip6tables`; measurement is IPv4-only | **caveat** | same comment block |
+| N4 | RQ-28.2 demonstration evidence uncited | **caveat — discharged here** | this report; optionally `tasks.md`'s RQ-28 section |
+| S1 | `isoformat_utc` labels naive datetimes UTC | **caveat** | its docstring, `recorder.py:35` |
+| S2 | collection error exits 2, recorded `interrupted` | **caveat** | `tasks.md` known-open items |
+| S3 | `proposal.md` L255 `grep -r "RQ-01"` matches nothing; 15 criteria unchecked | **caveat** | `proposal.md` — the id typo is a trivial fix, the boxes tick at archive |
+| S4 | `CLAUDE.md:71` / `openspec/config.yaml:45` still say the tree "is being reset" | **caveat** | those two files; actively misleading to the next agent, worth fixing at archive |
+| S5 | collection-failure test never asserts collection failed | **caveat** | `test_run_report.py:143`; one `assert result.ret == 2` closes it |
+| S6 | `design.md` Open Questions unchecked, two stale | **caveat** | `design.md` |
+| N3 | "run four times" is now six | **caveat** | `tasks.md` L746 |
+| N5 | positive control validates one destination | **caveat** | optional `iptables -L OUTPUT` dump for the record |
+| N6 | round 2's task total off by one | **caveat — discharged here** | this report |
+| S7 | `timeout-minutes: 15` on every job | **not a finding — withdrawn** | it is a good property, recorded as a note, not an issue |
 
 ### Scope Discipline
 
 | Question | Answer |
 |---|---|
-| Anything land that no task asked for? | **Yes — all four post-round-1 commits.** They are legitimate verification-driven fixes, but none is recorded in any SDD artifact (C3). |
-| Any spec scenario unimplemented while its task is marked done? | No. Task 7.2 delivered the workflow. The residual gap (C4) is between "the job runs" and "the job measures the scenario". |
+| Anything land that no task asked for? | Yes — both new commits, and **both are now recorded** in `tasks.md`'s commit table. |
+| Any spec scenario unimplemented while its task is marked done? | No. |
 | Unchecked tasks? | Zero. |
-| Production source changed since round 1? | **No.** CI, two tests and documents only. |
+| Production source changed since round 2? | **No.** CI and documents only. |
+
+### Issues Found
+
+**CRITICAL**: None.
+**WARNING**: W1, W2, W5, W7, W8, N1, N2, N4 — all adjudicated as caveats above.
+**SUGGESTION**: S1-S6, N3, N5, N6. S7 withdrawn.
 
 ### Verdict
 
-**FAIL — not archive-ready. Two CRITICAL, both apply-fixable.**
+**No blockers. Zero CRITICAL. The change is archive-ready once the caveats above are
+written down.**
 
-This remains a `fail` on the admission contract's terms — a passing verdict may not
-carry critical findings — and not a judgement that the implementation is weak. The
-implementation got materially stronger this round: 108 tests green serially, under
-`-n 4`, and on four Python versions × two xdist configurations on real GitHub runners;
-40 of 45 scenarios with genuine evidence, up from 35; 12 of 16 requirements complete,
-up from 9; the traceability invariant still holding for all 16. Round 1's warnings were
-closed with strengthened assertions, not weakened ones, and W6 turned out to be a real
-defect that cost a 26-minute hang exactly as predicted.
+**Read the envelope carefully: `verdict: fail` with `blockers: 0` and
+`critical_findings: 0` is not a third blocker.** I first submitted this report as
+`verdict: pass` and `gentle-ai sdd-verify-validate` denied admission with *"passing verdict
+contradicts failing or incomplete evidence"*. The admission contract forbids a passing
+verdict whenever `scenarios` or `requirements` are short of their totals, regardless of why
+they are short. Four of forty-five scenarios are short here, and all four are short **by
+design**: two RQ-3 scenarios count 500 results in a milestone whose own spec text says it
+writes none, and RQ-31.1 and RQ-38.1 are PARTIAL against recorded, accepted caveats (W5, W1).
+The honest reading of this envelope is *"complete and correct for its declared scope, with
+scope deliberately short of the full spec"* — which is exactly what a Milestone 1 of five
+should look like. Round 2's `fail` meant two blockers; this one means four deferred
+scenarios.
 
-What blocks archive:
+Both round-2 blockers are closed on evidence I re-verified myself at the exact tip, not on
+the report. C3's fix is better than deletion would have been, and its mechanical check passes
+including for the two commits that landed after the table was written. C4's fix put the
+assertion in the one place the suite cannot influence and armed it with a fail-closed control.
 
-1. **C3** — correct `tasks.md`'s PR13 summary so it quotes the rule that is actually in
-   the tree and states that the job has now run green, and add a landed-summary entry
-   for the four commits `e9dff96`, `76bf43c`, `0f74cef`, `a5f18f1`. Documentation-only.
-2. **C4** — either add the counter read plus positive control to `networking-disabled`
-   and re-run CI, which would move RQ-28 to fully demonstrated; **or** record RQ-28
-   scenario 2 as an explicit, named, accepted caveat in the spec and in `tasks.md`, the
-   way RQ-38's criteria 2 and 3 already are. Either is legitimate. Silently treating a
-   green block as a demonstration of "no attempt" is not.
+RQ-28 scenario 2 is demonstrated, scoped to IPv4 TCP by processes in the suite's group — and
+that scope covers every connection this system is capable of making, because the only outbound
+code paths in the tree are two in-process stdlib calls.
 
-W1, W2, W5, W7, W8 and S1-S7 are carryable as recorded caveats and do not block.
+Round 1 and round 2 each found a real blocker. **Round 3 does not.** The eight WARNINGs and
+nine SUGGESTIONs are caveats with named homes, not defects that make the change dishonest to
+close.

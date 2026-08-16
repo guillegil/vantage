@@ -42,10 +42,10 @@ context: |
   pip-audit. Every verifying test carries @pytest.mark.req("RQ-xx"); --strict-markers is on,
   so the marker must be declared in the workspace root config.
 
-  State: the tree is being reset. src/vantage and tests/ were written for a different product
-  (live run supervision, Phase 3) and are deleted rather than migrated. README.md,
-  pyproject.toml and docs/architecture.md still describe that older plan until slice A
-  rewrites them. Do not treat anything under src/ as a pattern to follow.
+  State: the reset is done. src/vantage and the old tests/ tree no longer exist; the tree is
+  packages/pytest-vantage and packages/vantage under one uv workspace, and pyproject.toml and
+  docs/architecture.md were rewritten for it. Anything describing a src/ layout, four
+  distributions, or a plugin that opens a database predates ADR-4 and ADR-9.
 
   Naming: no domain class name may start with Test — pytest collects it. The aggregate is
   Execution, its identity is Identity.
