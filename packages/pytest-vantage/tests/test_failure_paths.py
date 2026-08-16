@@ -417,6 +417,13 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        # `stdin` explicitly, because `pytester.popen` otherwise opens a pipe
+        # and closes it -- and on Python 3.10 `communicate()` still calls
+        # `self.stdin.flush()` on that closed file, raising
+        # `ValueError: flush of closed file`. Later versions guard it. Found
+        # by the RQ-27 matrix on its first real CI run: this passed on 3.13
+        # locally and failed on 3.10 only. `DEVNULL` leaves nothing to flush.
+        stdin=subprocess.DEVNULL,
     )
     # Give the child time to pass configure (preflight included) and enter
     # the test before pulling the server out from under it.
