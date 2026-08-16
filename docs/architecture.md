@@ -69,6 +69,45 @@ Not all version skew is equal. Across shared *imports* it is fatal and often
 silent; across a versioned HTTP boundary it is expected. Treating them as one
 risk is what produced two earlier packaging answers that had to be replaced.
 
+## The ingestion contract
+
+`POST /api/v1/runs` is the one endpoint Milestone 1 defines. The full
+contract — every status code, the rejection body shape and the `<unnamed>`
+field-echoing rule — is published as `docs/api/v1-ingestion.md`; this section
+is a map to it, not a second copy.
+
+The request is one envelope with one named `run` section:
+
+```json
+{"run": {"id": "<32 lowercase hex>", "started_at": "…", "finished_at": "…",
+         "exit_status": 0, "interrupted": false, "interrupt_reason": null}}
+```
+
+Milestone 2 adds `results`, Milestone 3 adds `environment`/`vcs` — always as
+sibling sections beside `run`, never as new top-level scalars.
+
+**`extra=` is asymmetric between the envelope and `run`, deliberately.**
+`SessionReport` (the envelope) is `extra="ignore"`: an unrecognised *section*
+means a newer `pytest-vantage` talking to an older `vantage` — the everyday
+version-skew case from the section above. `RunReport` (the `run` section) is
+`extra="forbid"`: an unrecognised or missing *field inside `run`* means the
+client and server disagree about what a run *is* — a bug, rejected loudly
+rather than silently swallowed. Fixing either direction into symmetry with
+the other would break the version-skew case it exists to handle.
+
+**A consequence worth stating plainly: `RunReport` declares exactly six
+fields, all required with no default, and extras are forbidden — so the
+`run` object cannot gain a seventh field without forcing `/api/v2`.** Every
+plugin already validated against six fields would start failing against a
+server that silently added one under `/api/v1`; the schema makes that cost
+visible at validation time, not discovered later against a production
+server.
+
+Idempotency is by primary key, not a header: `run.id` is a client-generated
+`uuid4`, the write is `INSERT … ON CONFLICT(id) DO NOTHING`, and the boolean
+it returns is the whole `201`-vs-`200` decision — no `SELECT` precedes it, so
+a replay racing the original write cannot check-then-act.
+
 ## Two independent decisions
 
 **Activation is a command-line flag, never a file or an environment
@@ -89,6 +128,40 @@ A third case exists only because the boundary is now a network: a server that
 accepts the connection and never answers. A bounded timeout is part of the
 obligation, not an implementation detail — a hang is worse than a failure,
 because the user cannot tell whether the suite is slow or stuck.
+
+## Server configuration
+
+`vantage serve` resolves its database path and bind address the same way on
+every start: a flag beats an environment variable beats a fixed default.
+Resolution is a pure function —
+`packages/vantage/src/vantage/core/config/resolution.py` — that touches no
+filesystem at all, not even an `exists()` check on its own default branch;
+`packages/vantage/src/vantage/service/cli.py` is the one place that acts on
+the resolved path, failing fast at startup if an existing parent directory
+is not writable, rather than losing a report later at the first write.
+
+| Precedence | Database | Host / port |
+| --- | --- | --- |
+| 1 | `--database PATH` | `--host` / `--port` |
+| 2 | `VANTAGE_DATABASE` | *(no environment variable)* |
+| 3 | `$XDG_DATA_HOME/vantage/vantage.db`, default `~/.local/share/vantage/vantage.db` | `127.0.0.1:8765` |
+
+**Environment configuration is allowed for the server although RQ-2 forbids
+it for the plugin — the threat differs, not the mechanism.** RQ-2 stops a
+value committed by one person from silently enabling recording in someone
+else's checkout; the server is started deliberately by whoever runs it, and
+an environment variable is the ordinary way a container is configured.
+
+**The default bind is loopback, and widening it is a deliberate `--host`.**
+Authentication in front of this endpoint is Phase 4 work; a wider bind gets
+a startup warning naming exactly what is missing, so the warning trains
+people to notice the one case that matters instead of firing on every normal
+start.
+
+Full rationale — the XDG default over `$XDG_STATE_HOME` and `~/.cache`, and
+why the reversal cost is what earns this a numbered ADR rather than a design
+note — is
+`docs/adr/0010-store-the-server-database-in-the-user-data-directory.md`.
 
 ## Schema
 
