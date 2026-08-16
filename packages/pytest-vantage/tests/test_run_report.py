@@ -1,6 +1,6 @@
 """RQ-1 (a run entry per invocation) and RQ-31 (its timestamps), proven
 end-to-end (design.md D2a): a real `vantage` server (the `vantage_server`
-fixture in `conftest.py`) and a real subprocess pytest invocation
+fixture in `vantage_test_server.py`) and a real subprocess pytest invocation
 (`pytester.runpytest_subprocess`), never a mock of either side of the HTTP
 boundary.
 
