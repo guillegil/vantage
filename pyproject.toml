@@ -26,6 +26,11 @@ dev = [
     # of `packages/vantage/pyproject.toml`, and this workspace root already
     # depends on `vantage`, so a second declaration here would only be able
     # to drift from the one that matters.
+    # RQ-27 requires the suite to pass with pytest-xdist installed; task 6.5
+    # needs a real `-n 4` subprocess run, not just the unit-level worker-input
+    # guard (5.3/5.4). Dev-only: neither `pytest-vantage` nor `vantage`
+    # depends on it (RQ-24, RQ-27's "without xdist" half of the CI matrix).
+    "pytest-xdist>=3.5",
 ]
 
 # This root pyproject.toml is the uv workspace root, not a published
