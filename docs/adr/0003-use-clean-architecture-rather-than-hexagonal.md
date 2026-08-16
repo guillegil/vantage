@@ -33,14 +33,21 @@ contract.
 Use Clean Architecture. Ports are `typing.Protocol`, not abstract base
 classes: a `SqliteExecutionStore` or `InMemoryExecutionStore` satisfies
 `ExecutionStore` by having the right shape, with no import of the core
-package required to do it. That is what makes `vantage-storage` a
+package required to do it. That is what makes `vantage.storage` a
 dependency of nothing on the core's side while still being swappable
 (RQ-30).
 
-Concretely: `vantage-core` defines the domain model and the storage port;
-`vantage-storage` and (later) other adapters satisfy that port structurally;
-`vantage-pytest` and `vantage-service` are the outermost layer, each
+Concretely: `vantage.core` defines the domain model and the storage port;
+`vantage.storage` and (later) other adapters satisfy that port structurally;
+`pytest-vantage` and `vantage.service` are the outermost layer, each
 depending inward and never the reverse.
+
+The layer names above are subpackage boundaries, not distribution
+boundaries. This ADR was written when the plan was four distributions;
+ADR-4 settled on two (`pytest-vantage`, and `vantage` carrying `core`,
+`storage` and `service` as subpackages). Nothing in the decision changes
+— the dependency arrow is the same one — but the names are corrected here
+so this file and ADR-4 do not describe different trees.
 
 ## Consequences
 
@@ -56,7 +63,7 @@ depending inward and never the reverse.
   a future adapter from silently implementing only part of the `Protocol`
   and failing at runtime on the unimplemented method, rather than at
   import time.
-- Reversal cost is non-trivial once `vantage-storage` and `vantage-pytest`
+- Reversal cost is non-trivial once `vantage.storage` and `pytest-vantage`
   exist against this boundary: switching to Hexagonal later means
   reintroducing an abstract base class and updating every adapter to
   inherit from it, not just a rename.

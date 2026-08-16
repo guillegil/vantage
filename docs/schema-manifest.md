@@ -351,20 +351,33 @@ created by an earlier release, opened through `connection.py`'s
 `open_database` — is `test_connection.py`'s job in PR4, which this PR
 does not include; `connection.py` does not exist yet.
 
-## Known inconsistency — not corrected in this PR
+## Resolved inconsistency — how the index count was once wrong
 
-`docs/adr/0005-complete-schema-at-first-use-no-migrations-in-phase-1.md`
-says **"all ten tables and twelve indexes"** and references
-`vantage-storage/src/vantage_storage/schema.sql` — both from before the
-two-distribution restructure (ADR-4) and before this manifest's index
-count grew to thirteen. `docs/adr/0006-use-stdlib-sqlite3-and-no-orm.md`
-references the same pre-restructure path
-(`vantage_storage/connection.py`). Both ADRs are still `Status: Proposed`.
+ADR-5 and ADR-6 disagreed with this manifest until task 8.2 corrected
+them. ADR-5 said **"all ten tables and twelve indexes"** and both ADRs
+named pre-restructure paths (`vantage-storage/src/vantage_storage/…`).
+They now agree with this file, so RQ-29's inspection has one source
+again.
 
-Until PR14 (task 8.2) corrects them, **RQ-29's inspection has two
-disagreeing sources: this manifest (thirteen indexes, current paths) and
-ADR-5/ADR-6's prose (twelve indexes, pre-restructure paths).** This
-manifest and `schema.sql` are the ones an inspector should trust in that
-window — the tasks.md `Flagged, Not Actioned` note says the same. This is
-exactly the two-disagreeing-sources defect PR14 exists to close; fixing
-the ADRs here would be out of this PR's scope (task 2.1 only).
+The index count is worth keeping on record, because the miscount was not
+carelessness and the same trap is still there. `schema.sql` contains
+twelve `CREATE INDEX` statements — but thirteen named indexes, because
+`idx_test_case_node_id` is a `CREATE UNIQUE INDEX`, which does not
+contain the substring `CREATE INDEX`. Counting by grep undercounts by
+exactly the number of unique indexes.
+
+Count against a database, never against the file:
+
+```python
+con = sqlite3.connect(":memory:")
+con.executescript(schema_sql)
+con.execute(
+    "SELECT count(*) FROM sqlite_master "
+    "WHERE type='index' AND name NOT LIKE 'sqlite_autoindex_%'"
+)  # -> 13
+```
+
+Exclude the six `sqlite_autoindex_*` entries SQLite creates for `UNIQUE`
+constraints declared inline, and the `sqlite_sequence` table any
+`AUTOINCREMENT` column brings with it — neither is part of this schema's
+documented shape.
