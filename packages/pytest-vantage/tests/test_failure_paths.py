@@ -125,6 +125,38 @@ def _accept_and_hang(conn: socket.socket) -> None:
     time.sleep(30)
 
 
+def _respond_with_unbounded_body(conn: socket.socket) -> None:
+    """Never stops writing on its own, never sends a `Content-Length` and
+    never closes -- an unbounded ``response.read()`` on the client side
+    would have nothing to stop it but the server closing, which this
+    handler deliberately never does. Only the client's own
+    `MAX_RESPONSE_BYTES` cap can end this exchange from its side; the
+    handler exits only once that makes the client stop reading and the
+    connection breaks underneath it.
+    """
+    conn.recv(65536)
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n")
+    chunk = b"x" * 65536
+    while True:
+        conn.sendall(chunk)
+
+
+def _respond_with_non_json_body(conn: socket.socket) -> None:
+    conn.recv(65536)
+    body = b"not-json"
+    conn.sendall(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: "
+        + str(len(body)).encode()
+        + b"\r\n\r\n"
+        + body
+    )
+
+
+def _respond_with_bare_500(conn: socket.socket) -> None:
+    conn.recv(65536)
+    conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+
+
 # --- Unit: the preflight probe itself (task 6.8) ----------------------------
 
 
@@ -437,4 +469,46 @@ def test_server_accepts_and_never_answers_finishes_within_timeout_plus_five_seco
     result.assert_outcomes(passed=1)
     assert result.ret == 0
     assert elapsed < 1.0 + 5.0
+    assert _combined_output(result).count("VantageWarning:") == 1
+
+
+# --- Threat matrix "Untrusted response" (task 6.11/6.12) --------------------
+#
+# No numbered requirement drives this row directly -- the same convention
+# `test_address_validation.py` already uses for a threat-matrix test with no
+# requirement of its own.
+
+
+def test_oversized_response_is_bounded_and_does_not_hang(pytester: pytest.Pytester) -> None:
+    with _StubServer(_respond_with_unbounded_body) as server:
+        pytester.makepyfile(test_sample=_PASSING_TEST)
+        result = pytester.runpytest_subprocess(
+            "--vantage", f"--vantage-server={server.address}", timeout=15
+        )
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    # The truncated 64 KiB chunk of the unbounded body is not valid JSON
+    # either, so this doubles as the "malformed acknowledgement is a
+    # warning, never an exception" proof.
+    assert _combined_output(result).count("VantageWarning:") == 1
+
+
+def test_non_json_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -> None:
+    with _StubServer(_respond_with_non_json_body) as server:
+        pytester.makepyfile(test_sample=_PASSING_TEST)
+        result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    assert _combined_output(result).count("VantageWarning:") == 1
+
+
+def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -> None:
+    with _StubServer(_respond_with_bare_500) as server:
+        pytester.makepyfile(test_sample=_PASSING_TEST)
+        result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
     assert _combined_output(result).count("VantageWarning:") == 1
