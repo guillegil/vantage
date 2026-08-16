@@ -36,7 +36,11 @@ def send(address: str, report: dict[str, object], *, timeout: float) -> None:
     """
     url = address.rstrip("/") + _INGESTION_PATH
     body = json.dumps(report).encode("utf-8")
-    http_request = urllib_request.Request(
+    # Both `Request(...)` and `urlopen(...)` below are flagged by S310
+    # ("audit URL open for permitted schemes"). The scheme has already been
+    # validated by `config.resolve_and_validate_address` -- only http/https
+    # ever reach here -- so both are false positives at this call site.
+    http_request = urllib_request.Request(  # noqa: S310
         url,
         data=body,
         headers={"Content-Type": "application/json"},

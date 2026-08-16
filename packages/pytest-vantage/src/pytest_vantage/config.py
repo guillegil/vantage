@@ -46,9 +46,7 @@ def resolve_and_validate_address(address: str) -> str:
     return address
 
 
-def resolve_server_address(
-    *, cli_url: str | None, env_url: str | None, ini_url: str | None
-) -> str:
+def resolve_server_address(*, cli_url: str | None, env_url: str | None, ini_url: str | None) -> str:
     """Where to report to: `--vantage-server` > `VANTAGE_SERVER` > the
     `vantage_server` ini value > the default (`http://127.0.0.1:8765`).
 
