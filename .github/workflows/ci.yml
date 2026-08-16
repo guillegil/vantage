@@ -6,7 +6,68 @@ name: CI
   pull_request:
 
 jobs:
+  # RQ-27: the suite passes on Python 3.10-3.13, both with and without
+  # pytest-xdist installed -- eight combinations.
   test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        xdist: [with, without]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install project (locked, dev extra)
+        run: uv sync --locked --extra dev --python ${{ matrix.python-version }}
+
+      # `uv run --extra dev` re-syncs and would reinstall pytest-xdist, so
+      # the "without" leg drops it after sync and runs with --no-sync.
+      - name: Uninstall pytest-xdist for the "without" leg  # RQ-27
+        if: matrix.xdist == 'without'
+        run: uv pip uninstall pytest-xdist
+
+      - name: Run pytest  # RQ-27
+        run: uv run --no-sync pytest
+
+  # RQ-27: the version floor refuses installation outright rather than
+  # failing at import time on an unsupported interpreter.
+  python-3-9-install-refused:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up build Python
+        run: uv python install 3.12
+
+      - name: Build the plugin wheel
+        run: uv build --wheel --package pytest-vantage -o dist --python 3.12
+
+      - name: Set up Python 3.9
+        run: uv python install 3.9
+
+      - name: Assert install is refused, not broken at import  # RQ-27
+        run: |
+          uv venv /tmp/py39-refused-check --python 3.9
+          if uv pip install --python /tmp/py39-refused-check/bin/python dist/pytest_vantage-*.whl; then
+            echo "expected the Python 3.9 install to be refused by requires-python, but it succeeded" >&2
+            exit 1
+          fi
+
+  # RQ-28: every operation completes with only the configured local server
+  # reachable. Outbound networking is blocked at the OUTPUT chain except
+  # loopback, and the whole suite (real subprocess/socket tests included)
+  # is run against that restriction.
+  networking-disabled:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,14 +81,83 @@ jobs:
       - name: Install project (locked, dev extra)
         run: uv sync --locked --extra dev --python 3.12
 
-      - name: Run pytest
-        run: uv run --extra dev pytest
+      - name: Block outbound networking except loopback  # RQ-28
+        run: |
+          sudo iptables -A OUTPUT -o lo -j ACCEPT
+          sudo iptables -A OUTPUT -j REJECT
 
-      - name: Run ruff
+      - name: Run the suite with outbound networking blocked  # RQ-28
+        run: uv run --no-sync pytest
+
+  # RQ-24: installing pytest-vantage into an environment that already has
+  # pytest adds exactly one distribution -- no third-party dependency rides
+  # along.
+  clean-environment-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up build Python
+        run: uv python install 3.12
+
+      - name: Build the plugin wheel
+        run: uv build --wheel --package pytest-vantage -o dist --python 3.12
+
+      - name: Assert exactly one distribution is added  # RQ-24
+        run: |
+          uv venv /tmp/clean-install-check --python 3.12
+          uv pip install --python /tmp/clean-install-check/bin/python pytest
+          uv pip list --python /tmp/clean-install-check/bin/python --format=freeze | sort > before.txt
+
+          uv pip install --python /tmp/clean-install-check/bin/python dist/pytest_vantage-*.whl
+          uv pip list --python /tmp/clean-install-check/bin/python --format=freeze | sort > after.txt
+
+          added="$(comm -13 before.txt after.txt)"
+          removed="$(comm -23 before.txt after.txt)"
+          echo "Added:"
+          echo "$added"
+          echo "Removed:"
+          echo "$removed"
+
+          added_count="$(printf '%s\n' "$added" | grep -c . || true)"
+          removed_count="$(printf '%s\n' "$removed" | grep -c . || true)"
+          if [ "$added_count" -ne 1 ] || [ "$removed_count" -ne 0 ]; then
+            echo "expected exactly one distribution added and none removed/changed" >&2
+            exit 1
+          fi
+
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install project (locked, dev extra)
+        run: uv sync --locked --extra dev --python 3.12
+
+      - name: Run ruff format --check
+        run: uv run --extra dev ruff format --check .
+
+      - name: Run ruff check
         run: uv run --extra dev ruff check .
 
-      - name: Run mypy
-        run: uv run --extra dev mypy src
+      - name: Run mypy --strict
+        run: uv run --extra dev mypy .
 
-      - name: Build wheel (packaging guard)
-        run: uv build --wheel
+      # deptry is scoped by name (pyproject.toml's [tool.deptry.per_rule_ignores]),
+      # not silenced wholesale -- see that file's comment for what each
+      # ignored name is and why it is a known false positive rather than a
+      # real problem.
+      - name: Run deptry
+        run: uv run --extra dev deptry .
+
+      - name: Build both distributions (packaging guard)
+        run: uv build --wheel --all-packages -o dist

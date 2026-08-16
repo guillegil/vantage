@@ -83,3 +83,21 @@ mypy_path = [
 # the standard library (RQ-24). vantage.core must import only the standard
 # library (RQ-26); both are also checked by the AST architecture test.
 ignore_notebooks = true
+
+# deptry reads exactly one pyproject.toml (this one) and has no notion of a
+# uv workspace, so it cannot see that fastapi/pydantic/starlette/uvicorn are
+# declared in packages/vantage/pyproject.toml, or that importwalk,
+# vantage_port_contract and vantage_test_server are real local test-support
+# modules reached through the root `pythonpath` rather than missing
+# packages. Per-module, per-rule ignores name exactly those known cases so a
+# genuinely new undeclared import is still caught (verified: an ad hoc
+# `import requests` probe was flagged even with this config in place).
+# DEP002 additionally covers CLI-only dev tools (ruff, mypy, deptry,
+# pip-audit) that are invoked via `uv run <tool>` and never imported as
+# Python modules, plus pytest-xdist and httpx2, which are exercised through
+# pytest's own plugin discovery and starlette's TestClient rather than a
+# direct `import` in this project's code.
+[tool.deptry.per_rule_ignores]
+DEP001 = ["importwalk", "vantage_port_contract", "vantage_test_server"]
+DEP002 = ["ruff", "mypy", "deptry", "pip-audit", "httpx2", "pytest-xdist"]
+DEP003 = ["fastapi", "pydantic", "starlette", "uvicorn"]

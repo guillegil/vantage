@@ -1,0 +1,57 @@
+# Pre-commit gate (CLAUDE.md's "Quality gates" table).
+#
+# Two stages, matched to the time budget each check fits:
+#   - `pre-commit`  (< 2-3s): ruff format, ruff check --fix, and hygiene
+#     hooks. All of these run on modified files only, which is why they are
+#     fast enough for this stage -- a whole-project pass belongs at
+#     pre-push or CI, never here.
+#   - `pre-push`: `mypy --strict` over the whole project (a type checker
+#     needs the whole project to be correct, not just the files that
+#     changed -- CLAUDE.md's own reasoning for why mypy is not at
+#     pre-commit) plus the fast unit-test suite (~10s locally, one Python
+#     version, no matrix -- the matrix itself belongs to CI, not a local
+#     git hook).
+default_install_hook_types: [pre-commit, pre-push]
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.9
+    hooks:
+      - id: ruff
+        args: [--fix]
+        stages: [pre-commit]
+      - id: ruff-format
+        stages: [pre-commit]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        stages: [pre-commit]
+      - id: end-of-file-fixer
+        stages: [pre-commit]
+      - id: check-yaml
+        stages: [pre-commit]
+      - id: check-toml
+        stages: [pre-commit]
+      - id: check-added-large-files
+        stages: [pre-commit]
+      - id: check-merge-conflict
+        stages: [pre-commit]
+      - id: mixed-line-ending
+        stages: [pre-commit]
+
+  - repo: local
+    hooks:
+      - id: mypy-strict
+        name: mypy --strict (whole project)
+        entry: uv run --extra dev mypy .
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: pytest-fast
+        name: pytest (fast unit suite)
+        entry: uv run --extra dev pytest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

@@ -201,7 +201,14 @@ def test_xdist_run_leaves_exactly_one_run_entry(
     """Ties 5.3's unit-level xdist guard to a real `-n 4` subprocess run:
     four workers plus the controller all execute `pytest_configure`, and
     only the controller may end up with a registered `Recorder`.
+
+    RQ-27's "without xdist" matrix leg installs no `pytest-xdist` at all, so
+    `-n 4` is not a recognised pytest option in that environment. This test
+    is specifically about xdist's dedup behaviour and has nothing to assert
+    when xdist is absent; skip rather than fail so PR13's CI matrix reports
+    an honest "not applicable" instead of a false negative.
     """
+    pytest.importorskip("xdist")
     pytester.makepyfile(
         test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(8))
     )
