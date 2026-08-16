@@ -121,11 +121,14 @@ jobs:
       # Same user, different group -- deliberately not root. RQ-40's tests
       # assert 0600 file modes, and root bypasses permission checks, so a
       # root run would turn those into false passes.
+      # `uv` by absolute path: sudo replaces PATH from its own `secure_path`
+      # and `--preserve-env=PATH` does not override that, so a bare `uv`
+      # resolves to nothing.
       - name: Run the suite with outbound networking blocked  # RQ-28
         run: >
           sudo -u "$(id -un)" -g nonet
-          --preserve-env=PATH,HOME,UV_CACHE_DIR
-          uv run --no-sync pytest
+          --preserve-env=HOME,UV_CACHE_DIR
+          "$(command -v uv)" run --no-sync pytest
 
   # RQ-24: installing pytest-vantage into an environment that already has
   # pytest adds exactly one distribution -- no third-party dependency rides
