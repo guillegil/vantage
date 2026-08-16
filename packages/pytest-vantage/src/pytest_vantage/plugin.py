@@ -20,11 +20,21 @@ in (RQ-24).
 from __future__ import annotations
 
 import os
+import socket
+from urllib.parse import urlparse
 
 import pytest
 
+from pytest_vantage.boundary import _warn
 from pytest_vantage.config import resolve_report_timeout, resolve_server_address
 from pytest_vantage.recorder import Recorder
+
+# design.md D6: "connect_timeout: min(2.0, report_timeout), applies to the
+# preflight probe" -- the preflight must not itself wait as long as a full
+# report would be allowed to.
+_MAX_CONNECT_TIMEOUT = 2.0
+_DEFAULT_HTTP_PORT = 80
+_DEFAULT_HTTPS_PORT = 443
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -66,6 +76,28 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+def _preflight_reachable(address: str, timeout: float) -> bool:
+    """A bare TCP connect, not an HTTP request (design.md D6) -- proves only
+    that something is listening at `address`, never anything about the
+    protocol or route. Sends no bytes, so RQ-2 stays untouched: this only
+    runs once activation has already been confirmed.
+
+    `ConnectionRefusedError` (nothing listening) and `socket.gaierror` (the
+    host does not resolve) are both `OSError` subclasses, so catching
+    `OSError` alone covers RQ-37 criteria 1 and 2 without needing to
+    distinguish which one fired -- the caller's response is the same
+    either way.
+    """
+    parsed = urlparse(address)
+    default_port = _DEFAULT_HTTPS_PORT if parsed.scheme == "https" else _DEFAULT_HTTP_PORT
+    port = parsed.port or default_port
+    try:
+        socket.create_connection((parsed.hostname, port), timeout=timeout).close()
+    except OSError:
+        return False
+    return True
+
+
 def _activation_requested(config: pytest.Config) -> bool:
     """Whether recording was activated for this session.
 
@@ -80,29 +112,32 @@ def _activation_requested(config: pytest.Config) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """The always-imported hook. Three steps, in this order (design.md D2,
-    D2a):
+    """The always-imported hook. Four steps, in this order (design.md D2, D6):
 
     1. Under xdist, every worker re-runs this hook -- unguarded, ``-n 4``
        would leave four workers' recorders plus the controller's, breaking
        RQ-1's "exactly one run entry" (RQ-27's xdist half of the matrix).
        The guard is the FIRST statement: before the activation check and
-       before anything could register a recorder or open a socket.
+       before anything could register a recorder, probe a socket, or open
+       one.
     2. Only then is activation checked. Absent ``--vantage``, this function
        does nothing further: no recorder is registered, no socket is opened
        (RQ-2).
-    3. The recorder is registered directly once activation succeeds.
+    3. A bare TCP preflight (``_preflight_reachable``) proves something is
+       listening at the resolved address before anything is registered
+       (RQ-37 criteria 1 and 2: refused connection, unresolvable host). A
+       failed preflight warns once, naming the address, and returns without
+       registering a recorder -- the session then runs to completion with
+       zero further overhead and nothing recorded.
+    4. The recorder is registered only once both activation and the
+       preflight succeed.
 
-    **PR11's deliberate resolution of a forward dependency.** design.md D6
-    describes registration as gated on a successful preflight TCP probe --
-    but that probe is PR12's task 6.8 and does not exist in this PR. Rather
-    than pull PR12's work forward (which would blow this PR's boundary),
-    registration here is unconditional once activation succeeds; PR12 adds
-    the preflight check in front of this same call, narrowing the condition
-    from "activated" to "activated and reachable". Until PR12 lands, a
-    session run with ``--vantage`` against an unreachable server will raise
-    uncaught from ``Recorder.pytest_sessionfinish`` -- PR12's
-    ``boundary.py`` (task 6.10) is what catches that.
+    A server that answers the preflight and later disappears, or starts
+    failing partway through reporting, is not this function's concern --
+    ``pytest_vantage.boundary``'s fault-isolation decorator on every
+    ``Recorder`` hook is what catches that (RQ-21), and RQ-37 criterion 3
+    ("drops out mid-session") is mechanically that same path, not a second
+    preflight.
     """
     if hasattr(config, "workerinput"):
         return
@@ -117,4 +152,8 @@ def pytest_configure(config: pytest.Config) -> None:
         cli_timeout=config.getoption("vantage_timeout"),
         ini_timeout=config.getini("vantage_timeout"),
     )
+    connect_timeout = min(_MAX_CONNECT_TIMEOUT, timeout)
+    if not _preflight_reachable(address, connect_timeout):
+        _warn(config, f"vantage: cannot reach {address}, this session will not be recorded")
+        return
     config.pluginmanager.register(Recorder(address, timeout))

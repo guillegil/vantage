@@ -62,24 +62,25 @@ def test_isoformat_utc_preserves_nonzero_microseconds() -> None:
 
 @pytest.mark.req("RQ-1")
 def test_recorder_registered_only_when_vantage_flag_is_present(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """Registration tracks activation alone at this point in the rollout.
+    """Registration tracks activation AND reachability (design.md D6).
 
-    Task 6.4's own text describes the recorder as registered "after a
-    successful preflight" -- but the preflight is PR12's task 6.8 and does
-    not exist yet. This PR's deliberate resolution (stated in full in the
-    apply-progress report) is: register unconditionally once activation
-    succeeds, and let PR12 insert the preflight gate in front of this same
-    call. This test proves exactly the condition PR11 owns -- mirrors 5.1's
-    differential shape (one run with the option, one without, asserting a
-    difference) applied to registration instead of a tree comparison.
+    PR11 registered `Recorder` unconditionally once activation succeeded,
+    with no reachability gate -- disclosed there as this PR's job (task
+    6.8). Now that the preflight exists, `--vantage` against a genuinely
+    reachable server (`vantage_server`, real) is what proves the same
+    "activation implies registration" half; the inactive half is unchanged.
+    `test_failure_paths.py::test_recorder_is_not_registered_when_the_preflight_fails`
+    is this test's mirror image -- activation present, nothing reachable.
     """
     from pytest_vantage.recorder import Recorder
 
     monkeypatch.delenv("VANTAGE_SERVER", raising=False)
 
-    active = pytester.parseconfigure("--vantage")
+    active = pytester.parseconfigure("--vantage", f"--vantage-server={vantage_server.address}")
     inactive = pytester.parseconfigure()
 
     assert any(isinstance(plugin, Recorder) for plugin in active.pluginmanager.get_plugins())
