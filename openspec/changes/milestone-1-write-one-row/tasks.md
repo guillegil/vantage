@@ -668,10 +668,126 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ## Phase 7: E — Quality Gates (both — never planned before this milestone) — PR13
 
-- [ ] 7.1 Create `.pre-commit-config.yaml` — `ruff format`, `ruff check --fix`, hygiene hooks, modified-files-only (< 2-3s budget per CLAUDE.md); a pre-push stage adding `mypy --strict` (whole project) + fast unit tests.
-- [ ] 7.2 Create `.github/workflows/ci.yml`: 3.10–3.13 × {with, without} xdist matrix (`# RQ-27`); a Python-3.9-install-refused job (`# RQ-27`); a networking-disabled job (`# RQ-28`); a clean-environment install-diff job asserting `pytest-vantage` adds exactly one distribution (`# RQ-24`); `ruff`/`mypy --strict`/`deptry`/`uv build --wheel`.
-- [ ] 7.3 Create `.github/workflows/audit.yml` — weekly `pip-audit`.
-- [ ] 7.4 Inspection (not Test) — confirm every CI block from 7.2 carries its RQ id in a comment, per CLAUDE.md's "grep -r finds the thing that proves it" rule applied to non-test verification.
+> **Landed 2026-08-16, 251 authored lines** (`.github/workflows/ci.yml` 144,
+> `.pre-commit-config.yaml` 57, `.github/workflows/audit.yml` 25,
+> `pyproject.toml` 18, one test-file line for a disclosed skip) against a
+> ~260-line forecast and the 800-line budget raised for this session — the
+> only slice so far to land *under* its own forecast rather than over it,
+> because this phase is configuration, not new production code with its own
+> test suite.
+>
+> **The starting condition was verified, not assumed.** The orchestrator's
+> pre-apply finding (`.github/workflows/ci.yml` never fires — 0 pushes to
+> `main`, 0 PRs opened across 65+ commits; `mypy src` and `uv build --wheel`
+> at the workspace root are both broken) was reproduced independently before
+> writing a single line of the new workflow: `uv run --extra dev mypy src`
+> → `Cannot read file 'src': No such file or directory`; `uv build --wheel`
+> at the root → `Multiple top-level packages discovered in a flat-layout`.
+> Both confirmed 7.2 as a rewrite, not an addition, exactly as scoped.
+>
+> **Every job in `ci.yml` was proven against a real command before being
+> written into YAML**, not assumed correct from reading the tool's --help:
+>
+> - The 3.10–3.13 × {with, without} xdist matrix (RQ-27) — `uv run
+>   --extra dev pytest` with `pytest-xdist` installed passes 107/107 (`-n 4`
+>   subprocess included); with it uninstalled (`uv pip uninstall
+>   pytest-xdist`, then `uv run --no-sync pytest` — `--extra dev` would
+>   silently re-sync and reinstall it, confirmed by watching it happen) it
+>   is 106 passed + 1 skipped. The one skip is `pytest.importorskip("xdist")`
+>   added to `test_xdist_run_leaves_exactly_one_run_entry`
+>   (`test_run_report.py`) — that test asserts xdist's own dedup behaviour
+>   via a literal `-n 4` subprocess arg pytest itself rejects when xdist is
+>   absent, so it has nothing to prove in that leg. Disclosed as a real
+>   production-test-code change, not hidden: it does not weaken the
+>   assertion, only scopes it to the condition (xdist installed) under which
+>   it is meaningful.
+> - The Python-3.9-install-refused job (RQ-27) — a built wheel installed
+>   into a `uv venv --python 3.9` refuses with `No solution found... Python
+>   >=3.10,<3.14 ... cannot be used`, exit 1, confirmed against both the raw
+>   package source and the built wheel.
+> - The clean-environment install-diff job (RQ-24) — `pytest` installed
+>   alone, `pip list --format=freeze` snapshotted, `pytest-vantage`'s wheel
+>   installed, snapshotted again: `comm -13`/`comm -23` shows exactly one
+>   line added (`pytest-vantage==0.1.0`), zero removed. Verified with a real
+>   `uv venv`, not asserted from the wheel's own metadata.
+> - `ruff format --check`, `ruff check`, `mypy --strict`, `deptry`, and
+>   `uv build --wheel --all-packages` — all four run clean at the tip (107
+>   tests, 49 source files under mypy, zero deptry findings after the
+>   config below); `uv build --wheel --all-packages -o dist` builds both
+>   `pytest_vantage-0.1.0-py3-none-any.whl` and `vantage-0.1.0-py3-none-
+>   any.whl` — the fix for the broken root-level `uv build --wheel`, which
+>   never worked for this layout and was never going to (the root
+>   `pyproject.toml` is a workspace root with no `[build-system]` by
+>   design; the two publishable distributions live under `packages/`).
+>
+> **`.pre-commit-config.yaml` was executed, not just written** —
+> `uvx pre-commit run --all-files` (ruff, ruff-format, five hygiene hooks
+> from `pre-commit-hooks`) and `uvx pre-commit run --all-files --hook-stage
+> pre-push` (the local `mypy --strict` and `pytest` hooks) both ran for
+> real against this tree and passed, then `uvx pre-commit install` /
+> `--hook-type pre-push` installed both git hooks to confirm the config
+> wires up cleanly end to end.
+>
+> **The networking-disabled job (RQ-28) could not be executed in this
+> sandbox and that is stated plainly, not implied otherwise.** Both
+> `unshare --net` (`Operation not permitted`) and `sudo`/root access needed
+> for `iptables` are denied here. What *was* verified instead: every
+> address the plugin/server test suite touches is `127.0.0.1` (grepped
+> across `packages/`); the one apparent external reference,
+> `http://example.com` in `test_preflight_falls_back_to_the_scheme_default_
+> port`, is explicitly monkeypatched — `socket.create_connection` is
+> intercepted, never dialled, with a comment stating exactly why (RQ-28);
+> and the one test that does perform a real DNS lookup
+> (`this-host-does-not-exist.invalid`, RFC 2606's reserved TLD) is caught
+> through `_preflight_reachable`'s broad `except OSError`, which does not
+> distinguish NXDOMAIN from a blocked-outbound failure — both are `OSError`
+> subclasses, so the same code path handles either environment. The job
+> itself (`sudo iptables -A OUTPUT -o lo -j ACCEPT` then `-A OUTPUT -j
+> REJECT`, then the full suite with `--no-sync`) is standard practice on
+> GitHub-hosted Ubuntu runners (passwordless sudo, iptables preinstalled)
+> but is the one job in this PR that rests on that standard practice rather
+> than on a local reproduction.
+>
+> **`deptry` findings were resolved by naming the false positives, not by
+> a blanket ignore.** `uv run --extra dev deptry .` at the tip reported 27
+> issues before this PR: `DEP001` for three local test-support modules
+> (`importwalk`, `vantage_port_contract`, `vantage_test_server`) reached
+> only through the root `pythonpath = ["packages/vantage/tests"]`, which
+> `deptry` has no notion of and reads as missing packages rather than local
+> files; `DEP002` for six workspace-root `dev`-extra tools (`ruff`, `mypy`,
+> `deptry`, `pip-audit`, `httpx2`, `pytest-xdist`) that are either invoked
+> as bare CLIs (never imported as Python modules) or exercised through
+> pytest's own plugin discovery / `starlette`'s `TestClient` rather than a
+> direct `import`; `DEP003` for `fastapi`/`pydantic`/`starlette`/`uvicorn`,
+> which genuinely **are** declared, just in `packages/vantage/pyproject.toml`
+> rather than the root one `deptry` reads — `deptry` has no concept of a
+> `uv` workspace and cannot see across member `pyproject.toml` files.
+> `pyproject.toml`'s new `[tool.deptry.per_rule_ignores]` names exactly
+> those modules per rule code, nothing broader. **Two rejected alternatives,
+> both tried first and both worse:** running `deptry` once per package
+> (`deptry packages/vantage`, `deptry packages/pytest-vantage`) does *not*
+> fix the workspace-visibility problem — it trades it for a new one, each
+> package's own imports of itself (`import vantage...`,
+> `import pytest_vantage...`) now read as an undeclared transitive
+> dependency, since a package is never listed as its own dependency; and
+> `--optional-dependencies-dev-groups dev` to mark the whole `dev` extra as
+> a dev-dependency group produces a *worse* result (43 findings, not fewer)
+> because this project's `tests` directories live nested under
+> `packages/*/tests`, past `deptry`'s default `--exclude` pattern (which
+> only matches a top-level `tests/`), so every `import pytest` in every test
+> file newly reports `DEP004`. **The scoped config was verified to still
+> catch a real problem**: an ad hoc `import requests` added temporarily to
+> `packages/vantage/src/vantage/_deptry_probe.py` was flagged (`DEP003
+> 'requests' imported but it is a transitive dependency`) with the exact
+> same config in place, then the probe file was deleted — nothing about
+> this fix silences a genuinely new undeclared import. None of the 27
+> original findings turned out to be a real problem; all three named
+> categories are workspace-visibility blind spots in `deptry` itself.
+
+- [x] 7.1 Create `.pre-commit-config.yaml` — `ruff format`, `ruff check --fix`, hygiene hooks, modified-files-only (< 2-3s budget per CLAUDE.md); a pre-push stage adding `mypy --strict` (whole project) + fast unit tests.
+- [x] 7.2 Create `.github/workflows/ci.yml`: 3.10–3.13 × {with, without} xdist matrix (`# RQ-27`); a Python-3.9-install-refused job (`# RQ-27`); a networking-disabled job (`# RQ-28`); a clean-environment install-diff job asserting `pytest-vantage` adds exactly one distribution (`# RQ-24`); `ruff`/`mypy --strict`/`deptry`/`uv build --wheel`.
+- [x] 7.3 Create `.github/workflows/audit.yml` — weekly `pip-audit`.
+- [x] 7.4 Inspection (not Test) — confirm every CI block from 7.2 carries its RQ id in a comment, per CLAUDE.md's "grep -r finds the thing that proves it" rule applied to non-test verification.
 
 ## Phase 8: F — Docs & Corrections (both) — PR14
 
