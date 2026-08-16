@@ -326,9 +326,47 @@ def test_recorder_is_not_registered_when_the_preflight_fails(
     from pytest_vantage.recorder import Recorder
 
     monkeypatch.delenv("VANTAGE_SERVER", raising=False)
-    config = pytester.parseconfigure("--vantage", f"--vantage-server={_closed_port_address()}")
+    # `pytest.warns` rather than a bare call: the preflight failing here is
+    # the whole point of the scenario, so asserting the warning is part of
+    # the proof -- and it stops this in-process `parseconfigure` from
+    # leaking a `VantageWarning` into the summary of the suite running it.
+    with pytest.warns(VantageWarning, match="cannot reach"):
+        config = pytester.parseconfigure("--vantage", f"--vantage-server={_closed_port_address()}")
 
     assert not any(isinstance(plugin, Recorder) for plugin in config.pluginmanager.get_plugins())
+
+
+@pytest.mark.req("RQ-37")
+def test_preflight_falls_back_to_the_scheme_default_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An address with no explicit port -- `http://example.com`, which is
+    what a user types -- must probe 80, and its https form 443.
+
+    `urlparse(...).port` is `None` for those, so the scheme default is the
+    only thing standing between a normal address and a connect to port 0.
+    Getting it wrong fails the preflight, warns "cannot reach", and silently
+    records nothing for an address that was perfectly good. Every other test
+    in this file builds an address with an explicit port, so nothing else
+    exercises this line.
+
+    `socket.create_connection` is intercepted rather than dialled: the
+    assertion is about which port is chosen, and reaching the real
+    example.com would make a unit test depend on the network (RQ-28).
+    """
+    attempted: list[tuple[str, int]] = []
+
+    def _capture(address: tuple[str, int], timeout: float | None = None) -> socket.socket:
+        attempted.append(address)
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr("pytest_vantage.plugin.socket.create_connection", _capture)
+
+    _preflight_reachable("http://example.com", 1.0)
+    _preflight_reachable("https://example.com", 1.0)
+    _preflight_reachable("http://example.com:8765", 1.0)
+
+    assert attempted == [("example.com", 80), ("example.com", 443), ("example.com", 8765)]
 
 
 @pytest.mark.req("RQ-37")
