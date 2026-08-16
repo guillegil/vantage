@@ -15,6 +15,13 @@ from urllib.parse import urlparse
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
+# design.md D11: "8765 is a memorable unregistered high port; the plugin's
+# default address is the same, so --vantage alone means something."
+_DEFAULT_ADDRESS = "http://127.0.0.1:8765"
+# design.md D6: report_timeout, the bound on every socket operation of the
+# report itself (distinct from connect_timeout, PR12's preflight probe).
+_DEFAULT_REPORT_TIMEOUT = 10.0
+
 
 class VantageConfigError(ValueError):
     """A configured value cannot be used -- the session should not proceed."""
@@ -39,4 +46,42 @@ def resolve_and_validate_address(address: str) -> str:
     return address
 
 
-__all__ = ["VantageConfigError", "resolve_and_validate_address"]
+def resolve_server_address(
+    *, cli_url: str | None, env_url: str | None, ini_url: str | None
+) -> str:
+    """Where to report to: `--vantage-server` > `VANTAGE_SERVER` > the
+    `vantage_server` ini value > the default (`http://127.0.0.1:8765`).
+
+    CLI over environment over ini mirrors the server's own precedence
+    (`resolve_server_config`, design.md D11): the most explicit,
+    session-specific source wins, and an environment variable -- how CI
+    configures a container -- outranks a value committed to `pyproject.toml`
+    or `pytest.ini`, which everyone who checks the project out shares.
+
+    Validates the resolved address's scheme before returning it (design.md
+    D6, threat matrix "Outbound request target") -- every caller gets a
+    validated address, never a raw configured string.
+    """
+    address = cli_url or env_url or ini_url or _DEFAULT_ADDRESS
+    return resolve_and_validate_address(address)
+
+
+def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | None) -> float:
+    """The bound on the reporting request: `--vantage-timeout` > the
+    `vantage_timeout` ini value > the default (`10.0` seconds, design.md
+    D6's `report_timeout`). No environment variable is defined for the
+    timeout -- only the address has one.
+    """
+    if cli_timeout is not None:
+        return cli_timeout
+    if ini_timeout is not None:
+        return float(ini_timeout)
+    return _DEFAULT_REPORT_TIMEOUT
+
+
+__all__ = [
+    "VantageConfigError",
+    "resolve_and_validate_address",
+    "resolve_report_timeout",
+    "resolve_server_address",
+]

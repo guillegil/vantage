@@ -19,7 +19,12 @@ in (RQ-24).
 
 from __future__ import annotations
 
+import os
+
 import pytest
+
+from pytest_vantage.config import resolve_report_timeout, resolve_server_address
+from pytest_vantage.recorder import Recorder
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -75,8 +80,8 @@ def _activation_requested(config: pytest.Config) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """The always-imported hook. Two gates, in this order, before anything
-    else may run (design.md D2):
+    """The always-imported hook. Three steps, in this order (design.md D2,
+    D2a):
 
     1. Under xdist, every worker re-runs this hook -- unguarded, ``-n 4``
        would leave four workers' recorders plus the controller's, breaking
@@ -86,9 +91,30 @@ def pytest_configure(config: pytest.Config) -> None:
     2. Only then is activation checked. Absent ``--vantage``, this function
        does nothing further: no recorder is registered, no socket is opened
        (RQ-2).
+    3. The recorder is registered directly once activation succeeds.
+
+    **PR11's deliberate resolution of a forward dependency.** design.md D6
+    describes registration as gated on a successful preflight TCP probe --
+    but that probe is PR12's task 6.8 and does not exist in this PR. Rather
+    than pull PR12's work forward (which would blow this PR's boundary),
+    registration here is unconditional once activation succeeds; PR12 adds
+    the preflight check in front of this same call, narrowing the condition
+    from "activated" to "activated and reachable". Until PR12 lands, a
+    session run with ``--vantage`` against an unreachable server will raise
+    uncaught from ``Recorder.pytest_sessionfinish`` -- PR12's
+    ``boundary.py`` (task 6.10) is what catches that.
     """
     if hasattr(config, "workerinput"):
         return
     if not _activation_requested(config):
         return
-    # The recorder is registered here from PR11 onward, once it exists.
+    address = resolve_server_address(
+        cli_url=config.getoption("vantage_server"),
+        env_url=os.environ.get("VANTAGE_SERVER"),
+        ini_url=config.getini("vantage_server"),
+    )
+    timeout = resolve_report_timeout(
+        cli_timeout=config.getoption("vantage_timeout"),
+        ini_timeout=config.getini("vantage_timeout"),
+    )
+    config.pluginmanager.register(Recorder(address, timeout))
