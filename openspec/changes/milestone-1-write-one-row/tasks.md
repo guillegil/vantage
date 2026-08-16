@@ -791,11 +791,82 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ## Phase 8: F — Docs & Corrections (both) — PR14
 
-- [ ] 8.1 Modify `docs/architecture.md` — add the ingestion contract and the server-configuration section (D11, D12).
-- [ ] 8.2 Modify `docs/adr/0005-…md` and `docs/adr/0006-…md` — correct `vantage-storage/src/vantage_storage/…` paths to the ADR-4 layout; correct ADR-5's index count 12 → 13. Both remain `Status: Proposed`; content only, no status change.
+> **Landed 2026-08-16, 83 authored lines** (`docs/architecture.md` +73/-0,
+> `docs/adr/0005-…md` +2/-2, `docs/adr/0006-…md` +3/-3) against the 800-line
+> session budget — this is the last apply slice, so every task in this file
+> is now `[x]`.
+>
+> **8.1 added two sections to `docs/architecture.md`, in its established
+> voice, without rewriting anything already there.** "The ingestion
+> contract" points at `docs/api/v1-ingestion.md` rather than duplicating it,
+> states the `extra="ignore"`/`extra="forbid"` asymmetry between
+> `SessionReport` and `RunReport` (verified against
+> `packages/vantage/src/vantage/service/schemas.py`: `RunReport` declares
+> exactly six fields — `id`, `started_at`, `finished_at`, `exit_status`,
+> `interrupted`, `interrupt_reason` — every one required with no default,
+> `extra="forbid"`), and states as a consequence that `run` cannot gain a
+> seventh field without forcing `/api/v2`. "Server configuration" covers
+> the `--database`/`VANTAGE_DATABASE`/XDG precedence and the loopback bind
+> default, verified against `resolve_server_config` in
+> `packages/vantage/src/vantage/core/config/resolution.py` and the CLI in
+> `packages/vantage/src/vantage/service/cli.py`, and points at
+> `docs/adr/0010-…md` for the full rationale rather than restating it.
+>
+> **8.2's three defects were each verified against the tree before
+> editing, not trusted from the brief.** `docs/adr/0005-…md` line 27 said
+> `vantage-storage/src/vantage_storage/schema.sql`; the real path is
+> `packages/vantage/src/vantage/storage/schema.sql`. Its "twelve indexes"
+> claim: `schema.sql` contains 12 plain `CREATE INDEX` statements but 13
+> `CREATE [UNIQUE] INDEX` statements total — the 13th,
+> `idx_test_case_node_id`, is `CREATE UNIQUE INDEX`, a substring `CREATE
+> INDEX` does not match — confirmed by executing `schema.sql` against
+> `sqlite3.connect(":memory:")` and reading `sqlite_master`: 13 named
+> `idx_*` indexes (12 `CREATE INDEX` + 1 `CREATE UNIQUE INDEX`), 6
+> `sqlite_autoindex_*` excluded, matching `docs/schema-manifest.md`'s
+> "Ten tables, thirteen indexes" exactly (11 `sqlite_master` table rows
+> minus the implicit `sqlite_sequence` SQLite creates for `AUTOINCREMENT`
+> = ten documented tables). `docs/adr/0006-…md` line 44 said
+> `vantage_storage/connection.py`; corrected to `vantage/storage/connection.py`.
+> Two more pre-restructure references were found in the same file (lines 11
+> and 15: `vantage-storage`/`vantage-core`/`vantage-pytest` as if they were
+> still separate distributions) and corrected alongside the listed defect,
+> since leaving them would have made the just-corrected file self-inconsistent
+> in the same paragraph. `docs/adr/0005-…md` had no other pre-restructure
+> reference beyond the two listed. Both ADRs' `Status: Proposed` is
+> unchanged — content only.
+>
+> **Swept every other ADR under `docs/adr/` for the same rot.**
+> `docs/adr/0007`, `0008`, `0009`, `0011` are clean. `docs/adr/0003-…md`
+> (also `Proposed`) carries the same defect in its Decision and
+> Consequences sections — `vantage-core`, `vantage-storage` and
+> `vantage-pytest` written as if each were still its own distribution,
+> which ADR-4's final (2026-08-15) revision replaced with two:
+> `pytest-vantage` and `vantage`, the latter holding `core`/`storage`/
+> `service` as subpackages. Reported, not fixed — outside 8.2's scope,
+> a follow-up.
+>
+> **`docs/schema-manifest.md`'s "Known inconsistency — not corrected in
+> this PR" note (its own lines 354-370) is now stale** — it describes the
+> ADR-5/ADR-6 disagreement this PR just resolved, and says fixing it is
+> task 2.1's job to defer, not PR14's to do. Left untouched: it belongs to
+> task 2.1's deliverable, not 8.1/8.2, and this slice's scope is exactly
+> those two tasks. Follow-up.
+
+- [x] 8.1 Modify `docs/architecture.md` — add the ingestion contract and the server-configuration section (D11, D12).
+- [x] 8.2 Modify `docs/adr/0005-…md` and `docs/adr/0006-…md` — correct `vantage-storage/src/vantage_storage/…` paths to the ADR-4 layout; correct ADR-5's index count 12 → 13. Both remain `Status: Proposed`; content only, no status change.
 
 ---
 
 ## Flagged, Not Actioned
 
 - **ADR-0005/0006 vs. the manifest, until PR14/8.2 lands.** Between PR2's schema-manifest landing and PR14's correction landing, RQ-29's Inspection has two disagreeing sources: ADR-5's prose ("twelve indexes", old paths) and `docs/schema-manifest.md` (thirteen indexes, ADR-4 paths). Trust the manifest during that window; PR14 is the fix, not a re-scope of PR2.
+  **Resolved by PR14 (task 8.2).** Both ADRs now match the manifest and the
+  ADR-4 layout. `docs/schema-manifest.md`'s own forward-reference to this
+  window (its lines 354-370) is now itself stale and is reported as a
+  follow-up in PR14's landed-summary above, not fixed here — it was task
+  2.1's deliverable, out of 8.1/8.2's scope.
+- **`docs/adr/0003-…md` carries the same pre-ADR-4 distribution-naming rot
+  as ADR-5/ADR-6 did**, in its Decision and Consequences sections
+  (`vantage-core`/`vantage-storage`/`vantage-pytest` as separate
+  distributions). `Status: Proposed`, so correctable the same way — not
+  actioned here, outside 8.2's exact two-file scope. Follow-up.
