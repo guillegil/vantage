@@ -594,12 +594,77 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### D2b — RQ-37/RQ-21 Boundary & Timeout (PR12)
 
-- [ ] 6.7 RED — `test_failure_paths.py` (RQ-37): closed port → `ConnectionRefusedError`; unresolvable host → `socket.gaierror`; server killed after configure but before the report (RQ-37.3); 200-test suite → exactly one warning naming the address (RQ-37.4). `@pytest.mark.req("RQ-37")`.
-- [ ] 6.8 GREEN — `plugin.py` preflight: `socket.create_connection(addr, connect_timeout).close()`; on failure, `_warn(config, message)` naming the address, no recorder registered.
-- [ ] 6.9 RED — `test_failure_paths.py` (RQ-21): reporting path patched to raise on a passing suite (exit 0, one warning) and a failing suite (exit 1, one warning); server accepts-then-closes (exit 0, one warning); server accepts-and-never-answers (exit 0 within `timeout + 5s`); every `Recorder` hook patched to raise (exit 0, no internal error surfaced). `@pytest.mark.req("RQ-21")`.
-- [ ] 6.10 GREEN — `boundary.py`: decorator on every `Recorder` hook catching `Exception` (never `BaseException` — `KeyboardInterrupt`/`SystemExit` propagate); warns once, latches `self._disabled`, never assigns `session.exitstatus`; `VantageWarning(UserWarning)` with the terminal-reporter → `sys.stderr` fallback chain. `transport.py`: `report_timeout` (default `10.0s`) bounds every socket operation via `urlopen(timeout=t)`.
-- [ ] 6.11 RED — **threat-matrix "Untrusted response"**: a stub server returning 100 MB, non-JSON, or a bare `500` — response read is bounded, and a malformed acknowledgement is a warning, never an exception.
-- [ ] 6.12 GREEN — `transport.py::send` — `resp.read(MAX_RESPONSE_BYTES)` (64 KiB), defensive JSON parse of the acknowledgement.
+> **Landed 2026-08-16, 780 changed lines** (`git diff --numstat` over the
+> whole tree against PR11's tip, `10d65d8` — no generated file touched, so
+> authored and ledger counts are the same number) against a ~260-line
+> forecast, inside the 800-line budget raised for this session with 20
+> lines of headroom. The overage's shape matches PR11's: almost all of it
+> is `test_failure_paths.py` (514 lines across six commits: real stub
+> servers and subprocess/`popen` end-to-end scenarios for both RQ-37 and
+> RQ-21, plus direct unit tests of the preflight, the fault-isolation
+> decorator and `_warn`'s fallback chain — none of it mockable down without
+> losing what it actually proves).
+>
+> **Closed the debt PR11 disclosed.** `pytest_configure` now registers
+> `Recorder` only once activation **and** a bare TCP preflight both
+> succeed (task 6.8); `pytest_configure`'s docstring no longer describes
+> the preflight as missing — it now describes the four-step sequence that
+> actually runs, ending with a forward pointer to `boundary.py` for what
+> happens after registration instead of before it. `test_run_report.py`'s
+> PR11 registration test needed the same update, in the same commit as
+> 6.8: it now asserts against a genuinely reachable `vantage_server`
+> fixture rather than the default (nothing-listening) address, since that
+> address no longer registers a `Recorder` under the new preflight. This
+> assertion holds unchanged against both the old and new `plugin.py`, so
+> it carried no RED step of its own — noted, not hidden.
+>
+> **The six tasks paired exactly as written**, three genuine RED/GREEN
+> pairs (6.7/6.8, 6.9/6.10, 6.11/6.12), with one disclosed cross-pair
+> dependency and one disclosed early-pass, both stated by design.md itself
+> rather than discovered by surprise:
+>
+> - **RQ-37 criterion 3 (server dropped mid-session) stayed red after
+>   6.8's GREEN.** design.md says so in plain language: "RQ-37 criterion 3
+>   is mechanically RQ-21's path." 6.7's RED wrote all four RQ-37
+>   scenarios together; 6.8's preflight closed three of them (closed
+>   port, unresolvable host, 200-test suite); the fourth needed 6.10's
+>   report-time fault isolation too, and was confirmed still failing
+>   after 6.8 and passing after 6.10 before either commit landed.
+> - **The bare-500 test (part of 6.11's RED) was already green when
+>   written**, confirmed by running it before touching `transport.py`.
+>   `urllib.request.urlopen()` raises `HTTPError` for any non-2xx status
+>   on its own, independent of task 6.12's bounded read or defensive
+>   parse, and `boundary.py`'s fault isolation (already landed at 6.10)
+>   already turns that into a warning. The other two 6.11 scenarios
+>   (unbounded response, non-JSON body) were genuinely red — one via
+>   `TimeoutExpired` at the test's own 15s bound (an unbounded
+>   `response.read()` against a server that never stops writing and
+>   never closes truly hangs), one via a zero-warning mismatch (nothing
+>   parsed the acknowledgement at all yet). Same pattern already used at
+>   5.7/5.8, 2.7/2.8 and 6.5/6.6: reported plainly, not staged to look
+>   red when it already wasn't.
+>
+> **`boundary.py`'s `_warn` reaches two different pytest lifecycles.** The
+> preflight's warning fires from `pytest_configure`, before pytest's own
+> warnings-summary capturing is active for this pytest version, and lands
+> on raw `stderr` via Python's default `warnings.showwarning` rather than
+> in the `stdout` "warnings summary" section a report-time warning (fired
+> from `pytest_sessionfinish`) reaches. Both are genuine `VantageWarning`s
+> going through the exact same `warnings.warn` call; only the pytest
+> phase differs. `test_failure_paths.py`'s `_combined_output` helper
+> checks both streams together rather than asserting on the timing of an
+> internal pytest capturing detail this PR does not own.
+>
+> **106 tests** (86 → 106, +20, all in `test_failure_paths.py`), full
+> suite `uv run --extra dev pytest`, `ruff check`/`format --check` and
+> `mypy --strict` all clean. — PR12
+
+- [x] 6.7 RED — `test_failure_paths.py` (RQ-37): closed port → `ConnectionRefusedError`; unresolvable host → `socket.gaierror`; server killed after configure but before the report (RQ-37.3); 200-test suite → exactly one warning naming the address (RQ-37.4). `@pytest.mark.req("RQ-37")`.
+- [x] 6.8 GREEN — `plugin.py` preflight: `socket.create_connection(addr, connect_timeout).close()`; on failure, `_warn(config, message)` naming the address, no recorder registered.
+- [x] 6.9 RED — `test_failure_paths.py` (RQ-21): reporting path patched to raise on a passing suite (exit 0, one warning) and a failing suite (exit 1, one warning); server accepts-then-closes (exit 0, one warning); server accepts-and-never-answers (exit 0 within `timeout + 5s`); every `Recorder` hook patched to raise (exit 0, no internal error surfaced). `@pytest.mark.req("RQ-21")`.
+- [x] 6.10 GREEN — `boundary.py`: decorator on every `Recorder` hook catching `Exception` (never `BaseException` — `KeyboardInterrupt`/`SystemExit` propagate); warns once, latches `self._disabled`, never assigns `session.exitstatus`; `VantageWarning(UserWarning)` with the terminal-reporter → `sys.stderr` fallback chain. `transport.py`: `report_timeout` (default `10.0s`) bounds every socket operation via `urlopen(timeout=t)`.
+- [x] 6.11 RED — **threat-matrix "Untrusted response"**: a stub server returning an unbounded body, non-JSON, or a bare `500` — response read is bounded, and a malformed acknowledgement is a warning, never an exception. **Deviation:** the unbounded-body handler writes an endless stream rather than a literal 100 MB — the point (an unbounded read has nothing to stop it but the server closing, which this handler deliberately never does) does not depend on a specific byte count, and an endless stream proves it without a slow, wasteful fixed transfer.
+- [x] 6.12 GREEN — `transport.py::send` — `resp.read(MAX_RESPONSE_BYTES)` (64 KiB), defensive JSON parse of the acknowledgement.
 
 ## Phase 7: E — Quality Gates (both — never planned before this milestone) — PR13
 
