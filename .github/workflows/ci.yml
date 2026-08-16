@@ -1,9 +1,21 @@
 name: CI
 
 "on":
+  # `main` alone was the old workflow's trigger, and it is why no commit of
+  # this milestone was ever checked: the delivery model is chained PRs off a
+  # tracker branch, only the tracker ever merges to main, and until a PR is
+  # opened `pull_request` fires for nothing either. A workflow that cannot
+  # run on the branches the work actually lands on is not a gate.
   push:
-    branches: [main]
+    branches: [main, "milestone-*"]
   pull_request:
+
+# One run per branch. Pushing a chain of stacked branches at once would
+# otherwise queue the whole matrix per branch and check every intermediate
+# commit, so a superseded run is cancelled rather than paid for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # RQ-27: the suite passes on Python 3.10-3.13, both with and without
