@@ -97,4 +97,7 @@ def test_no_connection_is_attempted_with_no_recording_option(
 
     result = pytester.runpytest()
 
-    result.assert_outcomes(passed=1)
+    # `warnings=0` explicitly, not omitted: `assert_outcomes` leaves any
+    # count it is not given UNCHECKED, so the spec's "and emits no warning"
+    # half was silently unverified while this line read `passed=1` alone.
+    result.assert_outcomes(passed=1, warnings=0)

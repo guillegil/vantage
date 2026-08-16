@@ -550,3 +550,25 @@ def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
     result.assert_outcomes(passed=1)
     assert result.ret == 0
     assert _combined_output(result).count("VantageWarning:") == 1
+
+
+@pytest.mark.req("RQ-21")
+def test_every_recorder_hook_is_fault_isolated() -> None:
+    """RQ-21 says *every* hook is fault-isolated, and the two that exist are.
+
+    Nothing else proves the rule rather than the instances: a third hook
+    added later without the decorator would leave the suite green and break
+    the requirement silently, because no test enumerates them. This one
+    does, so the failure lands on whoever adds the hook.
+
+    `functools.wraps` is what makes `__wrapped__` the reliable marker --
+    `fault_isolated` applies it, so an undecorated hook is exactly the
+    attribute that lacks it.
+    """
+    from pytest_vantage.recorder import Recorder
+
+    hooks = [name for name in dir(Recorder) if name.startswith("pytest_")]
+
+    assert hooks, "no pytest_* hooks found on Recorder -- the check would pass vacuously"
+    undecorated = [name for name in hooks if not hasattr(getattr(Recorder, name), "__wrapped__")]
+    assert undecorated == [], f"Recorder hooks missing @fault_isolated: {undecorated}"

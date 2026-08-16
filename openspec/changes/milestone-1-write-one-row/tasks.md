@@ -862,11 +862,32 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 - **ADR-0005/0006 vs. the manifest, until PR14/8.2 lands.** Between PR2's schema-manifest landing and PR14's correction landing, RQ-29's Inspection has two disagreeing sources: ADR-5's prose ("twelve indexes", old paths) and `docs/schema-manifest.md` (thirteen indexes, ADR-4 paths). Trust the manifest during that window; PR14 is the fix, not a re-scope of PR2.
   **Resolved by PR14 (task 8.2).** Both ADRs now match the manifest and the
   ADR-4 layout. `docs/schema-manifest.md`'s own forward-reference to this
-  window (its lines 354-370) is now itself stale and is reported as a
-  follow-up in PR14's landed-summary above, not fixed here — it was task
-  2.1's deliverable, out of 8.1/8.2's scope.
-- **`docs/adr/0003-…md` carries the same pre-ADR-4 distribution-naming rot
+  window was itself left stale by that correction, and is **also resolved**
+  — see the closing commit below.
+- **`docs/adr/0003-…md` carried the same pre-ADR-4 distribution-naming rot
   as ADR-5/ADR-6 did**, in its Decision and Consequences sections
   (`vantage-core`/`vantage-storage`/`vantage-pytest` as separate
-  distributions). `Status: Proposed`, so correctable the same way — not
-  actioned here, outside 8.2's exact two-file scope. Follow-up.
+  distributions). **Also resolved** — see the closing commit below.
+
+### Closing commit — `8b0d666`, after PR14's three task commits
+
+Both follow-ups above were correctly identified and correctly left alone by
+task 8.2, whose scope named two other files. They were then closed in a
+separate commit rather than carried past the archive, because the second one
+had stopped being merely stale and become actively wrong: the manifest's note
+told an inspector that ADR-5 and ADR-6 disagreed with it, when task 8.2 had
+just made them agree. RQ-29's verification method is Inspection and that
+manifest is its artefact of record, so a false warning inside it undermines
+the very thing the requirement points at.
+
+- `docs/adr/0003-…md` — distribution names corrected to the ADR-4 layout,
+  with an explicit note that the decision itself is unchanged. Correcting
+  names is not superseding a decision; `Status` stays `Proposed`.
+- `docs/schema-manifest.md` — the "Known inconsistency" note replaced with
+  why the count was wrong: `CREATE UNIQUE INDEX` does not contain the
+  substring `CREATE INDEX`, so counting by grep undercounts by exactly the
+  number of unique indexes. Carries the snippet that counts against
+  `sqlite_master` instead, verified to return 13.
+
+Recorded here because the verification pass found this commit contradicting
+this very section — the record said deferred, the tree said done.

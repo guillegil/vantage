@@ -95,7 +95,15 @@ jobs:
 
       - name: Block outbound networking except loopback  # RQ-28
         run: |
+          # Loopback is what RQ-28 permits: the configured local server.
           sudo iptables -A OUTPUT -o lo -j ACCEPT
+          # The runner agent holds its own long-lived connection to GitHub's
+          # control plane. A bare OUTPUT REJECT severs that too, and the job
+          # dies for a reason that has nothing to do with Vantage. Letting
+          # ALREADY-ESTABLISHED flows through spares the agent without
+          # weakening the demonstration -- every NEW outbound connection,
+          # which is the only kind the plugin could make, is still rejected.
+          sudo iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
           sudo iptables -A OUTPUT -j REJECT
 
       - name: Run the suite with outbound networking blocked  # RQ-28
