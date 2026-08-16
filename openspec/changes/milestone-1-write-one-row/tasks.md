@@ -909,6 +909,21 @@ commit below landed after the PR14 summary above and is part of the change.
 | `76bf43c` | Repaired what the first real CI run exposed. The RQ-27 matrix failed on Python 3.10, 3.11 and 3.12 and passed only on 3.13: `pytester.popen` opens a stdin pipe and closes it, and `communicate()` calls `flush()` on that closed file before 3.13. Fixed with `stdin=subprocess.DEVNULL`. Also rewrote the networking rule to match on group ownership so only the suite is blocked, and gave every job a `timeout-minutes`. |
 | `0f74cef` | `sudo -g` needs a sudoers rule of its own — the runner's stock grant covers running as another user, not as another group. |
 | `a5f18f1` | `uv` by absolute path: sudo rebuilds `PATH` from its own `secure_path`, so a bare `uv` resolved to nothing. First fully green CI run: `31960833652`, all twelve jobs. |
+| `c181719` | Closed verification round 2: C4 (the networking job could not fail, so its green proved survival rather than absence) and C3 (this file still quoting a deleted rule). Added this table. |
+| *`docs(tasks): close the recording recursion`* | Added `c181719` and this row, and the invariant below. Identified by subject rather than hash — see the invariant. |
+
+**The invariant, because the omission recurred twice — and once more while
+writing this.** A commit cannot contain its own hash: writing the hash changes
+the content, which changes the hash. The first attempt at this row embedded a
+short sha, an `--amend` invalidated it, and the row pointed at a commit that no
+longer existed. So the final row is identified by its **subject line**, which
+is stable, and every earlier row by hash.
+
+The wider point is the same one round 1 and round 2 both found: a table written
+once is false the moment the commit writing it lands. This section is therefore
+updated at **every verification round**, and the check is mechanical —
+`git log --oneline <PR14 summary commit>..HEAD` must yield nothing absent from
+the table above. Round 1 found one commit unrecorded; round 2 found four.
 
 ### RQ-28's second scenario, and why a green job was not enough
 
