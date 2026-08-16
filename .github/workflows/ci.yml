@@ -1,13 +1,90 @@
 name: CI
 
 "on":
+  # `main` alone was the old workflow's trigger, and it is why no commit of
+  # this milestone was ever checked: the delivery model is chained PRs off a
+  # tracker branch, only the tracker ever merges to main, and until a PR is
+  # opened `pull_request` fires for nothing either. A workflow that cannot
+  # run on the branches the work actually lands on is not a gate.
   push:
-    branches: [main]
+    branches: [main, "milestone-*"]
   pull_request:
 
+# One run per branch. Pushing a chain of stacked branches at once would
+# otherwise queue the whole matrix per branch and check every intermediate
+# commit, so a superseded run is cancelled rather than paid for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # RQ-27: the suite passes on Python 3.10-3.13, both with and without
+  # pytest-xdist installed -- eight combinations.
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        xdist: [with, without]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install project (locked, dev extra)
+        run: uv sync --locked --extra dev --python ${{ matrix.python-version }}
+
+      # `uv run --extra dev` re-syncs and would reinstall pytest-xdist, so
+      # the "without" leg drops it after sync and runs with --no-sync.
+      - name: Uninstall pytest-xdist for the "without" leg  # RQ-27
+        if: matrix.xdist == 'without'
+        run: uv pip uninstall pytest-xdist
+
+      - name: Run pytest  # RQ-27
+        run: uv run --no-sync pytest
+
+  # RQ-27: the version floor refuses installation outright rather than
+  # failing at import time on an unsupported interpreter.
+  python-3-9-install-refused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up build Python
+        run: uv python install 3.12
+
+      - name: Build the plugin wheel
+        run: uv build --wheel --package pytest-vantage -o dist --python 3.12
+
+      - name: Set up Python 3.9
+        run: uv python install 3.9
+
+      - name: Assert install is refused, not broken at import  # RQ-27
+        run: |
+          uv venv /tmp/py39-refused-check --python 3.9
+          if uv pip install --python /tmp/py39-refused-check/bin/python dist/pytest_vantage-*.whl; then
+            echo "expected the Python 3.9 install to be refused by requires-python, but it succeeded" >&2
+            exit 1
+          fi
+
+  # RQ-28: every operation completes with only the configured local server
+  # reachable. The whole suite, real subprocess and socket tests included,
+  # runs with every non-loopback outbound connection rejected for the
+  # process under test -- see the rule below for why the restriction is
+  # scoped to a group rather than applied to the whole machine.
+  networking-disabled:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -20,14 +97,171 @@ jobs:
       - name: Install project (locked, dev extra)
         run: uv sync --locked --extra dev --python 3.12
 
-      - name: Run pytest
-        run: uv run --extra dev pytest
+      # Block the PROCESS UNDER TEST, never the machine. A blanket
+      # `iptables -A OUTPUT -j REJECT` also severs the runner agent's own
+      # connection to GitHub's control plane: the first attempt hung for
+      # over twenty minutes and had to be cancelled by hand. Exempting
+      # ESTABLISHED flows is not enough either -- the agent reconnects, and
+      # a reconnect is a NEW connection, so that only delays the same death.
+      #
+      # Owner matching is what makes this precise: only processes running
+      # under the `nonet` group are rejected, and the suite is the only
+      # thing put in that group. Loopback stays open, which is exactly what
+      # RQ-28 permits -- the configured local server and nothing else.
+      - name: Create the blocked group and its rules  # RQ-28
+        run: |
+          sudo groupadd -f nonet
+          # The TCP rule lives in its own chain so its packet counter can be
+          # read unambiguously -- that counter is what turns this job from
+          # "the suite survived" into "the suite attempted nothing", which
+          # is what RQ-28's second scenario actually asks.
+          sudo iptables -N VANTAGE_NONET
+          sudo iptables -A VANTAGE_NONET -j REJECT
+          sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -p tcp -j VANTAGE_NONET
+          # Everything that is not TCP is still blocked, just not counted:
+          # the suite resolves one deliberately unresolvable host, and DNS
+          # is UDP, so counting it would make the assertion below fail for a
+          # reason that has nothing to do with reporting.
+          sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT
+          # IPv6 blocked too. The counter below reads the IPv4 chain only,
+          # so without this an IPv6 connection would be neither blocked nor
+          # counted and the assertion would still print zero -- the measured
+          # family and the blocked family have to be the same set.
+          sudo ip6tables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT
+          # The runner's stock sudoers rule grants passwordless sudo for
+          # running as another USER, but not as another GROUP, so `sudo -g`
+          # alone prompts for a password and the step dies in ten seconds.
+          echo "$(id -un) ALL=(ALL:ALL) NOPASSWD:ALL" \
+            | sudo tee /etc/sudoers.d/99-vantage-nonet >/dev/null
 
-      - name: Run ruff
+      # Same user, different group -- deliberately not root. RQ-40's tests
+      # assert 0600 file modes, and root bypasses permission checks, so a
+      # root run would turn those into false passes.
+      # Positive control, and it runs FIRST on purpose. The assertion below
+      # is that a counter reads zero, and a counter that never worked also
+      # reads zero. Proving the rule matches a real attempt is what stops
+      # the green result from being vacuous.
+      - name: Prove the rule counts a real attempt  # RQ-28
+        run: |
+          sudo iptables -Z VANTAGE_NONET
+          # 203.0.113.1 is TEST-NET-3 (RFC 5737): reserved, never routable,
+          # so this reaches nothing even if the rule were absent.
+          sudo -u "$(id -un)" -g nonet timeout 5 \
+            bash -c 'exec 3<>/dev/tcp/203.0.113.1/80' || true
+          armed="$(sudo iptables -L VANTAGE_NONET -v -n -x | awk '/REJECT/ {print $1; exit}')"
+          echo "packets the control attempt got rejected: ${armed:-0}"
+          if [ "${armed:-0}" -lt 1 ]; then
+            echo "the rule never matched, so a zero below would prove nothing" >&2
+            exit 1
+          fi
+
+      # `uv` by absolute path: sudo replaces PATH from its own `secure_path`
+      # and `--preserve-env=PATH` does not override that, so a bare `uv`
+      # resolves to nothing.
+      - name: Run the suite with outbound networking blocked  # RQ-28
+        run: >
+          sudo iptables -Z VANTAGE_NONET &&
+          sudo -u "$(id -un)" -g nonet
+          --preserve-env=HOME,UV_CACHE_DIR
+          "$(command -v uv)" run --no-sync pytest
+
+      # The suite passing only shows it SURVIVED: `plugin.py`'s
+      # `except OSError` and `boundary.py`'s fault isolation both swallow a
+      # rejected connection by design, so no test can fail because of one.
+      # RQ-28's second scenario is about ABSENCE, and absence is only
+      # visible in the rule's own counter.
+      - name: Assert the suite attempted no outbound connection  # RQ-28
+        run: |
+          # `pipefail`, and an empty read treated as failure rather than as
+          # zero. Without both, this is fail-OPEN: a pipeline's status is
+          # awk's, awk succeeds on empty input, and `${attempted:-0}` then
+          # turns a failed `iptables -L` into the answer the requirement
+          # wants to hear. The one assertion RQ-28 rests on must not be able
+          # to read nothing and call it success.
+          set -o pipefail
+          attempted="$(sudo iptables -L VANTAGE_NONET -v -n -x | awk '/REJECT/ {print $1; exit}')"
+          if [ -z "$attempted" ]; then
+            echo "could not read the rule counter; absence of evidence is not evidence" >&2
+            exit 1
+          fi
+          echo "non-loopback TCP connections the suite attempted: $attempted"
+          if [ "$attempted" -ne 0 ]; then
+            sudo iptables -L VANTAGE_NONET -v -n -x
+            echo "expected none; RQ-28 says nothing beyond the local server is contacted" >&2
+            exit 1
+          fi
+
+  # RQ-24: installing pytest-vantage into an environment that already has
+  # pytest adds exactly one distribution -- no third-party dependency rides
+  # along.
+  clean-environment-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up build Python
+        run: uv python install 3.12
+
+      - name: Build the plugin wheel
+        run: uv build --wheel --package pytest-vantage -o dist --python 3.12
+
+      - name: Assert exactly one distribution is added  # RQ-24
+        run: |
+          uv venv /tmp/clean-install-check --python 3.12
+          uv pip install --python /tmp/clean-install-check/bin/python pytest
+          uv pip list --python /tmp/clean-install-check/bin/python --format=freeze | sort > before.txt
+
+          uv pip install --python /tmp/clean-install-check/bin/python dist/pytest_vantage-*.whl
+          uv pip list --python /tmp/clean-install-check/bin/python --format=freeze | sort > after.txt
+
+          added="$(comm -13 before.txt after.txt)"
+          removed="$(comm -23 before.txt after.txt)"
+          echo "Added:"
+          echo "$added"
+          echo "Removed:"
+          echo "$removed"
+
+          added_count="$(printf '%s\n' "$added" | grep -c . || true)"
+          removed_count="$(printf '%s\n' "$removed" | grep -c . || true)"
+          if [ "$added_count" -ne 1 ] || [ "$removed_count" -ne 0 ]; then
+            echo "expected exactly one distribution added and none removed/changed" >&2
+            exit 1
+          fi
+
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install project (locked, dev extra)
+        run: uv sync --locked --extra dev --python 3.12
+
+      - name: Run ruff format --check
+        run: uv run --extra dev ruff format --check .
+
+      - name: Run ruff check
         run: uv run --extra dev ruff check .
 
-      - name: Run mypy
-        run: uv run --extra dev mypy src
+      - name: Run mypy --strict
+        run: uv run --extra dev mypy .
 
-      - name: Build wheel (packaging guard)
-        run: uv build --wheel
+      # deptry is scoped by name (pyproject.toml's [tool.deptry.per_rule_ignores]),
+      # not silenced wholesale -- see that file's comment for what each
+      # ignored name is and why it is a known false positive rather than a
+      # real problem.
+      - name: Run deptry
+        run: uv run --extra dev deptry .
+
+      - name: Build both distributions (packaging guard)
+        run: uv build --wheel --all-packages -o dist

@@ -1,49 +1,103 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
-name = "vantage"
+name = "vantage-workspace"
 version = "0.1.0"
-description = "A web platform and API for pytest -- launch, monitor live, schedule, and compare test runs from a single vantage point."
+description = "Vantage: continuous pytest observability -- workspace root."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.11"
+requires-python = ">=3.10,<3.14"
 authors = [{ name = "Guillermo Gil" }]
 dependencies = [
-    "sqlalchemy>=2.0",
-    "pydantic>=2",
-    "alembic",
+    "pytest-vantage",
+    "vantage",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "ruff",
-    "mypy",
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "deptry>=0.16",
+    "pip-audit>=2.7",
+    # `fastapi.testclient.TestClient` needs it (PR6); dev-only, never a
+    # runtime dependency of `vantage` itself.
+    "httpx2>=1.0",
+    # No standalone `uvicorn` entry here (PR8 carried one, dev-only, for the
+    # raw-socket truncation test): PR9 made `uvicorn` a runtime dependency
+    # of `packages/vantage/pyproject.toml`, and this workspace root already
+    # depends on `vantage`, so a second declaration here would only be able
+    # to drift from the one that matters.
+    # RQ-27 requires the suite to pass with pytest-xdist installed; task 6.5
+    # needs a real `-n 4` subprocess run, not just the unit-level worker-input
+    # guard (5.3/5.4). Dev-only: neither `pytest-vantage` nor `vantage`
+    # depends on it (RQ-24, RQ-27's "without xdist" half of the CI matrix).
+    "pytest-xdist>=3.5",
 ]
-# Populated at api-core-launch (slice 2): fastapi, uvicorn, apscheduler, etc.
-# Kept as an explicit empty extra now so collector-only installs never pull
-# server dependencies (see docs/architecture.md).
-server = []
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/vantage"]
+# This root pyproject.toml is the uv workspace root, not a published
+# distribution -- it carries no [build-system]. Two distributions are
+# published from packages/ (ADR-4), released independently through prefixed
+# tags: pytest-vantage-vX.Y.Z and vantage-vX.Y.Z.
+[tool.uv.workspace]
+members = ["packages/*"]
 
+[tool.uv.sources]
+pytest-vantage = { workspace = true }
+vantage = { workspace = true }
+
+# The only [tool.pytest.ini_options] in the workspace (D9). pytest reads
+# exactly one ini file, resolved from rootdir; a package that declared its
+# own would silently shadow this one when run from inside that package.
+# A guard test enforces the invariant by scanning every package
+# pyproject.toml for this section.
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-addopts = "--strict-markers --strict-config"
+markers = [
+    "req(id): the requirement (RQ-nn) this test verifies",
+]
+addopts = "--strict-markers"
+pythonpath = ["packages/vantage/tests"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py310"
+extend-exclude = ["docs/adr", "web"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "UP"]
+select = ["E", "F", "I", "N", "UP", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# `assert` is how pytest tests fail; S101 exists for production code.
+"**/tests/**" = ["S101"]
 
 [tool.mypy]
-python_version = "3.11"
-mypy_path = ["src"]
-disallow_untyped_defs = true
+python_version = "3.10"
+strict = true
 warn_unused_configs = true
+mypy_path = [
+    "packages/pytest-vantage/src",
+    "packages/vantage/src",
+    "packages/vantage/tests",
+]
+
+[tool.deptry]
+# pytest-vantage must declare nothing but pytest and import nothing outside
+# the standard library (RQ-24). vantage.core must import only the standard
+# library (RQ-26); both are also checked by the AST architecture test.
+ignore_notebooks = true
+
+# deptry reads exactly one pyproject.toml (this one) and has no notion of a
+# uv workspace, so it cannot see that fastapi/pydantic/starlette/uvicorn are
+# declared in packages/vantage/pyproject.toml, or that importwalk,
+# vantage_port_contract and vantage_test_server are real local test-support
+# modules reached through the root `pythonpath` rather than missing
+# packages. Per-module, per-rule ignores name exactly those known cases so a
+# genuinely new undeclared import is still caught (verified: an ad hoc
+# `import requests` probe was flagged even with this config in place).
+# DEP002 additionally covers CLI-only dev tools (ruff, mypy, deptry,
+# pip-audit) that are invoked via `uv run <tool>` and never imported as
+# Python modules, plus pytest-xdist and httpx2, which are exercised through
+# pytest's own plugin discovery and starlette's TestClient rather than a
+# direct `import` in this project's code.
+[tool.deptry.per_rule_ignores]
+DEP001 = ["importwalk", "vantage_port_contract", "vantage_test_server"]
+DEP002 = ["ruff", "mypy", "deptry", "pip-audit", "httpx2", "pytest-xdist"]
+DEP003 = ["fastapi", "pydantic", "starlette", "uvicorn"]
