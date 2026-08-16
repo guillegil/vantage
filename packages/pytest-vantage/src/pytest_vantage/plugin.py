@@ -156,4 +156,4 @@ def pytest_configure(config: pytest.Config) -> None:
     if not _preflight_reachable(address, connect_timeout):
         _warn(config, f"vantage: cannot reach {address}, this session will not be recorded")
         return
-    config.pluginmanager.register(Recorder(address, timeout))
+    config.pluginmanager.register(Recorder(config, address, timeout))

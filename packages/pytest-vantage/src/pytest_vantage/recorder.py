@@ -1,6 +1,12 @@
 """`Recorder` -- the hook implementation registered by `plugin.py` only once
-activation succeeds (design.md D2a). Assembles the session report and sends
-it exactly once, from `pytest_sessionfinish`, never per test (RQ-25's shape).
+activation and the reachability preflight both succeed (design.md D2a, D6).
+Assembles the session report and sends it exactly once, from
+`pytest_sessionfinish`, never per test (RQ-25's shape).
+
+Every hook is wrapped in `pytest_vantage.boundary.fault_isolated`: an error
+raised anywhere in the reporting path -- assembling the report, sending it,
+a server that never answers -- becomes one warning and never the suite's
+exit status (RQ-21).
 
 Never imports `pytest_vantage.plugin`: registration is the plugin's job, not
 this module's (RQ-24 keeps every import here to stdlib and `pytest`, same as
@@ -12,6 +18,9 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+import pytest
+
+from pytest_vantage.boundary import fault_isolated
 from pytest_vantage.transport import send
 
 # `pytest.ExitCode.INTERRUPTED` (2) and `pytest.ExitCode.INTERNAL_ERROR` (3):
@@ -36,18 +45,26 @@ def isoformat_utc(moment: datetime) -> str:
 
 
 class Recorder:
-    """Registered by `plugin.py::pytest_configure` once activation succeeds.
+    """Registered by `plugin.py::pytest_configure` once activation and the
+    reachability preflight both succeed.
 
     One request per session (RQ-25): the report is assembled in memory and
-    sent exactly once, from `pytest_sessionfinish`.
+    sent exactly once, from `pytest_sessionfinish`. `_config` is kept only
+    so a hook that fails can route its warning through the terminal
+    reporter (`boundary._warn`); `_disabled` is the fault-isolation latch
+    `fault_isolated` reads and sets -- once `True`, every further hook call
+    on this instance is a silent no-op.
     """
 
-    def __init__(self, address: str, timeout: float) -> None:
+    def __init__(self, config: pytest.Config, address: str, timeout: float) -> None:
+        self._config = config
         self._address = address
         self._timeout = timeout
         self._run_id = uuid.uuid4().hex
         self._started_at = datetime.now(timezone.utc)
+        self._disabled = False
 
+    @fault_isolated
     def pytest_report_header(self) -> str:
         """Names the run id so a test harness -- or a curious human -- can
         correlate a session with the row it produced, without reaching into
@@ -55,6 +72,7 @@ class Recorder:
         """
         return f"vantage: recording run {self._run_id} to {self._address}"
 
+    @fault_isolated
     def pytest_sessionfinish(self, exitstatus: int) -> None:
         exit_status = int(exitstatus)
         orderly = exit_status not in _NULL_FINISH_EXIT_STATUSES

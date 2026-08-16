@@ -1,25 +1,30 @@
 """Fault isolation for the reporting path (design.md D6, RQ-21, RQ-37).
 
-`_warn` emits a session warning that names what went wrong and never lets
-pytest's own warning-as-error configuration turn a recording failure into an
-unhandled exception. `plugin.py`'s preflight (task 6.8) calls it when the
-server cannot be reached at all, before anything is registered.
+Two things live here because design.md names one helper for both: `_warn`
+emits a session warning that names what went wrong and never lets pytest's
+own warning-as-error configuration turn a recording failure into an
+unhandled exception. `fault_isolated` is a decorator applied to every
+`Recorder` hook so an `Exception` raised while reporting becomes exactly one
+`_warn` call instead of propagating into pytest's hook-calling machinery.
 
-A second piece lands here in task 6.10: a decorator applied to every
-`Recorder` hook so an `Exception` raised while reporting -- after
-registration, not before -- becomes exactly one more `_warn` call instead of
-propagating into pytest's hook-calling machinery (RQ-21). Both moments call
-the same helper because, from the user's point of view, they are the same
-kind of event: recording did not happen, say so once, and let the suite
-finish exactly as it would have otherwise.
+`plugin.py`'s preflight (task 6.8) and `Recorder`'s hooks (task 6.10) both
+call `_warn` -- the preflight failing before anything is registered, and a
+hook failing after registration, are two different moments but the same
+kind of event from the user's point of view: recording did not happen, say
+so once, and let the suite finish exactly as it would have otherwise.
 """
 
 from __future__ import annotations
 
+import functools
 import sys
 import warnings
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 import pytest
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 
 class VantageWarning(UserWarning):
@@ -61,4 +66,36 @@ def _warn(config: pytest.Config, message: str) -> None:
     print(message, file=sys.stderr)
 
 
-__all__ = ["VantageWarning", "_warn"]
+def fault_isolated(hook: F) -> F:
+    """Wrap a `Recorder` hook so any `Exception` it raises becomes exactly
+    one warning instead of propagating (design.md D6, RQ-21).
+
+    Catches `Exception`, never `BaseException` -- `KeyboardInterrupt` and
+    `SystemExit` must still propagate through pytest's own `wrap_session`
+    (RQ-31 depends on a real SIGINT still reaching it). Latches on first
+    failure: once one wrapped call has warned, `self._disabled` makes every
+    later call on the same `Recorder` instance a silent no-op that does not
+    even invoke the hook body again -- this is what keeps a session where
+    several hooks fail at exactly one warning (RQ-21's "every hook is
+    fault-isolated" scenario), not one per failing hook.
+
+    Never assigns `session.exitstatus`. Catching the exception here and
+    simply not re-raising it *is* the entire mechanism -- nothing in this
+    module, or the hook it wraps, touches the suite's verdict.
+    """
+
+    @functools.wraps(hook)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if self._disabled:
+            return None
+        try:
+            return hook(self, *args, **kwargs)
+        except Exception as exc:  # deliberately broad, never BaseException -- RQ-21
+            self._disabled = True
+            _warn(self._config, f"vantage: error while reporting: {exc}")
+            return None
+
+    return wrapper  # type: ignore[return-value]
+
+
+__all__ = ["VantageWarning", "_warn", "fault_isolated"]
