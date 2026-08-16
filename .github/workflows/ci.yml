@@ -108,9 +108,20 @@ jobs:
       # under the `nonet` group are rejected, and the suite is the only
       # thing put in that group. Loopback stays open, which is exactly what
       # RQ-28 permits -- the configured local server and nothing else.
-      - name: Create the blocked group and its rule  # RQ-28
+      - name: Create the blocked group and its rules  # RQ-28
         run: |
           sudo groupadd -f nonet
+          # The TCP rule lives in its own chain so its packet counter can be
+          # read unambiguously -- that counter is what turns this job from
+          # "the suite survived" into "the suite attempted nothing", which
+          # is what RQ-28's second scenario actually asks.
+          sudo iptables -N VANTAGE_NONET
+          sudo iptables -A VANTAGE_NONET -j REJECT
+          sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -p tcp -j VANTAGE_NONET
+          # Everything that is not TCP is still blocked, just not counted:
+          # the suite resolves one deliberately unresolvable host, and DNS
+          # is UDP, so counting it would make the assertion below fail for a
+          # reason that has nothing to do with reporting.
           sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT
           # The runner's stock sudoers rule grants passwordless sudo for
           # running as another USER, but not as another GROUP, so `sudo -g`
@@ -121,14 +132,48 @@ jobs:
       # Same user, different group -- deliberately not root. RQ-40's tests
       # assert 0600 file modes, and root bypasses permission checks, so a
       # root run would turn those into false passes.
+      # Positive control, and it runs FIRST on purpose. The assertion below
+      # is that a counter reads zero, and a counter that never worked also
+      # reads zero. Proving the rule matches a real attempt is what stops
+      # the green result from being vacuous.
+      - name: Prove the rule counts a real attempt  # RQ-28
+        run: |
+          sudo iptables -Z VANTAGE_NONET
+          # 203.0.113.1 is TEST-NET-3 (RFC 5737): reserved, never routable,
+          # so this reaches nothing even if the rule were absent.
+          sudo -u "$(id -un)" -g nonet timeout 5 \
+            bash -c 'exec 3<>/dev/tcp/203.0.113.1/80' || true
+          armed="$(sudo iptables -L VANTAGE_NONET -v -n -x | awk '/REJECT/ {print $1; exit}')"
+          echo "packets the control attempt got rejected: ${armed:-0}"
+          if [ "${armed:-0}" -lt 1 ]; then
+            echo "the rule never matched, so a zero below would prove nothing" >&2
+            exit 1
+          fi
+
       # `uv` by absolute path: sudo replaces PATH from its own `secure_path`
       # and `--preserve-env=PATH` does not override that, so a bare `uv`
       # resolves to nothing.
       - name: Run the suite with outbound networking blocked  # RQ-28
         run: >
+          sudo iptables -Z VANTAGE_NONET &&
           sudo -u "$(id -un)" -g nonet
           --preserve-env=HOME,UV_CACHE_DIR
           "$(command -v uv)" run --no-sync pytest
+
+      # The suite passing only shows it SURVIVED: `plugin.py`'s
+      # `except OSError` and `boundary.py`'s fault isolation both swallow a
+      # rejected connection by design, so no test can fail because of one.
+      # RQ-28's second scenario is about ABSENCE, and absence is only
+      # visible in the rule's own counter.
+      - name: Assert the suite attempted no outbound connection  # RQ-28
+        run: |
+          attempted="$(sudo iptables -L VANTAGE_NONET -v -n -x | awk '/REJECT/ {print $1; exit}')"
+          echo "non-loopback TCP connections the suite attempted: ${attempted:-0}"
+          if [ "${attempted:-0}" -ne 0 ]; then
+            sudo iptables -L VANTAGE_NONET -v -n -x
+            echo "expected none; RQ-28 says nothing beyond the local server is contacted" >&2
+            exit 1
+          fi
 
   # RQ-24: installing pytest-vantage into an environment that already has
   # pytest adds exactly one distribution -- no third-party dependency rides

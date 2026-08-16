@@ -741,12 +741,15 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 > (`this-host-does-not-exist.invalid`, RFC 2606's reserved TLD) is caught
 > through `_preflight_reachable`'s broad `except OSError`, which does not
 > distinguish NXDOMAIN from a blocked-outbound failure — both are `OSError`
-> subclasses, so the same code path handles either environment. The job
-> itself (`sudo iptables -A OUTPUT -o lo -j ACCEPT` then `-A OUTPUT -j
-> REJECT`, then the full suite with `--no-sync`) is standard practice on
-> GitHub-hosted Ubuntu runners (passwordless sudo, iptables preinstalled)
-> but is the one job in this PR that rests on that standard practice rather
-> than on a local reproduction.
+> subclasses, so the same code path handles either environment.
+>
+> **Superseded — the job has since run four times, and the shape described
+> above was wrong.** See "Commits after PR14's landed summary" at the end
+> of this file. The original rule (`-A OUTPUT -o lo -j ACCEPT` then
+> `-A OUTPUT -j REJECT`) is deleted, and calling it standard practice did
+> not survive contact with a runner: a blanket OUTPUT REJECT also severs
+> the runner agent's own control-plane egress, and the first attempt hung
+> for twenty-six minutes before being cancelled by hand.
 >
 > **`deptry` findings were resolved by naming the false positives, not by
 > a blanket ignore.** `uv run --extra dev deptry .` at the tip reported 27
@@ -891,3 +894,34 @@ the very thing the requirement points at.
 
 Recorded here because the verification pass found this commit contradicting
 this very section — the record said deferred, the tree said done.
+
+## Commits after PR14's landed summary
+
+Recorded here because verification round 1 found a commit contradicting this
+file, round 2 found the same defect class recurring one generation later, and
+a record that is only true at the moment it is written is not a record. Every
+commit below landed after the PR14 summary above and is part of the change.
+
+| Commit | What it did |
+| --- | --- |
+| `8b0d666` | Closed the two documentation follow-ups PR14 correctly left alone — ADR-0003's pre-ADR-4 distribution names, and the schema manifest's "Known inconsistency" note, which task 8.2 had turned from stale into actively wrong. |
+| `e9dff96` | Closed verification round 1's findings: C1 (this file's record contradicting the tree), W3 (nothing asserted that *every* `Recorder` hook is fault-isolated), W4 (RQ-2's "emits no warning" half unasserted — `assert_outcomes` leaves any count it is not given unchecked), W6 (the networking rule severing the runner). |
+| `76bf43c` | Repaired what the first real CI run exposed. The RQ-27 matrix failed on Python 3.10, 3.11 and 3.12 and passed only on 3.13: `pytester.popen` opens a stdin pipe and closes it, and `communicate()` calls `flush()` on that closed file before 3.13. Fixed with `stdin=subprocess.DEVNULL`. Also rewrote the networking rule to match on group ownership so only the suite is blocked, and gave every job a `timeout-minutes`. |
+| `0f74cef` | `sudo -g` needs a sudoers rule of its own — the runner's stock grant covers running as another user, not as another group. |
+| `a5f18f1` | `uv` by absolute path: sudo rebuilds `PATH` from its own `secure_path`, so a bare `uv` resolved to nothing. First fully green CI run: `31960833652`, all twelve jobs. |
+
+### RQ-28's second scenario, and why a green job was not enough
+
+Verification round 2 rejected the green `networking-disabled` job as evidence
+for RQ-28's "no connection is attempted" scenario, correctly. The job blocked
+traffic and read nothing back, and the suite **cannot fail** on a rejected
+connection: `plugin.py`'s `except OSError` treats REJECT, NXDOMAIN and a
+closed port as one case, and `boundary.py`'s fault isolation does the same on
+the send path, both by design. A green run there proved the suite *survived*,
+never that it *attempted nothing*.
+
+The job now reads the rejecting rule's own packet counter and asserts it is
+zero — that counter is the scenario's subject — and runs a deliberate
+connection to TEST-NET-3 first to prove the counter moves. Without that
+positive control a zero would be indistinguishable from a rule that never
+armed, which is exactly how the three earlier failures presented.
