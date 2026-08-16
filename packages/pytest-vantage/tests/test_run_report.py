@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 
 import pytest
-from vantage_test_server import VantageTestServer
+from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
 
@@ -83,9 +83,7 @@ def test_recorder_registered_only_when_vantage_flag_is_present(
     inactive = pytester.parseconfigure()
 
     assert any(isinstance(plugin, Recorder) for plugin in active.pluginmanager.get_plugins())
-    assert not any(
-        isinstance(plugin, Recorder) for plugin in inactive.pluginmanager.get_plugins()
-    )
+    assert not any(isinstance(plugin, Recorder) for plugin in inactive.pluginmanager.get_plugins())
 
 
 # --- End-to-end (task 6.1, RQ-1 + RQ-31) ------------------------------------
@@ -94,7 +92,8 @@ def test_recorder_registered_only_when_vantage_flag_is_present(
 @pytest.mark.req("RQ-1")
 @pytest.mark.req("RQ-31")
 def test_completed_session_writes_one_row_with_ordered_timestamps(
-    pytester: pytest.Pytester, vantage_server: VantageTestServer
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
@@ -112,7 +111,8 @@ def test_completed_session_writes_one_row_with_ordered_timestamps(
 
 @pytest.mark.req("RQ-1")
 def test_second_invocation_gets_a_distinct_identifier(
-    pytester: pytest.Pytester, vantage_server: VantageTestServer
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     pytester.makepyfile(test_sample=_PASSING_TEST)
     args = ("--vantage", f"--vantage-server={vantage_server.address}")
@@ -127,7 +127,8 @@ def test_second_invocation_gets_a_distinct_identifier(
 
 @pytest.mark.req("RQ-1")
 def test_zero_test_collection_still_writes_one_row(
-    pytester: pytest.Pytester, vantage_server: VantageTestServer
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     result = pytester.runpytest_subprocess(
         "--vantage", f"--vantage-server={vantage_server.address}"
@@ -139,7 +140,8 @@ def test_zero_test_collection_still_writes_one_row(
 
 @pytest.mark.req("RQ-1")
 def test_failed_collection_still_writes_one_row(
-    pytester: pytest.Pytester, vantage_server: VantageTestServer
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     pytester.makepyfile(test_broken="import this_module_does_not_exist_anywhere_at_all\n")
 
@@ -150,7 +152,8 @@ def test_failed_collection_still_writes_one_row(
 
 @pytest.mark.req("RQ-31")
 def test_sigint_leaves_start_time_and_null_end_time(
-    pytester: pytest.Pytester, vantage_server: VantageTestServer
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     """`pytest`'s `wrap_session` calls `pytest_sessionfinish` from a
     `finally` with `ExitCode.INTERRUPTED` (design.md D7) -- the report IS
@@ -158,11 +161,7 @@ def test_sigint_leaves_start_time_and_null_end_time(
     `Popen` (`pytester.popen`, not `runpytest_subprocess`) because the
     signal has to be delivered to a still-running child process.
     """
-    pytester.makepyfile(
-        test_slow=(
-            "import time\n\n\ndef test_slow():\n    time.sleep(5)\n"
-        )
-    )
+    pytester.makepyfile(test_slow=("import time\n\n\ndef test_slow():\n    time.sleep(5)\n"))
 
     process = pytester.popen(
         [
@@ -195,7 +194,8 @@ def test_sigint_leaves_start_time_and_null_end_time(
 @pytest.mark.req("RQ-1")
 @pytest.mark.req("RQ-27")
 def test_xdist_run_leaves_exactly_one_run_entry(
-    pytester: pytest.Pytester, vantage_server: VantageTestServer
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     """Ties 5.3's unit-level xdist guard to a real `-n 4` subprocess run:
     four workers plus the controller all execute `pytest_configure`, and

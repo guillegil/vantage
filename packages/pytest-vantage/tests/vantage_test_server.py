@@ -1,13 +1,19 @@
 """`VantageTestServer` -- a real `vantage` server for `pytest-vantage`'s own
-end-to-end tests (design.md D2a).
+end-to-end tests (design.md D2a), and the `vantage_server` fixture that
+wraps it.
 
-A separate, non-`test_*` module rather than living in `conftest.py` directly:
-`conftest.py` is loaded by pytest through its own path-based import
-machinery, and a plain `import conftest` from a sibling test module risks
-colliding with the workspace-root `conftest.py`, which already claims that
-module name during a full-suite run. `vantage_port_contract.py` (PR1) and
-`importwalk.py` (PR1) already establish the same pattern: a shared, non-test
-module living directly inside a `tests/` directory, imported by name.
+A separate, non-`test_*` module rather than a `conftest.py`: a package-level
+`conftest.py` alongside the workspace-root one both resolve to the bare
+module name `conftest` under this project's plain (non-package) test
+layout, which mypy rejects as a duplicate module -- pytest itself tolerates
+it (each is loaded through its own path-keyed machinery), but a second
+`conftest.py` here would fail `mypy --strict` outright. Importing the
+fixture function directly into the one test module that needs it
+(`test_run_report.py`) is the standard pytest idiom for a fixture that does
+not need conftest.py's directory-wide auto-application, and it sidesteps
+the collision entirely. `vantage_port_contract.py` and `importwalk.py`
+(both PR1) already establish the same "shared, non-test module living
+directly inside a `tests/` directory" pattern.
 
 Dev-only: never packaged (RQ-24 constrains `src/`, not `tests/`).
 """
@@ -18,7 +24,9 @@ import asyncio
 import socket
 import threading
 import time
+from collections.abc import Iterator
 
+import pytest
 import uvicorn
 from vantage.core.domain.execution import Execution
 from vantage.service.app import create_app
@@ -51,9 +59,7 @@ class VantageTestServer:
         )
         self._server = uvicorn.Server(config)
         self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self._run, name="vantage-test-server", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name="vantage-test-server", daemon=True)
 
     def _run(self) -> None:
         asyncio.set_event_loop(self._loop)
@@ -79,3 +85,13 @@ class VantageTestServer:
         every test that needs to inspect what was recorded.
         """
         return list(self.store._executions.values())  # noqa: SLF001
+
+
+@pytest.fixture
+def vantage_server() -> Iterator[VantageTestServer]:
+    server = VantageTestServer()
+    server.start()
+    try:
+        yield server
+    finally:
+        server.stop()
