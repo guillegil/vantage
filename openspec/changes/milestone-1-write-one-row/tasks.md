@@ -522,12 +522,75 @@ is ADR-5's accepted cost. Say so plainly rather than trimming it.
 
 ### D2a — Recorder, Transport & Happy Path (PR11)
 
-- [ ] 6.1 RED — `test_run_report.py`: `pytester.runpytest_subprocess` against a real `vantage` server (uvicorn, ephemeral port, in-memory adapter) — completed session (RQ-1.1, RQ-31.1: end time later than start); zero-test collection (RQ-1.3); failed collection (RQ-1.4); Ctrl-C/SIGINT (RQ-31.2: start time, null end). `@pytest.mark.req("RQ-1")`, `@pytest.mark.req("RQ-31")`.
-- [ ] 6.2 GREEN — `recorder.py::Recorder` (`pytest_sessionfinish`, `pytest_report_header`) assembles the `{"run": {...}}` envelope per D1: `datetime.now(timezone.utc)`, **never `datetime.UTC`**, fixed-width ISO-8601 with `+00:00`; `finished_at` null iff `exitstatus in {2, 3}`. `transport.py::send` — one `urllib` POST at `pytest_sessionfinish`, never per test (RQ-25's shape).
-- [ ] 6.3 RED — reuse 5.1's differential plus an assertion that `Recorder` is registered iff `--vantage`/equivalent is present and the preflight succeeded.
-- [ ] 6.4 GREEN — `plugin.py`: `pluginmanager.register(Recorder(address, timeout))` wired in after a successful preflight (PR12's 6.8).
-- [ ] 6.5 RED — end-to-end xdist check: `-n 4` against a real server leaves exactly one run entry (ties 5.3's unit guard to a real subprocess). `@pytest.mark.req("RQ-1")`, `@pytest.mark.req("RQ-27")`.
-- [ ] 6.6 GREEN — verification-only; expected to pass from 5.4 + 6.2 with no further change.
+> **Landed 2026-08-16, 521 authored lines** (excluding `openspec/` and
+> `uv.lock`) against a ~260-line forecast — comfortably inside the 800-line
+> budget raised for this session, though well over the original PR-slice
+> estimate. The overage is mostly `test_run_report.py` (213 lines: six
+> end-to-end scenarios plus the registration and timestamp-formatting unit
+> tests, all real subprocess/socket work, none of it mockable down) and
+> `vantage_test_server.py` (97 lines: a real uvicorn server, not a stub —
+> the same ceremony `test_rejection.py::_RawSocketServer` already pays for
+> the same reason).
+>
+> **Resolved: task 6.4's forward dependency on PR12's preflight (task
+> 6.8).** design.md D6 describes registration as gated on a successful TCP
+> preflight probe, but that probe does not exist until PR12. Rather than
+> pull PR12's work forward — which the launch prompt explicitly forbade —
+> `pytest_configure` registers `Recorder` **unconditionally once the xdist
+> guard and the activation check both pass**, with no reachability gate.
+> PR12 narrows that condition from "activated" to "activated and
+> reachable" by inserting the preflight in front of the same
+> `pluginmanager.register(...)` call. Until PR12 lands, a session run with
+> `--vantage` against a genuinely unreachable server raises uncaught from
+> `Recorder.pytest_sessionfinish` — PR12's `boundary.py` (task 6.10) is
+> what will catch it. Stated in `plugin.py`'s own docstring, not just here.
+>
+> **Task 6.3's RED and 6.2's GREEN were restructured, not skipped.** As
+> written, 6.2's GREEN (`recorder.py` + `transport.py` only, no `plugin.py`
+> wiring) cannot make 6.1's end-to-end RED test pass — wiring is
+> explicitly 6.4's job. Rather than leave 6.1 red across an unrelated GREEN
+> commit with no test signal at all from that commit, the registration
+> test (6.3's assertion) was written **in the same RED commit as 6.1**,
+> and two isoformat-fixed-width unit tests were added alongside it as a
+> real, independently-closable RED for 6.2 to close (neither the
+> end-to-end scenarios nor the server's pydantic parsing would catch a
+> variable-width-timestamp regression — pydantic tolerates it). The actual
+> commit sequence: RED (6.1 six e2e scenarios + 6.3's registration
+> assertion + two isoformat unit tests, nine tests, all confirmed failing
+> for the stated reasons) → GREEN (6.2: `recorder.py`/`transport.py`,
+> closing only the two isoformat tests, confirmed the other seven stayed
+> red) → GREEN (6.4: `plugin.py` wiring, closing all seven remaining
+> tests) → RED/GREEN (6.5/6.6: `pytest-xdist` dev dependency added,
+> closing the eighth test with zero further code change, exactly as 6.6's
+> own text predicted).
+>
+> **The known blocker was real and is now fixed.** `pytest-xdist` was not
+> installed (`ModuleNotFoundError` on `import xdist`, confirmed before
+> adding it); added to the workspace root's `dev` extras only. `uv.lock`
+> regenerates (excluded from the authored count, included in the ledger
+> tree diff).
+>
+> **One self-caught correction, disclosed rather than hidden:** a
+> package-level `packages/pytest-vantage/tests/conftest.py` (holding only
+> the `vantage_server` fixture) passed the full pytest suite but failed
+> `mypy --strict` outright — "Duplicate module named conftest" against the
+> workspace-root `conftest.py`, since this project's plain (non-package)
+> test layout gives both files the same bare module name. Caught by
+> actually running `mypy .` (not skipped), fixed by moving the fixture
+> into `vantage_test_server.py` and importing it directly into the one
+> test module that needs it — the standard pytest idiom for a
+> conftest-independent fixture — rather than reaching for a namespace-package
+> workaround. No package-level `conftest.py` exists in this PR.
+>
+> 77 → 86 tests (+9), full suite `uv run --extra dev pytest`, `ruff
+> check`/`format --check` and `mypy --strict` all clean. — PR11
+
+- [x] 6.1 RED — `test_run_report.py`: `pytester.runpytest_subprocess` against a real `vantage` server (uvicorn, ephemeral port, in-memory adapter) — completed session (RQ-1.1, RQ-31.1: end time later than start); zero-test collection (RQ-1.3); failed collection (RQ-1.4); Ctrl-C/SIGINT (RQ-31.2: start time, null end). `@pytest.mark.req("RQ-1")`, `@pytest.mark.req("RQ-31")`.
+- [x] 6.2 GREEN — `recorder.py::Recorder` (`pytest_sessionfinish`, `pytest_report_header`) assembles the `{"run": {...}}` envelope per D1: `datetime.now(timezone.utc)`, **never `datetime.UTC`**, fixed-width ISO-8601 with `+00:00`; `finished_at` null iff `exitstatus in {2, 3}`. `transport.py::send` — one `urllib` POST at `pytest_sessionfinish`, never per test (RQ-25's shape).
+- [x] 6.3 RED — reuse 5.1's differential plus an assertion that `Recorder` is registered iff `--vantage`/equivalent is present and the preflight succeeded. **Scoped down to "activated" only — see the landed-summary note above on the preflight forward dependency.**
+- [x] 6.4 GREEN — `plugin.py`: `pluginmanager.register(Recorder(address, timeout))` wired in after activation succeeds. **Not gated on a preflight in this PR — see the landed-summary note above.**
+- [x] 6.5 RED — end-to-end xdist check: `-n 4` against a real server leaves exactly one run entry (ties 5.3's unit guard to a real subprocess). `@pytest.mark.req("RQ-1")`, `@pytest.mark.req("RQ-27")`.
+- [x] 6.6 GREEN — verification-only; passed from 5.4 + 6.4 with no further code change once `pytest-xdist` was installed.
 
 ### D2b — RQ-37/RQ-21 Boundary & Timeout (PR12)
 
