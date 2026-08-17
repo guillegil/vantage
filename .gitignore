@@ -32,3 +32,11 @@ frontend/dist/
 # Tool caches (generated, not source)
 .atl/
 .codegraph/
+
+# Local machine-restore backups. These now live in ~/backups/claude-restore-2026-08-16/
+# and must stay out of this tree: claude-config.tar.gz carries .claude/.credentials.json
+# and a session key, and this repository is public. Kept here as a guard in case a
+# future restore drops them in the root again.
+/claude-config.tar.gz
+/engram-raw.tar.gz
+/engram-backup-*.json

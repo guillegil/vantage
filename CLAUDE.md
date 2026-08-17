@@ -12,7 +12,7 @@ The authoritative pages are:
 | What | Where |
 | --- | --- |
 | Project | **PROJ-1**, the row in the Projects database — https://app.notion.com/p/3bb2ba69b9aa81208f51d7b4deeee8de |
-| Requirements | `RQ-1`…`RQ-30` — data source `collection://e0aaedb4-286d-400b-b3d5-33c50b4c47a0` |
+| Requirements | `RQ-1`…`RQ-44` — data source `collection://e0aaedb4-286d-400b-b3d5-33c50b4c47a0` |
 | Features | `FT-1`…`FT-8` — data source `collection://948d9092-ef67-435c-9fcd-1ac9b5a499a2` |
 | Decisions (ADR) | data source `collection://c627b63e-917d-4876-bc10-16db280e5fa5` |
 
@@ -23,7 +23,9 @@ The authoritative pages are:
 > `NFR-1-xx`). It carries a red banner saying so. An earlier SDD cycle was
 > planned against it by mistake and had to be redone.
 
-Read all thirty requirements in **one** call rather than fetching thirty pages:
+There are **forty-three** requirements, not forty-four: the identifiers run `RQ-1`
+to `RQ-44` and `RQ-43` does not exist. Read them all in **one** call rather than
+fetching forty-three pages:
 
 ```sql
 SELECT "Ref", "Name", "Statement", "Priority", "Type", "Status",
@@ -45,8 +47,8 @@ iterations; a requirement sits in `Draft` until it has actually earned `Approved
 **Never assume a select value still exists.** The organising scheme changes: a status
 that is `Deferred` today may be replaced by `Obsolete` tomorrow, and phases,
 priorities and drivers move the same way. Fetch the data source and read its schema
-before writing any select field. All thirty Vantage requirements are currently
-`Draft`; treat every one as open to amendment rather than settled.
+before writing any select field. Every Vantage requirement is currently `Draft`;
+treat every one as open to amendment rather than settled.
 
 ### ADRs
 
@@ -86,27 +88,39 @@ more ceremony than this earns. Ports are `typing.Protocol`, not abstract base
 classes, so an adapter satisfies a port without importing the core and the
 dependency arrow points inwards at the type level too.
 
-Four packages in one uv workspace, because the dependency rule differs between them:
+**Two published distributions in one uv workspace (ADR-4), not four packages.** An
+earlier decision split this four ways and one slice of it landed as four empty
+`pyproject.toml` files; ADR-4 rejected that by name and collapsed it before any of
+them carried code. Anything still saying `vantage-core`, `vantage-storage`,
+`vantage-pytest` or `vantage-service` predates ADR-4 and describes a layout that no
+longer exists.
 
-| Package | May depend on | Why |
+| Distribution | Contains | May depend on |
 | --- | --- | --- |
-| `vantage-core` | nothing at all | RQ-26 forbids it importing any pytest, database or web module |
-| `vantage-storage` | the core only | `sqlite3` is standard library, so the adapter needs nothing else |
-| `vantage-pytest` | core + storage + pytest | the plugin |
-| `vantage-service` | anything | the only package allowed a third-party dependency — a server someone installs deliberately |
+| `pytest-vantage` | the plugin | pytest and the standard library, nothing else (RQ-24) |
+| `vantage` | `vantage.core`, `vantage.storage`, `vantage.service` | see below |
 
-**The SQLite adapter is its own package on purpose.** It cannot live in the core
-(RQ-26), and it cannot live in the plugin, because then `vantage-service` would
-have to depend on `vantage-pytest` to read the database it serves — the dependency
-arrow the wrong way for no gain.
+The dependency rule is enforced per **internal package** inside `vantage`, by an AST
+architecture test rather than by distribution boundaries:
 
-Layout is `packages/vantage-*` plus `specs/` at the root. `specs/` is generated
-from Notion in one direction; editing it by hand and expecting Notion to follow is
-how the two sources start disagreeing.
+| Internal package | May depend on | Why |
+| --- | --- | --- |
+| `vantage.core` | nothing at all | RQ-26 forbids it importing any pytest, database or web module |
+| `vantage.storage` | the core only | `sqlite3` is standard library, so the adapter needs nothing else |
+| `vantage.service` | anything | the only one allowed a third-party dependency — a server someone installs deliberately |
+
+**The plugin never opens a database (ADR-9).** It reports a finished session over
+HTTP to `POST /api/v1/runs` and the server performs every write. That is what keeps
+the plugin dependency-free, and it is why the SQLite adapter lives in `vantage` and
+the question of it living in the plugin no longer arises at all.
+
+Layout is `packages/pytest-vantage`, `packages/vantage` and `specs/` at the root.
+`specs/` is generated from Notion in one direction; editing it by hand and expecting
+Notion to follow is how the two sources start disagreeing.
 
 ## Requirement traps
 
-Four requirements have a subtlety that costs a rewrite if missed:
+Five requirements have a subtlety that costs a rewrite if missed:
 
 - **RQ-2 (opt-in recording).** "Absent from the invocation" means **the flag, not a
   configuration file.** A config file committed by one person silently enables
@@ -117,14 +131,25 @@ Four requirements have a subtlety that costs a rewrite if missed:
   tree") is unsatisfiable, because pytest writes `.pytest_cache` and `__pycache__`
   itself.
 - **RQ-24 (zero runtime dependencies).** The rule is no **third-party**
-  distribution. Vantage's own distributions are fine and expected — installing
-  `vantage-pytest` legitimately pulls `vantage-core` and `vantage-storage`.
+  distribution; Vantage's own are fine. Note what this does *not* license under
+  ADR-4 and ADR-9: `pytest-vantage` depends on pytest and the standard library
+  and nothing else. It does not pull `vantage`, because it never opens a database
+  — it speaks HTTP with `urllib`. If installing the plugin ever drags the server
+  in, the boundary has been broken, not merely bent.
 - **RQ-12 (xdist).** Under xdist every result is emitted twice, once by the worker
   and once by the controller. The filter is whether the config object carries a
   worker input attribute.
 - **RQ-29 (complete schema).** The full schema, including columns nothing populates
   until a later phase, is created at first use. No migration framework in Phase 1 —
   having one available is exactly what makes casual schema changes feel affordable.
+- **RQ-44 (abandoned run is observable)** was added on 2026-08-16, after Milestone 1
+  closed, and nothing in this repository implements it yet. It requires a run with a
+  start time and no end time to read back as *abandoned* once a grace period lapses,
+  and as *interrupted* when a Ctrl-C report did arrive. Today the plugin sends
+  nothing until `pytest_sessionfinish`, so a killed session leaves no row at all and
+  there is nothing to present. Satisfying it needs a write at the **start** of a
+  session, which changes the ingestion contract. Decide that before Milestone 2
+  rather than during it.
 
 ## Conventions
 
@@ -157,19 +182,20 @@ second copy.
 ## Validation and dependencies
 
 Pydantic v2 belongs at system boundaries — APIs, configs, payloads — because static
-types do not protect against malformed JSON. **It lives in `vantage-service` only.**
-RQ-24 forbids it, and `attrs`, and every other third-party package, from the core,
-the storage adapter and the plugin. Those use `dataclasses` from the standard
-library and hand-written validation over stdlib `json`.
+types do not protect against malformed JSON. **It lives in `vantage.service` only.**
+RQ-24 forbids it, and `attrs`, and every other third-party package, from
+`vantage.core`, `vantage.storage` and the whole of `pytest-vantage`. Those use
+`dataclasses` from the standard library and hand-written validation over stdlib
+`json`.
 
 ## Commands
 
-The tree is mid-reset; these are the intended commands once the uv workspace lands.
+The uv workspace has landed; these commands work today.
 
 ```bash
 uv sync                                  # whole workspace, one lockfile
 uv run pytest                            # every package
-uv run pytest packages/vantage-pytest    # one package
+uv run pytest packages/pytest-vantage    # one distribution
 uv run pytest -k test_name               # one test
 uv run pytest -m 'req("RQ-2")'           # everything verifying one requirement
 uv run ruff format . && uv run ruff check --fix .
@@ -188,8 +214,15 @@ will wait for is a check skipped with `--no-verify`.
 | Editor / LSP | `ruff format`, `ruff check --fix` on save; type checker as a language server |
 | pre-commit (< 2–3 s) | `ruff format`, `ruff check --fix`, and hygiene hooks; modified files only |
 | pre-push | `mypy --strict` over the whole project; fast unit tests |
-| CI | everything again in verification mode, pytest with coverage, the 3.10–3.13 × xdist matrix, `deptry`, `pip-audit`, clean-environment install check, build |
+| CI | everything again in verification mode, the 3.10–3.13 × xdist matrix, a networking-disabled job for RQ-28, `deptry`, the clean-environment install check for RQ-24, a Python-3.9-install-refused job, and a build of both wheels |
 | Weekly | `pip-audit`, plus dependency updates |
+
+**Coverage is not measured.** It was planned for CI and never landed: there is no
+`pytest-cov` in the dev extra or the lockfile, and `openspec/config.yaml` sets
+`coverage_threshold: 0` deliberately. Do not write it up as if it ran.
+
+**`pip-audit` runs weekly, not per pull request.** CVEs appear without anyone
+touching the code, so a PR-only check never sees them.
 
 `mypy` goes at pre-push, not pre-commit: pre-commit passes only modified files and a
 type checker needs the whole project to be correct. Everything in pre-commit is

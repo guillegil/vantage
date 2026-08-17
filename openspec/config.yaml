@@ -3,7 +3,8 @@ schema: spec-driven
 
 context: |
   SOURCE OF TRUTH: Notion, not this repository. The project row is PROJ-1 in the Projects
-  database; requirements are RQ-1..RQ-42, features FT-1..FT-8, decisions are ADRs.
+  database; requirements are RQ-1..RQ-44 (43 of them -- there is no RQ-43), features
+  FT-1..FT-8, decisions are ADRs.
   specs/requirements.md mirrors the Milestone 1 subset verbatim, generated one way --
   read it rather than pasting requirement text into prompts.
   A SECOND Notion page titled "Vantage" exists under the Projects hub and is SUPERSEDED —
