@@ -98,22 +98,22 @@ why it must share a PR with the catalogue upsert, which is why it no longer does
 No behaviour changes here. **The proof is that all 108 existing tests pass untouched** — a
 pure rename is the REFACTOR step of a cycle whose RED and GREEN already happened.
 
-- [ ] 2.1 REFACTOR `packages/vantage/src/vantage/core/ports/storage.py`: rename
+- [x] 2.1 REFACTOR `packages/vantage/src/vantage/core/ports/storage.py`: rename
       `record_execution` → `record_session(execution, *, results, received_at) -> bool`,
       `results` keyword-only and required. **No new methods yet** — `get_results`,
       `count_results` and `get_catalogue_entry` arrive with the tests that need them, in
       Phase 3, so the Protocol never declares something no adapter implements.
-- [ ] 2.2 REFACTOR both adapters to the new name and signature —
+- [x] 2.2 REFACTOR both adapters to the new name and signature —
       `packages/vantage/src/vantage/storage/sqlite_store.py` and
       `packages/vantage/src/vantage/storage/memory.py`. Each accepts `results` and persists
       nothing from it yet; say so in a comment naming Phase 3, so a reader does not read the
       gap as an oversight.
-- [ ] 2.3 Update every call site: `packages/vantage/src/vantage/service/routes/runs.py`
+- [x] 2.3 Update every call site: `packages/vantage/src/vantage/service/routes/runs.py`
       (passing `results=()`), `packages/vantage/tests/test_concurrency.py`, and
       `packages/vantage/tests/vantage_port_contract.py`. Confirm
       `rg record_execution --glob '!openspec/changes/archive/**'` returns nothing outside
       this change's own documents — 6 files carry it today.
-- [ ] 2.4 GREEN gate: `uv run --extra dev pytest` is 108 passed, `uv run mypy .` clean,
+- [x] 2.4 GREEN gate: `uv run --extra dev pytest` is 108 passed, `uv run mypy .` clean,
       `uv run ruff check .` clean. Any failure here means the rename was not mechanical and
       something else rode along with it.
 
