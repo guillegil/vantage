@@ -119,33 +119,33 @@ pure rename is the REFACTOR step of a cycle whose RED and GREEN already happened
 
 ## Phase 3: Catalogue upsert and result persistence (PR 3)
 
-- [ ] 3.1 RED: extend `packages/vantage/tests/vantage_port_contract.py` — `record_session`
+- [x] 3.1 RED: extend `packages/vantage/tests/vantage_port_contract.py` — `record_session`
       with two results persists the run and both results; `count_results() == 2`.
-- [ ] 3.2 RED, contract: replaying the identical report leaves `count_results()` unchanged
+- [x] 3.2 RED, contract: replaying the identical report leaves `count_results()` unchanged
       and returns `False` (RQ-41 idempotency, D19 layer 3).
-- [ ] 3.3 RED, contract: `get_results` returns per-phase outcomes and durations exactly as
+- [x] 3.3 RED, contract: `get_results` returns per-phase outcomes and durations exactly as
       stored — a phase that never ran reads back `None`, not `0.0` (RQ-5.2).
-- [ ] 3.4 RED, contract: a result stored with `param_id=""` reads back `""`, and a query for
+- [x] 3.4 RED, contract: a result stored with `param_id=""` reads back `""`, and a query for
       NULL parameter identifiers excludes it — the **SQLite hop** of the `""`-vs-NULL guard.
-- [ ] 3.5 RED, contract: `get_catalogue_entry` after a session; a second session with the
+- [x] 3.5 RED, contract: `get_catalogue_entry` after a session; a second session with the
       same node id reuses the entry, advances `last_seen_at` and leaves `first_seen_at`
       untouched (RQ-13.2).
-- [ ] 3.6 RED, contract: a session whose `run.started_at` is **older** than the stored
+- [x] 3.6 RED, contract: a session whose `run.started_at` is **older** than the stored
       `last_seen_at` does not roll it back, and `last_seen_run_id` does not move (D20 `MAX`).
-- [ ] 3.7 RED, contract: a node id absent from the report has its catalogue row untouched —
+- [x] 3.7 RED, contract: a node id absent from the report has its catalogue row untouched —
       `last_seen_at` literally unchanged (RQ-13.1).
-- [ ] 3.8 GREEN `packages/vantage/src/vantage/core/ports/storage.py`: add `get_results`, `count_results`,
+- [x] 3.8 GREEN `packages/vantage/src/vantage/core/ports/storage.py`: add `get_results`, `count_results`,
       `get_catalogue_entry`.
-- [ ] 3.9 GREEN `packages/vantage/src/vantage/storage/sqlite_store.py`: four statements in
+- [x] 3.9 GREEN `packages/vantage/src/vantage/storage/sqlite_store.py`: four statements in
       one `BEGIN IMMEDIATE`, in the order the FKs require (D22) — run insert, `executemany`
       catalogue upsert `ON CONFLICT(node_id) DO UPDATE` with the `MAX`/`CASE` monotonicity
       clause, batched `SELECT id, node_id … WHERE node_id IN (…)` at ≤500 placeholders,
       `executemany` result insert `ON CONFLICT(run_id, node_id, attempt) DO NOTHING`.
       **No `RETURNING`** — it needs SQLite ≥3.35, above the 3.10 floor.
-- [ ] 3.10 GREEN `packages/vantage/src/vantage/storage/memory.py`: same semantics over dicts
+- [x] 3.10 GREEN `packages/vantage/src/vantage/storage/memory.py`: same semantics over dicts
       — catalogue keyed by node id with the `MAX` guard, results keyed by
       `(run_id, node_id, attempt)`, first-write-wins. A second mechanism, not a stub (RQ-30).
-- [ ] 3.11 REFACTOR: update the `sqlite_store.py` and `memory.py` module docstrings to name
+- [x] 3.11 REFACTOR: update the `sqlite_store.py` and `memory.py` module docstrings to name
       D19–D22, matching the existing D3/D5/D8 citation convention.
 
 
