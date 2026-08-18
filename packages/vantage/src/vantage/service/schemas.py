@@ -31,15 +31,34 @@ a typo'd or drifted run field would be silently swallowed instead of
 rejected, which is exactly what RQ-42 exists to prevent. The asymmetry is not
 an inconsistency to "fix" -- it is two different version-skew directions with
 two different acceptable costs.
+
+**A third `extra=` value, `"allow"`, appears on `ResultReport` (design.md
+D15) and is a third position, not a compromise between the other two.** An
+unknown key on one *result* -- a marker, a parameter -- is neither a schema
+disagreement about what `run` is, nor an unnamed sibling section: it is
+enrichment on a record whose known fields still fully validate. Rejecting it
+would break every plugin upgrade the same way a strict `run` would; ignoring
+it silently would hide the drift RQ-42 exists to surface. `"allow"` keeps
+both: the report still records, and the tolerated key names surface,
+deduplicated, in `Acknowledgement.ignored`.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
+
+# Mirrors `vantage.core.domain.result.OUTCOMES` (design.md D15/D17/D21). The
+# plugin cannot import `vantage` (RQ-24), so the six-value vocabulary is
+# necessarily declared a second time here rather than imported -- the
+# consistency between the schema `CHECK`, `OUTCOMES` and this `Literal` is a
+# task in its own right (design.md, "Interfaces / Contracts"), not this
+# phase's (Phase 5, task 5.8).
+_Outcome = Literal["passed", "failed", "error", "skipped", "xfailed", "xpassed"]
 
 
 class RunReport(BaseModel):
@@ -63,17 +82,81 @@ class RunReport(BaseModel):
     interrupt_reason: str | None
 
 
+class ResultReport(BaseModel):
+    """One test's resolved outcome inside the `results` section (design.md
+    D15, D17, D18).
+
+    ``extra="allow"``: unlike `RunReport`, an unknown key on a *result* is
+    tolerated rather than rejected. See the module docstring for the
+    `RunReport`/`SessionReport` asymmetry -- this is a third, distinct
+    position for a third, distinct kind of drift: a newer plugin's enriched
+    result (an added marker, an added parameter) must still record on an
+    older server, and the tolerance must be visible rather than silent.
+    `service/routes/runs.py` collects the tolerated key **names**,
+    deduplicated, into `Acknowledgement.ignored` as `results[].<name>` --
+    never a per-index path, so one unknown key on 500 results is one entry,
+    not 500.
+
+    Every known field is required with no default, matching `RunReport`'s
+    rule: even a field whose type allows `None` must be sent explicitly, so
+    a field the client forgot to send is a rejection (422), not a silently
+    substituted null. Nullability itself mirrors
+    `vantage.core.domain.result.CaseIdentity`/`Result`: `node_id`,
+    `file_path`, `function_name` and `outcome` are never null there, so they
+    are not optional here either -- a client that sends `null` for one of
+    them fails validation exactly like a client that omits it, because the
+    core dataclasses that receive the converted value do not accept `None`
+    for those fields. Every other field can be null because the
+    corresponding phase may never have run (RQ-5.2) or the identity
+    component may genuinely be absent (RQ-9.2/9.3).
+
+    `class_name` and `param_id` are plain `str | None`, never a
+    length-constrained string: `param_id=""` (RQ-9's extension scenario)
+    must arrive intact. **No `min_length=1`, no validator that coerces a
+    falsy value to `None`** -- either would silently turn the empty-string
+    case into the null case, which is exactly the distinction RQ-9 exists to
+    preserve (design.md D18, the ``""`` is not `None` hop). The same rule
+    applies to `duration` and the three phase durations: a genuine `0.0`
+    must survive as `0.0`, never `x or None`.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    node_id: str
+    file_path: str
+    class_name: str | None
+    function_name: str
+    param_id: str | None
+    outcome: _Outcome
+    duration: float | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    setup_outcome: _Outcome | None
+    call_outcome: _Outcome | None
+    teardown_outcome: _Outcome | None
+    setup_duration: float | None
+    call_duration: float | None
+    teardown_duration: float | None
+    worker_id: str | None
+
+
 class SessionReport(BaseModel):
     """The envelope submitted to `POST /api/v1/runs` (design.md D1).
 
     ``extra="ignore"``: see the module docstring. Milestone 2 and 3 add
     sibling sections (``results``, ``environment``, ``vcs``) that an older
     server must tolerate rather than reject.
+
+    ``results`` is `None` by default -- design.md D15's "optional sibling
+    section". `None` (the section is absent) and `[]` (the session collected
+    nothing) are both legal and both mean zero result rows: a reverted
+    plugin against an un-reverted server still must have its run stored.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     run: RunReport
+    results: list[ResultReport] | None = None
 
 
 class Acknowledgement(BaseModel):
