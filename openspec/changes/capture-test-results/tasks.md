@@ -68,24 +68,24 @@ Bases: PR 1 → tracker branch; PR *n* → PR *n−1* branch.
 
 ## Phase 1: Core domain and the one ADR (PR 1)
 
-- [ ] 1.1 Write `docs/adr/0012-key-the-test-catalogue-by-the-pytest-node-id.md` — Nygard
+- [x] 1.1 Write `docs/adr/0012-key-the-test-catalogue-by-the-pytest-node-id.md` — Nygard
       (Status / Context / Decision / Consequences), `Status: Proposed`, imperative title,
       linked to RQ-13, RQ-9 and ADR-5. Record both rejected alternatives verbatim: hashing
       the four decomposed columns (same information, same rename split, but changing the
       recipe re-keys every row) and function-plus-parameters ignoring the path (survives a
       move, collides two identically-named tests — a merged history asserts something false,
       a split one is only incomplete).
-- [ ] 1.2 RED `packages/vantage/tests/test_result.py`: `Result` rejects an outcome outside
+- [x] 1.2 RED `packages/vantage/tests/test_result.py`: `Result` rejects an outcome outside
       `OUTCOMES`; six accepted values match the `result.outcome` CHECK.
-- [ ] 1.3 RED, same file: `CaseIdentity(param_id="")` and `CaseIdentity(param_id=None)` are
+- [x] 1.3 RED, same file: `CaseIdentity(param_id="")` and `CaseIdentity(param_id=None)` are
       **not equal** — the dataclass hop of the four-hop `""`-vs-NULL guard (D18).
-- [ ] 1.4 RED: `class_name=None` for a module-level identity; a phase duration of `0.0`
+- [x] 1.4 RED: `class_name=None` for a module-level identity; a phase duration of `0.0`
       survives as `0.0` and is not coerced to `None` (RQ-5.2, forbidden idiom `x or None`).
-- [ ] 1.5 GREEN `packages/vantage/src/vantage/core/domain/result.py`: `OUTCOMES` as a
+- [x] 1.5 GREEN `packages/vantage/src/vantage/core/domain/result.py`: `OUTCOMES` as a
       module-level `frozenset` (**never `Enum`** — `class X(str, Enum)` changes `__format__`
       between 3.10 and 3.11), `CaseIdentity`, `Result`, `CatalogueEntry` as frozen slotted
       stdlib dataclasses with `__post_init__` validation. No name starts with `Test`.
-- [ ] 1.6 Verify `packages/vantage/tests/test_architecture.py` still passes — `vantage.core`
+- [x] 1.6 Verify `packages/vantage/tests/test_architecture.py` still passes — `vantage.core`
       imports the standard library only (RQ-26).
 
 ## Phase 2: Port rename, atomic and mechanical (PR 2)
