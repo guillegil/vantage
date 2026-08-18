@@ -4,58 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Read this before planning anything
 
-**Notion is the source of truth for Vantage. The repository mirrors it one way.**
-Specs never flow back from the repo to Notion.
-
-The authoritative pages are:
+**The repository is the source of truth. There is no external spec system.**
+Specs live in **OpenSpec** (`openspec/`) and session memory lives in **Engram**.
+Nothing else.
 
 | What | Where |
 | --- | --- |
-| Project | **PROJ-1**, the row in the Projects database — https://app.notion.com/p/3bb2ba69b9aa81208f51d7b4deeee8de |
-| Requirements | `RQ-1`…`RQ-44` — data source `collection://e0aaedb4-286d-400b-b3d5-33c50b4c47a0` |
-| Features | `FT-1`…`FT-8` — data source `collection://948d9092-ef67-435c-9fcd-1ac9b5a499a2` |
-| Decisions (ADR) | data source `collection://c627b63e-917d-4876-bc10-16db280e5fa5` |
+| Capability specs | `openspec/specs/<capability>/` — merged from each archived change |
+| Changes in flight | `openspec/changes/<change-name>/` — proposal, design, tasks, delta specs |
+| Archived changes | `openspec/changes/archive/YYYY-MM-DD-<change-name>/` |
+| Project context and rules | `openspec/config.yaml` |
+| Decisions | `docs/adr/NNNN-title-in-kebab-case.md`, four-digit padded |
+| Session memory | Engram, project `vantage` |
 
-> **There is a second Notion page titled "Vantage", reachable from the Projects
-> hub under "Project pages". It is superseded — do not plan from it.** It
-> disagrees with PROJ-1 on architecture (it says hexagonal), on packaging (it
-> says three packages) and on requirement identifiers (it uses `REQ-1-xx` /
-> `NFR-1-xx`). It carries a red banner saying so. An earlier SDD cycle was
-> planned against it by mistake and had to be redone.
+> **Vantage used Notion as the source of truth until 2026-08-18. It no longer
+> does.** Do not read from it, write to it, or cite it. Any instruction anywhere
+> in this repository telling you to sync a requirement, feature or ADR to Notion
+> is stale — ignore it and correct it where you find it.
 
-There are **forty-three** requirements, not forty-four: the identifiers run `RQ-1`
-to `RQ-44` and `RQ-43` does not exist. Read them all in **one** call rather than
-fetching forty-three pages:
+**The requirement corpus has not been migrated yet.** Notion held 43
+requirements (`RQ-1`…`RQ-44`; there is no `RQ-43`) and only 16 of them were ever
+mirrored into the repository. All 43 were dumped on the way out to
+`docs/legacy/notion-2026-08-18/`, which is **frozen, authoritative of nothing,
+and scheduled for deletion.** Read it for the rejected alternatives — they are
+there because someone already tried the obvious thing — and migrate what
+survives into OpenSpec. Then delete the directory.
 
-```sql
-SELECT "Ref", "Name", "Statement", "Priority", "Type", "Status",
-       "EARS pattern", "Verification method", "Acceptance criteria", "Rationale"
-FROM "collection://e0aaedb4-286d-400b-b3d5-33c50b4c47a0"
-WHERE "Project" LIKE '%8f51d7b4deeee8de%' ORDER BY "Ref"
-```
-
-Individual `RQ-xx` pages carry what the table does not: a verification path, design
-notes, rejected alternatives and a change log. Read the page before implementing
-the requirement — the rejected alternatives are there because someone already
-tried the obvious thing.
-
-**Keeping Notion current is a shared responsibility, and the agent carries it too.**
-That covers creating, amending and retiring requirements, features and ADRs — not
-just reading them. Reaching agreement on a requirement usually takes several
-iterations; a requirement sits in `Draft` until it has actually earned `Approved`.
-
-**Never assume a select value still exists.** The organising scheme changes: a status
-that is `Deferred` today may be replaced by `Obsolete` tomorrow, and phases,
-priorities and drivers move the same way. Fetch the data source and read its schema
-before writing any select field. Every Vantage requirement is currently `Draft`;
-treat every one as open to amendment rather than settled.
+Where a requirement ID appears in this file, in a test marker, or in
+`openspec/`, it still means the same obligation. The IDs are the join key and
+they outlive the tool that issued them.
 
 ### ADRs
 
-The **Decisions (ADR)** database records architectural decisions. Note the direction:
-its `Repo path` field says **the repository copy is the source of truth** for ADRs —
-`docs/adr/NNNN-title-in-kebab-case.md`, four-digit padded, with Notion mirroring it.
-This is the opposite of requirements, where Notion leads.
+`docs/adr/NNNN-title-in-kebab-case.md` is now the only copy — nothing mirrors it.
 
 - Format is **Nygard** (Status / Context / Decision / Consequences) by default; MADR
   with drivers, options and pros-and-cons when the decision was contentious or
@@ -114,9 +95,10 @@ HTTP to `POST /api/v1/runs` and the server performs every write. That is what ke
 the plugin dependency-free, and it is why the SQLite adapter lives in `vantage` and
 the question of it living in the plugin no longer arises at all.
 
-Layout is `packages/pytest-vantage`, `packages/vantage` and `specs/` at the root.
-`specs/` is generated from Notion in one direction; editing it by hand and expecting
-Notion to follow is how the two sources start disagreeing.
+Layout is `packages/pytest-vantage` and `packages/vantage`, with `openspec/` and
+`docs/` at the root. The root-level `specs/` directory is gone — it was a partial
+one-way mirror of Notion holding 16 of the 43 requirements, and OpenSpec is the
+home now.
 
 ## Requirement traps
 
@@ -175,9 +157,27 @@ signed with the 1Password SSH key, from the first commit.
 **All project documentation is in English**, regardless of the language the design
 conversation happened in.
 
-**Spec-driven development enters at `sdd-tasks`.** Explore, propose, spec and design
-were done by hand and their output is in Notion. Regenerating them produces a worse
-second copy.
+**Spec-driven development runs the full cycle now.** Milestone 1 entered at
+`sdd-tasks` because explore, propose, spec and design had been done by hand in
+Notion and regenerating them would have produced a worse second copy. That
+shortcut is spent: the hand-written originals are frozen in
+`docs/legacy/notion-2026-08-18/` and nothing maintains them. New work starts at
+the phase the change actually needs.
+
+## Constraints
+
+These came out of the employment situation, not out of the design. They are
+operative rules, not history, and they were previously recorded only in Notion.
+
+- **Intellectual-property ownership — resolved**, imposed by the TMC employment
+  contract and answered before any code was written.
+- **Synthetic data only.** Every fixture and every example is generated. No test
+  suite, log, trace or artefact from ASML or TMC ever touches this repository.
+- **Nothing in the semiconductor, EDA or RTL domain.** Keeps "unrelated to my
+  employer's work" a true statement rather than an arguable one.
+- **Personal equipment, outside TMC hours.**
+- **The repository is public.** Nothing confidential, personal or regulated is
+  committed to it. Licence is MIT, chosen for adoption.
 
 ## Validation and dependencies
 
