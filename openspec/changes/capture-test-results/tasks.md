@@ -173,24 +173,24 @@ pure rename is the REFACTOR step of a cycle whose RED and GREEN already happened
 
 ## Phase 5: Service — rejection, atomicity, measurement (PR 5)
 
-- [ ] 5.1 RED `packages/vantage/tests/test_rejection.py`: one malformed entry at index 250 of
+- [x] 5.1 RED `packages/vantage/tests/test_rejection.py`: one malformed entry at index 250 of
       500 rejects the **entire** report — `count_executions() == 0` and `count_results() == 0`
       (RQ-42.1 with RQ-3.2).
-- [ ] 5.2 RED: a duplicate `node_id` inside one report is 422, whole report (D19 layer 2).
-- [ ] 5.3 RED (**threat-derived**, D15/Threat Matrix): the rejection body and `ignored` name
-      the offending field through the existing `errors.py::_safe_segment` allow-list, and no
+- [x] 5.2 RED: a duplicate `node_id` inside one report is 422, whole report (D19 layer 2).
+- [x] 5.3 RED (**threat-derived**, D15/Threat Matrix): the rejection body and `ignored` name
+      the offending field through the existing `errors.py::safe_segment` allow-list, and no
       node id **value** is ever echoed. This is a task, not an assumption.
-- [ ] 5.4 GREEN: list validator for duplicate node ids; `ignored` key names routed through the
+- [x] 5.4 GREEN: list validator for duplicate node ids; `ignored` key names routed through the
       same allow-list.
-- [ ] 5.5 RED then measure `test_five_hundred_results_fit_within_the_body_cap`
+- [x] 5.5 RED then measure `test_five_hundred_results_fit_within_the_body_cap`
       (`@pytest.mark.req("RQ-3")`): build a 500-result report through the real assembler and
       assert `len(json.dumps(report).encode("utf-8")) < MAX_REPORT_BYTES`, **reporting the
       real byte count**. Do not raise `MAX_REPORT_BYTES` in this change (D23).
-- [ ] 5.6 Measure server peak memory with `tracemalloc` around one 500-result request. Record
+- [x] 5.6 Measure server peak memory with `tracemalloc` around one 500-result request. Record
       the number; assert nothing against an invented threshold (D23).
-- [ ] 5.7 RED: a 500-result report reaches storage in **one commit**, counted through a
+- [x] 5.7 RED: a 500-result report reaches storage in **one commit**, counted through a
       commit-counting store wrapper (RQ-3.3, D21).
-- [ ] 5.8 Add the outcome-vocabulary consistency test: parse the six values out of
+- [x] 5.8 Add the outcome-vocabulary consistency test: parse the six values out of
       `schema.sql`'s `CHECK`, assert they equal `OUTCOMES` and the service `Literal` arguments.
 
 ### Added 2026-08-18 — normalize timestamps to UTC at the service boundary
@@ -211,23 +211,23 @@ so a plugin in another language can talk to this server, and that one would not.
 The fix goes at the boundary, where the plugin already does it, so the storage layer only ever
 sees one form. Decided 2026-08-18.
 
-- [ ] 5.9 RED `packages/vantage/tests/test_ingestion.py`: record a session, then record a
+- [x] 5.9 RED `packages/vantage/tests/test_ingestion.py`: record a session, then record a
       second one for the same `node_id` whose `run.started_at` is an **earlier instant
       expressed with a `+02:00` offset**, chosen so its raw ISO string sorts *after* the
       stored one. Assert `last_seen_at` did not move and `last_seen_run_id` still names the
       first run (D20). This fails today.
-- [ ] 5.10 RED, same file: a report whose timestamps carry a non-UTC offset reads back as the
+- [x] 5.10 RED, same file: a report whose timestamps carry a non-UTC offset reads back as the
       **equivalent UTC instant**, and a report whose timestamps are **naive** is interpreted
       as UTC. Cover `run.started_at`/`finished_at` and a result's `started_at`/`finished_at`
       in the same test — one path, not two.
-- [ ] 5.11 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: one helper applied to
+- [x] 5.11 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: one helper applied to
       every timestamp before it reaches the store. An **aware** datetime converts with
       `astimezone(timezone.utc)`. A **naive** one is stamped `replace(tzinfo=timezone.utc)` —
       never `astimezone()` on a naive value, which silently assumes the server's local zone
       and makes the result depend on where the server runs. Never `datetime.UTC` (3.11+).
       Replace the `_to_result` comment that currently says normalization is deliberately
       absent; it stops being true here.
-- [ ] 5.12 Correct Engram observation 62 to record the resolution, and note in
+- [x] 5.12 Correct Engram observation 62 to record the resolution, and note in
       `docs/open-questions.md` that the guard is now sound for any client, not just this
       project's plugin.
 
