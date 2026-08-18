@@ -29,8 +29,8 @@ Nothing links to it, nothing depends on it, and nothing keeps it accurate.
 
 Suggested order of migration, cheapest value first:
 
-1. `open-questions.md` — nine questions, most still unanswered. Migrate first;
-   they are decisions the project still owes.
+1. ~~`open-questions.md`~~ — **done 2026-08-18.** Migrated to
+   `docs/open-questions.md` and answered; eight of nine closed, OQ-9 still open.
 2. `requirement-notes.md` — the rejected alternatives. Fold each into the
    OpenSpec requirement it belongs to as it gets rewritten.
 3. `requirements.md` — statements, criteria and rationale. Superseded the moment
@@ -44,7 +44,6 @@ Suggested order of migration, cheapest value first:
 | `requirements.md` | All 43 requirements: statement, priority, type, EARS pattern, verification method, acceptance criteria, rationale |
 | `requirement-notes.md` | Per-requirement design notes, **rejected alternatives**, per-requirement open questions, change logs |
 | `features.md` | FT-1…FT-8 and which requirements hang from each |
-| `open-questions.md` | OQ-2…OQ-10, plus the obligations that have no subject yet |
 | `project.md` | Product reasoning, roadmap, glossary, and the historical decisions table |
 
 ## Known defects in this content
