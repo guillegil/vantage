@@ -193,6 +193,44 @@ pure rename is the REFACTOR step of a cycle whose RED and GREEN already happened
 - [ ] 5.8 Add the outcome-vocabulary consistency test: parse the six values out of
       `schema.sql`'s `CHECK`, assert they equal `OUTCOMES` and the service `Literal` arguments.
 
+### Added 2026-08-18 — normalize timestamps to UTC at the service boundary
+
+Found while reviewing Phase 3, recorded as Engram observation 62. `test_case.last_seen_at`
+is TEXT, and D20's guard advances it with `MAX(test_case.last_seen_at, excluded.last_seen_at)`
+— a **lexicographic** comparison. That equals an instant comparison only if every stored
+string carries the same offset, and `routes/runs.py` passes wire timestamps through
+unnormalized. Reproduced: `'2026-08-18T12:00:00+02:00'` (10:00 UTC) sorts *after*
+`'2026-08-18T11:00:00+00:00'` (11:00 UTC), so an older run rolls `last_seen_at` forward and
+drags `last_seen_run_id` with it. The in-memory adapter compares real `datetime` objects, so
+on mixed input it raises `TypeError` instead — two adapters, two different wrong answers, and
+the RQ-30 contract suite misses both because every test uses one timestamp form.
+
+Invisible today only because `pytest_vantage.recorder.isoformat_utc` normalizes; ADR-9 exists
+so a plugin in another language can talk to this server, and that one would not.
+
+The fix goes at the boundary, where the plugin already does it, so the storage layer only ever
+sees one form. Decided 2026-08-18.
+
+- [ ] 5.9 RED `packages/vantage/tests/test_ingestion.py`: record a session, then record a
+      second one for the same `node_id` whose `run.started_at` is an **earlier instant
+      expressed with a `+02:00` offset**, chosen so its raw ISO string sorts *after* the
+      stored one. Assert `last_seen_at` did not move and `last_seen_run_id` still names the
+      first run (D20). This fails today.
+- [ ] 5.10 RED, same file: a report whose timestamps carry a non-UTC offset reads back as the
+      **equivalent UTC instant**, and a report whose timestamps are **naive** is interpreted
+      as UTC. Cover `run.started_at`/`finished_at` and a result's `started_at`/`finished_at`
+      in the same test — one path, not two.
+- [ ] 5.11 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: one helper applied to
+      every timestamp before it reaches the store. An **aware** datetime converts with
+      `astimezone(timezone.utc)`. A **naive** one is stamped `replace(tzinfo=timezone.utc)` —
+      never `astimezone()` on a naive value, which silently assumes the server's local zone
+      and makes the result depend on where the server runs. Never `datetime.UTC` (3.11+).
+      Replace the `_to_result` comment that currently says normalization is deliberately
+      absent; it stops being true here.
+- [ ] 5.12 Correct Engram observation 62 to record the resolution, and note in
+      `docs/open-questions.md` that the guard is now sound for any client, not just this
+      project's plugin.
+
 ## Phase 6: Plugin — identity decomposition (PR 6)
 
 - [ ] 6.1 RED `packages/pytest-vantage/tests/test_capture.py`, table-driven: module-level
