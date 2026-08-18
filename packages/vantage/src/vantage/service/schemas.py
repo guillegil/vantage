@@ -48,7 +48,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 
@@ -157,6 +157,29 @@ class SessionReport(BaseModel):
 
     run: RunReport
     results: list[ResultReport] | None = None
+
+    @field_validator("results")
+    @classmethod
+    def _reject_duplicate_node_ids(
+        cls, value: list[ResultReport] | None
+    ) -> list[ResultReport] | None:
+        """D19 layer 2: a duplicate `node_id` inside one report is rejected
+        loudly and wholesale, before it ever reaches the silent replay
+        backstop (D19 layer 3). The `ValueError` message never repeats a
+        `node_id` -- not because it would reach the client (`errors.py`
+        builds every rejection body from `loc` segments only, never a
+        validator's message text), but for the same discipline `errors.py`'s
+        own docstring names: nothing client-chosen is passed through, even
+        where it currently happens not to be echoed.
+        """
+        if value is None:
+            return value
+        seen: set[str] = set()
+        for item in value:
+            if item.node_id in seen:
+                raise ValueError("results contains a duplicate node_id")
+            seen.add(item.node_id)
+        return value
 
 
 class Acknowledgement(BaseModel):
