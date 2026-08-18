@@ -135,10 +135,20 @@ Five requirements have a subtlety that costs a rewrite if missed:
 
 ## Conventions
 
-**Requirement traceability.** Every test that verifies a requirement carries its ID:
-`@pytest.mark.req("RQ-12")`. Where verification is not a test — a CI matrix, a
-benchmark script — the ID goes in a comment on the relevant block. The invariant is
-that `grep -r "RQ-12"` finds the thing that proves it.
+**Requirement traceability, for the identifiers that already exist.** Every test
+that verifies one carries its ID: `@pytest.mark.req("RQ-12")`. Where verification
+is not a test — a CI matrix, a benchmark script — the ID goes in a comment on the
+relevant block. The invariant is that `grep -r "RQ-12"` finds the thing that
+proves it.
+
+**No new `RQ-xx` identifiers are minted.** Decided 2026-08-18. The existing ones
+stay because they are executable — 55 markers, `--strict-markers` is on, and CI
+and `docs/schema-manifest.md` both cite them — and removing them would break the
+traceability of work already delivered. But they were Notion's numbering scheme,
+Notion is gone, and OpenSpec already carries identity in a form this project
+uses: a **capability** and a **scenario**. New obligations get those, not a
+number. Reference an existing `RQ-xx` when you are working on it; do not invent
+`RQ-45`.
 
 **Verification methods are not all tests.** Each requirement declares one of Test,
 Analysis, Inspection or Demonstration. RQ-11 and RQ-29 are Inspection, RQ-25 is
