@@ -1,7 +1,7 @@
 """SQLite adapter for `ExecutionStore` (RQ-30.1, RQ-38.1) -- design.md D5, D8.
 
 Idempotency is settled inside the `INSERT` itself, never by a preceding
-`SELECT`: `record_execution` uses `INSERT ... ON CONFLICT(id) DO NOTHING` and
+`SELECT`: `record_session` uses `INSERT ... ON CONFLICT(id) DO NOTHING` and
 reads the row count the INSERT itself produced to decide its boolean return
 (D3, D5). A `SELECT`-then-`INSERT` shape would leave a window in which two
 concurrent replays of the same `run.id` both pass the `SELECT` and both
@@ -21,11 +21,13 @@ mid-statement is the classic two-writer deadlock.
 from __future__ import annotations
 
 import threading
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import cast
 
 from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.result import Result
 from vantage.storage.connection import open_database
 
 _INSERT_RUN = """
@@ -72,7 +74,12 @@ class SqliteExecutionStore:
         self._conn = open_database(path)
         self._lock = threading.Lock()
 
-    def record_execution(self, execution: Execution, *, received_at: datetime) -> bool:
+    def record_session(
+        self, execution: Execution, *, results: Sequence[Result], received_at: datetime
+    ) -> bool:
+        # `results` is accepted and persisted nowhere yet -- the catalogue
+        # upsert and result insert land in Phase 3 (design.md D21, D22).
+        del results
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:

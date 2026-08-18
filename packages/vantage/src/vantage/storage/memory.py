@@ -9,9 +9,11 @@ implementation that happens to agree with itself.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from vantage.core.domain.execution import Execution
+from vantage.core.domain.result import Result
 
 
 class InMemoryExecutionStore:
@@ -20,11 +22,16 @@ class InMemoryExecutionStore:
     def __init__(self) -> None:
         self._executions: dict[str, Execution] = {}
 
-    def record_execution(self, execution: Execution, *, received_at: datetime) -> bool:
+    def record_session(
+        self, execution: Execution, *, results: Sequence[Result], received_at: datetime
+    ) -> bool:
         # `received_at` is part of the port's signature (the two-clocks point,
         # design.md D1) but nothing in this adapter's contract surface reads
         # it back -- `get_execution` returns only what the client reported.
+        # `results` is accepted and persisted nowhere yet -- the catalogue
+        # and result storage land in Phase 3 (design.md D21, D22).
         del received_at
+        del results
         identity = execution.identity.value
         if identity in self._executions:
             return False

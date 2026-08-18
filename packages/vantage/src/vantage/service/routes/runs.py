@@ -1,7 +1,7 @@
 """`POST /api/v1/runs` -- session report ingestion (RQ-41, RQ-42, design.md D3, D5).
 
-**The 201-vs-200 decision comes from the boolean `record_execution` already
-returns.** `record_execution` is `INSERT ... ON CONFLICT(id) DO NOTHING`,
+**The 201-vs-200 decision comes from the boolean `record_session` already
+returns.** `record_session` is `INSERT ... ON CONFLICT(id) DO NOTHING`,
 deciding its own return value from the INSERT's own row count -- no
 preceding `SELECT`. This route does not ask the store whether the id exists
 and then decide: that would reintroduce, at the HTTP layer, precisely the
@@ -130,7 +130,7 @@ async def create_run(request: Request) -> JSONResponse:
     store = request.app.state.store
     execution = _to_execution(payload.run)
 
-    created = store.record_execution(execution, received_at=datetime.now(timezone.utc))
+    created = store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
 
     acknowledgement = Acknowledgement(
         run_id=payload.run.id,

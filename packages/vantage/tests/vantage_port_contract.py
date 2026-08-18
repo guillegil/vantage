@@ -43,7 +43,9 @@ class ExecutionStoreContract:
     def test_first_write_creates_a_row(self, store: ExecutionStore) -> None:
         execution = _execution("a" * 32)
 
-        created = store.record_execution(execution, received_at=datetime.now(timezone.utc))
+        created = store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc)
+        )
 
         assert created is True
         assert store.count_executions() == 1
@@ -51,9 +53,11 @@ class ExecutionStoreContract:
     @pytest.mark.req("RQ-30")
     def test_replaying_the_same_id_reports_no_new_row(self, store: ExecutionStore) -> None:
         execution = _execution("b" * 32)
-        store.record_execution(execution, received_at=datetime.now(timezone.utc))
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
 
-        created_again = store.record_execution(execution, received_at=datetime.now(timezone.utc))
+        created_again = store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc)
+        )
 
         assert created_again is False
         assert store.count_executions() == 1
@@ -61,7 +65,7 @@ class ExecutionStoreContract:
     @pytest.mark.req("RQ-30")
     def test_get_execution_returns_what_was_stored(self, store: ExecutionStore) -> None:
         execution = _execution("c" * 32, finished=False)
-        store.record_execution(execution, received_at=datetime.now(timezone.utc))
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
 
         found = store.get_execution(execution.identity.value)
 

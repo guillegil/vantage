@@ -36,8 +36,8 @@ def test_two_concurrent_sessions_both_leave_a_run_entry(tmp_path: Path) -> None:
 
         def _report(hex_id: str) -> None:
             barrier.wait()
-            created = store.record_execution(
-                _execution(hex_id), received_at=datetime.now(timezone.utc)
+            created = store.record_session(
+                _execution(hex_id), results=(), received_at=datetime.now(timezone.utc)
             )
             results[hex_id] = created
 
