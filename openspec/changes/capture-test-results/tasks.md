@@ -151,23 +151,23 @@ pure rename is the REFACTOR step of a cycle whose RED and GREEN already happened
 
 ## Phase 4: Service — `results` on the envelope (PR 4)
 
-- [ ] 4.1 RED `packages/vantage/tests/test_ingestion.py`: a report carrying N results yields
+- [x] 4.1 RED `packages/vantage/tests/test_ingestion.py`: a report carrying N results yields
       one run row and N result rows, acknowledged (RQ-41.1).
-- [ ] 4.2 RED: a report with **no** `results` section records its run and is not rejected;
+- [x] 4.2 RED: a report with **no** `results` section records its run and is not rejected;
       `results: null` and `results: []` both record the run and write zero result rows
       (RQ-41.1, D15 — the supported plugin/server skew case).
-- [ ] 4.3 RED: replaying a report carrying N results leaves exactly N result rows and returns
+- [x] 4.3 RED: replaying a report carrying N results leaves exactly N result rows and returns
       200 `duplicate`, never an error (RQ-41.2).
-- [ ] 4.4 RED: a `ResultReport` carrying an unknown key records normally and the **key name**
+- [x] 4.4 RED: a `ResultReport` carrying an unknown key records normally and the **key name**
       appears deduplicated in `Acknowledgement.ignored` as `results[].<name>`, never a
       per-index path (D15).
-- [ ] 4.5 RED: `param_id: ""` on the wire arrives as `""` and `param_id: null` as `None` —
+- [x] 4.5 RED: `param_id: ""` on the wire arrives as `""` and `param_id: null` as `None` —
       the **Pydantic hop**. No `min_length=1`, no falsy-to-`None` coercion (D18).
-- [ ] 4.6 GREEN `packages/vantage/src/vantage/service/schemas.py`: `ResultReport`
+- [x] 4.6 GREEN `packages/vantage/src/vantage/service/schemas.py`: `ResultReport`
       (`extra="allow"`, every known field required-and-nullable, never defaulted);
       `results: list[ResultReport] | None = None` on `SessionReport`. **Do not touch
       `RunReport`** (`extra="forbid"`). No `/api/v2`.
-- [ ] 4.7 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: convert `ResultReport`
+- [x] 4.7 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: convert `ResultReport`
       to the core `Result`, assign `stable_id` server-side from `node_id` (it is not on the
       wire), call `record_session`, populate `ignored`. The 201/200 branch is untouched.
 
