@@ -45,6 +45,22 @@ from pytest_vantage.capture import decompose
             None,
             id="nested-class-segments-joined-with-double-colon",
         ),
+        pytest.param(
+            "test_nid.py::test_p[a::b]",
+            "test_nid.py",
+            None,
+            "test_p",
+            "a::b",
+            id="parametrised-value-itself-contains-double-colon",
+        ),
+        pytest.param(
+            "test_nid.py::TestOuter::TestInner::test_q[m::n]",
+            "test_nid.py",
+            "TestOuter::TestInner",
+            "test_q",
+            "m::n",
+            id="nested-class-and-a-parametrised-value-containing-double-colon",
+        ),
     ],
 )
 def test_decompose_identity_class_name_and_unparametrised_param_id(
@@ -63,7 +79,9 @@ def test_decompose_identity_class_name_and_unparametrised_param_id(
     assert identity.file_path == expected_file_path
     assert identity.class_name == expected_class_name
     assert identity.function_name == expected_function_name
-    assert identity.param_id is expected_param_id  # None must stay None
+    assert identity.param_id == expected_param_id
+    if expected_param_id is None:
+        assert identity.param_id is None  # None must stay None, never a computed ""
 
 
 @pytest.mark.req("RQ-9")
@@ -102,3 +120,33 @@ def test_decompose_identity_slices_on_first_and_last_bracket_not_partition_symme
 
     assert identity.function_name == "test_x"
     assert identity.param_id == "[0]"
+
+
+@pytest.mark.req("RQ-9")
+def test_decompose_identity_directory_containing_brackets_is_not_mistaken_for_a_parameter() -> None:
+    """A directory component may itself contain brackets (design.md D18
+    addendum). The parameter section must be located within the remainder
+    AFTER the file path has already been split off -- searching the whole
+    `node_id` for a bracket would misidentify this directory as the start
+    of a parameter section and corrupt every field that follows it.
+    """
+    node_id = "tests/data[1]/test_a.py::test_b[x]"
+
+    identity = decompose(node_id)
+
+    assert identity.file_path == "tests/data[1]/test_a.py"
+    assert identity.class_name is None
+    assert identity.function_name == "test_b"
+    assert identity.param_id == "x"
+
+
+@pytest.mark.req("RQ-9")
+def test_decompose_identity_rejects_a_string_with_no_double_colon_at_all() -> None:
+    """Every real pytest node id has at least one `"::"` separating the
+    file path from the test path (design.md D18 addendum). A string with
+    none is not a node id at all, and silently treating the whole string
+    as a function name (or as a bare file path with no test) would hide
+    that malformed input rather than surface it -- so this raises instead.
+    """
+    with pytest.raises(ValueError, match="::"):
+        decompose("not_a_node_id_at_all.py")

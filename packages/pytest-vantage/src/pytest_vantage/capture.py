@@ -34,29 +34,55 @@ class DecomposedIdentity(NamedTuple):
 def decompose(node_id: str) -> DecomposedIdentity:
     """Split a pytest node id into its identity components (design.md D18).
 
-    1. Split on ``"::"``. The first segment is ``file_path``; the segments
-       between the first and the last, joined with ``"::"``, are
-       ``class_name`` -- ``None`` when there are none (module-level test).
-    2. In the last segment: if it ends with ``"]"`` and contains ``"["``,
-       slice on the FIRST ``"["`` and the LAST ``"]"`` -- not
-       ``partition``/``rpartition`` symmetry -- so a parameter id that
-       itself contains brackets (``test_x[[0]]``) survives intact.
-       Otherwise the whole segment is the function name and ``param_id``
-       is ``None``.
-    """
-    segments = node_id.split("::")
-    file_path = segments[0]
-    class_segments = segments[1:-1]
-    class_name = "::".join(class_segments) if class_segments else None
+    The parameter section (a parametrised test's ``[...]`` suffix) is
+    arbitrary user data supplied to ``@pytest.mark.parametrize`` -- it MAY
+    itself contain ``"::"`` (``test_p[a::b]``) or brackets
+    (``test_p[[0]]``). It is therefore removed from the remainder BEFORE
+    that remainder is split on ``"::"`` to find the class and function
+    segments -- do NOT re-simplify this back into one ``node_id.split("::")``
+    call, which would misparse the parameter section's own ``"::"`` as a
+    class separator.
 
-    last_segment = segments[-1]
-    if last_segment.endswith("]") and "[" in last_segment:
-        bracket_start = last_segment.index("[")
-        function_name = last_segment[:bracket_start]
-        param_id = last_segment[bracket_start + 1 : -1]
+    Likewise a directory component MAY itself contain brackets
+    (``tests/data[1]/test_a.py::test_b[x]``), so the parameter section is
+    located only within the remainder AFTER the file path has already been
+    split off -- never by searching the whole ``node_id`` for a bracket.
+
+    Steps:
+
+    1. Partition on the FIRST ``"::"`` only. The part before it is
+       ``file_path``; pytest node ids do not put ``"::"`` inside a file
+       path, so this is unambiguous. A ``node_id`` with no ``"::"`` at all
+       is not a real pytest node id (every one has a file path and at
+       least one test-path segment) and raises ``ValueError`` rather than
+       silently inventing a function name.
+    2. In that remainder: if it ends with ``"]"`` and contains ``"["``,
+       slice on the FIRST ``"["`` and the LAST ``"]"`` -- not
+       ``partition``/``rpartition`` symmetry -- to pull out ``param_id``,
+       then drop that suffix from the remainder. Otherwise ``param_id`` is
+       ``None`` and the remainder is left untouched.
+    3. Split what is left on ``"::"``. The last segment is
+       ``function_name``; every segment before it, joined with ``"::"``,
+       is ``class_name`` -- ``None`` when there are none (module-level
+       test).
+    """
+    file_path, separator, remainder = node_id.partition("::")
+    if not separator:
+        raise ValueError(
+            f"not a pytest node id (missing '::' between file path and test path): {node_id!r}"
+        )
+
+    if remainder.endswith("]") and "[" in remainder:
+        bracket_start = remainder.index("[")
+        param_id = remainder[bracket_start + 1 : -1]
+        remainder = remainder[:bracket_start]
     else:
-        function_name = last_segment
         param_id = None
+
+    segments = remainder.split("::")
+    class_segments = segments[:-1]
+    class_name = "::".join(class_segments) if class_segments else None
+    function_name = segments[-1]
 
     return DecomposedIdentity(
         node_id=node_id,
