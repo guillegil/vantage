@@ -233,17 +233,17 @@ sees one form. Decided 2026-08-18.
 
 ## Phase 6: Plugin — identity decomposition (PR 6)
 
-- [ ] 6.1 RED `packages/pytest-vantage/tests/test_capture.py`, table-driven: module-level
+- [x] 6.1 RED `packages/pytest-vantage/tests/test_capture.py`, table-driven: module-level
       test → `class_name is None` (RQ-9.2); nested class → segments joined with `"::"`;
       unparametrised → `param_id is None` (RQ-9.3).
-- [ ] 6.2 RED: `…::test_x[]` → `param_id == ""`, **not** `None` — the brackets are the
+- [x] 6.2 RED: `…::test_x[]` → `param_id == ""`, **not** `None` — the brackets are the
       evidence of parametrisation, the content is not. The live case is
       `test_execution.py::test_identity_rejects_anything_but_32_lowercase_hex_characters[]`.
-- [ ] 6.3 RED: `…::test_x[[0]]` → `param_id == "[0]"`, proving first-`[`/last-`]` slicing
+- [x] 6.3 RED: `…::test_x[[0]]` → `param_id == "[0]"`, proving first-`[`/last-`]` slicing
       rather than `partition`/`rpartition` symmetry.
-- [ ] 6.4 GREEN `packages/pytest-vantage/src/pytest_vantage/capture.py`: `decompose` per D18.
+- [x] 6.4 GREEN `packages/pytest-vantage/src/pytest_vantage/capture.py`: `decompose` per D18.
       Standard library and `pytest` only — **never import xdist** (RQ-24).
-- [ ] 6.5 Confirm `packages/pytest-vantage/tests/test_plugin_imports.py` still passes.
+- [x] 6.5 Confirm `packages/pytest-vantage/tests/test_plugin_imports.py` still passes.
 
 ## Phase 7: Plugin — phases, outcome, assembly (PR 7)
 
