@@ -8,12 +8,16 @@ in here would reintroduce a dependency this slice is explicitly free of.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
+from vantage.storage.sqlite_store import SqliteExecutionStore
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -66,6 +70,23 @@ def store() -> InMemoryExecutionStore:
 @pytest.fixture
 def client(store: InMemoryExecutionStore) -> TestClient:
     return TestClient(create_app(store))
+
+
+@pytest.fixture
+def sqlite_store(tmp_path: Path) -> Iterator[SqliteExecutionStore]:
+    """The real SQLite adapter (tasks 5.9/5.10): the D20 `MAX` monotonicity
+    guard is a lexicographic comparison of stored TEXT, so only this adapter
+    -- not `InMemoryExecutionStore`, which compares real `datetime` objects
+    and is already correct -- can reproduce the un-normalized-timestamp bug
+    (Engram observation 62)."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    yield adapter
+    adapter.close()
+
+
+@pytest.fixture
+def sqlite_client(sqlite_store: SqliteExecutionStore) -> TestClient:
+    return TestClient(create_app(sqlite_store))
 
 
 @pytest.mark.req("RQ-41")
@@ -230,3 +251,70 @@ def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
     assert absent_param.param_id is None
     assert empty_param.param_id != absent_param.param_id
     assert zero_duration.duration == 0.0
+
+
+@pytest.mark.req("RQ-13")
+def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
+    sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
+) -> None:
+    """Reproduces the Phase 3 finding (Engram observation 62): `last_seen_at`
+    is TEXT and D20's `MAX` guard compares it lexicographically, which is
+    only correct once every writer normalizes to the same UTC offset. Before
+    the boundary normalizes, `'...T12:00:00+02:00'` (10:00 UTC, genuinely
+    earlier) sorts AFTER `'...T11:00:00+00:00'` (11:00 UTC) as a string and
+    rolls the catalogue forward -- exactly what D20 exists to prevent."""
+    node_id = "packages/vantage/tests/test_utc.py::test_guard"
+
+    first_report = _well_formed_report("7" * 32)
+    first_report["run"]["started_at"] = "2026-08-18T11:00:00+00:00"  # 11:00 UTC
+    first_report["results"] = [_result_entry(node_id)]
+    sqlite_client.post("/api/v1/runs", json=first_report)
+
+    second_report = _well_formed_report("8" * 32)
+    second_report["run"]["started_at"] = "2026-08-18T12:00:00+02:00"  # 10:00 UTC, earlier
+    second_report["results"] = [_result_entry(node_id)]
+    sqlite_client.post("/api/v1/runs", json=second_report)
+
+    entry = sqlite_store.get_catalogue_entry(node_id)
+    assert entry is not None
+    assert entry.last_seen_at == datetime(2026, 8, 18, 11, 0, tzinfo=timezone.utc)
+    assert entry.last_seen_run_id == "7" * 32
+
+
+@pytest.mark.req("RQ-30")
+def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
+    sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
+) -> None:
+    """D-addendum (2026-08-18): one helper normalizes every timestamp before
+    it reaches the store -- `run.started_at`/`finished_at` and a result's
+    `started_at`/`finished_at` alike, proven in one test on purpose so the
+    two are never allowed to diverge onto separate paths. An aware value
+    converts to its UTC equivalent; a naive value is interpreted as UTC."""
+    node_id = "packages/vantage/tests/test_utc.py::test_normalizes"
+    report = _well_formed_report("9" * 32)
+    report["run"]["started_at"] = "2026-08-18T13:00:00+02:00"  # 11:00 UTC
+    report["run"]["finished_at"] = "2026-08-18T13:00:05"  # naive -- interpreted as UTC
+    report["results"] = [
+        _result_entry(
+            node_id,
+            started_at="2026-08-18T13:00:01+02:00",  # 11:00:01 UTC
+            finished_at="2026-08-18T13:00:02",  # naive -- interpreted as UTC
+        )
+    ]
+
+    response = sqlite_client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    raw_started_at = sqlite_store._conn.execute(
+        "SELECT started_at FROM run WHERE id = ?", ("9" * 32,)
+    ).fetchone()[0]
+    assert raw_started_at == "2026-08-18T11:00:00+00:00"
+
+    execution = sqlite_store.get_execution("9" * 32)
+    assert execution is not None
+    assert execution.started_at == datetime(2026, 8, 18, 11, 0, tzinfo=timezone.utc)
+    assert execution.finished_at == datetime(2026, 8, 18, 13, 0, 5, tzinfo=timezone.utc)
+
+    [result] = sqlite_store.get_results("9" * 32)
+    assert result.started_at == datetime(2026, 8, 18, 11, 0, 1, tzinfo=timezone.utc)
+    assert result.finished_at == datetime(2026, 8, 18, 13, 0, 2, tzinfo=timezone.utc)
