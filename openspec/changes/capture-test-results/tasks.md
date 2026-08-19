@@ -285,29 +285,29 @@ sees one form. Decided 2026-08-18.
 
 ## Phase 9: xdist, catalogue, and the sweep (PR 9)
 
-- [ ] 9.1 RED `packages/pytest-vantage/tests/test_xdist_capture.py`: six tests under `-n 2`
+- [x] 9.1 RED `packages/pytest-vantage/tests/test_xdist_capture.py`: six tests under `-n 2`
       produce six results (RQ-12.1) and exactly one run entry (RQ-12.3).
-- [ ] 9.2 RED, **non-optional control**: the same six tests without xdist also produce six
+- [x] 9.2 RED, **non-optional control**: the same six tests without xdist also produce six
       results (RQ-12.2). This is the only test that catches an over-aggressive dedup filter.
-- [ ] 9.3 RED: delete a test, re-run — its catalogue entry survives with `last_seen_at`
+- [x] 9.3 RED: delete a test, re-run — its catalogue entry survives with `last_seen_at`
       unchanged (RQ-13.1); add the same node id back — the same entry is reused and the
       timestamp advances (RQ-13.2).
-- [ ] 9.4 RED `packages/vantage/tests/test_concurrency.py`: two concurrent 200-test sessions
+- [x] 9.4 RED `packages/vantage/tests/test_concurrency.py`: two concurrent 200-test sessions
       → 400 result rows (RQ-38.2); ten simultaneous sessions → ten run entries and no error
       response (RQ-38.3).
-- [ ] 9.5 **Schema-unchanged verification**: assert
+- [x] 9.5 **Schema-unchanged verification**: assert
       `git diff --exit-code -- packages/vantage/src/vantage/storage/schema.sql` is empty
       across the whole chain, and that
       `test_schema_manifest.py::test_fresh_database_matches_the_recorded_ground_truth` is
       green. A diff here means the design went wrong (RQ-29, ADR-5).
-- [ ] 9.6 Traceability sweep: `grep -r "RQ-4"`, `RQ-5`, `RQ-9`, `RQ-12`, `RQ-13`, `RQ-3`,
+- [x] 9.6 Traceability sweep: `grep -r "RQ-4"`, `RQ-5`, `RQ-9`, `RQ-12`, `RQ-13`, `RQ-3`,
       `RQ-38` each reach the test that proves them; every new verifying test carries
       `@pytest.mark.req`, declared under `--strict-markers`.
-- [ ] 9.7 Run the full gate: `uv run ruff format . && uv run ruff check --fix .`,
+- [x] 9.7 Run the full gate: `uv run ruff format . && uv run ruff check --fix .`,
       `uv run mypy .`, `uv run deptry .`, and the 3.10–3.13 × xdist matrix. Confirm
       `pytest-vantage` still imports nothing but pytest and the standard library (RQ-24) and
       `vantage.core` nothing but the standard library (RQ-26).
-- [ ] 9.8 RED, **closing the one hop of the `""`-vs-NULL guard nothing proves end-to-end**:
+- [x] 9.8 RED, **closing the one hop of the `""`-vs-NULL guard nothing proves end-to-end**:
       a real parametrised test whose parameter id is the empty string (`test_x[]`) and an
       unparametrised test in the same session are recorded with `param_id == ""` and
       `param_id is None` respectively, read back through the real server. D18 names four
