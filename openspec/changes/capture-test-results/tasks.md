@@ -307,3 +307,11 @@ sees one form. Decided 2026-08-18.
       `uv run mypy .`, `uv run deptry .`, and the 3.10–3.13 × xdist matrix. Confirm
       `pytest-vantage` still imports nothing but pytest and the standard library (RQ-24) and
       `vantage.core` nothing but the standard library (RQ-26).
+- [ ] 9.8 RED, **closing the one hop of the `""`-vs-NULL guard nothing proves end-to-end**:
+      a real parametrised test whose parameter id is the empty string (`test_x[]`) and an
+      unparametrised test in the same session are recorded with `param_id == ""` and
+      `param_id is None` respectively, read back through the real server. D18 names four
+      hops; Phases 1, 3, 4, 6 and 7 cover the dataclass, SQLite, Pydantic, plugin and JSON
+      hops, and Phase 8's tasks cover `class_name`/`file_path` but never this one. Raised by
+      the Phase 8 actor's own coverage review and added 2026-08-19 — the guard is only worth
+      its five hops if the whole chain is exercised once.
