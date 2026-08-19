@@ -21,6 +21,12 @@ _DEFAULT_ADDRESS = "http://127.0.0.1:8765"
 # design.md D6: report_timeout, the bound on every socket operation of the
 # report itself (distinct from connect_timeout, PR12's preflight probe).
 _DEFAULT_REPORT_TIMEOUT = 10.0
+# design.md D31: the ceiling this design imposes on a liveness request
+# (start-write, heartbeat) -- a fixed ~200-byte payload that must not stall
+# as long as the (potentially much larger) finish-write report is allowed
+# to, distinct from `_DEFAULT_REPORT_TIMEOUT`, which is the ceiling the
+# user chose via `--vantage-timeout`.
+_MAX_SHORT_TIMEOUT = 2.0
 
 
 class VantageConfigError(ValueError):
@@ -77,9 +83,24 @@ def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | None
     return _DEFAULT_REPORT_TIMEOUT
 
 
+def resolve_liveness_timeout(report_timeout: float) -> float:
+    """The bound on a liveness request (start-write, heartbeat): `min(2.0,
+    report_timeout)` (design.md D31).
+
+    `report_timeout` is a ceiling the *user* chose via `--vantage-timeout`;
+    `_MAX_SHORT_TIMEOUT` is a ceiling this *design* imposes on top of it.
+    Taking the smaller honours both: a user who configured a timeout below
+    2.0 seconds meant it, and never gets more than they asked for, while a
+    user who configured a larger (or default) timeout still gets a liveness
+    request bounded well below the time a full report is allowed to take.
+    """
+    return min(_MAX_SHORT_TIMEOUT, report_timeout)
+
+
 __all__ = [
     "VantageConfigError",
     "resolve_and_validate_address",
+    "resolve_liveness_timeout",
     "resolve_report_timeout",
     "resolve_server_address",
 ]

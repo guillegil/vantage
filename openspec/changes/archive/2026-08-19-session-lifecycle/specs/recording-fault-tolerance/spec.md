@@ -1,17 +1,14 @@
-# Recording Fault Tolerance Specification
+# Delta for Recording Fault Tolerance
 
-## Purpose
+A heartbeat introduces a new internal reporting path. RQ-21's existing
+"internal error while recording" language already covers it, but its shared
+fault-isolation latch — one failure disables every further hook, including
+ordinary result accumulation — is a bigger blast radius than a heartbeat
+failure should have. This delta narrows that failure mode for the heartbeat
+path specifically, confirmed by the maintainer's decision in the 2026-08-19
+question round (answer 4).
 
-Defines the failure paths a reporting session must survive without
-disrupting the host pytest run: an internal error while reporting (including
-a server that accepts a connection and never answers), and a server that
-cannot be reached at all, found before any test runs.
-
-**Component:** `pytest-vantage` (plugin) — both requirements are exercised
-entirely on the client side of the HTTP boundary; no assertion here depends
-on server behavior beyond a simulated response or its absence.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Non-disruptive failure (RQ-21)
 
@@ -61,29 +58,3 @@ anywhere in `Recorder`'s hooks was assumed to share one latch.)
 - GIVEN a heartbeat send patched to fail on every attempt across a session with multiple heartbeat intervals
 - WHEN the session runs to completion
 - THEN exactly one warning is emitted for the heartbeat failure, not one per failed attempt
-
-### Requirement: Unreachable server (RQ-37)
-
-If the configured server cannot be reached, then the plugin MUST emit a
-warning naming that server and MUST let the pytest session run to
-completion unrecorded.
-
-#### Scenario: Nothing listening
-- GIVEN a configured server address where nothing is listening
-- WHEN a suite of passing tests is run
-- THEN pytest exits with status 0 and emits one warning naming the address
-
-#### Scenario: Host does not resolve
-- GIVEN a configured server address whose host does not resolve
-- WHEN a suite of passing tests is run
-- THEN pytest exits with status 0 and emits one warning naming the address
-
-#### Scenario: Server drops out mid-session
-- GIVEN a server that becomes unreachable after the session has started but before the report is sent
-- WHEN the suite finishes
-- THEN pytest exits with the status it would have had and emits one warning
-
-#### Scenario: One warning, not one per test
-- GIVEN a configured server that is unreachable
-- WHEN a suite of 200 tests is run
-- THEN exactly one warning is emitted rather than one per test

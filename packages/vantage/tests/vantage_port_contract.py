@@ -35,6 +35,23 @@ def _execution(hex_id: str, *, finished: bool = True, started: datetime | None =
     )
 
 
+def _start_only_execution(hex_id: str, *, started: datetime | None = None) -> Execution:
+    """The shape a start-write reports (design.md D25/D32): `exit_status` is
+    the only field never sent, `interrupted`/`interrupt_reason` are their
+    defaults because nothing is yet known about how the session will end."""
+    started = (
+        started if started is not None else datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+    )
+    return Execution(
+        identity=Identity(hex_id),
+        started_at=started,
+        finished_at=None,
+        exit_status=None,
+        interrupted=False,
+        interrupt_reason=None,
+    )
+
+
 def _result(
     node_id: str,
     *,
@@ -140,6 +157,112 @@ class ExecutionStoreContract:
 
         assert replayed is False
         assert store.count_results() == 2
+
+    @pytest.mark.req(id="RQ-3")
+    def test_finish_after_start_applies_in_full(self, store: ExecutionStore) -> None:
+        """design.md D25, task 1.1: a finish-write following an accepted
+        start-write for the same run id applies in full -- `exit_status`
+        goes NULL -> int, and the finish's other fields and results land."""
+        identity = "1" + "0" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start = _start_only_execution(identity, started=started)
+        store.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+
+        finish = _execution(identity, finished=True, started=started)
+        results = (_result("t.py::test_a"),)
+        store.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
+
+        stored = store.get_execution(identity)
+        assert stored is not None
+        assert stored.exit_status == finish.exit_status
+        assert stored.finished_at == finish.finished_at
+        assert stored.interrupted == finish.interrupted
+        assert stored.interrupt_reason == finish.interrupt_reason
+        assert store.count_results() == 1
+
+    @pytest.mark.req(id="RQ-3")
+    def test_reordered_start_after_finish_never_nulls_the_recorded_finish(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D25, task 1.2: `run-recording`'s 'A reordered
+        start-write never nulls a recorded finish' -- the finish, its exit
+        fields and its result rows survive a start-write arriving late."""
+        identity = "1" + "1" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        finish = _execution(identity, finished=True, started=started)
+        results = (_result("t.py::test_a"),)
+        store.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
+
+        late_start = _start_only_execution(identity, started=started)
+        store.record_session(late_start, results=(), received_at=datetime.now(timezone.utc))
+
+        stored = store.get_execution(identity)
+        assert stored == finish
+        assert store.count_results() == 1
+
+    @pytest.mark.req(id="RQ-41")
+    def test_replayed_finish_is_a_no_op_first_finish_wins(self, store: ExecutionStore) -> None:
+        """design.md D25, task 1.3: finish-after-finish (replay) is a no-op
+        -- the first accepted finish wins, unchanged semantics (RQ-41),
+        now expressed through the same discriminator as every other case."""
+        identity = "1" + "2" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        first_finish = _execution(identity, finished=True, started=started)
+        store.record_session(first_finish, results=(), received_at=datetime.now(timezone.utc))
+
+        second_finish = Execution(
+            identity=Identity(identity),
+            started_at=started,
+            finished_at=started + timedelta(seconds=104),
+            exit_status=1,
+            interrupted=True,
+            interrupt_reason="a-different-reason",
+        )
+        store.record_session(second_finish, results=(), received_at=datetime.now(timezone.utc))
+
+        stored = store.get_execution(identity)
+        assert stored == first_finish
+
+    @pytest.mark.req(id="RQ-30")
+    def test_duplicate_start_after_start_is_a_no_op(self, store: ExecutionStore) -> None:
+        """design.md D25, task 1.4: a second start-write for the same run id
+        changes nothing -- `excluded.exit_status IS NULL` never satisfies
+        the conflict `WHERE`, regardless of what `run.exit_status` holds."""
+        identity = "1" + "3" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        first_start = _start_only_execution(identity, started=started)
+        store.record_session(first_start, results=(), received_at=datetime.now(timezone.utc))
+
+        second_start = _start_only_execution(identity, started=started + timedelta(seconds=5))
+        store.record_session(second_start, results=(), received_at=datetime.now(timezone.utc))
+
+        stored = store.get_execution(identity)
+        assert stored == first_start
+
+    @pytest.mark.req(id="RQ-30")
+    def test_created_is_true_only_on_a_true_first_insert(self, store: ExecutionStore) -> None:
+        """design.md D26, task 1.5: `record_session` returns True only for a
+        true first insert. A finish applied over an existing start-only row,
+        and a true duplicate, both return False -- `rowcount` can no longer
+        answer this under `DO UPDATE`, so the adapter must probe first."""
+        identity = "1" + "4" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start = _start_only_execution(identity, started=started)
+        created_by_start = store.record_session(
+            start, results=(), received_at=datetime.now(timezone.utc)
+        )
+        assert created_by_start is True
+
+        finish = _execution(identity, finished=True, started=started)
+        created_by_finish = store.record_session(
+            finish, results=(), received_at=datetime.now(timezone.utc)
+        )
+        assert created_by_finish is False
+
+        created_by_duplicate = store.record_session(
+            finish, results=(), received_at=datetime.now(timezone.utc)
+        )
+        assert created_by_duplicate is False
 
     @pytest.mark.req(id="RQ-5")
     def test_get_results_preserves_phase_outcomes_and_durations_exactly(
@@ -271,3 +394,47 @@ class ExecutionStoreContract:
 
         entry_after = store.get_catalogue_entry(stable_node_id)
         assert entry_after == entry_before
+
+    @pytest.mark.req(id="RQ-44")
+    def test_touch_last_contact_is_monotonic_and_reports_unknown_runs(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D33, task 4.1: `touch_last_contact` advances on a known
+        run (returns True); a second, earlier-or-equal contact leaves it
+        unchanged (returns False, the monotonic guard); an unknown execution
+        id also returns False -- the route disambiguates the two `False`
+        cases itself, by calling `get_execution` (D33), not this method."""
+        identity = "2" + "0" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start = _start_only_execution(identity, started=started)
+        store.record_session(start, results=(), received_at=started)
+
+        first_contact = started + timedelta(seconds=30)
+        assert store.touch_last_contact(identity, first_contact) is True
+
+        earlier_contact = first_contact - timedelta(seconds=5)
+        assert store.touch_last_contact(identity, earlier_contact) is False
+
+        equal_contact = first_contact
+        assert store.touch_last_contact(identity, equal_contact) is False
+
+        later_contact = first_contact + timedelta(seconds=5)
+        assert store.touch_last_contact(identity, later_contact) is True
+
+        assert store.touch_last_contact("9" * 32, later_contact) is False
+
+        # A heartbeat touches the contact clock and NOTHING else. Without
+        # this read-back the assertions above are satisfied by the return
+        # value alone, and an adapter whose UPDATE also fabricated a
+        # `finished_at` would pass every one of them -- verified by
+        # mutation, which left the whole suite green. The store is the only
+        # place that can say so, because the route never reads these fields
+        # back and `Execution` is what the client reported, not what was
+        # stored beside it.
+        after = store.get_execution(identity)
+        assert after is not None
+        assert after.started_at == started
+        assert after.finished_at is None
+        assert after.exit_status is None
+        assert after.interrupted is False
+        assert after.interrupt_reason is None

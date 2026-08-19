@@ -1,0 +1,402 @@
+# Tasks: Session lifecycle — a run row exists while the session is still alive
+
+**Change:** `session-lifecycle` · Strict TDD — every behavioural task names its
+failing test first. Test command: `uv run --extra dev pytest`.
+
+**No new `RQ-xx` identifiers are minted.** New obligations (start-write,
+heartbeat, abandonment) are named by capability/scenario, per `session-liveness`
+and the modified deltas in `run-recording`, `session-ingestion`,
+`recording-schema`, `recording-fault-tolerance`.
+
+**pytest entry-point registration: nothing to do.** `packages/pytest-vantage/src/pytest_vantage/plugin.py`
+is **unchanged** by this design (D36) — `pytest11 = pytest_vantage.plugin` is
+already declared, and the controller-only xdist guard at `plugin.py:142-143`
+already runs before `Recorder` construction. No user ever edits a `conftest.py`
+for this change.
+
+## Review Workload Forecast
+
+| Field | Value |
+|-------|-------|
+| Estimated changed lines | ~1,110 authored (design's own count: slice 1 ~200, slice 2 ~300, slice 3 ~250, slice 4 ~360) |
+| 400-line budget risk | Low per slice, High for the change as a whole |
+| Chained PRs recommended | Yes |
+| Suggested split | PR 1 → PR 2 → PR 3 → PR 4 |
+| Delivery strategy | auto-chain |
+| Chain strategy | feature-branch-chain |
+
+Decision needed before apply: No
+Chained PRs recommended: Yes
+Chain strategy: feature-branch-chain
+400-line budget risk: Low
+
+Every slice is under the 500-line review budget; the change as a whole is not,
+which is why it is chained rather than shipped as one PR. Slice boundaries and
+order are the design's own (`rollout-and-migration`), not re-derived here.
+
+### Suggested Work Units
+
+Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* branch.
+
+| Unit | Goal | PR | Forecast | Focused test command | Runtime harness | Rollback boundary |
+|------|------|----|----------|----------------------|-----------------|-------------------|
+| 1 | Monotonic upsert (both adapters) + created-detection probe + RQ-3 premise-test rename/split | PR 1 | ~200 | `uv run --extra dev pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_rejection.py` | N/A — no behaviour change while only the finish-write exists; no live server scenario to add yet | **Reverted LAST in the chain, not first** — reverting it while slice 2's start-writes are still live resurrects the silent-drop bug against real data |
+| 2 | Plugin start-write (`pytest_sessionstart`), `liveness_isolated`, liveness timeout | PR 2 | ~300 | `uv run --extra dev pytest packages/pytest-vantage/tests/test_failure_paths.py packages/pytest-vantage/tests/test_run_report.py` | `uv run --extra dev pytest --vantage=<addr>` against a live server; a run row exists before the first test executes | Revert removes the hook and the decorator; the finish-write alone reproduces Milestone-1 behaviour exactly |
+| 3 | Schema: `last_contact_at` column + index, `meta.schema_version` stamp, open-time refusal, manifest, ADR-0013 | PR 3 | ~250 | `uv run --extra dev pytest packages/vantage/tests/test_connection.py packages/vantage/tests/test_schema_manifest.py` | Delete a schema file created by the pre-change code; confirm the server refuses to start against it, message on stderr | Revert drops the column and refusal; a Milestone-1 database is opened again, matching pre-change behaviour |
+| 4 | Heartbeat endpoint, activity-driven beats, `derive_presentation`, grace config | PR 4 | ~360 | `uv run --extra dev pytest packages/vantage/tests/test_ingestion.py packages/vantage/tests/test_rejection.py packages/pytest-vantage/tests/test_failure_paths.py packages/vantage/tests/test_architecture.py -k liveness` | A suite exceeding one heartbeat interval against a live server; confirm `last_contact_at` advances and a ~10 s suite (RQ-25 profile) sends zero beats | Revert drops the route, `touch_last_contact`, `liveness.py` and grace config; `last_contact_at` sits unpopulated, matching slice 3's end state |
+
+---
+
+## Phase 1: Storage — monotonic upsert, created probe, memory adapter (PR 1)
+
+- [x] 1.1 RED `packages/vantage/tests/vantage_port_contract.py`: finish-after-start
+      applies in full (start then finish, `exit_status` NULL→int).
+- [x] 1.2 RED, same file: **reordered start-after-finish is a no-op** — the
+      recorded finish, its exit fields and its result rows are unchanged
+      (`run-recording` "A reordered start-write never nulls a recorded finish").
+- [x] 1.3 RED, same file: replayed finish (finish-after-finish) is a no-op,
+      first finish wins (RQ-41, unchanged semantics, new discriminator).
+- [x] 1.4 RED, same file: duplicate start-after-start is a no-op.
+- [x] 1.5 RED, same file (D26): `record_session` returns `True` only on a true
+      first insert; a finish applied over an existing start-only row, and a
+      true duplicate, both return `False`.
+- [x] 1.6 RED `packages/vantage/tests/test_rejection.py`: rename
+      `test_five_hundred_results_reach_storage_in_one_commit` to
+      `test_finish_report_reaches_storage_in_one_commit`; add an assertion that
+      `finished_at` and `exit_status` actually landed, on top of the existing
+      commit-count and row-count assertions (D35) — the rename alone is
+      cosmetic and a `DO NOTHING` regression would still pass it. Carry the
+      Measurements paragraph (252,511 bytes body, ~2,021,039 bytes peak) with
+      the renamed test, unchanged.
+- [x] 1.7 RED, same file: new sibling running that same finish-write **after**
+      a prior accepted start-write — asserts one commit, 500 result rows, and
+      the finish fields applied.
+- [x] 1.8 RED, same file: new `test_start_write_reaches_storage_in_one_commit`
+      — one commit, one run row, `finished_at IS NULL`, zero result rows.
+- [x] 1.9 RED, same file: new
+      `test_reordered_start_write_never_nulls_a_recorded_finish` — the
+      slice-1 acceptance criterion, an explicitly reordered pair, using the
+      existing `_CommitCountingConnection` wrapper unchanged.
+- [x] 1.10 GREEN `packages/vantage/src/vantage/storage/sqlite_store.py`:
+      `_INSERT_RUN` → `_UPSERT_RUN` — `ON CONFLICT(id) DO UPDATE SET
+      finished_at, exit_status, interrupted, interrupt_reason ... WHERE
+      run.exit_status IS NULL AND excluded.exit_status IS NOT NULL` (D25).
+      **Do not add `last_contact_at` to this statement yet** — the column
+      does not exist until Phase 3; it is added there. `received_at` and
+      `started_at` are never written on the conflict path.
+- [x] 1.11 GREEN, same file (D26): one `SELECT 1 FROM run WHERE id = ?`
+      immediately after `BEGIN IMMEDIATE`, before the write, to determine
+      `created` — never `cursor.rowcount`, never `last_insert_rowid()`. Add
+      the docstring sentence justifying `SELECT`-then-write under the same
+      transaction and lock (no window exists between them here).
+- [x] 1.12 GREEN `packages/vantage/src/vantage/storage/memory.py`: replace
+      `if created: self._executions[identity] = execution` with the same
+      guard, `stored.exit_status is None and execution.exit_status is not
+      None`, and the matching created-detection semantics (RQ-30 parity).
+- [x] 1.13 REFACTOR: update `sqlite_store.py` and `memory.py` module
+      docstrings to cite D25/D26, matching the existing D3/D5/D8 convention.
+- [x] 1.14 GREEN gate: `uv run --extra dev pytest packages/vantage/tests/
+      vantage_port_contract.py packages/vantage/tests/test_rejection.py
+      packages/vantage/tests/test_sqlite_store.py
+      packages/vantage/tests/test_memory_store.py`, `uv run mypy .` clean. No
+      behaviour change is observable yet — only the finish-write exists.
+
+## Phase 2: Plugin — start-write and the non-latching failure path (PR 2)
+
+- [x] 2.1 RED `packages/pytest-vantage/tests/test_failure_paths.py`: extend
+      `boundary.py`'s decorator factory tests — a failure isolated by the new
+      liveness path does **not** set `_disabled` and does **not** consult it;
+      the existing `fault_isolated` path is untouched (name, behaviour,
+      message all identical, so no existing test moves).
+- [x] 2.2 RED, same file: a failing start-write emits exactly one warning and
+      the session still completes and reports its ordinary exit status
+      (`recording-fault-tolerance` "A failed heartbeat does not stop result
+      recording", applied here to the start-write's own isolated failure).
+- [x] 2.3 RED `packages/pytest-vantage/tests/test_run_report.py` (or the
+      module covering `recorder.py`'s hooks): `pytest_sessionstart` sends a
+      report with `finished_at: null`, no `results`, and the session's
+      `run_id`; `_started_at` captured in `__init__` matches the value later
+      sent by `pytest_sessionfinish` (D32's "identical `started_at`" claim).
+- [x] 2.4 RED, same file: the start-write request uses
+      `resolve_liveness_timeout(report_timeout)`, not the finish-write's
+      `resolve_report_timeout` value, when the two differ.
+- [x] 2.5 GREEN `packages/pytest-vantage/src/pytest_vantage/boundary.py`:
+      `_isolated(flag, description)` factory; `fault_isolated =
+      _isolated("_disabled", "error while reporting")` (unchanged behaviour);
+      `liveness_isolated = _isolated("_liveness_disabled", "error while
+      reporting session liveness")` (D29).
+- [x] 2.6 GREEN `packages/pytest-vantage/src/pytest_vantage/config.py`:
+      `resolve_liveness_timeout(report_timeout) -> min(_MAX_SHORT_TIMEOUT,
+      report_timeout)`, `_MAX_SHORT_TIMEOUT = 2.0` (D31).
+- [x] 2.7 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`: add
+      `pytest_sessionstart`, decorated `@liveness_isolated` (D32 — not
+      `@fault_isolated`, so a failed start-write degrades to exactly
+      Milestone-1 behaviour once the finish-write's insert branch runs).
+- [x] 2.8 GREEN `packages/pytest-vantage/src/pytest_vantage/transport.py`: add
+      `send_heartbeat(address, run_id, *, timeout)` **as a distinct function**,
+      not a `path` parameter on the existing `send` (D31) — used by Phase 4,
+      declared here so the module's shape is settled once.
+- [x] 2.9 Confirm, **by reading**, `plugin.py:142-143` — `if
+      hasattr(config, "workerinput"): return` remains the first statement of
+      `pytest_configure`, before `Recorder` construction (D36). No edit
+      expected; record that the invariant still holds after this slice's hook
+      additions.
+- [x] 2.10 GREEN gate: `uv run --extra dev pytest packages/pytest-vantage`,
+      confirm the plugin still imports nothing but pytest and the standard
+      library (`rg -n '^import|^from' packages/pytest-vantage/src`, RQ-24).
+
+## Phase 3: Schema — `last_contact_at`, version stamp, refusal (PR 3) — COMPLETE
+
+- [x] 3.1 RED `packages/vantage/tests/test_connection.py`: opening a database
+      whose `meta` table has no `schema_version` row is refused
+      (`SchemaVersionError`), naming the version found (absent) and required.
+- [x] 3.2 RED, same file: `schema_version < 2`, and `schema_version > 2`, are
+      both refused, each naming both versions (D28's superset rule).
+- [x] 3.3 RED, same file: a refusal issues **no DDL** — snapshot
+      `sqlite_master` before and after the refused open and assert equality
+      — and the connection is closed before the error is raised (RQ-29.2).
+- [x] 3.4 RED, same file: opening a database with `schema_version == 2`
+      succeeds and applies no schema-altering statement.
+- [x] 3.5 GREEN `packages/vantage/src/vantage/storage/schema.sql`: add
+      `run.last_contact_at TEXT NULL` immediately after `received_at`; add
+      `CREATE INDEX IF NOT EXISTS idx_run_last_contact_at ON run
+      (last_contact_at)` (index 14); append `INSERT OR IGNORE INTO meta (key,
+      value) VALUES ('schema_version', '2')` as the file's last statement, so
+      it commits atomically with `_apply_schema`'s existing
+      `BEGIN IMMEDIATE`…`COMMIT`. Update the header comment's index count.
+- [x] 3.6 GREEN `packages/vantage/src/vantage/storage/connection.py`:
+      `_SCHEMA_VERSION = 2`; `SchemaVersionError(RuntimeError)`; replace `if
+      not _schema_already_applied(conn): _apply_schema(conn)` with the
+      explicit two-branch form — applied ⇒ check version, not applied ⇒
+      apply schema; best-effort `created_at`/`created_by` rows in `meta`
+      after creation.
+- [x] 3.7 GREEN `packages/vantage/src/vantage/service/cli.py`: catch
+      `SchemaVersionError` at start-up (reached via
+      `SqliteExecutionStore.__init__` from `cli.py:92`), print the message to
+      stderr, exit non-zero — same shape as the existing
+      `DatabaseDirectoryNotWritableError` handling.
+- [x] 3.8 Update `docs/schema-manifest.md`: add the `run.last_contact_at`
+      row (`TEXT NULL`, RQ-44, M2), index 14, and correct the `meta` table
+      note — it is now genuinely populated at creation, not merely reserved.
+- [x] 3.9 RED then GREEN `packages/vantage/tests/test_schema_manifest.py`:
+      `test_fresh_database_matches_the_recorded_ground_truth` moves from
+      **10 tables / 125 columns / 13 indexes** to **10 tables / 126 columns /
+      14 indexes**.
+- [x] 3.10 Write `docs/adr/0013-refuse-databases-from-an-older-schema-version.md`
+      — Nygard (Status: Proposed in the PR), imperative title, linked to
+      ADR-5 and RQ-29. Record both rejected alternatives named in D37:
+      `ALTER TABLE … ADD COLUMN` migration, and opening read-only in
+      degraded mode.
+- [x] 3.11 GREEN gate: `uv run --extra dev pytest packages/vantage/tests/
+      test_connection.py packages/vantage/tests/test_schema_manifest.py`,
+      `git diff --exit-code -- packages/vantage/src/vantage/storage/schema.sql`
+      shows only this slice's addition (no unrelated drift).
+
+## Phase 4: Heartbeat, activity-driven beats, abandonment derivation (PR 4) — COMPLETE
+
+- [x] 4.1 RED `packages/vantage/tests/vantage_port_contract.py`:
+      `touch_last_contact` advances `last_contact_at` on a known run; a
+      second, earlier-or-equal contact leaves it unchanged (monotonic guard,
+      D33); an unknown execution id returns `False`.
+- [x] 4.2 RED `packages/vantage/tests/test_ingestion.py`: `POST
+      /api/v1/runs/{id}/heartbeat` for a run created by an accepted
+      start-write advances `last_contact_at`; the response is `200
+      {"run_id": ..., "status": "acknowledged"}`.
+- [x] 4.3 RED, same file: a heartbeat for a run whose finish is already
+      recorded leaves `finished_at`, `exit_status`, `interrupted` and
+      `interrupt_reason` exactly as recorded — the body is `{}` and read by
+      nothing, so there is no field to smuggle a change through.
+- [x] 4.4 RED `packages/vantage/tests/test_rejection.py`: heartbeat for an
+      unknown run id → `404 {"error": "unknown_run", ...}`; a malformed id
+      (not `^[0-9a-f]{32}$`) → `422` through the existing
+      `register_error_handlers` path, no new code.
+- [x] 4.5 GREEN `packages/vantage/src/vantage/core/ports/storage.py`: add
+      `touch_last_contact(execution_id: str, contacted_at: datetime) -> bool`
+      to the `ExecutionStore` protocol.
+- [x] 4.6 GREEN `packages/vantage/src/vantage/storage/sqlite_store.py`: add
+      `_TOUCH_LAST_CONTACT` (`UPDATE run SET last_contact_at = ? WHERE id = ?
+      AND (last_contact_at IS NULL OR last_contact_at < ?)`); extend
+      `_UPSERT_RUN`'s insert branch to write `last_contact_at = received_at`
+      on creation, left alone on the conflict path (D27) — the column now
+      exists (Phase 3).
+- [x] 4.7 GREEN `packages/vantage/src/vantage/storage/memory.py`: mirror
+      `touch_last_contact` and the insert-time `last_contact_at` write over
+      the dict-backed store (RQ-30 parity).
+- [x] 4.8 GREEN `packages/vantage/src/vantage/service/errors.py`:
+      `UnknownRunError(RejectionError)`, `status_code = 404`.
+- [x] 4.9 GREEN `packages/vantage/src/vantage/service/schemas.py`:
+      `HeartbeatAcknowledgement`.
+- [x] 4.10 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: `POST
+      /api/v1/runs/{run_id}/heartbeat`, `run_id: str =
+      Path(pattern=r"^[0-9a-f]{32}$")`; resolve the 404 by calling
+      `get_execution` rather than inferring it from a zero-`rowcount` update
+      (an out-of-order beat on a known run is `200`, not `404`).
+- [x] 4.11 RED `packages/vantage/tests/test_architecture.py` (or a new
+      `test_liveness.py`, stdlib only, no I/O): table-driven
+      `derive_presentation` — finished (any staleness) → `FINISHED`;
+      interrupted (any staleness) → `INTERRUPTED`, checked before the clock;
+      past-grace with no finish/interrupt → `ABANDONED`; inside-grace →
+      `RUNNING`; `last_contact_at is None` falls back to `started_at`.
+- [x] 4.12 GREEN `packages/vantage/src/vantage/core/domain/liveness.py`
+      (new file, standard library only, RQ-26): `PRESENTATIONS` as a
+      module-level `frozenset` of `"finished"`, `"interrupted"`,
+      `"abandoned"`, `"running"` — **never an `Enum` and never `StrEnum`**.
+      Measured on this project's own floor and ceiling, `class X(str, Enum)`
+      formats as `'abandoned'` on 3.10 and `'X.A'` on 3.13, and
+      `vantage.core.domain.result` already records exactly this reason for
+      keeping `OUTCOMES` a `frozenset`. Follow that precedent; `derive_presentation(execution,
+      *, last_contact_at, now, grace)` implementing the precedence in D34
+      exactly (finished → interrupted → grace comparison → running).
+- [x] 4.13 GREEN `packages/vantage/src/vantage/core/config/resolution.py`:
+      `grace_period_seconds`, `grace_source` on `ServerConfig`,
+      `--grace-period` CLI flag, default `900.0`
+      (`_DEFAULT_GRACE_BEATS = 30 × _BEAT_INTERVAL_HINT_SECONDS`).
+- [x] 4.14 GREEN `packages/vantage/src/vantage/service/app.py`:
+      `create_app(store, *, grace_period_seconds=...)` →
+      `app.state.grace_period` (no reader yet — a named seam, not dead code,
+      per D34's open question).
+- [x] 4.15 GREEN `packages/vantage/src/vantage/service/cli.py`: wire
+      `--grace-period` through to `create_app`.
+- [x] 4.16 RED `packages/pytest-vantage/tests/test_failure_paths.py`: a
+      heartbeat send patched to fail on every attempt across a session with
+      multiple heartbeat intervals emits **exactly one** warning, and every
+      test result is still recorded (`recording-fault-tolerance` "A failed
+      heartbeat warns once, not once per beat").
+- [x] 4.17 RED, same file: a session where **both** the start-write and a
+      heartbeat fail emits **two** warnings — one naming reporting, one
+      naming liveness. This is correct and must not collapse into one; do
+      not "fix" it into a single warning.
+- [x] 4.18 RED `packages/pytest-vantage/tests/test_run_report.py`: a suite
+      exceeding one heartbeat interval sends at least one heartbeat before
+      the session finishes; a suite of 1,000 ~10 ms tests (RQ-25's measured
+      profile) sends zero.
+- [x] 4.19 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`:
+      `pytest_runtest_logreport` calls `accumulate(self._results, report)`
+      **first, unconditionally**, then a separately-decorated
+      `_maybe_beat()` (`@liveness_isolated`) — a decorator on the hook
+      itself cannot stop the outer `@fault_isolated` wrapper from catching
+      and latching first (D30). `time.monotonic()` only, never wall clock.
+      `_last_beat_at` assigned **before** the send, not after.
+      `_BEAT_INTERVAL_SECONDS = 30.0`. Uses `send_heartbeat` from Phase 2.
+- [x] 4.20 Confirm, **by reading**, `plugin.py:142-143` a second time — the
+      controller-only guard still precedes every hook this slice added,
+      including the beat inside `pytest_runtest_logreport` (D36).
+- [x] 4.21 GREEN `packages/pytest-vantage/tests/test_xdist_guard.py`: add
+      the assertion that no xdist worker constructs a `Recorder` (D36).
+- [x] 4.22 Final gate: `uv run ruff format . && uv run ruff check --fix .`,
+      `uv run mypy .`, `uv run deptry .`; run
+      `uv run --extra dev pytest` locally on the interpreter available in
+      this environment and the `-n auto` xdist path; **state explicitly**
+      that the 3.10–3.13 matrix, the networking-disabled RQ-28 job and the
+      clean-environment RQ-24 install check were **not** run locally and are
+      left to CI — do not claim a matrix run that did not happen.
+- [x] 4.23 Traceability sweep: `rg "RQ-1\.5|RQ-1\.6|RQ-31\.3|RQ-3\.2|RQ-42\.3|
+      RQ-29|RQ-21|RQ-25|RQ-44|RQ-26|RQ-30|RQ-24"` each reach the test that
+      proves them; confirm `derive_presentation`'s new obligations carry no
+      new `RQ-xx` marker.
+
+## Phase 5: The scenarios the task list forgot (PR 5)
+
+Added 2026-08-19 after `sdd-verify` returned `blocked` with five untested spec
+scenarios. **All 61 earlier tasks were genuinely done** — the gap is upstream of
+apply: `design.md`'s Integration and E2E test-layer rows were never decomposed
+into tasks, so three criteria this change was commissioned to restore shipped
+written-but-unproven, and two regression paths ship green.
+
+The suite reported 241 passed and zero warnings while none of this was covered.
+Gates measure the tests that exist, not the scenarios that should have them.
+
+- [x] 5.1 RED `packages/pytest-vantage/tests/test_run_report.py`: a session
+      killed with **SIGKILL** mid-run leaves a run entry present, holding a
+      start time and a null end time (`run-recording` RQ-1.6). Use
+      `pytester.popen`, wait until the child is past `pytest_sessionstart`,
+      then `os.kill(pid, signal.SIGKILL)`. The existing
+      `test_server_dropped_mid_session_preserves_exit_status_and_warns_once`
+      is the pattern for the popen/wait shape, including its
+      `stdin=subprocess.DEVNULL` note — on 3.10 `communicate()` flushes a
+      closed stdin and raises.
+- [x] 5.2 RED, same file: that entry carries **no interrupt reason** and is
+      not marked interrupted (RQ-31.3). This asserts an **absence**: SIGKILL
+      cannot be caught, so no code of this project runs to record one. The
+      contrast with the existing SIGINT test is the point — assert both in
+      one place if it makes the distinction legible.
+- [x] 5.3 RED, same file: a **still-running** session already has a run
+      entry with a start time and a null end time (RQ-1.5) — query the
+      server while the child is still executing, before it finishes.
+- [x] 5.4 RED `packages/vantage/tests/test_rejection.py`: a finish report
+      **truncated in transit after an accepted start-write** leaves the run
+      entry as the start-write left it — present, null `finished_at`, no
+      result rows — rather than removing it (`run-recording` RQ-3.2,
+      `session-ingestion` RQ-42.3, the second scenario of each). The existing
+      `test_truncated_body_raw_socket` covers only the no-prior-report case.
+- [x] 5.5 RED `packages/vantage/tests/test_ingestion.py` (W1): a heartbeat
+      for a **known** run whose `last_contact_at` is already ahead of the
+      beat answers **200**, not 404. `touch_last_contact` returns `False`
+      there, so this is the only case that distinguishes a 404 resolved from
+      `get_execution` from one inferred off a zero rowcount. Today all four
+      heartbeat tests pass against the wrong implementation.
+- [x] 5.6 RED `packages/vantage/tests/vantage_port_contract.py` or
+      `test_sqlite_store.py` (W2): `received_at`, `started_at` and
+      `last_contact_at` are **not advanced** by the finish-write. Neither
+      column is exposed on `Execution`, so no existing test can observe them
+      — read them directly. Adding `last_contact_at = excluded.last_contact_at`
+      to the `DO UPDATE` list currently leaves all 241 tests green.
+- [x] 5.7 REFACTOR `test_a_fast_suite_emits_no_heartbeat` (W3): it asserts
+      only that no beat arrived, and `@liveness_isolated` swallows anything
+      the beat path raises — so deleting `_last_beat_at` keeps it green while
+      emitting a warning per test. Assert warning-freedom as well, so a
+      crashed path stops being indistinguishable from a suppressed one.
+- [x] 5.8 Tick `proposal.md`'s Success Criteria that are now genuinely met,
+      and leave unticked any that are not. They are all still `[ ]`,
+      including the three naming exactly these criteria.
+- [x] 5.9 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
+      `uv run mypy .`, `uv run ruff check .`, `uv run deptry .`. State which
+      matrix legs ran locally and which were left to CI.
+
+## Phase 6: The heartbeat's own wire, actually exercised (PR 6)
+
+Added 2026-08-19 after verify round two. Round one graded
+`session-liveness`'s "A long suite's last contact advances during execution"
+as PARTIAL; round two re-derived it **by mutation** and it is UNTESTED.
+
+`send_heartbeat` is never invoked against a real server anywhere in the suite —
+both of its test references monkeypatch it away. So the chain has its first and
+third links tested and its middle one not at all:
+
+```
+plugin decides to beat  ->  send_heartbeat POSTs  ->  route advances contact
+        tested                    UNTESTED                    tested
+```
+
+Reproduced independently by the orchestrator: changing the path suffix to
+`/HEARTBEAT-TYPO` leaves **246 passed**. A monkeypatched transport function
+silently voids every end-to-end scenario that depends on its wire format, and
+no number of green tests will say so.
+
+- [x] 6.1 RED `packages/pytest-vantage/tests/test_run_report.py`: run a suite
+      against the real `vantage_server` fixture **without patching
+      `send_heartbeat`**, long enough to cross one beat interval, and assert
+      the **server's** `last_contact_at` for that run advances past the
+      value the start-write recorded. Read it from the server's store, not
+      from a captured call — `touch_last_contact` on `vantage_server.store`
+      is wrapped (not replaced: the real implementation still runs) so the
+      wrapper can read the store's own pre-update value, exactly what the
+      start-write recorded, before the first real heartbeat overwrites it.
+      **Verified by mutation before calling it done**: broke
+      `_HEARTBEAT_PATH_SUFFIX` in `transport.py` to `/HEARTBEAT-TYPO` — RED
+      (`no heartbeat ever reached the server's touch_last_contact`, 1
+      failed / 246 passed), reverted — clean. Also mutated the HTTP method
+      (`POST`→`GET`, RED: 405) and the run-id/suffix ordering (RED: 404),
+      both reverted.
+- [x] 6.2 Keep the suite's wall-clock honest. `_BEAT_INTERVAL_SECONDS` is
+      driven to `0.0` via `monkeypatch` for this test only (the same
+      technique task 4.18's wiring test already established) — the
+      production default (`30.0`) is never touched. Cost measured at 0.40 s
+      standalone; not marked `slow` (comparable to the existing unmarked
+      wiring test, well under the `slow` marker's real-elapsed-time
+      threshold used elsewhere in this suite, e.g. the 8 s duration test).
+- [x] 6.3 GREEN gate: `uv run --extra dev pytest` — **247 passed, zero
+      warnings**, 25.88 s serial / 10.97 s under `-n auto`. `uv run mypy .`
+      clean (58 source files). `uv run ruff check .` clean. `uv run ruff
+      format --check .` — 58 files already formatted. `uv run deptry .`
+      clean.

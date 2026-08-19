@@ -1,15 +1,11 @@
-# Run Recording Specification
+# Delta for Run Recording
 
-## Purpose
+Restores three acceptance criteria (RQ-1.5, RQ-1.6, RQ-31.3) dropped from this
+spec's Milestone-1 delta, and corrects RQ-3's atomicity argument and its
+RQ-3.2 scenario, both of which assumed a session is written in exactly one
+POST — an assumption a start-write ends.
 
-Defines what the server persists for every pytest session: exactly one run
-entry per invocation, its start/end timestamps, atomicity of that write, and
-correctness when more than one session reports concurrently.
-
-**Component:** `vantage` (server) — the ingestion path from `vantage.service`
-through `vantage.core`'s storage port to `vantage.storage`.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Run entry per invocation (RQ-1)
 
@@ -163,26 +159,3 @@ planning for deployments. Future changes to the result schema or the
 batch-insert strategy MUST re-run the measurement test
 (`test_finish_report_reaches_storage_in_one_commit` via `tracemalloc` at
 request time) and justify any material increase.
-
-### Requirement: Concurrent session recording (RQ-38)
-
-While more than one pytest session is reporting to the server concurrently,
-the server MUST record every one of those sessions' run entries and every
-result those sessions reported, and MUST NOT answer any of them with an error
-response.
-
-#### Scenario: Two concurrent sessions both leave a run entry (RQ-38.1)
-- GIVEN two pytest sessions started within the same second against one server
-- WHEN both complete
-- THEN the database holds two run entries with different identifiers
-
-#### Scenario: Two concurrent 200-test sessions leave 400 results (RQ-38.2)
-- GIVEN two pytest sessions of 200 tests each started within the same second against one server
-- WHEN both complete
-- THEN the database holds 400 result rows
-
-#### Scenario: Ten simultaneous sessions all succeed (RQ-38.3)
-- GIVEN ten pytest sessions reporting simultaneously
-- WHEN all complete
-- THEN the database holds ten run entries
-- AND no session receives an error response

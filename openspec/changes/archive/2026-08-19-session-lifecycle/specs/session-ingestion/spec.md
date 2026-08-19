@@ -1,59 +1,11 @@
-# Session Report Ingestion Specification
+# Delta for Session Report Ingestion
 
-## Purpose
+RQ-42.3 asserted that a truncated report leaves the run table empty. That was
+true only because every report arrived in one POST. With a start-write, a
+truncated *finish* report can now be rejected while a run entry created by an
+earlier accepted start-write legitimately remains.
 
-Defines the versioned HTTP endpoint that accepts a session report from
-`pytest-vantage`: what a well-formed report does, including idempotent
-retry, and what a malformed one does — reject and store nothing. New
-capability made necessary by ADR-9; no previous spec covered ingestion.
-
-**Component:** across the boundary — `pytest-vantage` is the client;
-`vantage.service` owns the endpoint, and the storage/rejection decision is
-entirely server-side.
-
-## Requirements
-
-### Requirement: Session report ingestion (RQ-41)
-
-When a client submits a well-formed session report to the versioned
-ingestion endpoint, the server MUST store that session and acknowledge it. A
-retried submission of an already-stored report MUST NOT create a duplicate
-run, and MUST NOT create duplicate results.
-
-A session report MAY carry a `results` section alongside its run. That section
-is OPTIONAL: a well-formed report without it MUST still have its run stored and
-acknowledged. This is the supported skew case between independently released
-plugin and server versions, not an error.
-
-#### Scenario: Well-formed report is stored and acknowledged (RQ-41.1)
-- GIVEN an empty database
-- WHEN a well-formed session report is submitted to `/api/v1/runs`
-- THEN the run table holds one row and the response acknowledges it with the identifier stored
-
-#### Scenario: A report carrying results stores them with the run (RQ-41.1)
-- GIVEN an empty database
-- WHEN a well-formed session report carrying a `results` section of N entries is submitted to `/api/v1/runs`
-- THEN the run table holds one row, N result rows are stored against it, and the response acknowledges it with the identifier stored
-
-#### Scenario: A report with no results section still records its run (RQ-41.1)
-- GIVEN an empty database and a server newer than the client that reports to it
-- WHEN a well-formed session report carrying no `results` section is submitted to `/api/v1/runs`
-- THEN the run table holds one row and the response acknowledges it, rather than the report being rejected
-
-#### Scenario: Retried report is idempotent (RQ-41.2)
-- GIVEN a session report that has already been submitted
-- WHEN the identical report is submitted a second time
-- THEN the run table still holds one row for that session and the response acknowledges it
-
-#### Scenario: Retried report does not duplicate results (RQ-41.2)
-- GIVEN a session report carrying N results that has already been submitted and stored
-- WHEN the identical report is submitted a second time
-- THEN that session still holds exactly N result rows and the response acknowledges it rather than failing
-
-#### Scenario: Unversioned path is refused (RQ-41.3)
-- GIVEN a running server
-- WHEN the ingestion endpoint is requested at an unversioned path
-- THEN the request is refused rather than served
+## MODIFIED Requirements
 
 ### Requirement: Malformed report rejection (RQ-42)
 

@@ -1,16 +1,12 @@
-# Recording Schema Specification
+# Delta for Recording Schema
 
-## Purpose
+Adds `run.last_contact_at`, its index, and states the existing-database
+policy this change establishes: a database created by an older schema
+version is refused, never altered in place. This is the first schema change
+since the reset (ADR-5, RQ-29), decided by the maintainer as answer 1 of the
+2026-08-19 question round.
 
-Defines the completeness and stability guarantee on the database schema:
-every documented column, including Phase 2 columns nothing populates yet,
-exists from the schema's first creation, and no later Phase 1 release
-alters it.
-
-**Component:** `vantage` (server) — `vantage.storage`'s `schema.sql`,
-applied by the sqlite adapter at first use.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Complete schema from first use (RQ-29)
 

@@ -30,7 +30,7 @@ from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
 from vantage.service.schemas import _Outcome
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _execution, _result
+from vantage_port_contract import _execution, _result, _start_only_execution
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -233,6 +233,30 @@ def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -
     assert max(len(field) for field in response.json()["fields"]) < 128
 
 
+# --- Phase 4: heartbeat rejection (design.md D33, task 4.4) ----------------
+
+
+@pytest.mark.req(id="RQ-44")
+def test_heartbeat_for_unknown_run_is_404(client: TestClient) -> None:
+    response = client.post(f"/api/v1/runs/{'e' * 32}/heartbeat")
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"] == "unknown_run"
+
+
+@pytest.mark.req(id="RQ-44")
+def test_heartbeat_for_malformed_run_id_is_422(client: TestClient) -> None:
+    """No new code (design.md D33): the malformed id is caught by the path
+    parameter's own pattern, and rejected through the existing
+    `register_error_handlers`/`RequestValidationError` path."""
+    response = client.post("/api/v1/runs/not-a-hex-id/heartbeat")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "invalid_report"
+
+
 # --- Phase 5: whole-report rejection, atomicity, measurement ---------------
 
 
@@ -353,7 +377,23 @@ class _CommitCountingConnection:
 
 
 @pytest.mark.req(id="RQ-3")
-def test_five_hundred_results_reach_storage_in_one_commit(tmp_path: Path) -> None:
+def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
+    """Renamed from `test_five_hundred_results_reach_storage_in_one_commit`
+    (design.md D35, task 1.6) -- the Analysis argument moved from one commit
+    per *session* to one commit per *report*, and this is the finish-write's
+    premise. The rename alone would be cosmetic: without the finish-field
+    assertions below, a `DO NOTHING` regression that dropped every finish
+    field on conflict would still satisfy the commit count and row counts.
+
+    **Measurements:** the 500-result finish-write generated here measures
+    252,511 bytes in body size (via `test_five_hundred_results_fit_within_the_body_cap`);
+    server peak memory traced for one such finish-write request reaches
+    approximately 2,021,039 bytes (`test_server_peak_memory_for_one_five_hundred_result_request`).
+    These measurements are diagnostic; they inform payload size budgeting and
+    resource planning for deployments. Future changes to the result schema or
+    the batch-insert strategy MUST re-run this test via `tracemalloc` at
+    request time and justify any material increase.
+    """
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     counting = _CommitCountingConnection(adapter._conn)
     adapter._conn = counting  # type: ignore[assignment]
@@ -374,6 +414,107 @@ def test_five_hundred_results_reach_storage_in_one_commit(tmp_path: Path) -> Non
         # this test, so the test has to carry the weight.
         assert adapter.count_results() == 500
         assert adapter.count_executions() == 1
+        stored = adapter.get_execution(execution.identity.value)
+        assert stored is not None
+        assert stored.finished_at == execution.finished_at
+        assert stored.exit_status == execution.exit_status
+    finally:
+        adapter.close()
+
+
+@pytest.mark.req(id="RQ-3")
+def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_commit(
+    tmp_path: Path,
+) -> None:
+    """design.md D25, D35, task 1.7: the same finish-write, run after a
+    prior accepted start-write for the same run id -- one commit, the same
+    500 result rows, and the finish fields actually applied through the
+    conflict (`DO UPDATE`) branch rather than the insert branch."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+
+    try:
+        identity = "f" + "1" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start = _start_only_execution(identity, started=started)
+        adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+
+        counting = _CommitCountingConnection(adapter._conn)
+        adapter._conn = counting  # type: ignore[assignment]
+
+        finish = _execution(identity, finished=True, started=started)
+        results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
+
+        created = adapter.record_session(
+            finish, results=results, received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is False
+        assert counting.commit_count == 1
+        assert adapter.count_results() == 500
+        assert adapter.count_executions() == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at == finish.finished_at
+        assert stored.exit_status == finish.exit_status
+    finally:
+        adapter.close()
+
+
+@pytest.mark.req(id="RQ-3")
+def test_start_write_reaches_storage_in_one_commit(tmp_path: Path) -> None:
+    """design.md D35, task 1.8: the start-write's own commit-count premise --
+    one commit, one run row, a null `finished_at`, and zero result rows,
+    since a start report carries none."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    counting = _CommitCountingConnection(adapter._conn)
+    adapter._conn = counting  # type: ignore[assignment]
+
+    try:
+        identity = "f" + "2" * 31
+        start = _start_only_execution(identity)
+
+        created = adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+
+        assert created is True
+        assert counting.commit_count == 1
+        assert adapter.count_results() == 0
+        assert adapter.count_executions() == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at is None
+    finally:
+        adapter.close()
+
+
+@pytest.mark.req(id="RQ-3")
+def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> None:
+    """design.md D25, task 1.9: the slice-1 acceptance criterion, driven
+    through the same `_CommitCountingConnection` wrapper the rest of this
+    module uses -- an explicitly reordered pair, finish then start."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+
+    try:
+        identity = "f" + "3" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        finish = _execution(identity, finished=True, started=started)
+        results = [_result("packages/vantage/tests/test_bulk.py::test_reordered")]
+        adapter.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
+
+        counting = _CommitCountingConnection(adapter._conn)
+        adapter._conn = counting  # type: ignore[assignment]
+
+        late_start = _start_only_execution(identity, started=started)
+        created = adapter.record_session(
+            late_start, results=(), received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is False
+        assert counting.commit_count == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at == finish.finished_at
+        assert stored.exit_status == finish.exit_status
+        assert adapter.count_results() == 1
     finally:
         adapter.close()
 
@@ -600,6 +741,91 @@ def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
     # RQ-3 criterion 2, the assertion of record: nothing is written for a
     # truncated session, not a prefix of it.
     assert store.count_executions() == 0
+    assert not error_capture.records, (
+        "an unhandled ClientDisconnect reached uvicorn's ASGI exception "
+        f"wrapper instead of being handled: {error_capture.records}"
+    )
+
+
+@pytest.mark.req(id="RQ-3")
+@pytest.mark.req(id="RQ-42")
+def test_finish_report_truncated_after_an_accepted_start_write_leaves_the_start_row_intact(
+    store: InMemoryExecutionStore,
+) -> None:
+    """`run-recording`'s "Finish report truncated after an accepted
+    start-write" (RQ-3.2) and `session-ingestion`'s matching RQ-42.3
+    scenario. `test_truncated_body_raw_socket` above proves only the
+    no-prior-report case (``count_executions() == 0``); it would be wrong
+    to extend that assertion here, because the start-write's row MUST
+    survive. A start-write is accepted first through the same real app,
+    then a finish report for that same run id is truncated in transit
+    through the identical raw-socket harness -- the row it left behind must
+    still be exactly what the start-write wrote, not removed and not
+    overwritten by a partial finish.
+    """
+    app = create_app(store)
+    run_id = "d" * 32
+    start_report = {
+        "run": {
+            "id": run_id,
+            "started_at": "2026-08-15T09:14:02.481930+00:00",
+            "finished_at": None,
+            "exit_status": None,
+            "interrupted": False,
+            "interrupt_reason": None,
+        }
+    }
+    accept_response = TestClient(app).post("/api/v1/runs", json=start_report)
+    assert accept_response.status_code == 201
+    assert store.count_executions() == 1
+
+    signal = _AsgiCompletionSignal(app)
+    error_capture = _UvicornErrorCapture()
+
+    with _RawSocketServer(signal) as server, error_capture:
+        # Deliberately short: promises 500 bytes via Content-Length, sends a
+        # small fraction of that, then stops -- same shape as
+        # `test_truncated_body_raw_socket`, but a finish report for a run id
+        # that already has an accepted start-write.
+        truncated_body = ('{"run": {"id": "' + run_id + '", "finished_at"').encode()
+        promised_length = 500
+        request_head = (
+            f"POST /api/v1/runs HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{server.port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {promised_length}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode()
+
+        client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_sock.settimeout(5)
+        try:
+            client_sock.connect(("127.0.0.1", server.port))
+            client_sock.sendall(request_head + truncated_body)
+            assert len(truncated_body) < promised_length
+            client_sock.shutdown(socket.SHUT_WR)
+            try:
+                received = client_sock.recv(4096)
+            except OSError:
+                received = b""
+        finally:
+            client_sock.close()
+
+        completed = signal.completed.wait(timeout=5)
+
+    assert completed, "the server never finished handling the truncated finish report"
+    assert received == b""
+    # The assertion of record: the start-write's row survives the rejected
+    # finish exactly as written -- present, one row, no result rows, still a
+    # null `finished_at` -- neither removed nor overwritten by the partial
+    # finish report.
+    assert store.count_executions() == 1
+    stored = store.get_execution(run_id)
+    assert stored is not None
+    assert stored.finished_at is None
+    assert stored.exit_status is None
+    assert store.count_results() == 0
     assert not error_capture.records, (
         "an unhandled ClientDisconnect reached uvicorn's ASGI exception "
         f"wrapper instead of being handled: {error_capture.records}"
