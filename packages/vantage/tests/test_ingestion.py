@@ -411,3 +411,26 @@ def test_create_app_exposes_the_configured_grace_period() -> None:
     app = create_app(InMemoryExecutionStore(), grace_period_seconds=123.0)
 
     assert app.state.grace_period == 123.0
+
+
+# --- Capability advertisement (design decisions D38-D40, tasks 1.1/1.2) -----
+
+
+def test_capabilities_endpoint_advertises_the_session_lifecycle(client: TestClient) -> None:
+    """D38: the server advertises exactly one capability, not a version
+    string -- `GET /api/v1/capabilities` answers `{"session_lifecycle":
+    true}`, the one explicit positive answer a client's fail-closed check
+    (D40) may treat as permission."""
+    response = client.get("/api/v1/capabilities")
+
+    assert response.status_code == 200
+    assert response.json() == {"session_lifecycle": True}
+
+
+def test_capabilities_endpoint_is_not_mounted_unversioned(client: TestClient) -> None:
+    """Mounted under `/api/v1` and nowhere else -- the same absence rule
+    `app.py`'s own docstring already states for the run routes (RQ-41's
+    third criterion)."""
+    response = client.get("/capabilities")
+
+    assert response.status_code == 404

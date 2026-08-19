@@ -513,7 +513,12 @@ def test_a_fast_suite_emits_no_heartbeat(
         def getoption(self, name: str, default: object = None) -> object:
             return None
 
-    recorder = Recorder(_ConfigDouble(), "http://127.0.0.1:1", 1.0)  # type: ignore[arg-type]
+    recorder = Recorder(
+        _ConfigDouble(),  # type: ignore[arg-type]
+        "http://127.0.0.1:1",
+        1.0,
+        lifecycle_available=True,
+    )
     for _ in range(1000):
         recorder._maybe_beat()
 

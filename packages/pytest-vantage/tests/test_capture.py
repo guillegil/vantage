@@ -429,7 +429,12 @@ def test_recorder_sends_the_assembled_results_in_the_one_session_post(
         sent.append(report)
 
     monkeypatch.setattr("pytest_vantage.recorder.send", _capture)
-    recorder = Recorder(config=None, address="http://example.invalid", timeout=1.0)  # type: ignore[arg-type]
+    recorder = Recorder(
+        config=None,  # type: ignore[arg-type]
+        address="http://example.invalid",
+        timeout=1.0,
+        lifecycle_available=True,
+    )
 
     for report_ in (
         _report("setup", "passed", nodeid="test_a.py::test_1"),

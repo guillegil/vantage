@@ -24,6 +24,7 @@ from urllib import request as urllib_request
 
 _INGESTION_PATH = "/api/v1/runs"
 _HEARTBEAT_PATH_SUFFIX = "/heartbeat"
+_CAPABILITIES_PATH = "/api/v1/capabilities"
 
 # design.md threat matrix "Untrusted response": the acknowledgement body is
 # never expected to be more than a few dozen bytes
@@ -88,4 +89,41 @@ def send_heartbeat(address: str, run_id: str, *, timeout: float) -> None:
         response.read(MAX_RESPONSE_BYTES)
 
 
-__all__ = ["MAX_RESPONSE_BYTES", "send", "send_heartbeat"]
+def fetch_capabilities(address: str, *, timeout: float) -> bool:
+    """GET ``{address}/api/v1/capabilities`` and answer whether the server
+    advertises the ``session_lifecycle`` capability (design decisions
+    D38-D40, `plugin-server-compatibility`).
+
+    Returns ``True`` for exactly one shape: a `200` response whose JSON body
+    is a mapping carrying ``"session_lifecycle": true``. Every other outcome
+    degrades to ``False`` -- the `404` an older server (one that predates
+    this route entirely) answers (D39), a connection failure, a timeout, any
+    other non-2xx status, a body that is not valid JSON, JSON of the wrong
+    shape (not a mapping at all, or ``session_lifecycle`` missing, falsy, or
+    not literally the JSON boolean ``true``).
+
+    Unlike `send`/`send_heartbeat`, whose contract is "send, or raise" and
+    leave turning the exception into a warning to `boundary.py`, this
+    function IS the fail-closed boundary (D40): it never propagates. Catching
+    broadly here, not in the caller, is deliberate -- a capability check that
+    could ever raise out to its caller would let one overlooked exception
+    path fail OPEN by accident, exactly the defect this change exists to
+    prevent.
+    """
+    url = address.rstrip("/") + _CAPABILITIES_PATH
+    try:
+        # Flagged by S310 for the same reason `send`'s call site is -- the
+        # scheme has already passed `config.resolve_and_validate_address` by
+        # the time this is called, so only http/https ever reach here.
+        http_request = urllib_request.Request(url, method="GET")  # noqa: S310
+        with urllib_request.urlopen(http_request, timeout=timeout) as response:  # noqa: S310
+            body = response.read(MAX_RESPONSE_BYTES)
+        payload = json.loads(body)
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    return payload.get("session_lifecycle") is True
+
+
+__all__ = ["MAX_RESPONSE_BYTES", "fetch_capabilities", "send", "send_heartbeat"]
