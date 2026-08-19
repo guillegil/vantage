@@ -1,7 +1,8 @@
-"""SQLite adapter for `ExecutionStore` (RQ-30.1, RQ-38.1) -- design.md D5, D8.
+"""SQLite adapter for `ExecutionStore` (RQ-30.1, RQ-38.1) -- design.md D5, D8,
+D19-D22.
 
 Idempotency is settled inside the `INSERT` itself, never by a preceding
-`SELECT`: `record_execution` uses `INSERT ... ON CONFLICT(id) DO NOTHING` and
+`SELECT`: `record_session` uses `INSERT ... ON CONFLICT(id) DO NOTHING` and
 reads the row count the INSERT itself produced to decide its boolean return
 (D3, D5). A `SELECT`-then-`INSERT` shape would leave a window in which two
 concurrent replays of the same `run.id` both pass the `SELECT` and both
@@ -16,17 +17,36 @@ file -- no in-process lock can reach across a process boundary. Every write
 takes the lock up front with `BEGIN IMMEDIATE`, never a deferred
 transaction, because a deferred transaction that upgrades to a write
 mid-statement is the classic two-writer deadlock.
+
+Results and the catalogue join the same transaction (D22): run insert, the
+catalogue upsert, the surrogate-key resolve, and the result insert are four
+statements inside one `BEGIN IMMEDIATE` -- never four separate calls, and
+never `RETURNING` (needs SQLite >= 3.35, above the 3.10 floor). The
+catalogue upsert (D20) advances `last_seen_at` with `MAX` rather than an
+unconditional overwrite, so a late-arriving report with an older
+`run.started_at` cannot roll a test's last-seen timestamp backwards. The
+result insert (D19 layer 3) is `ON CONFLICT(run_id, node_id, attempt) DO
+NOTHING`, which makes a replayed report a silent no-op rather than an error
+(RQ-41).
 """
 
 from __future__ import annotations
 
+import sqlite3
 import threading
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import cast
 
 from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.storage.connection import open_database
+
+# SQLITE_MAX_VARIABLE_NUMBER is 999 on older SQLite builds; 500 leaves
+# headroom without needing to introspect the running library's compile-time
+# limit (design.md D20).
+_MAX_PLACEHOLDERS = 500
 
 _INSERT_RUN = """
     INSERT INTO run (
@@ -39,6 +59,50 @@ _INSERT_RUN = """
 _SELECT_RUN = """
     SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason
     FROM run WHERE id = ?
+"""
+
+# Conflict target is `node_id` -- the Phase 1 identity key (schema.sql
+# comment). `stable_id` carries the identical string in Phase 1, so its own
+# UNIQUE index cannot be violated by the row this statement updates.
+_UPSERT_TEST_CASE = """
+    INSERT INTO test_case (
+        stable_id, node_id, file_path, class_name, function_name,
+        param_id, first_seen_at, last_seen_at, last_seen_run_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(node_id) DO UPDATE SET
+        file_path        = excluded.file_path,
+        class_name       = excluded.class_name,
+        function_name    = excluded.function_name,
+        param_id         = excluded.param_id,
+        last_seen_run_id = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
+                                THEN excluded.last_seen_run_id ELSE test_case.last_seen_run_id END,
+        last_seen_at     = MAX(test_case.last_seen_at, excluded.last_seen_at)
+"""
+
+_INSERT_RESULT = """
+    INSERT INTO result (
+        run_id, test_case_id, node_id, outcome, duration, started_at, finished_at,
+        setup_outcome, call_outcome, teardown_outcome,
+        setup_duration, call_duration, teardown_duration, worker_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(run_id, node_id, attempt) DO NOTHING
+"""
+
+_SELECT_RESULTS_FOR_RUN = """
+    SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
+           r.outcome, r.duration, r.started_at, r.finished_at,
+           r.setup_outcome, r.call_outcome, r.teardown_outcome,
+           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id
+    FROM result r
+    JOIN test_case tc ON tc.id = r.test_case_id
+    WHERE r.run_id = ?
+    ORDER BY r.id
+"""
+
+_SELECT_TEST_CASE = """
+    SELECT node_id, file_path, class_name, function_name, param_id,
+           first_seen_at, last_seen_at, last_seen_run_id
+    FROM test_case WHERE node_id = ?
 """
 
 
@@ -54,6 +118,141 @@ def _row_to_execution(row: tuple[object, ...]) -> Execution:
         interrupted=bool(interrupted),
         interrupt_reason=interrupt_reason if isinstance(interrupt_reason, str) else None,
     )
+
+
+def _row_to_result(row: tuple[object, ...]) -> Result:
+    (
+        node_id,
+        file_path,
+        class_name,
+        function_name,
+        param_id,
+        outcome,
+        duration,
+        started_at,
+        finished_at,
+        setup_outcome,
+        call_outcome,
+        teardown_outcome,
+        setup_duration,
+        call_duration,
+        teardown_duration,
+        worker_id,
+    ) = row
+    return Result(
+        identity=CaseIdentity(
+            node_id=cast(str, node_id),
+            file_path=cast(str, file_path),
+            class_name=cast("str | None", class_name),
+            function_name=cast(str, function_name),
+            param_id=cast("str | None", param_id),
+        ),
+        outcome=cast(str, outcome),
+        duration=cast("float | None", duration),
+        started_at=datetime.fromisoformat(started_at) if isinstance(started_at, str) else None,
+        finished_at=datetime.fromisoformat(finished_at) if isinstance(finished_at, str) else None,
+        setup_outcome=cast("str | None", setup_outcome),
+        call_outcome=cast("str | None", call_outcome),
+        teardown_outcome=cast("str | None", teardown_outcome),
+        setup_duration=cast("float | None", setup_duration),
+        call_duration=cast("float | None", call_duration),
+        teardown_duration=cast("float | None", teardown_duration),
+        worker_id=cast("str | None", worker_id),
+    )
+
+
+def _row_to_catalogue_entry(row: tuple[object, ...]) -> CatalogueEntry:
+    (
+        node_id,
+        file_path,
+        class_name,
+        function_name,
+        param_id,
+        first_seen_at,
+        last_seen_at,
+        last_seen_run_id,
+    ) = row
+    return CatalogueEntry(
+        identity=CaseIdentity(
+            node_id=cast(str, node_id),
+            file_path=cast(str, file_path),
+            class_name=cast("str | None", class_name),
+            function_name=cast(str, function_name),
+            param_id=cast("str | None", param_id),
+        ),
+        first_seen_at=datetime.fromisoformat(cast(str, first_seen_at)),
+        last_seen_at=datetime.fromisoformat(cast(str, last_seen_at)),
+        last_seen_run_id=cast("str | None", last_seen_run_id),
+    )
+
+
+def _catalogue_rows(
+    execution: Execution, results: Sequence[Result]
+) -> list[tuple[str, str, str, str | None, str, str | None, str, str, str]]:
+    started_at = execution.started_at.isoformat()
+    run_id = execution.identity.value
+    # Keyed by node_id so a report carrying the same node id twice (should
+    # not happen -- the service layer rejects it, D19 layer 2) still yields
+    # one upsert row rather than a batch containing a duplicate key.
+    by_node_id: dict[str, CaseIdentity] = {
+        result.identity.node_id: result.identity for result in results
+    }
+    return [
+        (
+            identity.node_id,  # stable_id -- identical to node_id in Phase 1 (D20)
+            identity.node_id,
+            identity.file_path,
+            identity.class_name,
+            identity.function_name,
+            identity.param_id,
+            started_at,  # first_seen_at -- only used on INSERT, ignored on conflict
+            started_at,  # last_seen_at -- the MAX/CASE clause decides on conflict
+            run_id,  # last_seen_run_id
+        )
+        for identity in by_node_id.values()
+    ]
+
+
+def _result_rows(
+    execution: Execution, results: Sequence[Result], test_case_ids: dict[str, int]
+) -> list[tuple[object, ...]]:
+    run_id = execution.identity.value
+    return [
+        (
+            run_id,
+            test_case_ids[result.identity.node_id],
+            result.identity.node_id,
+            result.outcome,
+            result.duration,
+            result.started_at.isoformat() if result.started_at is not None else None,
+            result.finished_at.isoformat() if result.finished_at is not None else None,
+            result.setup_outcome,
+            result.call_outcome,
+            result.teardown_outcome,
+            result.setup_duration,
+            result.call_duration,
+            result.teardown_duration,
+            result.worker_id,
+        )
+        for result in results
+    ]
+
+
+def _resolve_test_case_ids(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, int]:
+    resolved: dict[str, int] = {}
+    for start in range(0, len(node_ids), _MAX_PLACEHOLDERS):
+        batch = node_ids[start : start + _MAX_PLACEHOLDERS]
+        # `placeholders` is built only from the literal `?` marker, repeated
+        # once per batch item -- no value is ever interpolated into the SQL
+        # text itself, so this is not the injection pattern S608 flags.
+        placeholders = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT id, node_id FROM test_case WHERE node_id IN ({placeholders})",  # noqa: S608
+            batch,
+        ).fetchall()
+        for row_id, row_node_id in rows:
+            resolved[cast(str, row_node_id)] = cast(int, row_id)
+    return resolved
 
 
 class SqliteExecutionStore:
@@ -72,7 +271,14 @@ class SqliteExecutionStore:
         self._conn = open_database(path)
         self._lock = threading.Lock()
 
-    def record_execution(self, execution: Execution, *, received_at: datetime) -> bool:
+    def record_session(
+        self, execution: Execution, *, results: Sequence[Result], received_at: datetime
+    ) -> bool:
+        # Four statements, one transaction, one fixed order (design.md D22):
+        # run insert, catalogue upsert, surrogate-key resolve, result insert.
+        # The order is required, not tidy -- `PRAGMA foreign_keys=ON` is set
+        # on every connection, so `result.run_id`, `test_case.last_seen_run_id`
+        # and `result.test_case_id` each need their referent to exist first.
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -88,10 +294,20 @@ class SqliteExecutionStore:
                         execution.interrupt_reason,
                     ),
                 )
+                created = cursor.rowcount == 1
+
+                if results:
+                    catalogue_rows = _catalogue_rows(execution, results)
+                    self._conn.executemany(_UPSERT_TEST_CASE, catalogue_rows)
+
+                    node_ids = [row[1] for row in catalogue_rows]
+                    test_case_ids = _resolve_test_case_ids(self._conn, node_ids)
+
+                    result_rows = _result_rows(execution, results, test_case_ids)
+                    self._conn.executemany(_INSERT_RESULT, result_rows)
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
-            created = cursor.rowcount == 1
             self._conn.execute("COMMIT")
             return created
 
@@ -104,6 +320,20 @@ class SqliteExecutionStore:
     def count_executions(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM run").fetchone()
         return int(row[0])
+
+    def get_results(self, execution_id: str) -> Sequence[Result]:
+        rows = self._conn.execute(_SELECT_RESULTS_FOR_RUN, (execution_id,)).fetchall()
+        return [_row_to_result(row) for row in rows]
+
+    def count_results(self) -> int:
+        row = self._conn.execute("SELECT COUNT(*) FROM result").fetchone()
+        return int(row[0])
+
+    def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
+        row = self._conn.execute(_SELECT_TEST_CASE, (node_id,)).fetchone()
+        if row is None:
+            return None
+        return _row_to_catalogue_entry(row)
 
     def close(self) -> None:
         self._conn.close()

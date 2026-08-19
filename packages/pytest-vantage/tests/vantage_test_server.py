@@ -29,6 +29,7 @@ from collections.abc import Iterator
 import pytest
 import uvicorn
 from vantage.core.domain.execution import Execution
+from vantage.core.domain.result import CatalogueEntry, Result
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 
@@ -85,6 +86,23 @@ class VantageTestServer:
         every test that needs to inspect what was recorded.
         """
         return list(self.store._executions.values())  # noqa: SLF001
+
+    def results(self) -> list[Result]:
+        """Every result the server has stored so far, across every
+        execution, in no particular order (task 8.1). `get_results` on the
+        port needs an execution id the caller rarely knows ahead of time --
+        same reasoning as `executions()` above, and the same private-attribute
+        reach-in rather than scattering it across every test that needs it.
+        """
+        return list(self.store._results.values())  # noqa: SLF001
+
+    def catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
+        """The catalogue entry for one node id, or `None` if the server has
+        never observed it (task 8.1). A thin pass-through -- `get_catalogue_entry`
+        is already public on the port and already takes exactly this argument,
+        so no private reach-in is needed here (unlike `executions()`/`results()`).
+        """
+        return self.store.get_catalogue_entry(node_id)
 
 
 @pytest.fixture
