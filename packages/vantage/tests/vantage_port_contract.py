@@ -422,3 +422,19 @@ class ExecutionStoreContract:
         assert store.touch_last_contact(identity, later_contact) is True
 
         assert store.touch_last_contact("9" * 32, later_contact) is False
+
+        # A heartbeat touches the contact clock and NOTHING else. Without
+        # this read-back the assertions above are satisfied by the return
+        # value alone, and an adapter whose UPDATE also fabricated a
+        # `finished_at` would pass every one of them -- verified by
+        # mutation, which left the whole suite green. The store is the only
+        # place that can say so, because the route never reads these fields
+        # back and `Execution` is what the client reported, not what was
+        # stored beside it.
+        after = store.get_execution(identity)
+        assert after is not None
+        assert after.started_at == started
+        assert after.finished_at is None
+        assert after.exit_status is None
+        assert after.interrupted is False
+        assert after.interrupt_reason is None
