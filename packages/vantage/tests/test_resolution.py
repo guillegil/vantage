@@ -127,7 +127,10 @@ def test_cli_main_carries_the_resolved_grace_period_into_the_app(
     def _capture(app: object, **_kwargs: object) -> None:
         served["app"] = app
 
-    monkeypatch.setattr(cli.uvicorn, "run", _capture)
+    # Patched by dotted path, not through `cli.uvicorn`: `cli.py`'s
+    # `__all__` does not re-export its imports, and reaching through the
+    # module attribute is what mypy flags rather than a style preference.
+    monkeypatch.setattr("vantage.service.cli.uvicorn.run", _capture)
 
     cli.main(["--database", str(tmp_path / "v.db"), "--grace-period", "60"])
 
