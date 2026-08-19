@@ -51,7 +51,12 @@ def test_six_tests_under_xdist_produce_six_results_and_one_run_entry(
     `test_xdist_guard.py`), and each worker's results reach the controller
     through `pytest_runtest_logreport`, which xdist forwards -- never a
     second HTTP request from a worker.
+
+    RQ-27's "without xdist" CI matrix leg installs no `pytest-xdist` at
+    all, so `-n 2` is not a recognised option there -- skip rather than
+    fail, the same pattern `test_run_report.py`'s `-n 4` test already uses.
     """
+    pytest.importorskip("xdist")
     pytester.makepyfile(test_six=_SIX_TESTS)
 
     pytester.runpytest_subprocess(
