@@ -13,6 +13,7 @@ lists only this one new test file for D2a.
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -20,9 +21,28 @@ import time
 from datetime import datetime, timezone
 
 import pytest
+from vantage.core.domain.execution import Execution
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
+_SLOW_TEST = "import time\n\n\ndef test_slow():\n    time.sleep(5)\n"
+
+
+def _wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> Execution:
+    """Poll `server` until its first run entry has landed, or raise after
+    `timeout` seconds -- a bounded observable condition, not a fixed sleep
+    (task 5.1's own instruction: a fixed sleep before a signal is how a
+    test becomes flaky on a loaded CI runner). Used to prove a kill or a
+    liveness query happens strictly after `pytest_sessionstart`'s
+    start-write has been accepted, never before it.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        executions = server.executions()
+        if executions:
+            return executions[0]
+        time.sleep(0.02)
+    raise TimeoutError(f"no run entry appeared within {timeout}s")
 
 
 # --- Unit: fixed-width ISO-8601 timestamps (design.md D1) -------------------
@@ -262,6 +282,243 @@ def test_sigint_leaves_start_time_and_null_end_time(
     (execution,) = executions
     assert execution.finished_at is None
     assert execution.interrupted is True
+
+
+# --- The scenarios the task list forgot (Phase 5) ---------------------------
+
+
+@pytest.mark.req(id="RQ-1")
+def test_a_still_running_session_already_has_a_run_entry(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """`run-recording`'s "A still-running session already has a run entry"
+    (RQ-1.5): the database is queried WHILE the child is still executing,
+    before it finishes or is killed -- proving the row exists because of
+    the start-write alone, not merely that it exists once the session is
+    over, which every other RQ-1 test in this file already proves.
+
+    Needs a raw `Popen` (`pytester.popen`), not `runpytest_subprocess`,
+    because the child must still be alive when the server is queried.
+    `stdin=subprocess.DEVNULL` for the same 3.10 `communicate()` reason
+    `test_sigint_leaves_start_time_and_null_end_time` above carries.
+    """
+    pytester.makepyfile(test_slow=_SLOW_TEST)
+
+    process = pytester.popen(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--vantage",
+            f"--vantage-server={vantage_server.address}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        execution = _wait_for_execution(vantage_server)
+
+        # The assertion of record: the child is still executing its 5-second
+        # test when the row is observed.
+        assert process.poll() is None
+        assert execution.started_at is not None
+        assert execution.finished_at is None
+    finally:
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=15)
+
+
+@pytest.mark.req(id="RQ-1")
+@pytest.mark.req(id="RQ-31")
+def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_reason(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """`run-recording`'s "A SIGKILL'd session's entry is present" (RQ-1.6)
+    and `run-recording`'s "SIGKILL'd session carries no interrupt reason"
+    (RQ-31.3), asserted together to make the contrast legible: SIGINT
+    (`test_sigint_leaves_start_time_and_null_end_time` above) is a signal
+    Python observes, so that entry carries `interrupted=True`. SIGKILL
+    cannot be caught, blocked or handled at all -- the process stops
+    between two instructions, and no code of this project ever runs to
+    record a reason. This test proves the negative directly: the run entry
+    the start-write already left behind stays exactly as it was, holding a
+    start time and a null end time, `interrupted=False`, and no
+    `interrupt_reason`.
+
+    SIGKILL, never SIGTERM or SIGINT, sent only after
+    `_wait_for_execution` confirms the start-write has already landed --
+    proving the kill happens after `pytest_sessionstart`, not before it.
+    """
+    pytester.makepyfile(test_slow=_SLOW_TEST)
+
+    process = pytester.popen(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--vantage",
+            f"--vantage-server={vantage_server.address}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+    )
+    _wait_for_execution(vantage_server)
+
+    os.kill(process.pid, signal.SIGKILL)
+    process.wait(timeout=15)
+
+    executions = vantage_server.executions()
+    assert len(executions) == 1
+    (execution,) = executions
+    assert execution.started_at is not None
+    assert execution.finished_at is None
+    assert execution.interrupted is False
+    assert execution.interrupt_reason is None
+
+
+# --- Activity-driven beats (design.md D30, task 4.18) -----------------------
+
+
+@pytest.mark.req(id="RQ-25")
+def test_a_suite_exceeding_one_heartbeat_interval_sends_at_least_one_heartbeat(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`session-liveness`'s "A long suite's last contact advances during
+    execution" scenario -- `_BEAT_INTERVAL_SECONDS` shrunk to make every
+    `pytest_runtest_logreport` call a beat opportunity, proving the wiring
+    fires for real rather than merely never being due within the suite's
+    real wall-clock duration."""
+    beats: list[str] = []
+
+    def _capture(address: str, run_id: str, *, timeout: float) -> None:
+        beats.append(run_id)
+
+    monkeypatch.setattr("pytest_vantage.recorder.send_heartbeat", _capture)
+    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
+    )
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=3)
+    assert len(beats) >= 1
+
+
+@pytest.mark.req(id="RQ-25")
+def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_contact(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`session-liveness`'s "A long suite's last contact advances during
+    execution" scenario, exercised for real: `send_heartbeat` is left
+    UNPATCHED, so the whole chain -- the plugin decides to beat, POSTs over
+    real HTTP, the route calls `touch_last_contact` -- runs end to end
+    against `vantage_server`, closing the gap the test above leaves open (it
+    monkeypatches `send_heartbeat` itself away and only ever observes its
+    own stub list, never the server).
+
+    Only `_BEAT_INTERVAL_SECONDS` is driven down here, the same technique
+    the test above already uses -- the production default (30.0) is never
+    touched, so a suite still "exceeds one heartbeat interval" without
+    sleeping through 30 real seconds.
+
+    The server's own `touch_last_contact` is wrapped, not replaced: the real
+    implementation still runs on every call, so `last_contact_at` is genuine
+    store state, not a captured client-side call. The wrapper's only job is
+    to read the store's value for this run BEFORE the first real heartbeat
+    overwrites it -- exactly the value the start-write alone recorded --
+    so the final assertion compares two real reads of the store, not a
+    stub's argument list. If the wire between `send_heartbeat` and this
+    route breaks (wrong path, wrong method, wrong run id), the wrapped
+    method is never called at all and `baseline_by_run` stays empty.
+
+    Verified by mutation (task 6.1): breaking
+    `transport._HEARTBEAT_PATH_SUFFIX` to `/HEARTBEAT-TYPO` makes this test
+    fail; reverting restores green. See `apply-progress` for both runs.
+    """
+    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
+
+    baseline_by_run: dict[str, datetime] = {}
+    real_touch_last_contact = vantage_server.store.touch_last_contact
+
+    def _spy_touch_last_contact(execution_id: str, contacted_at: datetime) -> bool:
+        if execution_id not in baseline_by_run:
+            # The value `_last_contact` holds right now is exactly what the
+            # start-write's insert branch set (design.md D27) -- nothing
+            # else can have touched it before this, the first real
+            # heartbeat call this run has received.
+            baseline_by_run[execution_id] = vantage_server.store._last_contact[  # noqa: SLF001
+                execution_id
+            ]
+        return real_touch_last_contact(execution_id, contacted_at)
+
+    monkeypatch.setattr(vantage_server.store, "touch_last_contact", _spy_touch_last_contact)
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
+    )
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=3)
+    execution = _wait_for_execution(vantage_server)
+    run_id = execution.identity.value
+    assert run_id in baseline_by_run, (
+        "no heartbeat ever reached the server's touch_last_contact -- "
+        "the plugin -> HTTP -> route -> store chain never completed"
+    )
+    last_contact_at = vantage_server.store._last_contact[run_id]  # noqa: SLF001
+    assert last_contact_at > baseline_by_run[run_id]
+
+
+@pytest.mark.req(id="RQ-25")
+def test_a_fast_suite_emits_no_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+) -> None:
+    """RQ-25's measured profile -- 1,000 tests at ~10 ms each is a
+    ~10-second suite, comfortably inside one `_BEAT_INTERVAL_SECONDS`
+    (30.0) window. Proven directly against `Recorder._maybe_beat`'s timing
+    guard, called 1,000 times in a tight loop right after construction,
+    rather than spawning 1,000 real subprocess tests -- the real elapsed
+    wall-clock time for that loop is a small fraction of a second, well
+    under the interval, exactly like RQ-25's own measured suite.
+
+    `_maybe_beat` is wrapped in `@liveness_isolated` (design.md D30), which
+    swallows whatever the beat path raises and turns it into a
+    `VantageWarning` instead of propagating -- so `beats == []` alone
+    cannot distinguish "correctly suppressed, no attempt made" from "the
+    timing guard is broken and every attempt raised, silently, latched
+    after the first failure" (W3). Asserting the suite stayed warning-free
+    as well closes that gap: deleting `_last_beat_at` leaves `beats == []`
+    unchanged but emits exactly one `VantageWarning` -- confirmed by
+    reverting the fix and observing this assertion, and only this one,
+    fail.
+    """
+    from pytest_vantage.recorder import Recorder
+
+    beats: list[str] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send_heartbeat",
+        lambda *args, **kwargs: beats.append("beat"),
+    )
+
+    class _ConfigDouble:
+        def getoption(self, name: str, default: object = None) -> object:
+            return None
+
+    recorder = Recorder(_ConfigDouble(), "http://127.0.0.1:1", 1.0)  # type: ignore[arg-type]
+    for _ in range(1000):
+        recorder._maybe_beat()
+
+    assert beats == []
+    assert len(recwarn) == 0, [str(w.message) for w in recwarn.list]
 
 
 # --- End-to-end xdist (task 6.5, RQ-1 + RQ-27) ------------------------------

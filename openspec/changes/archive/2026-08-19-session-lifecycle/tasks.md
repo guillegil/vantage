@@ -192,52 +192,52 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
       `git diff --exit-code -- packages/vantage/src/vantage/storage/schema.sql`
       shows only this slice's addition (no unrelated drift).
 
-## Phase 4: Heartbeat, activity-driven beats, abandonment derivation (PR 4)
+## Phase 4: Heartbeat, activity-driven beats, abandonment derivation (PR 4) — COMPLETE
 
-- [ ] 4.1 RED `packages/vantage/tests/vantage_port_contract.py`:
+- [x] 4.1 RED `packages/vantage/tests/vantage_port_contract.py`:
       `touch_last_contact` advances `last_contact_at` on a known run; a
       second, earlier-or-equal contact leaves it unchanged (monotonic guard,
       D33); an unknown execution id returns `False`.
-- [ ] 4.2 RED `packages/vantage/tests/test_ingestion.py`: `POST
+- [x] 4.2 RED `packages/vantage/tests/test_ingestion.py`: `POST
       /api/v1/runs/{id}/heartbeat` for a run created by an accepted
       start-write advances `last_contact_at`; the response is `200
       {"run_id": ..., "status": "acknowledged"}`.
-- [ ] 4.3 RED, same file: a heartbeat for a run whose finish is already
+- [x] 4.3 RED, same file: a heartbeat for a run whose finish is already
       recorded leaves `finished_at`, `exit_status`, `interrupted` and
       `interrupt_reason` exactly as recorded — the body is `{}` and read by
       nothing, so there is no field to smuggle a change through.
-- [ ] 4.4 RED `packages/vantage/tests/test_rejection.py`: heartbeat for an
+- [x] 4.4 RED `packages/vantage/tests/test_rejection.py`: heartbeat for an
       unknown run id → `404 {"error": "unknown_run", ...}`; a malformed id
       (not `^[0-9a-f]{32}$`) → `422` through the existing
       `register_error_handlers` path, no new code.
-- [ ] 4.5 GREEN `packages/vantage/src/vantage/core/ports/storage.py`: add
+- [x] 4.5 GREEN `packages/vantage/src/vantage/core/ports/storage.py`: add
       `touch_last_contact(execution_id: str, contacted_at: datetime) -> bool`
       to the `ExecutionStore` protocol.
-- [ ] 4.6 GREEN `packages/vantage/src/vantage/storage/sqlite_store.py`: add
+- [x] 4.6 GREEN `packages/vantage/src/vantage/storage/sqlite_store.py`: add
       `_TOUCH_LAST_CONTACT` (`UPDATE run SET last_contact_at = ? WHERE id = ?
       AND (last_contact_at IS NULL OR last_contact_at < ?)`); extend
       `_UPSERT_RUN`'s insert branch to write `last_contact_at = received_at`
       on creation, left alone on the conflict path (D27) — the column now
       exists (Phase 3).
-- [ ] 4.7 GREEN `packages/vantage/src/vantage/storage/memory.py`: mirror
+- [x] 4.7 GREEN `packages/vantage/src/vantage/storage/memory.py`: mirror
       `touch_last_contact` and the insert-time `last_contact_at` write over
       the dict-backed store (RQ-30 parity).
-- [ ] 4.8 GREEN `packages/vantage/src/vantage/service/errors.py`:
+- [x] 4.8 GREEN `packages/vantage/src/vantage/service/errors.py`:
       `UnknownRunError(RejectionError)`, `status_code = 404`.
-- [ ] 4.9 GREEN `packages/vantage/src/vantage/service/schemas.py`:
+- [x] 4.9 GREEN `packages/vantage/src/vantage/service/schemas.py`:
       `HeartbeatAcknowledgement`.
-- [ ] 4.10 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: `POST
+- [x] 4.10 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: `POST
       /api/v1/runs/{run_id}/heartbeat`, `run_id: str =
       Path(pattern=r"^[0-9a-f]{32}$")`; resolve the 404 by calling
       `get_execution` rather than inferring it from a zero-`rowcount` update
       (an out-of-order beat on a known run is `200`, not `404`).
-- [ ] 4.11 RED `packages/vantage/tests/test_architecture.py` (or a new
+- [x] 4.11 RED `packages/vantage/tests/test_architecture.py` (or a new
       `test_liveness.py`, stdlib only, no I/O): table-driven
       `derive_presentation` — finished (any staleness) → `FINISHED`;
       interrupted (any staleness) → `INTERRUPTED`, checked before the clock;
       past-grace with no finish/interrupt → `ABANDONED`; inside-grace →
       `RUNNING`; `last_contact_at is None` falls back to `started_at`.
-- [ ] 4.12 GREEN `packages/vantage/src/vantage/core/domain/liveness.py`
+- [x] 4.12 GREEN `packages/vantage/src/vantage/core/domain/liveness.py`
       (new file, standard library only, RQ-26): `PRESENTATIONS` as a
       module-level `frozenset` of `"finished"`, `"interrupted"`,
       `"abandoned"`, `"running"` — **never an `Enum` and never `StrEnum`**.
@@ -247,30 +247,30 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
       keeping `OUTCOMES` a `frozenset`. Follow that precedent; `derive_presentation(execution,
       *, last_contact_at, now, grace)` implementing the precedence in D34
       exactly (finished → interrupted → grace comparison → running).
-- [ ] 4.13 GREEN `packages/vantage/src/vantage/core/config/resolution.py`:
+- [x] 4.13 GREEN `packages/vantage/src/vantage/core/config/resolution.py`:
       `grace_period_seconds`, `grace_source` on `ServerConfig`,
       `--grace-period` CLI flag, default `900.0`
       (`_DEFAULT_GRACE_BEATS = 30 × _BEAT_INTERVAL_HINT_SECONDS`).
-- [ ] 4.14 GREEN `packages/vantage/src/vantage/service/app.py`:
+- [x] 4.14 GREEN `packages/vantage/src/vantage/service/app.py`:
       `create_app(store, *, grace_period_seconds=...)` →
       `app.state.grace_period` (no reader yet — a named seam, not dead code,
       per D34's open question).
-- [ ] 4.15 GREEN `packages/vantage/src/vantage/service/cli.py`: wire
+- [x] 4.15 GREEN `packages/vantage/src/vantage/service/cli.py`: wire
       `--grace-period` through to `create_app`.
-- [ ] 4.16 RED `packages/pytest-vantage/tests/test_failure_paths.py`: a
+- [x] 4.16 RED `packages/pytest-vantage/tests/test_failure_paths.py`: a
       heartbeat send patched to fail on every attempt across a session with
       multiple heartbeat intervals emits **exactly one** warning, and every
       test result is still recorded (`recording-fault-tolerance` "A failed
       heartbeat warns once, not once per beat").
-- [ ] 4.17 RED, same file: a session where **both** the start-write and a
+- [x] 4.17 RED, same file: a session where **both** the start-write and a
       heartbeat fail emits **two** warnings — one naming reporting, one
       naming liveness. This is correct and must not collapse into one; do
       not "fix" it into a single warning.
-- [ ] 4.18 RED `packages/pytest-vantage/tests/test_run_report.py`: a suite
+- [x] 4.18 RED `packages/pytest-vantage/tests/test_run_report.py`: a suite
       exceeding one heartbeat interval sends at least one heartbeat before
       the session finishes; a suite of 1,000 ~10 ms tests (RQ-25's measured
       profile) sends zero.
-- [ ] 4.19 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`:
+- [x] 4.19 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`:
       `pytest_runtest_logreport` calls `accumulate(self._results, report)`
       **first, unconditionally**, then a separately-decorated
       `_maybe_beat()` (`@liveness_isolated`) — a decorator on the hook
@@ -278,19 +278,125 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
       and latching first (D30). `time.monotonic()` only, never wall clock.
       `_last_beat_at` assigned **before** the send, not after.
       `_BEAT_INTERVAL_SECONDS = 30.0`. Uses `send_heartbeat` from Phase 2.
-- [ ] 4.20 Confirm, **by reading**, `plugin.py:142-143` a second time — the
+- [x] 4.20 Confirm, **by reading**, `plugin.py:142-143` a second time — the
       controller-only guard still precedes every hook this slice added,
       including the beat inside `pytest_runtest_logreport` (D36).
-- [ ] 4.21 GREEN `packages/pytest-vantage/tests/test_xdist_guard.py`: add
+- [x] 4.21 GREEN `packages/pytest-vantage/tests/test_xdist_guard.py`: add
       the assertion that no xdist worker constructs a `Recorder` (D36).
-- [ ] 4.22 Final gate: `uv run ruff format . && uv run ruff check --fix .`,
+- [x] 4.22 Final gate: `uv run ruff format . && uv run ruff check --fix .`,
       `uv run mypy .`, `uv run deptry .`; run
       `uv run --extra dev pytest` locally on the interpreter available in
       this environment and the `-n auto` xdist path; **state explicitly**
       that the 3.10–3.13 matrix, the networking-disabled RQ-28 job and the
       clean-environment RQ-24 install check were **not** run locally and are
       left to CI — do not claim a matrix run that did not happen.
-- [ ] 4.23 Traceability sweep: `rg "RQ-1\.5|RQ-1\.6|RQ-31\.3|RQ-3\.2|RQ-42\.3|
+- [x] 4.23 Traceability sweep: `rg "RQ-1\.5|RQ-1\.6|RQ-31\.3|RQ-3\.2|RQ-42\.3|
       RQ-29|RQ-21|RQ-25|RQ-44|RQ-26|RQ-30|RQ-24"` each reach the test that
       proves them; confirm `derive_presentation`'s new obligations carry no
       new `RQ-xx` marker.
+
+## Phase 5: The scenarios the task list forgot (PR 5)
+
+Added 2026-08-19 after `sdd-verify` returned `blocked` with five untested spec
+scenarios. **All 61 earlier tasks were genuinely done** — the gap is upstream of
+apply: `design.md`'s Integration and E2E test-layer rows were never decomposed
+into tasks, so three criteria this change was commissioned to restore shipped
+written-but-unproven, and two regression paths ship green.
+
+The suite reported 241 passed and zero warnings while none of this was covered.
+Gates measure the tests that exist, not the scenarios that should have them.
+
+- [x] 5.1 RED `packages/pytest-vantage/tests/test_run_report.py`: a session
+      killed with **SIGKILL** mid-run leaves a run entry present, holding a
+      start time and a null end time (`run-recording` RQ-1.6). Use
+      `pytester.popen`, wait until the child is past `pytest_sessionstart`,
+      then `os.kill(pid, signal.SIGKILL)`. The existing
+      `test_server_dropped_mid_session_preserves_exit_status_and_warns_once`
+      is the pattern for the popen/wait shape, including its
+      `stdin=subprocess.DEVNULL` note — on 3.10 `communicate()` flushes a
+      closed stdin and raises.
+- [x] 5.2 RED, same file: that entry carries **no interrupt reason** and is
+      not marked interrupted (RQ-31.3). This asserts an **absence**: SIGKILL
+      cannot be caught, so no code of this project runs to record one. The
+      contrast with the existing SIGINT test is the point — assert both in
+      one place if it makes the distinction legible.
+- [x] 5.3 RED, same file: a **still-running** session already has a run
+      entry with a start time and a null end time (RQ-1.5) — query the
+      server while the child is still executing, before it finishes.
+- [x] 5.4 RED `packages/vantage/tests/test_rejection.py`: a finish report
+      **truncated in transit after an accepted start-write** leaves the run
+      entry as the start-write left it — present, null `finished_at`, no
+      result rows — rather than removing it (`run-recording` RQ-3.2,
+      `session-ingestion` RQ-42.3, the second scenario of each). The existing
+      `test_truncated_body_raw_socket` covers only the no-prior-report case.
+- [x] 5.5 RED `packages/vantage/tests/test_ingestion.py` (W1): a heartbeat
+      for a **known** run whose `last_contact_at` is already ahead of the
+      beat answers **200**, not 404. `touch_last_contact` returns `False`
+      there, so this is the only case that distinguishes a 404 resolved from
+      `get_execution` from one inferred off a zero rowcount. Today all four
+      heartbeat tests pass against the wrong implementation.
+- [x] 5.6 RED `packages/vantage/tests/vantage_port_contract.py` or
+      `test_sqlite_store.py` (W2): `received_at`, `started_at` and
+      `last_contact_at` are **not advanced** by the finish-write. Neither
+      column is exposed on `Execution`, so no existing test can observe them
+      — read them directly. Adding `last_contact_at = excluded.last_contact_at`
+      to the `DO UPDATE` list currently leaves all 241 tests green.
+- [x] 5.7 REFACTOR `test_a_fast_suite_emits_no_heartbeat` (W3): it asserts
+      only that no beat arrived, and `@liveness_isolated` swallows anything
+      the beat path raises — so deleting `_last_beat_at` keeps it green while
+      emitting a warning per test. Assert warning-freedom as well, so a
+      crashed path stops being indistinguishable from a suppressed one.
+- [x] 5.8 Tick `proposal.md`'s Success Criteria that are now genuinely met,
+      and leave unticked any that are not. They are all still `[ ]`,
+      including the three naming exactly these criteria.
+- [x] 5.9 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
+      `uv run mypy .`, `uv run ruff check .`, `uv run deptry .`. State which
+      matrix legs ran locally and which were left to CI.
+
+## Phase 6: The heartbeat's own wire, actually exercised (PR 6)
+
+Added 2026-08-19 after verify round two. Round one graded
+`session-liveness`'s "A long suite's last contact advances during execution"
+as PARTIAL; round two re-derived it **by mutation** and it is UNTESTED.
+
+`send_heartbeat` is never invoked against a real server anywhere in the suite —
+both of its test references monkeypatch it away. So the chain has its first and
+third links tested and its middle one not at all:
+
+```
+plugin decides to beat  ->  send_heartbeat POSTs  ->  route advances contact
+        tested                    UNTESTED                    tested
+```
+
+Reproduced independently by the orchestrator: changing the path suffix to
+`/HEARTBEAT-TYPO` leaves **246 passed**. A monkeypatched transport function
+silently voids every end-to-end scenario that depends on its wire format, and
+no number of green tests will say so.
+
+- [x] 6.1 RED `packages/pytest-vantage/tests/test_run_report.py`: run a suite
+      against the real `vantage_server` fixture **without patching
+      `send_heartbeat`**, long enough to cross one beat interval, and assert
+      the **server's** `last_contact_at` for that run advances past the
+      value the start-write recorded. Read it from the server's store, not
+      from a captured call — `touch_last_contact` on `vantage_server.store`
+      is wrapped (not replaced: the real implementation still runs) so the
+      wrapper can read the store's own pre-update value, exactly what the
+      start-write recorded, before the first real heartbeat overwrites it.
+      **Verified by mutation before calling it done**: broke
+      `_HEARTBEAT_PATH_SUFFIX` in `transport.py` to `/HEARTBEAT-TYPO` — RED
+      (`no heartbeat ever reached the server's touch_last_contact`, 1
+      failed / 246 passed), reverted — clean. Also mutated the HTTP method
+      (`POST`→`GET`, RED: 405) and the run-id/suffix ordering (RED: 404),
+      both reverted.
+- [x] 6.2 Keep the suite's wall-clock honest. `_BEAT_INTERVAL_SECONDS` is
+      driven to `0.0` via `monkeypatch` for this test only (the same
+      technique task 4.18's wiring test already established) — the
+      production default (`30.0`) is never touched. Cost measured at 0.40 s
+      standalone; not marked `slow` (comparable to the existing unmarked
+      wiring test, well under the `slow` marker's real-elapsed-time
+      threshold used elsewhere in this suite, e.g. the 8 s duration test).
+- [x] 6.3 GREEN gate: `uv run --extra dev pytest` — **247 passed, zero
+      warnings**, 25.88 s serial / 10.97 s under `-n auto`. `uv run mypy .`
+      clean (58 source files). `uv run ruff check .` clean. `uv run ruff
+      format --check .` — 58 files already formatted. `uv run deptry .`
+      clean.
