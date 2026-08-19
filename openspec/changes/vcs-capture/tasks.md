@@ -58,29 +58,29 @@ New files: `packages/pytest-vantage/src/pytest_vantage/vcs.py`,
 `subprocess`/`tmp_path`, never mocked git output (spec's own verification
 method for RQ-10 and RQ-39).
 
-- [ ] 1.1 RED `test_vcs.py::test_dirty_tracked_file_marks_run_dirty` — two
+- [x] 1.1 RED `test_vcs.py::test_dirty_tracked_file_marks_run_dirty` — two
       arms in one repo family: a worktree-modified tracked file, and a
       staged-only change. *(Scenario: Dirty working tree is marked dirty,
       RQ-10.1)*
-- [ ] 1.2 RED `test_vcs.py::test_clean_tree_matches_independent_head_read` —
+- [x] 1.2 RED `test_vcs.py::test_clean_tree_matches_independent_head_read` —
       assert `commit` equals `git rev-parse HEAD` read independently of the
       module under test. *(Scenario: Clean working tree matches an
       independent read, RQ-10.2)*
-- [ ] 1.3 RED `test_vcs.py::test_detached_head_records_commit_null_branch` —
+- [x] 1.3 RED `test_vcs.py::test_detached_head_records_commit_null_branch` —
       `git checkout <sha>`; assert commit recorded, branch null.
       *(Scenario: Detached HEAD records the commit with a null branch,
       RQ-10.3)*
-- [ ] 1.4 RED `test_vcs.py::test_no_commits_yet_stores_null_commit` —
+- [x] 1.4 RED `test_vcs.py::test_no_commits_yet_stores_null_commit` —
       `git init` only; assert `commit is None` **and** invocation 4
       (`git show`) is never spawned (assert on the patched
       `subprocess.run` call count). *(Scenario: A repository with no
       commits yet stores a null commit, RQ-10.4)*
-- [ ] 1.5 RED
+- [x] 1.5 RED
       `test_vcs.py::test_not_a_repository_records_nulls_and_no_warning` —
       bare `tmp_path`; assert all five fields `None` and `warning is None`.
       *(Scenarios: Not a git repository records nulls; Absent repository
       emits no warning — both RQ-23.1)*
-- [ ] 1.6 RED
+- [x] 1.6 RED
       `test_vcs.py::test_corrupt_git_entry_records_nulls_and_warns_once` —
       two real fixtures, not a mock: a `.git` **file** containing garbage,
       and a `.git` **directory** with a truncated `HEAD`; assert all-null
@@ -88,43 +88,43 @@ method for RQ-10 and RQ-39).
       "not a repository" via `(rootpath / ".git").exists()`, never stderr
       text. *(Scenarios: A `.git` entry that is not a valid repository
       records nulls, RQ-39.1; A corrupt repository warns exactly once)*
-- [ ] 1.7 RED
+- [x] 1.7 RED
       `test_vcs.py::test_missing_git_executable_records_nulls_silently` —
       `monkeypatch.setenv("PATH", str(tmp_path / "empty"))` for real;
       **never** `mock.patch("subprocess.run")` — a mock proves the mock,
       not `FileNotFoundError`. Assert nulls and no warning. *(Scenario: No
       git executable on PATH records nulls silently, RQ-39.2)*
-- [ ] 1.8 RED `test_vcs.py::test_permissions_restricted_repository` —
+- [x] 1.8 RED `test_vcs.py::test_permissions_restricted_repository` —
       **Inspection, `skipif(os.geteuid() == 0)`**, never counted as Test:
       `chmod 000` the `.git` directory; assert all-null. Skip, not pass
       vacuously, when running as root. *(Scenario: A permissions-restricted
       repository, skip-if-root)*
-- [ ] 1.9 RED `test_vcs.py::test_monorepo_subdirectory_records_toplevel` —
+- [x] 1.9 RED `test_vcs.py::test_monorepo_subdirectory_records_toplevel` —
       rootdir inside a subdirectory records git's `--show-toplevel`, not
       `config.rootpath` (supplementary — Testing Strategy row "Monorepo
       root", not one of the 18 spec scenarios).
-- [ ] 1.10 RED `test_vcs.py::test_argv_discipline` — **Inspection**: every
+- [x] 1.10 RED `test_vcs.py::test_argv_discipline` — **Inspection**: every
       invocation is a literal list, `shell=False`, `cwd=rootpath`,
       `stdin=DEVNULL`; no value derived from the repository or the
       environment is ever an argv element (supplementary, Testing Strategy
       row "Argv discipline").
-- [ ] 1.11 RED `test_vcs.py::test_hung_git_bounded_at_capture_level` — a
+- [x] 1.11 RED `test_vcs.py::test_hung_git_bounded_at_capture_level` — a
       fake `git` shim on `PATH` that sleeps; assert `capture()` returns
       inside the 5 s budget with an all-null snapshot (supplementary,
       component-level precursor to the session-level scenario in Phase 2).
-- [ ] 1.12 RED
+- [x] 1.12 RED
       `test_vcs.py::test_whole_capture_budget_not_per_invocation` — a shim
       sleeping 3 s on every invocation; assert **one** shared
       `time.monotonic()` deadline is consumed, not five independent 5 s
       timeouts (supplementary — proves D44's "budget for the whole
       capture, not per invocation").
-- [ ] 1.13 GREEN `vcs.py`: `VcsSnapshot` (frozen, slots dataclass);
+- [x] 1.13 GREEN `vcs.py`: `VcsSnapshot` (frozen, slots dataclass);
       `capture(rootpath) -> VcsSnapshot`, never raises — the five
       invocations in order (D44), env override of the six hazardous keys
       (D46), the exhaustive exception table (D43), the `.git`-exists
       discriminator (D45). Stdlib only: `subprocess`, `shutil`, `os`,
       `time`, `dataclasses`, `pathlib`.
-- [ ] 1.14 GREEN gate:
+- [x] 1.14 GREEN gate:
       `uv run --extra dev pytest packages/pytest-vantage/tests/test_vcs.py`,
       `uv run mypy .` clean, confirm `vcs.py` imports nothing but stdlib
       (`rg -n '^import|^from' packages/pytest-vantage/src/pytest_vantage/vcs.py`,
