@@ -366,12 +366,23 @@ inferring it from the update — an out-of-order beat on a known run is a `200`,
 
 `vantage/core/domain/liveness.py`, standard library only (RQ-26):
 
+**Corrected 2026-08-19.** This block first read `class RunPresentation(str, Enum)`.
+It caught the `StrEnum` trap and walked into the neighbouring one. Measured on the
+project's own floor and ceiling:
+
+```text
+Python 3.10:  f"{X.A}"  ->  'abandoned'
+Python 3.13:  f"{X.A}"  ->  'X.A'
+```
+
+Same source, different string, inside the supported range — which is precisely why
+`vantage.core.domain.result` records `OUTCOMES` as a module-level `frozenset` and says
+"never an `Enum`" in its own docstring. A vocabulary that formats differently per
+interpreter has no business being written into a database or a JSON body. The
+established shape here is the `frozenset`, and this follows it.
+
 ```python
-class RunPresentation(str, Enum):        # never StrEnum — 3.11+, floor is 3.10
-    FINISHED = "finished"
-    INTERRUPTED = "interrupted"
-    ABANDONED = "abandoned"
-    RUNNING = "running"
+PRESENTATIONS = frozenset({"finished", "interrupted", "abandoned", "running"})
 
 def derive_presentation(
     execution: Execution, *, last_contact_at: datetime | None,

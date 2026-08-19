@@ -26,6 +26,7 @@ import uvicorn
 
 from vantage.core.config.resolution import resolve_server_config
 from vantage.service.app import create_app
+from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,6 +67,13 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--database", default=None, help="Path to the SQLite database file.")
     parser.add_argument("--host", default=None, help=f"Bind address (default {_LOOPBACK}).")
     parser.add_argument("--port", type=int, default=None, help="Bind port (default 8765).")
+    parser.add_argument(
+        "--grace-period",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Seconds without contact before a run is presented as abandoned (default 900.0).",
+    )
     return parser.parse_args(argv)
 
 
@@ -77,6 +85,7 @@ def main(argv: list[str] | None = None) -> None:
         env_database=os.environ.get("VANTAGE_DATABASE"),
         cli_host=args.host,
         cli_port=args.port,
+        cli_grace_period=args.grace_period,
         home=Path.home(),
         xdg_data_home=os.environ.get("XDG_DATA_HOME"),
     )
@@ -89,8 +98,13 @@ def main(argv: list[str] | None = None) -> None:
 
     warn_if_bound_wide(config.host)
 
-    store = SqliteExecutionStore(config.database_path)
-    app = create_app(store)
+    try:
+        store = SqliteExecutionStore(config.database_path)
+    except SchemaVersionError as exc:
+        print(f"vantage: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    app = create_app(store, grace_period_seconds=config.grace_period_seconds)
     uvicorn.run(app, host=config.host, port=config.port)
 
 

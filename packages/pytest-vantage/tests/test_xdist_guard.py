@@ -22,14 +22,34 @@ import pytest
 from pytest_vantage.plugin import pytest_configure
 
 
+class _RegisterCallDouble:
+    """A ``pluginmanager.register`` stand-in that records every call (task
+    4.21, design.md D36). If a worker ever constructed a `Recorder`,
+    `pytest_configure` would end its guarded path here -- this is the most
+    direct place to assert it never does, one step past the existing
+    `getoption`-raises proof that the guard runs first.
+    """
+
+    def __init__(self) -> None:
+        self.registered: list[object] = []
+
+    def register(self, plugin: object) -> None:
+        self.registered.append(plugin)
+
+
 class _WorkerConfigDouble:
     """A ``pytest.Config`` stand-in carrying xdist's ``workerinput`` marker.
 
     ``getoption`` raises: if ``pytest_configure`` reaches it at all after
-    seeing ``workerinput``, the guard did not return first.
+    seeing ``workerinput``, the guard did not return first. ``pluginmanager``
+    is a ``_RegisterCallDouble`` for the same reason, one level further down
+    the path a worker must never reach (task 4.21).
     """
 
     workerinput: dict[str, Any] = {}
+
+    def __init__(self) -> None:
+        self.pluginmanager = _RegisterCallDouble()
 
     def getoption(self, name: str, default: object = None) -> object:
         raise AssertionError(
@@ -57,6 +77,12 @@ class _ControllerConfigDouble:
 def test_worker_input_returns_before_registration() -> None:
     config = _WorkerConfigDouble()
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+
+    # design.md D36, task 4.21: no xdist worker constructs a `Recorder` --
+    # holds for every hook this change adds, including the beat inside
+    # `pytest_runtest_logreport`, since none of them can run without a
+    # registered `Recorder` in the first place.
+    assert config.pluginmanager.registered == []
 
 
 @pytest.mark.req(id="RQ-1")

@@ -1,12 +1,25 @@
 """SQLite adapter for `ExecutionStore` (RQ-30.1, RQ-38.1) -- design.md D5, D8,
-D19-D22.
+D19-D22, D25-D27, D33.
 
-Idempotency is settled inside the `INSERT` itself, never by a preceding
-`SELECT`: `record_session` uses `INSERT ... ON CONFLICT(id) DO NOTHING` and
-reads the row count the INSERT itself produced to decide its boolean return
-(D3, D5). A `SELECT`-then-`INSERT` shape would leave a window in which two
-concurrent replays of the same `run.id` both pass the `SELECT` and both
-attempt the `INSERT` -- the exact race this adapter exists to avoid.
+A run row is now written by `INSERT ... ON CONFLICT(id) DO UPDATE`, not
+`DO NOTHING` (D25): a start-write and a finish-write share one `id`, and the
+finish-write must be able to apply over a row the start-write already
+created. The `DO UPDATE`'s own `WHERE run.exit_status IS NULL AND
+excluded.exit_status IS NOT NULL` is the monotonic guard -- `exit_status`,
+never `finished_at`, is the discriminator, because a Ctrl-C session reports
+an integer exit status with a null finish time. `received_at` and
+`started_at` are never advanced on the conflict path.
+
+Under `DO UPDATE`, `cursor.rowcount` can no longer answer "was this row
+created?" -- an applied conflict also reports one changed row (D26). One
+`SELECT 1 FROM run WHERE id = ?` immediately after `BEGIN IMMEDIATE`, before
+the write, decides `created` instead. This *is* a `SELECT`-then-write shape,
+and the reasoning that used to rule that out still applies to every other
+use of this connection -- but not here: `BEGIN IMMEDIATE` takes the
+`RESERVED` lock for the whole transaction before the `SELECT` runs, and
+`self._lock` serialises the server's threadpool, so the probe reads under
+precisely the lock the write will write under. There is no window here for
+two concurrent replays to both pass the `SELECT` and both attempt the write.
 
 Concurrency is a two-layer net (D8), and neither layer alone is sufficient:
 a `threading.Lock` held across the whole transaction serialises the several
@@ -28,6 +41,17 @@ unconditional overwrite, so a late-arriving report with an older
 result insert (D19 layer 3) is `ON CONFLICT(run_id, node_id, attempt) DO
 NOTHING`, which makes a replayed report a silent no-op rather than an error
 (RQ-41).
+
+`last_contact_at` is written by the creating report only (D27): the insert
+branch of `_UPSERT_RUN` sets it to `received_at`, and the conflict branch
+never advances it -- a finished or interrupted run is not stale, it is done.
+`touch_last_contact`'s `_TOUCH_LAST_CONTACT` is its own monotonic `UPDATE`
+(D33), mirroring `_UPSERT_RUN`'s `exit_status` guard with a `last_contact_at
+< ?` comparison instead. That comparison is lexicographic, correct only at
+fixed width -- `_fixed_width_isoformat` mirrors
+`pytest_vantage.recorder.isoformat_utc` so every value this module writes to
+`last_contact_at` carries the same width, the same latent hazard D27 records
+for `test_case.last_seen_at`'s `MAX` but does not fix.
 """
 
 from __future__ import annotations
@@ -48,12 +72,35 @@ from vantage.storage.connection import open_database
 # limit (design.md D20).
 _MAX_PLACEHOLDERS = 500
 
-_INSERT_RUN = """
+# `last_contact_at` is written on the insert branch only (D27) -- the
+# conflict branch's `DO UPDATE SET` list never names it, so a finish-write
+# applied over an existing start-only row leaves it exactly where the
+# creating report set it.
+_UPSERT_RUN = """
     INSERT INTO run (
-        id, received_at, started_at, finished_at,
+        id, received_at, last_contact_at, started_at, finished_at,
         exit_status, interrupted, interrupt_reason
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO NOTHING
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+        finished_at      = excluded.finished_at,
+        exit_status      = excluded.exit_status,
+        interrupted      = excluded.interrupted,
+        interrupt_reason = excluded.interrupt_reason
+     WHERE run.exit_status IS NULL AND excluded.exit_status IS NOT NULL
+"""
+
+_PROBE_RUN_EXISTS = "SELECT 1 FROM run WHERE id = ?"
+
+# D33's monotonic guard: mirrors `_UPSERT_RUN`'s `exit_status` `WHERE`, but on
+# `last_contact_at` itself rather than a separate discriminator column -- an
+# out-of-order beat (an earlier or equal `contacted_at` than what is already
+# stored) changes zero rows, exactly like a reordered start-write changes
+# zero rows under `_UPSERT_RUN`.
+_TOUCH_LAST_CONTACT = """
+    UPDATE run
+       SET last_contact_at = ?
+     WHERE id = ?
+       AND (last_contact_at IS NULL OR last_contact_at < ?)
 """
 
 _SELECT_RUN = """
@@ -104,6 +151,20 @@ _SELECT_TEST_CASE = """
            first_seen_at, last_seen_at, last_seen_run_id
     FROM test_case WHERE node_id = ?
 """
+
+
+def _fixed_width_isoformat(moment: datetime) -> str:
+    """Fixed-width ISO-8601 UTC text: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`.
+
+    Mirrors `pytest_vantage.recorder.isoformat_utc` exactly (D27). Every
+    caller here already holds a UTC-aware `datetime` (`received_at` and
+    `contacted_at` are both `datetime.now(timezone.utc)` at the call site in
+    `service/routes/runs.py`), so `strftime` alone is sufficient -- no
+    `astimezone` normalization is needed. Used only for `last_contact_at`,
+    the one column this module compares lexicographically (`< ?`); every
+    other timestamp column keeps plain `.isoformat()`, unaffected.
+    """
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
 def _row_to_execution(row: tuple[object, ...]) -> Execution:
@@ -274,19 +335,26 @@ class SqliteExecutionStore:
     def record_session(
         self, execution: Execution, *, results: Sequence[Result], received_at: datetime
     ) -> bool:
-        # Four statements, one transaction, one fixed order (design.md D22):
-        # run insert, catalogue upsert, surrogate-key resolve, result insert.
-        # The order is required, not tidy -- `PRAGMA foreign_keys=ON` is set
-        # on every connection, so `result.run_id`, `test_case.last_seen_run_id`
-        # and `result.test_case_id` each need their referent to exist first.
+        # Five statements, one transaction, one fixed order (design.md D22,
+        # extended by D26): existence probe, run upsert, catalogue upsert,
+        # surrogate-key resolve, result insert. The order is required, not
+        # tidy -- `PRAGMA foreign_keys=ON` is set on every connection, so
+        # `result.run_id`, `test_case.last_seen_run_id` and
+        # `result.test_case_id` each need their referent to exist first.
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                cursor = self._conn.execute(
-                    _INSERT_RUN,
+                probe = self._conn.execute(
+                    _PROBE_RUN_EXISTS, (execution.identity.value,)
+                ).fetchone()
+                created = probe is None
+
+                self._conn.execute(
+                    _UPSERT_RUN,
                     (
                         execution.identity.value,
                         received_at.isoformat(),
+                        _fixed_width_isoformat(received_at),
                         execution.started_at.isoformat(),
                         execution.finished_at.isoformat() if execution.finished_at else None,
                         execution.exit_status,
@@ -294,7 +362,6 @@ class SqliteExecutionStore:
                         execution.interrupt_reason,
                     ),
                 )
-                created = cursor.rowcount == 1
 
                 if results:
                     catalogue_rows = _catalogue_rows(execution, results)
@@ -316,6 +383,12 @@ class SqliteExecutionStore:
         if row is None:
             return None
         return _row_to_execution(row)
+
+    def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
+        with self._lock:
+            formatted = _fixed_width_isoformat(contacted_at)
+            cursor = self._conn.execute(_TOUCH_LAST_CONTACT, (formatted, execution_id, formatted))
+            return cursor.rowcount == 1
 
     def count_executions(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM run").fetchone()

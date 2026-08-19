@@ -24,6 +24,16 @@ class ExecutionStore(Protocol):
         """Return the stored execution for `execution_id`, or None if it is unknown."""
         ...
 
+    def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
+        """Advance `execution_id`'s last contact to `contacted_at` (design.md D33).
+
+        Returns False if `execution_id` is unknown, or if a newer contact is
+        already recorded -- the two cases are deliberately indistinguishable
+        from this boolean alone; a caller that needs to tell them apart calls
+        `get_execution` first (design.md D33). Never touches the finish
+        fields."""
+        ...
+
     def count_executions(self) -> int:
         """Return how many executions are stored."""
         ...

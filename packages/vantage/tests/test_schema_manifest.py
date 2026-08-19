@@ -217,8 +217,8 @@ def test_fresh_database_matches_the_recorded_ground_truth() -> None:
     snapshot = _real_schema_snapshot()
 
     assert len(snapshot.tables) == 10
-    assert sum(len(columns) for columns in snapshot.tables.values()) == 125
-    assert len(snapshot.indexes) == 13
+    assert sum(len(columns) for columns in snapshot.tables.values()) == 126
+    assert len(snapshot.indexes) == 14
 
 
 def test_reapplying_schema_sql_issues_no_error_and_no_count_change() -> None:

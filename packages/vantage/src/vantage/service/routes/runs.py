@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import overload
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Path, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
@@ -59,14 +59,22 @@ from vantage.service.errors import (
     InvalidJsonError,
     InvalidReportError,
     PayloadTooLargeError,
+    UnknownRunError,
     UnsupportedMediaTypeError,
     safe_segment,
 )
-from vantage.service.schemas import Acknowledgement, ResultReport, RunReport, SessionReport
+from vantage.service.schemas import (
+    Acknowledgement,
+    HeartbeatAcknowledgement,
+    ResultReport,
+    RunReport,
+    SessionReport,
+)
 
 router = APIRouter()
 
 _JSON_MEDIA_TYPE = "application/json"
+_IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 
 
 @overload
@@ -228,3 +236,24 @@ async def create_run(request: Request) -> JSONResponse:
         status_code=201 if created else 200,
         content=acknowledgement.model_dump(),
     )
+
+
+@router.post("/runs/{run_id}/heartbeat")
+async def heartbeat(
+    request: Request, run_id: str = Path(pattern=_IDENTITY_PATTERN)
+) -> HeartbeatAcknowledgement:
+    """Advance `run_id`'s last contact (design.md D33).
+
+    The request body is `{}`, read by nothing -- the strongest form of "MUST
+    NOT accept or apply `finished_at`, `exit_status`, `interrupted` or
+    `interrupt_reason`" is that there is no field to send. `get_execution`,
+    not `touch_last_contact`'s own boolean, decides the 404: a zero-rowcount
+    update is ambiguous between "unknown run" and "a newer contact is
+    already recorded", and only the former is a rejection.
+    """
+    store = request.app.state.store
+    if store.get_execution(run_id) is None:
+        raise UnknownRunError()
+
+    store.touch_last_contact(run_id, datetime.now(timezone.utc))
+    return HeartbeatAcknowledgement(run_id=run_id, status="acknowledged")
