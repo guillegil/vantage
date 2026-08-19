@@ -52,15 +52,15 @@ class _ControllerConfigDouble:
         return False
 
 
-@pytest.mark.req("RQ-1")
-@pytest.mark.req("RQ-27")
+@pytest.mark.req(id="RQ-1")
+@pytest.mark.req(id="RQ-27")
 def test_worker_input_returns_before_registration() -> None:
     config = _WorkerConfigDouble()
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
 
-@pytest.mark.req("RQ-1")
-@pytest.mark.req("RQ-27")
+@pytest.mark.req(id="RQ-1")
+@pytest.mark.req(id="RQ-27")
 def test_no_worker_input_still_runs_the_activation_check() -> None:
     config = _ControllerConfigDouble()
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config

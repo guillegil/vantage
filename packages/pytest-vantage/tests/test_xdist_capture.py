@@ -39,7 +39,7 @@ def test_6():
 """
 
 
-@pytest.mark.req("RQ-12")
+@pytest.mark.req(id="RQ-12")
 def test_six_tests_under_xdist_produce_six_results_and_one_run_entry(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -74,7 +74,7 @@ def test_six_tests_under_xdist_produce_six_results_and_one_run_entry(
     assert worker_ids == {"gw0", "gw1"}
 
 
-@pytest.mark.req("RQ-12")
+@pytest.mark.req(id="RQ-12")
 def test_six_tests_without_xdist_also_produce_six_results(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose

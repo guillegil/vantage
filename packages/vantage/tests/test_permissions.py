@@ -41,7 +41,7 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
-@pytest.mark.req("RQ-40")
+@pytest.mark.req(id="RQ-40")
 def test_database_file_created_0600_before_connect(
     tmp_path: Path, permissive_umask: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -72,7 +72,7 @@ def test_database_file_created_0600_before_connect(
     assert captured_modes == [0o600]
 
 
-@pytest.mark.req("RQ-40")
+@pytest.mark.req(id="RQ-40")
 def test_artifact_store_directory_created_0700(tmp_path: Path, permissive_umask: None) -> None:
     db_path = tmp_path / "store" / "vantage.db"
 
@@ -84,7 +84,7 @@ def test_artifact_store_directory_created_0700(tmp_path: Path, permissive_umask:
     assert _mode(artifacts_dir) == 0o700
 
 
-@pytest.mark.req("RQ-40")
+@pytest.mark.req(id="RQ-40")
 def test_existing_permissive_database_still_records_and_warns(
     tmp_path: Path, permissive_umask: None, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -110,7 +110,7 @@ def test_existing_permissive_database_still_records_and_warns(
     assert any("644" in message for message in warnings)
 
 
-@pytest.mark.req("RQ-40")
+@pytest.mark.req(id="RQ-40")
 def test_wal_and_shm_sidecars_created_0600(tmp_path: Path, permissive_umask: None) -> None:
     db_path = tmp_path / "store" / "vantage.db"
 

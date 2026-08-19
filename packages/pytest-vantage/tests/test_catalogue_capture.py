@@ -17,7 +17,7 @@ _ONE_TEST = "def test_stable():\n    assert True\n"
 _NODE_ID = "test_catalogue.py::test_removable"
 
 
-@pytest.mark.req("RQ-13")
+@pytest.mark.req(id="RQ-13")
 def test_deleting_and_readding_a_test_preserves_and_advances_the_catalogue_entry(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose

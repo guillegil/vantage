@@ -78,7 +78,7 @@ class ExecutionStoreContract:
     def store(self) -> ExecutionStore:
         raise NotImplementedError("subclasses must override the `store` fixture")
 
-    @pytest.mark.req("RQ-30")
+    @pytest.mark.req(id="RQ-30")
     def test_first_write_creates_a_row(self, store: ExecutionStore) -> None:
         execution = _execution("a" * 32)
 
@@ -89,7 +89,7 @@ class ExecutionStoreContract:
         assert created is True
         assert store.count_executions() == 1
 
-    @pytest.mark.req("RQ-30")
+    @pytest.mark.req(id="RQ-30")
     def test_replaying_the_same_id_reports_no_new_row(self, store: ExecutionStore) -> None:
         execution = _execution("b" * 32)
         store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
@@ -101,7 +101,7 @@ class ExecutionStoreContract:
         assert created_again is False
         assert store.count_executions() == 1
 
-    @pytest.mark.req("RQ-30")
+    @pytest.mark.req(id="RQ-30")
     def test_get_execution_returns_what_was_stored(self, store: ExecutionStore) -> None:
         execution = _execution("c" * 32, finished=False)
         store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
@@ -110,11 +110,11 @@ class ExecutionStoreContract:
 
         assert found == execution
 
-    @pytest.mark.req("RQ-30")
+    @pytest.mark.req(id="RQ-30")
     def test_get_execution_returns_none_for_an_unknown_id(self, store: ExecutionStore) -> None:
         assert store.get_execution("d" * 32) is None
 
-    @pytest.mark.req("RQ-30")
+    @pytest.mark.req(id="RQ-30")
     def test_recording_a_session_with_results_persists_both(self, store: ExecutionStore) -> None:
         execution = _execution("e" * 32)
         results = (_result("t.py::test_a"), _result("t.py::test_b"))
@@ -126,7 +126,7 @@ class ExecutionStoreContract:
         assert created is True
         assert store.count_results() == 2
 
-    @pytest.mark.req("RQ-41")
+    @pytest.mark.req(id="RQ-41")
     def test_replaying_the_same_report_does_not_duplicate_results(
         self, store: ExecutionStore
     ) -> None:
@@ -141,7 +141,7 @@ class ExecutionStoreContract:
         assert replayed is False
         assert store.count_results() == 2
 
-    @pytest.mark.req("RQ-5")
+    @pytest.mark.req(id="RQ-5")
     def test_get_results_preserves_phase_outcomes_and_durations_exactly(
         self, store: ExecutionStore
     ) -> None:
@@ -169,7 +169,7 @@ class ExecutionStoreContract:
         assert stored["t.py::test_setup_failure"].setup_outcome == "failed"
         assert stored["t.py::test_instant"].call_duration == 0.0
 
-    @pytest.mark.req("RQ-9")
+    @pytest.mark.req(id="RQ-9")
     def test_empty_param_id_is_distinct_from_no_param_id(self, store: ExecutionStore) -> None:
         execution = _execution("3" + "c" * 31)
         empty_param = _result("t.py::test_x[]", param_id="")
@@ -188,7 +188,7 @@ class ExecutionStoreContract:
         without_param = [r for r in stored if r.identity.param_id is None]
         assert [r.identity.node_id for r in without_param] == ["t.py::test_y"]
 
-    @pytest.mark.req("RQ-13")
+    @pytest.mark.req(id="RQ-13")
     def test_catalogue_entry_advances_last_seen_and_keeps_first_seen(
         self, store: ExecutionStore
     ) -> None:
@@ -221,7 +221,7 @@ class ExecutionStoreContract:
         assert entry_after_second.last_seen_at == second_execution.started_at
         assert entry_after_second.last_seen_run_id == second_execution.identity.value
 
-    @pytest.mark.req("RQ-13")
+    @pytest.mark.req(id="RQ-13")
     def test_an_older_session_does_not_roll_back_the_catalogue_entry(
         self, store: ExecutionStore
     ) -> None:
@@ -247,7 +247,7 @@ class ExecutionStoreContract:
         assert entry.last_seen_at == later_execution.started_at
         assert entry.last_seen_run_id == later_execution.identity.value
 
-    @pytest.mark.req("RQ-13")
+    @pytest.mark.req(id="RQ-13")
     def test_a_report_without_a_node_id_leaves_its_catalogue_entry_untouched(
         self, store: ExecutionStore
     ) -> None:

@@ -47,7 +47,7 @@ def _forbidden_create_connection(*args: object, **kwargs: object) -> tuple[objec
     raise AssertionError("socket.create_connection must not be called when --vantage is absent")
 
 
-@pytest.mark.req("RQ-2")
+@pytest.mark.req(id="RQ-2")
 def test_project_tree_is_byte_identical_with_plugin_absent(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -82,7 +82,7 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
     assert _tree_snapshot(bare_root) == _tree_snapshot(control_root)
 
 
-@pytest.mark.req("RQ-2")
+@pytest.mark.req(id="RQ-2")
 def test_no_connection_is_attempted_with_no_recording_option(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:

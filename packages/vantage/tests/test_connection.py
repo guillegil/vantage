@@ -3,7 +3,7 @@ re-issues DDL against an existing, already-schema'd database (RQ-29.2).
 
 RQ-29's verification method is Inspection, not Test -- `docs/schema-manifest.md`
 (PR2) is the verification of record. This file is not tagged
-`@pytest.mark.req("RQ-29")`, for the same reason PR3's rot-detector isn't
+`@pytest.mark.req(id="RQ-29")`, for the same reason PR3's rot-detector isn't
 (plain comment instead): it mechanises/protects the same guarantee the
 Inspection already covers, rather than being the Inspection itself.
 """

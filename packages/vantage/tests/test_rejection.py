@@ -99,7 +99,7 @@ def client(store: InMemoryExecutionStore) -> TestClient:
     return TestClient(create_app(store))
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_422_response_never_echoes_input_or_pydantic_types(client: TestClient) -> None:
     """FastAPI's default handler mirrors the client's own value back in an
     ``"input"`` key, and can carry pydantic's internal error ``"type"``
@@ -128,7 +128,7 @@ def test_422_response_never_echoes_input_or_pydantic_types(client: TestClient) -
     assert "pydantic" not in body_text.lower()
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_missing_field_is_422_naming_the_field(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -144,7 +144,7 @@ def test_missing_field_is_422_naming_the_field(
     assert store.count_executions() == 0
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_non_json_body_is_400(client: TestClient, store: InMemoryExecutionStore) -> None:
     response = client.post(
         "/api/v1/runs",
@@ -158,7 +158,7 @@ def test_non_json_body_is_400(client: TestClient, store: InMemoryExecutionStore)
     assert store.count_executions() == 0
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore) -> None:
     from vantage.service.errors import MAX_REPORT_BYTES
 
@@ -173,7 +173,7 @@ def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore
     assert store.count_executions() == 0
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
     import json
 
@@ -189,7 +189,7 @@ def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionS
     assert store.count_executions() == 0
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
     import json
 
@@ -202,7 +202,7 @@ def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecution
     assert store.count_executions() == 0
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_forbidden_extra_field_name_is_not_echoed(client: TestClient) -> None:
     """A rejected *value* is never echoed -- but for an `extra_forbidden`
     error the offending path segment is a key the CLIENT chose, and echoing
@@ -221,7 +221,7 @@ def test_forbidden_extra_field_name_is_not_echoed(client: TestClient) -> None:
         assert "\r" not in field and "\n" not in field
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -> None:
     """A 50 KiB key must not come back as a 50 KiB field path."""
     report = _well_formed_report()
@@ -236,8 +236,8 @@ def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -
 # --- Phase 5: whole-report rejection, atomicity, measurement ---------------
 
 
-@pytest.mark.req("RQ-42")
-@pytest.mark.req("RQ-3")
+@pytest.mark.req(id="RQ-42")
+@pytest.mark.req(id="RQ-3")
 def test_one_malformed_result_among_five_hundred_rejects_the_whole_report(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -255,7 +255,7 @@ def test_one_malformed_result_among_five_hundred_rejects_the_whole_report(
     assert store.count_results() == 0
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_duplicate_node_id_inside_one_report_is_422_whole_report(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -273,7 +273,7 @@ def test_duplicate_node_id_inside_one_report_is_422_whole_report(
     assert store.count_results() == 0
 
 
-@pytest.mark.req("RQ-42")
+@pytest.mark.req(id="RQ-42")
 def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
     client: TestClient,
 ) -> None:
@@ -294,7 +294,7 @@ def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
         assert safe_segment(field) == field
 
 
-@pytest.mark.req("RQ-3")
+@pytest.mark.req(id="RQ-3")
 def test_five_hundred_results_fit_within_the_body_cap() -> None:
     """D23: the cap is not raised in this change -- it is measured against.
     Builds a 500-result report through the same wire-shaped assembly the
@@ -306,7 +306,7 @@ def test_five_hundred_results_fit_within_the_body_cap() -> None:
     assert len(encoded) < MAX_REPORT_BYTES
 
 
-@pytest.mark.req("RQ-3")
+@pytest.mark.req(id="RQ-3")
 def test_server_peak_memory_for_one_five_hundred_result_request(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -352,7 +352,7 @@ class _CommitCountingConnection:
         self._real.close()
 
 
-@pytest.mark.req("RQ-3")
+@pytest.mark.req(id="RQ-3")
 def test_five_hundred_results_reach_storage_in_one_commit(tmp_path: Path) -> None:
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     counting = _CommitCountingConnection(adapter._conn)
@@ -372,7 +372,7 @@ def test_five_hundred_results_reach_storage_in_one_commit(tmp_path: Path) -> Non
         adapter.close()
 
 
-@pytest.mark.req("RQ-30")
+@pytest.mark.req(id="RQ-30")
 def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None:
     """The six outcome strings live in three places (design.md, Interfaces
     section): `schema.sql`'s CHECK, `OUTCOMES`, and the service `_Outcome`
@@ -513,8 +513,8 @@ class _UvicornErrorCapture:
         self._logger.setLevel(self._previous_level)
 
 
-@pytest.mark.req("RQ-42")
-@pytest.mark.req("RQ-3")
+@pytest.mark.req(id="RQ-42")
+@pytest.mark.req(id="RQ-3")
 def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
     """RQ-3 criterion 2 ("its report is truncated in transit ... the
     database holds none of that session's results rather than a prefix of

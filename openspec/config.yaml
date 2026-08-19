@@ -40,7 +40,9 @@ context: |
   from the standard library and hand-written validation over stdlib json (RQ-24).
 
   Testing: `uv run --extra dev pytest`; ruff (S rules replace bandit); mypy strict; deptry;
-  pip-audit. Every verifying test carries @pytest.mark.req("RQ-xx"); --strict-markers is on,
+  pip-audit. Every verifying test carries @pytest.mark.req(id="RQ-xx") -- the id= keyword is required,
+  because pytest's -m expression cannot match a positionally-applied marker argument and a
+  positional req("RQ-xx") filter silently selects the whole suite; --strict-markers is on,
   so the marker must be declared in the workspace root config.
 
   State: the reset is done. src/vantage and the old tests/ tree no longer exist; the tree is
