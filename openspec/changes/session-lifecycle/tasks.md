@@ -352,3 +352,40 @@ Gates measure the tests that exist, not the scenarios that should have them.
 - [x] 5.9 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
       `uv run mypy .`, `uv run ruff check .`, `uv run deptry .`. State which
       matrix legs ran locally and which were left to CI.
+
+## Phase 6: The heartbeat's own wire, actually exercised (PR 6)
+
+Added 2026-08-19 after verify round two. Round one graded
+`session-liveness`'s "A long suite's last contact advances during execution"
+as PARTIAL; round two re-derived it **by mutation** and it is UNTESTED.
+
+`send_heartbeat` is never invoked against a real server anywhere in the suite —
+both of its test references monkeypatch it away. So the chain has its first and
+third links tested and its middle one not at all:
+
+```
+plugin decides to beat  ->  send_heartbeat POSTs  ->  route advances contact
+        tested                    UNTESTED                    tested
+```
+
+Reproduced independently by the orchestrator: changing the path suffix to
+`/HEARTBEAT-TYPO` leaves **246 passed**. A monkeypatched transport function
+silently voids every end-to-end scenario that depends on its wire format, and
+no number of green tests will say so.
+
+- [ ] 6.1 RED `packages/pytest-vantage/tests/test_result_capture.py` (or the
+      module holding the real-server end-to-end tests): run a suite against
+      the real `vantage_server` fixture **without patching `send_heartbeat`**,
+      long enough to cross one beat interval, and assert the **server's**
+      `last_contact_at` for that run advances past the value the start-write
+      recorded. Read it from the server's store, not from a captured call.
+      **Verify by mutation before you call it done**: break the path suffix
+      in `transport.py`, confirm this test goes red, revert. A test that
+      passes against both spellings proves nothing.
+- [ ] 6.2 Keep the suite's wall-clock honest. The beat interval is ~30 s by
+      default and a test may not wait that long — drive the interval from
+      configuration rather than sleeping through the production default, and
+      mark the test `slow` if it still costs real seconds. Do **not** shrink
+      the production default to make a test cheap.
+- [ ] 6.3 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
+      `uv run mypy .`, `uv run ruff check .`, `uv run deptry .`.
