@@ -36,6 +36,27 @@ were written, so it was exercised through the run entry alone.)
 - WHEN the server is killed with SIGKILL midway through writing it
 - THEN the database afterwards holds either all 500 result rows of that session or none of them
 
+**Verification method: Analysis, not Test.** Decided 2026-08-19, after
+`sdd-verify` reported this scenario as the change's one untested obligation.
+
+The argument: the whole session — run entry, catalogue upsert and every result
+row — is written inside a single `BEGIN IMMEDIATE` … `COMMIT`. A SIGKILL lands
+either before that `COMMIT`, in which case SQLite's journal rolls the whole
+transaction back on the next open, or after it, in which case the transaction
+is durable in full. There is no third position, so there is no partial state to
+observe. `test_five_hundred_results_reach_storage_in_one_commit` supplies the
+premise that the argument depends on: exactly one commit, and 500 result rows
+and one run entry actually written by it.
+
+Why not a test: killing a process mid-transaction and asserting on what
+survives is a test of SQLite's journal, not of this project's code, and it is
+timing-dependent enough to be flaky in the 3.10–3.13 × xdist matrix.
+
+What would invalidate this: any change that splits the session write across
+more than one transaction. The commit-counting test is what catches that, which
+is why it asserts the row counts too — a commit that wrote nothing would
+otherwise satisfy it.
+
 #### Scenario: Report truncated in transit (RQ-3.2)
 - GIVEN a session of 500 tests
 - WHEN its report is truncated in transit
