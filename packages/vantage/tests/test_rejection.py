@@ -368,6 +368,12 @@ def test_five_hundred_results_reach_storage_in_one_commit(tmp_path: Path) -> Non
 
         assert created is True
         assert counting.commit_count == 1
+        # Counting commits proves the transaction's SHAPE and nothing about
+        # its content: an adapter that committed once and wrote no rows would
+        # satisfy the count alone. RQ-3.1 is verified by Analysis resting on
+        # this test, so the test has to carry the weight.
+        assert adapter.count_results() == 500
+        assert adapter.count_executions() == 1
     finally:
         adapter.close()
 
