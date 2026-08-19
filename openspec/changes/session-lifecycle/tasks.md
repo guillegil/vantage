@@ -346,9 +346,9 @@ Gates measure the tests that exist, not the scenarios that should have them.
       the beat path raises — so deleting `_last_beat_at` keeps it green while
       emitting a warning per test. Assert warning-freedom as well, so a
       crashed path stops being indistinguishable from a suppressed one.
-- [ ] 5.8 Tick `proposal.md`'s Success Criteria that are now genuinely met,
+- [x] 5.8 Tick `proposal.md`'s Success Criteria that are now genuinely met,
       and leave unticked any that are not. They are all still `[ ]`,
       including the three naming exactly these criteria.
-- [ ] 5.9 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
+- [x] 5.9 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
       `uv run mypy .`, `uv run ruff check .`, `uv run deptry .`. State which
       matrix legs ran locally and which were left to CI.
