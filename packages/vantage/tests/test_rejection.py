@@ -233,6 +233,30 @@ def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -
     assert max(len(field) for field in response.json()["fields"]) < 128
 
 
+# --- Phase 4: heartbeat rejection (design.md D33, task 4.4) ----------------
+
+
+@pytest.mark.req(id="RQ-44")
+def test_heartbeat_for_unknown_run_is_404(client: TestClient) -> None:
+    response = client.post(f"/api/v1/runs/{'e' * 32}/heartbeat")
+
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"] == "unknown_run"
+
+
+@pytest.mark.req(id="RQ-44")
+def test_heartbeat_for_malformed_run_id_is_422(client: TestClient) -> None:
+    """No new code (design.md D33): the malformed id is caught by the path
+    parameter's own pattern, and rejected through the existing
+    `register_error_handlers`/`RequestValidationError` path."""
+    response = client.post("/api/v1/runs/not-a-hex-id/heartbeat")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "invalid_report"
+
+
 # --- Phase 5: whole-report rejection, atomicity, measurement ---------------
 
 

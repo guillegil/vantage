@@ -164,6 +164,22 @@ class UnsupportedMediaTypeError(RejectionError):
         super().__init__(f"Content-Type must be application/json, got {media_type!r}.")
 
 
+class UnknownRunError(RejectionError):
+    """No run matches the id used in a heartbeat (design.md D33).
+
+    Accepting a heartbeat for an id the server never saw would either
+    manufacture liveness for a run that does not exist or require inventing
+    a row with no `started_at` -- neither is acceptable, so this is a
+    rejection, not a silent accept.
+    """
+
+    status_code = 404
+    error = "unknown_run"
+
+    def __init__(self) -> None:
+        super().__init__("No run with that identifier has been recorded.")
+
+
 def _rejection_response(exc: RejectionError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
@@ -202,6 +218,7 @@ __all__ = [
     "InvalidReportError",
     "PayloadTooLargeError",
     "RejectionError",
+    "UnknownRunError",
     "UnsupportedMediaTypeError",
     "register_error_handlers",
     "safe_segment",

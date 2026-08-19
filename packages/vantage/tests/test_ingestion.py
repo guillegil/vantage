@@ -318,3 +318,49 @@ def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     [result] = sqlite_store.get_results("9" * 32)
     assert result.started_at == datetime(2026, 8, 18, 11, 0, 1, tzinfo=timezone.utc)
     assert result.finished_at == datetime(2026, 8, 18, 13, 0, 2, tzinfo=timezone.utc)
+
+
+# --- Phase 4: heartbeat endpoint (design.md D33, task 4.2/4.3) --------------
+
+
+@pytest.mark.req(id="RQ-44")
+def test_heartbeat_advances_last_contact_for_an_accepted_start_write(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    report = _well_formed_report("2" + "a" * 31)
+    report["run"]["finished_at"] = None
+    report["run"]["exit_status"] = None
+    client.post("/api/v1/runs", json=report)
+    run_id = report["run"]["id"]
+    before = store._last_contact[run_id]  # noqa: SLF001
+
+    response = client.post(f"/api/v1/runs/{run_id}/heartbeat")
+
+    assert response.status_code == 200
+    assert response.json() == {"run_id": run_id, "status": "acknowledged"}
+    assert store._last_contact[run_id] > before  # noqa: SLF001
+
+
+@pytest.mark.req(id="RQ-44")
+def test_heartbeat_cannot_touch_finish_fields(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """design.md D33, task 4.3: a heartbeat for a run whose finish is already
+    recorded leaves `finished_at`, `exit_status`, `interrupted` and
+    `interrupt_reason` exactly as recorded -- the body is `{}` and read by
+    nothing, so there is no field to smuggle a change through."""
+    report = _well_formed_report("3" + "a" * 31)
+    client.post("/api/v1/runs", json=report)
+    run_id = report["run"]["id"]
+    before = store.get_execution(run_id)
+    assert before is not None
+
+    response = client.post(f"/api/v1/runs/{run_id}/heartbeat")
+
+    assert response.status_code == 200
+    after = store.get_execution(run_id)
+    assert after is not None
+    assert after.finished_at == before.finished_at
+    assert after.exit_status == before.exit_status
+    assert after.interrupted == before.interrupted
+    assert after.interrupt_reason == before.interrupt_reason
