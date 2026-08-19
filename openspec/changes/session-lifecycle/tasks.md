@@ -238,9 +238,13 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
       past-grace with no finish/interrupt → `ABANDONED`; inside-grace →
       `RUNNING`; `last_contact_at is None` falls back to `started_at`.
 - [ ] 4.12 GREEN `packages/vantage/src/vantage/core/domain/liveness.py`
-      (new file, standard library only, RQ-26): `class RunPresentation(str,
-      Enum)` — **never `StrEnum`**, floor is 3.10 — with `FINISHED`,
-      `INTERRUPTED`, `ABANDONED`, `RUNNING`; `derive_presentation(execution,
+      (new file, standard library only, RQ-26): `PRESENTATIONS` as a
+      module-level `frozenset` of `"finished"`, `"interrupted"`,
+      `"abandoned"`, `"running"` — **never an `Enum` and never `StrEnum`**.
+      Measured on this project's own floor and ceiling, `class X(str, Enum)`
+      formats as `'abandoned'` on 3.10 and `'X.A'` on 3.13, and
+      `vantage.core.domain.result` already records exactly this reason for
+      keeping `OUTCOMES` a `frozenset`. Follow that precedent; `derive_presentation(execution,
       *, last_contact_at, now, grace)` implementing the precedence in D34
       exactly (finished → interrupted → grace comparison → running).
 - [ ] 4.13 GREEN `packages/vantage/src/vantage/core/config/resolution.py`:
