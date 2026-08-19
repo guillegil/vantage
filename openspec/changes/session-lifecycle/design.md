@@ -46,6 +46,13 @@ drop `interrupted` and `interrupt_reason` for exactly the case RQ-31.2 and RQ-44
 capture. The correct discriminator is `exit_status`: a start-write sends `null`, every
 finish-write sends an integer.
 
+**This block is the END state, after all four slices.** The column it names arrives in
+slice 3, and the rollout table below puts this upsert in slice 1 — so slice 1 writes this
+statement **without** `last_contact_at`, and slice 4 extends it once the column exists.
+Shipping the end-state SQL in slice 1 would reference a column that is not there yet.
+Stated here because the two readings disagree, and an implementer following the SQL
+literally would break the first slice.
+
 ```sql
 _UPSERT_RUN = """
     INSERT INTO run (
