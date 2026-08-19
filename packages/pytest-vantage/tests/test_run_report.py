@@ -412,6 +412,73 @@ def test_a_suite_exceeding_one_heartbeat_interval_sends_at_least_one_heartbeat(
 
 
 @pytest.mark.req(id="RQ-25")
+def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_contact(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`session-liveness`'s "A long suite's last contact advances during
+    execution" scenario, exercised for real: `send_heartbeat` is left
+    UNPATCHED, so the whole chain -- the plugin decides to beat, POSTs over
+    real HTTP, the route calls `touch_last_contact` -- runs end to end
+    against `vantage_server`, closing the gap the test above leaves open (it
+    monkeypatches `send_heartbeat` itself away and only ever observes its
+    own stub list, never the server).
+
+    Only `_BEAT_INTERVAL_SECONDS` is driven down here, the same technique
+    the test above already uses -- the production default (30.0) is never
+    touched, so a suite still "exceeds one heartbeat interval" without
+    sleeping through 30 real seconds.
+
+    The server's own `touch_last_contact` is wrapped, not replaced: the real
+    implementation still runs on every call, so `last_contact_at` is genuine
+    store state, not a captured client-side call. The wrapper's only job is
+    to read the store's value for this run BEFORE the first real heartbeat
+    overwrites it -- exactly the value the start-write alone recorded --
+    so the final assertion compares two real reads of the store, not a
+    stub's argument list. If the wire between `send_heartbeat` and this
+    route breaks (wrong path, wrong method, wrong run id), the wrapped
+    method is never called at all and `baseline_by_run` stays empty.
+
+    Verified by mutation (task 6.1): breaking
+    `transport._HEARTBEAT_PATH_SUFFIX` to `/HEARTBEAT-TYPO` makes this test
+    fail; reverting restores green. See `apply-progress` for both runs.
+    """
+    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
+
+    baseline_by_run: dict[str, datetime] = {}
+    real_touch_last_contact = vantage_server.store.touch_last_contact
+
+    def _spy_touch_last_contact(execution_id: str, contacted_at: datetime) -> bool:
+        if execution_id not in baseline_by_run:
+            # The value `_last_contact` holds right now is exactly what the
+            # start-write's insert branch set (design.md D27) -- nothing
+            # else can have touched it before this, the first real
+            # heartbeat call this run has received.
+            baseline_by_run[execution_id] = vantage_server.store._last_contact[  # noqa: SLF001
+                execution_id
+            ]
+        return real_touch_last_contact(execution_id, contacted_at)
+
+    monkeypatch.setattr(vantage_server.store, "touch_last_contact", _spy_touch_last_contact)
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
+    )
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=3)
+    execution = _wait_for_execution(vantage_server)
+    run_id = execution.identity.value
+    assert run_id in baseline_by_run, (
+        "no heartbeat ever reached the server's touch_last_contact -- "
+        "the plugin -> HTTP -> route -> store chain never completed"
+    )
+    last_contact_at = vantage_server.store._last_contact[run_id]  # noqa: SLF001
+    assert last_contact_at > baseline_by_run[run_id]
+
+
+@pytest.mark.req(id="RQ-25")
 def test_a_fast_suite_emits_no_heartbeat(
     monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
 ) -> None:
