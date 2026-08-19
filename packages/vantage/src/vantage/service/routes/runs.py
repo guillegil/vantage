@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from typing import overload
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -68,11 +69,38 @@ router = APIRouter()
 _JSON_MEDIA_TYPE = "application/json"
 
 
+@overload
+def _normalize_to_utc(value: datetime) -> datetime: ...
+@overload
+def _normalize_to_utc(value: None) -> None: ...
+def _normalize_to_utc(value: datetime | None) -> datetime | None:
+    """The one helper every timestamp that reaches the store goes through
+    (Phase 5 UTC-normalization addendum, Engram observation 62's resolution).
+
+    `test_case.last_seen_at` is TEXT and D20's monotonicity guard advances it
+    with `MAX(...)` -- a **lexicographic** comparison, correct only when
+    every stored string carries the same offset and the same width. The
+    plugin already normalizes (`pytest_vantage.recorder.isoformat_utc`), but
+    ADR-9 exists precisely so a client in another language can talk to this
+    server without normalizing, so the boundary must not trust the wire.
+
+    An **aware** value converts with `astimezone(timezone.utc)`. A **naive**
+    value is stamped `replace(tzinfo=timezone.utc)` -- never `astimezone()`
+    on a naive value, which silently assumes the SERVER's local zone and
+    would make the stored instant depend on where the server happens to run.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _to_execution(run: RunReport) -> Execution:
     return Execution(
         identity=Identity(run.id),
-        started_at=run.started_at,
-        finished_at=run.finished_at,
+        started_at=_normalize_to_utc(run.started_at),
+        finished_at=_normalize_to_utc(run.finished_at),
         exit_status=run.exit_status,
         interrupted=run.interrupted,
         interrupt_reason=run.interrupt_reason,
@@ -80,16 +108,10 @@ def _to_execution(run: RunReport) -> Execution:
 
 
 def _to_result(item: ResultReport) -> Result:
-    # `started_at`/`finished_at` are handed to the core exactly as parsed by
-    # Pydantic, with no UTC normalization -- matching `_to_execution` above,
-    # which does the same for `run.started_at`. This is deliberate, not an
-    # oversight: there is an OPEN finding (Engram observation 62, from the
-    # Phase 3 review) that the catalogue's `MAX(...)` monotonicity guard
-    # compares stored ISO-8601 strings lexicographically, which is only
-    # correct across writers that all normalize to UTC. Fixing that touches
-    # stored data format and is the user's decision -- out of scope here.
-    # What matters for THIS function is that it does not introduce a SECOND,
-    # differently-behaved timestamp path alongside the existing one.
+    # `started_at`/`finished_at` go through `_normalize_to_utc`, same as
+    # `_to_execution` above -- one path, not two (Phase 5 UTC-normalization
+    # addendum). This used to be deliberately absent (see the Phase 3-era
+    # Engram observation 62 finding); it stops being true here.
     return Result(
         identity=CaseIdentity(
             node_id=item.node_id,
@@ -100,8 +122,8 @@ def _to_result(item: ResultReport) -> Result:
         ),
         outcome=item.outcome,
         duration=item.duration,
-        started_at=item.started_at,
-        finished_at=item.finished_at,
+        started_at=_normalize_to_utc(item.started_at),
+        finished_at=_normalize_to_utc(item.finished_at),
         setup_outcome=item.setup_outcome,
         call_outcome=item.call_outcome,
         teardown_outcome=item.teardown_outcome,

@@ -173,24 +173,24 @@ pure rename is the REFACTOR step of a cycle whose RED and GREEN already happened
 
 ## Phase 5: Service — rejection, atomicity, measurement (PR 5)
 
-- [ ] 5.1 RED `packages/vantage/tests/test_rejection.py`: one malformed entry at index 250 of
+- [x] 5.1 RED `packages/vantage/tests/test_rejection.py`: one malformed entry at index 250 of
       500 rejects the **entire** report — `count_executions() == 0` and `count_results() == 0`
       (RQ-42.1 with RQ-3.2).
-- [ ] 5.2 RED: a duplicate `node_id` inside one report is 422, whole report (D19 layer 2).
-- [ ] 5.3 RED (**threat-derived**, D15/Threat Matrix): the rejection body and `ignored` name
-      the offending field through the existing `errors.py::_safe_segment` allow-list, and no
+- [x] 5.2 RED: a duplicate `node_id` inside one report is 422, whole report (D19 layer 2).
+- [x] 5.3 RED (**threat-derived**, D15/Threat Matrix): the rejection body and `ignored` name
+      the offending field through the existing `errors.py::safe_segment` allow-list, and no
       node id **value** is ever echoed. This is a task, not an assumption.
-- [ ] 5.4 GREEN: list validator for duplicate node ids; `ignored` key names routed through the
+- [x] 5.4 GREEN: list validator for duplicate node ids; `ignored` key names routed through the
       same allow-list.
-- [ ] 5.5 RED then measure `test_five_hundred_results_fit_within_the_body_cap`
+- [x] 5.5 RED then measure `test_five_hundred_results_fit_within_the_body_cap`
       (`@pytest.mark.req("RQ-3")`): build a 500-result report through the real assembler and
       assert `len(json.dumps(report).encode("utf-8")) < MAX_REPORT_BYTES`, **reporting the
       real byte count**. Do not raise `MAX_REPORT_BYTES` in this change (D23).
-- [ ] 5.6 Measure server peak memory with `tracemalloc` around one 500-result request. Record
+- [x] 5.6 Measure server peak memory with `tracemalloc` around one 500-result request. Record
       the number; assert nothing against an invented threshold (D23).
-- [ ] 5.7 RED: a 500-result report reaches storage in **one commit**, counted through a
+- [x] 5.7 RED: a 500-result report reaches storage in **one commit**, counted through a
       commit-counting store wrapper (RQ-3.3, D21).
-- [ ] 5.8 Add the outcome-vocabulary consistency test: parse the six values out of
+- [x] 5.8 Add the outcome-vocabulary consistency test: parse the six values out of
       `schema.sql`'s `CHECK`, assert they equal `OUTCOMES` and the service `Literal` arguments.
 
 ### Added 2026-08-18 — normalize timestamps to UTC at the service boundary
@@ -211,60 +211,60 @@ so a plugin in another language can talk to this server, and that one would not.
 The fix goes at the boundary, where the plugin already does it, so the storage layer only ever
 sees one form. Decided 2026-08-18.
 
-- [ ] 5.9 RED `packages/vantage/tests/test_ingestion.py`: record a session, then record a
+- [x] 5.9 RED `packages/vantage/tests/test_ingestion.py`: record a session, then record a
       second one for the same `node_id` whose `run.started_at` is an **earlier instant
       expressed with a `+02:00` offset**, chosen so its raw ISO string sorts *after* the
       stored one. Assert `last_seen_at` did not move and `last_seen_run_id` still names the
       first run (D20). This fails today.
-- [ ] 5.10 RED, same file: a report whose timestamps carry a non-UTC offset reads back as the
+- [x] 5.10 RED, same file: a report whose timestamps carry a non-UTC offset reads back as the
       **equivalent UTC instant**, and a report whose timestamps are **naive** is interpreted
       as UTC. Cover `run.started_at`/`finished_at` and a result's `started_at`/`finished_at`
       in the same test — one path, not two.
-- [ ] 5.11 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: one helper applied to
+- [x] 5.11 GREEN `packages/vantage/src/vantage/service/routes/runs.py`: one helper applied to
       every timestamp before it reaches the store. An **aware** datetime converts with
       `astimezone(timezone.utc)`. A **naive** one is stamped `replace(tzinfo=timezone.utc)` —
       never `astimezone()` on a naive value, which silently assumes the server's local zone
       and makes the result depend on where the server runs. Never `datetime.UTC` (3.11+).
       Replace the `_to_result` comment that currently says normalization is deliberately
       absent; it stops being true here.
-- [ ] 5.12 Correct Engram observation 62 to record the resolution, and note in
+- [x] 5.12 Correct Engram observation 62 to record the resolution, and note in
       `docs/open-questions.md` that the guard is now sound for any client, not just this
       project's plugin.
 
 ## Phase 6: Plugin — identity decomposition (PR 6)
 
-- [ ] 6.1 RED `packages/pytest-vantage/tests/test_capture.py`, table-driven: module-level
+- [x] 6.1 RED `packages/pytest-vantage/tests/test_capture.py`, table-driven: module-level
       test → `class_name is None` (RQ-9.2); nested class → segments joined with `"::"`;
       unparametrised → `param_id is None` (RQ-9.3).
-- [ ] 6.2 RED: `…::test_x[]` → `param_id == ""`, **not** `None` — the brackets are the
+- [x] 6.2 RED: `…::test_x[]` → `param_id == ""`, **not** `None` — the brackets are the
       evidence of parametrisation, the content is not. The live case is
       `test_execution.py::test_identity_rejects_anything_but_32_lowercase_hex_characters[]`.
-- [ ] 6.3 RED: `…::test_x[[0]]` → `param_id == "[0]"`, proving first-`[`/last-`]` slicing
+- [x] 6.3 RED: `…::test_x[[0]]` → `param_id == "[0]"`, proving first-`[`/last-`]` slicing
       rather than `partition`/`rpartition` symmetry.
-- [ ] 6.4 GREEN `packages/pytest-vantage/src/pytest_vantage/capture.py`: `decompose` per D18.
+- [x] 6.4 GREEN `packages/pytest-vantage/src/pytest_vantage/capture.py`: `decompose` per D18.
       Standard library and `pytest` only — **never import xdist** (RQ-24).
-- [ ] 6.5 Confirm `packages/pytest-vantage/tests/test_plugin_imports.py` still passes.
+- [x] 6.5 Confirm `packages/pytest-vantage/tests/test_plugin_imports.py` still passes.
 
 ## Phase 7: Plugin — phases, outcome, assembly (PR 7)
 
-- [ ] 7.1 RED `test_capture.py`, table-driven over synthetic report doubles: all nine D17
+- [x] 7.1 RED `test_capture.py`, table-driven over synthetic report doubles: all nine D17
       precedence rows — setup failed → `error` (RQ-4.1); setup skipped → `skipped` (RQ-4.2);
       call skipped/failed with `wasxfail` → `xfailed` (RQ-4.3); call passed with `wasxfail` →
       `xpassed` (RQ-4.4); call passed with teardown failed → `error` (RQ-4.5).
-- [ ] 7.2 RED, **its own test**: a **strict** `xfail` that passes is `failed`, not `xpassed` —
+- [x] 7.2 RED, **its own test**: a **strict** `xfail` that passes is `failed`, not `xpassed` —
       pytest sets `outcome="failed"` with `wasxfail` absent for `[XPASS(strict)]`. RQ-4.4
       describes only the non-strict case; reading `wasxfail` naively mislabels this one.
-- [ ] 7.3 RED: a teardown failure downgrades **only** a `passed` result; a `failed` result
+- [x] 7.3 RED: a teardown failure downgrades **only** a `passed` result; a `failed` result
       keeps its own word and the teardown failure stays visible in `teardown_outcome`.
-- [ ] 7.4 RED: a phase that never ran serialises as `null`, never `0.0`, and a genuine `0.0`
+- [x] 7.4 RED: a phase that never ran serialises as `null`, never `0.0`, and a genuine `0.0`
       survives as `0.0` — the **JSON hop** of the `""`-vs-NULL family (D17).
-- [ ] 7.5 RED: a test resolved only through setup and call, with no teardown report, is
+- [x] 7.5 RED: a test resolved only through setup and call, with no teardown report, is
       **dropped** rather than invented — "resolution, not attendance" (D16).
-- [ ] 7.6 GREEN `capture.py`: `_Pending` accumulation in `dict[str, _Pending]` (insertion
+- [x] 7.6 GREEN `capture.py`: `_Pending` accumulation in `dict[str, _Pending]` (insertion
       order = execution order, duplicate report = overwrite), `derive_outcome`, payload
       assembly. Timestamps via `datetime.fromtimestamp(..., timezone.utc)` — **never
       `datetime.UTC`** (3.11+). `worker_id` read through a `getattr` chain.
-- [ ] 7.7 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`: add
+- [x] 7.7 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`: add
       `pytest_runtest_logreport` (the one hook xdist forwards to the controller) and attach
       `results` to the report already sent from `pytest_sessionfinish`. **Still exactly one
       HTTP request per session** (ADR-9, RQ-25.2). `plugin.py` is unchanged — its xdist
@@ -272,38 +272,46 @@ sees one form. Decided 2026-08-18.
 
 ## Phase 8: End-to-end capture (PR 8)
 
-- [ ] 8.1 Extend `packages/pytest-vantage/tests/vantage_test_server.py` with `results()` and
+- [x] 8.1 Extend `packages/pytest-vantage/tests/vantage_test_server.py` with `results()` and
       `catalogue_entry(node_id)` accessors over the in-memory store.
-- [ ] 8.2 RED `packages/pytest-vantage/tests/test_result_capture.py` (pytester subprocess +
+- [x] 8.2 RED `packages/pytest-vantage/tests/test_result_capture.py` (pytester subprocess +
       real server): a fixture raising before the body → `error`; `@pytest.mark.skip` →
       `skipped`; failing `xfail` → `xfailed`; passing non-strict `xfail` → `xpassed`; a test
       passing with a raising teardown is **not** `passed` (RQ-4.1–4.5).
-- [ ] 8.3 RED: an 8s fixture with a 0.1s body → `setup_duration >= 8` and `call_duration < 1`;
+- [x] 8.3 RED: an 8s fixture with a 0.1s body → `setup_duration >= 8` and `call_duration < 1`;
       a setup failure → `call_duration is None`, not `0.0` (RQ-5.1, RQ-5.2).
-- [ ] 8.4 RED: filtering stored results by file path alone returns every test defined in that
+- [x] 8.4 RED: filtering stored results by file path alone returns every test defined in that
       file (RQ-9.1); a module-level test stores a null class name (RQ-9.2).
 
 ## Phase 9: xdist, catalogue, and the sweep (PR 9)
 
-- [ ] 9.1 RED `packages/pytest-vantage/tests/test_xdist_capture.py`: six tests under `-n 2`
+- [x] 9.1 RED `packages/pytest-vantage/tests/test_xdist_capture.py`: six tests under `-n 2`
       produce six results (RQ-12.1) and exactly one run entry (RQ-12.3).
-- [ ] 9.2 RED, **non-optional control**: the same six tests without xdist also produce six
+- [x] 9.2 RED, **non-optional control**: the same six tests without xdist also produce six
       results (RQ-12.2). This is the only test that catches an over-aggressive dedup filter.
-- [ ] 9.3 RED: delete a test, re-run — its catalogue entry survives with `last_seen_at`
+- [x] 9.3 RED: delete a test, re-run — its catalogue entry survives with `last_seen_at`
       unchanged (RQ-13.1); add the same node id back — the same entry is reused and the
       timestamp advances (RQ-13.2).
-- [ ] 9.4 RED `packages/vantage/tests/test_concurrency.py`: two concurrent 200-test sessions
+- [x] 9.4 RED `packages/vantage/tests/test_concurrency.py`: two concurrent 200-test sessions
       → 400 result rows (RQ-38.2); ten simultaneous sessions → ten run entries and no error
       response (RQ-38.3).
-- [ ] 9.5 **Schema-unchanged verification**: assert
+- [x] 9.5 **Schema-unchanged verification**: assert
       `git diff --exit-code -- packages/vantage/src/vantage/storage/schema.sql` is empty
       across the whole chain, and that
       `test_schema_manifest.py::test_fresh_database_matches_the_recorded_ground_truth` is
       green. A diff here means the design went wrong (RQ-29, ADR-5).
-- [ ] 9.6 Traceability sweep: `grep -r "RQ-4"`, `RQ-5`, `RQ-9`, `RQ-12`, `RQ-13`, `RQ-3`,
+- [x] 9.6 Traceability sweep: `grep -r "RQ-4"`, `RQ-5`, `RQ-9`, `RQ-12`, `RQ-13`, `RQ-3`,
       `RQ-38` each reach the test that proves them; every new verifying test carries
       `@pytest.mark.req`, declared under `--strict-markers`.
-- [ ] 9.7 Run the full gate: `uv run ruff format . && uv run ruff check --fix .`,
+- [x] 9.7 Run the full gate: `uv run ruff format . && uv run ruff check --fix .`,
       `uv run mypy .`, `uv run deptry .`, and the 3.10–3.13 × xdist matrix. Confirm
       `pytest-vantage` still imports nothing but pytest and the standard library (RQ-24) and
       `vantage.core` nothing but the standard library (RQ-26).
+- [x] 9.8 RED, **closing the one hop of the `""`-vs-NULL guard nothing proves end-to-end**:
+      a real parametrised test whose parameter id is the empty string (`test_x[]`) and an
+      unparametrised test in the same session are recorded with `param_id == ""` and
+      `param_id is None` respectively, read back through the real server. D18 names four
+      hops; Phases 1, 3, 4, 6 and 7 cover the dataclass, SQLite, Pydantic, plugin and JSON
+      hops, and Phase 8's tasks cover `class_name`/`file_path` but never this one. Raised by
+      the Phase 8 actor's own coverage review and added 2026-08-19 — the guard is only worth
+      its five hops if the whole chain is exercised once.
