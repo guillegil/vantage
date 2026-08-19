@@ -1,7 +1,9 @@
 """`Recorder` -- the hook implementation registered by `plugin.py` only once
 activation and the reachability preflight both succeed (design.md D2a, D6).
 Assembles the session report and sends it exactly once, from
-`pytest_sessionfinish`, never per test (RQ-25's shape).
+`pytest_sessionfinish`, never per test (RQ-25's shape) -- Phase 7 adds
+`pytest_runtest_logreport`, which only accumulates in memory and never sends
+anything itself (design.md D16).
 
 Every hook is wrapped in `pytest_vantage.boundary.fault_isolated`: an error
 raised anywhere in the reporting path -- assembling the report, sending it,
@@ -21,6 +23,7 @@ from datetime import datetime, timezone
 import pytest
 
 from pytest_vantage.boundary import fault_isolated
+from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.transport import send
 
 # `pytest.ExitCode.INTERRUPTED` (2) and `pytest.ExitCode.INTERNAL_ERROR` (3):
@@ -49,11 +52,12 @@ class Recorder:
     reachability preflight both succeed.
 
     One request per session (RQ-25): the report is assembled in memory and
-    sent exactly once, from `pytest_sessionfinish`. `_config` is kept only
-    so a hook that fails can route its warning through the terminal
-    reporter (`boundary._warn`); `_disabled` is the fault-isolation latch
-    `fault_isolated` reads and sets -- once `True`, every further hook call
-    on this instance is a silent no-op.
+    sent exactly once, from `pytest_sessionfinish`. `_results` accumulates
+    every phase report `pytest_runtest_logreport` receives (design.md D16).
+    `_config` is kept only so a hook that fails can route its warning
+    through the terminal reporter (`boundary._warn`); `_disabled` is the
+    fault-isolation latch `fault_isolated` reads and sets -- once `True`,
+    every further hook call on this instance is a silent no-op.
     """
 
     def __init__(self, config: pytest.Config, address: str, timeout: float) -> None:
@@ -63,6 +67,7 @@ class Recorder:
         self._run_id = uuid.uuid4().hex
         self._started_at = datetime.now(timezone.utc)
         self._disabled = False
+        self._results: dict[str, _Pending] = {}
 
     @fault_isolated
     def pytest_report_header(self) -> str:
@@ -71,6 +76,14 @@ class Recorder:
         storage internals.
         """
         return f"vantage: recording run {self._run_id} to {self._address}"
+
+    @fault_isolated
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        """The one hook xdist forwards to the controller (design.md D16,
+        D19 layer 1). Only accumulates; sends nothing -- resolution into a
+        `results[]` entry happens later, in `pytest_sessionfinish`.
+        """
+        accumulate(self._results, report)
 
     @fault_isolated
     def pytest_sessionfinish(self, exitstatus: int) -> None:
@@ -86,7 +99,8 @@ class Recorder:
                 "exit_status": exit_status,
                 "interrupted": exit_status == _INTERRUPTED_EXIT_STATUS,
                 "interrupt_reason": None,
-            }
+            },
+            "results": assemble_results(self._results),
         }
         send(self._address, report, timeout=self._timeout)
 
