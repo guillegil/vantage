@@ -531,7 +531,17 @@ def test_reporting_error_preserves_passing_exit_status_and_warns_once(
     monkeypatch.setattr("pytest_vantage.recorder.send", _raise)
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
-    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+    # Two independent failures now, not one: the patched `send` raises for the
+    # start-write in `pytest_sessionstart` as well as for the finish-write.
+    # They are isolated by different decorators on purpose (design.md D29), so
+    # each warns once. Only the finish-write's warning reaches `RunResult` --
+    # a warning raised as early as `pytest_sessionstart` escapes an in-process
+    # run's capture and surfaces in THIS session instead, which is the same
+    # phenomenon `_combined_output`'s docstring records for `pytest_configure`.
+    # `pytest.warns` asserts that escaping warning rather than letting it leak
+    # into the suite's summary, where it would train a reader to ignore it.
+    with pytest.warns(VantageWarning, match="session liveness"):
+        result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
@@ -550,7 +560,10 @@ def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     monkeypatch.setattr("pytest_vantage.recorder.send", _raise)
     pytester.makepyfile(test_sample="def test_it():\n    assert False\n")
 
-    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+    # See the sibling above: the start-write's warning escapes an in-process
+    # run's capture, so it is asserted here rather than left to leak.
+    with pytest.warns(VantageWarning, match="session liveness"):
+        result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
     result.assert_outcomes(failed=1)
     assert result.ret == 1
