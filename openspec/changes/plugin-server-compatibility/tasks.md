@@ -37,49 +37,49 @@ for the report timeout puts that cost in front of every session.
 
 ## Phase 1: Capability advertisement and the plugin's refusal to half-record
 
-- [ ] 1.1 RED `packages/vantage/tests/test_ingestion.py`: `GET
+- [x] 1.1 RED `packages/vantage/tests/test_ingestion.py`: `GET
       /api/v1/capabilities` answers `200 {"session_lifecycle": true}`.
-- [ ] 1.2 RED, same file: it is mounted under `/api/v1` and nowhere else —
+- [x] 1.2 RED, same file: it is mounted under `/api/v1` and nowhere else —
       `GET /capabilities` is `404`, matching the absence rule `app.py`'s
       docstring already states for the run routes.
-- [ ] 1.3 RED `packages/pytest-vantage/tests/test_failure_paths.py`: a server
+- [x] 1.3 RED `packages/pytest-vantage/tests/test_failure_paths.py`: a server
       that answers the capability probe `404` (an older `vantage`) records the
       session with **no start-write and no heartbeat**, and its finish report
       is byte-identical to what the plugin sent before the lifecycle existed.
       Assert the request count, not just the outcome — the point is that
       nothing extra was sent.
-- [ ] 1.4 RED, same file: that degradation warns **once**, on the liveness
+- [x] 1.4 RED, same file: that degradation warns **once**, on the liveness
       latch, naming the address. It must not disable result recording.
-- [ ] 1.5 RED, same file, **the fail-closed table**: a capability response that
+- [x] 1.5 RED, same file, **the fail-closed table**: a capability response that
       is malformed JSON, valid JSON of the wrong type, `{"session_lifecycle":
       false}`, an empty body, a `500`, or a connection that hangs past the
       liveness timeout — **every one degrades**. Table-driven; each row is a way
       a check could quietly fail open.
-- [ ] 1.6 RED: the capability probe is bounded by `resolve_liveness_timeout`,
+- [x] 1.6 RED: the capability probe is bounded by `resolve_liveness_timeout`,
       not the report timeout, when the two differ (D42).
-- [ ] 1.7 GREEN `packages/vantage/src/vantage/service/routes/capabilities.py`
+- [x] 1.7 GREEN `packages/vantage/src/vantage/service/routes/capabilities.py`
       (new) and `app.py`: the route and its mount.
-- [ ] 1.8 GREEN `packages/pytest-vantage/src/pytest_vantage/transport.py`:
+- [x] 1.8 GREEN `packages/pytest-vantage/src/pytest_vantage/transport.py`:
       `fetch_capabilities(address, *, timeout) -> bool` — returns True **only**
       for an explicit positive answer. Every other outcome is False, including
       every exception it can raise; this function does not propagate.
-- [ ] 1.9 GREEN `packages/pytest-vantage/src/pytest_vantage/plugin.py`: call it
+- [x] 1.9 GREEN `packages/pytest-vantage/src/pytest_vantage/plugin.py`: call it
       after `_preflight_reachable` succeeds, and pass the result to `Recorder`.
       **Correct `_preflight_reachable`'s docstring** — it claims the preflight
       sends no bytes, and after this change that is no longer true of the
       preflight as a whole.
-- [ ] 1.10 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`:
+- [x] 1.10 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`:
       `pytest_sessionstart` and `_maybe_beat` both return immediately when the
       lifecycle is unavailable. `pytest_sessionfinish` is **unchanged** — that
       is what makes the degraded path the previous release's behaviour.
-- [ ] 1.11 Confirm, **by reading**, that the xdist controller guard in
+- [x] 1.11 Confirm, **by reading**, that the xdist controller guard in
       `plugin.py` still precedes every one of these calls, so no worker probes
       capabilities either. No edit expected; record what you saw.
-- [ ] 1.12 Prove each new test by **mutation**: make `fetch_capabilities`
+- [x] 1.12 Prove each new test by **mutation**: make `fetch_capabilities`
       return True unconditionally, and confirm the fail-closed table goes red.
       A check that cannot fail closed is the defect this change exists to
       prevent, so a test that would not catch it is not worth having. Revert
       and prove the tree is clean.
-- [ ] 1.13 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
+- [x] 1.13 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
       `uv run mypy .`, `uv run ruff check .`, `uv run deptry .`. Confirm
       `pytest-vantage` still imports pytest and the standard library only.
