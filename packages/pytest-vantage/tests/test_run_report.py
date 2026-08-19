@@ -13,6 +13,7 @@ lists only this one new test file for D2a.
 
 from __future__ import annotations
 
+import os
 import signal
 import subprocess
 import sys
@@ -20,9 +21,28 @@ import time
 from datetime import datetime, timezone
 
 import pytest
+from vantage.core.domain.execution import Execution
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
+_SLOW_TEST = "import time\n\n\ndef test_slow():\n    time.sleep(5)\n"
+
+
+def _wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> Execution:
+    """Poll `server` until its first run entry has landed, or raise after
+    `timeout` seconds -- a bounded observable condition, not a fixed sleep
+    (task 5.1's own instruction: a fixed sleep before a signal is how a
+    test becomes flaky on a loaded CI runner). Used to prove a kill or a
+    liveness query happens strictly after `pytest_sessionstart`'s
+    start-write has been accepted, never before it.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        executions = server.executions()
+        if executions:
+            return executions[0]
+        time.sleep(0.02)
+    raise TimeoutError(f"no run entry appeared within {timeout}s")
 
 
 # --- Unit: fixed-width ISO-8601 timestamps (design.md D1) -------------------
@@ -262,6 +282,102 @@ def test_sigint_leaves_start_time_and_null_end_time(
     (execution,) = executions
     assert execution.finished_at is None
     assert execution.interrupted is True
+
+
+# --- The scenarios the task list forgot (Phase 5) ---------------------------
+
+
+@pytest.mark.req(id="RQ-1")
+def test_a_still_running_session_already_has_a_run_entry(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """`run-recording`'s "A still-running session already has a run entry"
+    (RQ-1.5): the database is queried WHILE the child is still executing,
+    before it finishes or is killed -- proving the row exists because of
+    the start-write alone, not merely that it exists once the session is
+    over, which every other RQ-1 test in this file already proves.
+
+    Needs a raw `Popen` (`pytester.popen`), not `runpytest_subprocess`,
+    because the child must still be alive when the server is queried.
+    `stdin=subprocess.DEVNULL` for the same 3.10 `communicate()` reason
+    `test_sigint_leaves_start_time_and_null_end_time` above carries.
+    """
+    pytester.makepyfile(test_slow=_SLOW_TEST)
+
+    process = pytester.popen(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--vantage",
+            f"--vantage-server={vantage_server.address}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+    )
+    try:
+        execution = _wait_for_execution(vantage_server)
+
+        # The assertion of record: the child is still executing its 5-second
+        # test when the row is observed.
+        assert process.poll() is None
+        assert execution.started_at is not None
+        assert execution.finished_at is None
+    finally:
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=15)
+
+
+@pytest.mark.req(id="RQ-1")
+@pytest.mark.req(id="RQ-31")
+def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_reason(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """`run-recording`'s "A SIGKILL'd session's entry is present" (RQ-1.6)
+    and `run-recording`'s "SIGKILL'd session carries no interrupt reason"
+    (RQ-31.3), asserted together to make the contrast legible: SIGINT
+    (`test_sigint_leaves_start_time_and_null_end_time` above) is a signal
+    Python observes, so that entry carries `interrupted=True`. SIGKILL
+    cannot be caught, blocked or handled at all -- the process stops
+    between two instructions, and no code of this project ever runs to
+    record a reason. This test proves the negative directly: the run entry
+    the start-write already left behind stays exactly as it was, holding a
+    start time and a null end time, `interrupted=False`, and no
+    `interrupt_reason`.
+
+    SIGKILL, never SIGTERM or SIGINT, sent only after
+    `_wait_for_execution` confirms the start-write has already landed --
+    proving the kill happens after `pytest_sessionstart`, not before it.
+    """
+    pytester.makepyfile(test_slow=_SLOW_TEST)
+
+    process = pytester.popen(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--vantage",
+            f"--vantage-server={vantage_server.address}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+    )
+    _wait_for_execution(vantage_server)
+
+    os.kill(process.pid, signal.SIGKILL)
+    process.wait(timeout=15)
+
+    executions = vantage_server.executions()
+    assert len(executions) == 1
+    (execution,) = executions
+    assert execution.started_at is not None
+    assert execution.finished_at is None
+    assert execution.interrupted is False
+    assert execution.interrupt_reason is None
 
 
 # --- Activity-driven beats (design.md D30, task 4.18) -----------------------

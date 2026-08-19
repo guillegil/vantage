@@ -306,7 +306,7 @@ written-but-unproven, and two regression paths ship green.
 The suite reported 241 passed and zero warnings while none of this was covered.
 Gates measure the tests that exist, not the scenarios that should have them.
 
-- [ ] 5.1 RED `packages/pytest-vantage/tests/test_run_report.py`: a session
+- [x] 5.1 RED `packages/pytest-vantage/tests/test_run_report.py`: a session
       killed with **SIGKILL** mid-run leaves a run entry present, holding a
       start time and a null end time (`run-recording` RQ-1.6). Use
       `pytester.popen`, wait until the child is past `pytest_sessionstart`,
@@ -315,12 +315,12 @@ Gates measure the tests that exist, not the scenarios that should have them.
       is the pattern for the popen/wait shape, including its
       `stdin=subprocess.DEVNULL` note — on 3.10 `communicate()` flushes a
       closed stdin and raises.
-- [ ] 5.2 RED, same file: that entry carries **no interrupt reason** and is
+- [x] 5.2 RED, same file: that entry carries **no interrupt reason** and is
       not marked interrupted (RQ-31.3). This asserts an **absence**: SIGKILL
       cannot be caught, so no code of this project runs to record one. The
       contrast with the existing SIGINT test is the point — assert both in
       one place if it makes the distinction legible.
-- [ ] 5.3 RED, same file: a **still-running** session already has a run
+- [x] 5.3 RED, same file: a **still-running** session already has a run
       entry with a start time and a null end time (RQ-1.5) — query the
       server while the child is still executing, before it finishes.
 - [x] 5.4 RED `packages/vantage/tests/test_rejection.py`: a finish report
