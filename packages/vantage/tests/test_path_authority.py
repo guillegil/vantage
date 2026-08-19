@@ -32,6 +32,7 @@ def test_resolution_creates_no_directory(tmp_path: Path) -> None:
         env_database=None,
         cli_host=None,
         cli_port=None,
+        cli_grace_period=None,
         home=tmp_path,
         xdg_data_home=str(xdg_data_home),
     )

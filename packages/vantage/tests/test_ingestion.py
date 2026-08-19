@@ -364,3 +364,18 @@ def test_heartbeat_cannot_touch_finish_fields(
     assert after.exit_status == before.exit_status
     assert after.interrupted == before.interrupted
     assert after.interrupt_reason == before.interrupt_reason
+
+
+# --- Phase 4: `app.state.grace_period` (design.md D34, task 4.14) ----------
+
+
+def test_create_app_defaults_grace_period_to_900_seconds() -> None:
+    app = create_app(InMemoryExecutionStore())
+
+    assert app.state.grace_period == 900.0
+
+
+def test_create_app_exposes_the_configured_grace_period() -> None:
+    app = create_app(InMemoryExecutionStore(), grace_period_seconds=123.0)
+
+    assert app.state.grace_period == 123.0

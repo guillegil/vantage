@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from vantage.core.config.resolution import ConfigSource, ServerConfig, resolve_server_config
 
 
@@ -18,6 +19,7 @@ def _resolve(
     env_database: str | None = None,
     cli_host: str | None = None,
     cli_port: int | None = None,
+    cli_grace_period: float | None = None,
     home: Path = Path("/home/nobody"),
     xdg_data_home: str | None = None,
 ) -> ServerConfig:
@@ -26,6 +28,7 @@ def _resolve(
         env_database=env_database,
         cli_host=cli_host,
         cli_port=cli_port,
+        cli_grace_period=cli_grace_period,
         home=home,
         xdg_data_home=xdg_data_home,
     )
@@ -78,3 +81,23 @@ def test_cli_host_and_port_override_the_default() -> None:
 
     assert config.host == "0.0.0.0"  # noqa: S104
     assert config.port == 9000
+
+
+@pytest.mark.req(id="RQ-44")
+def test_default_grace_period_is_900_seconds_from_the_default_source() -> None:
+    """design.md D34: 900.0 seconds, expressed in source as `30 * 30.0` -- a
+    multiple of the default heartbeat interval, not an invented round
+    number. No environment variable exists for this (CLI-only, matching
+    `host`/`port`'s own precedent)."""
+    config = _resolve()
+
+    assert config.grace_period_seconds == 900.0
+    assert config.grace_source is ConfigSource.DEFAULT
+
+
+@pytest.mark.req(id="RQ-44")
+def test_cli_grace_period_overrides_the_default() -> None:
+    config = _resolve(cli_grace_period=60.0)
+
+    assert config.grace_period_seconds == 60.0
+    assert config.grace_source is ConfigSource.CLI
