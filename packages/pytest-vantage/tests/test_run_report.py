@@ -264,6 +264,66 @@ def test_sigint_leaves_start_time_and_null_end_time(
     assert execution.interrupted is True
 
 
+# --- Activity-driven beats (design.md D30, task 4.18) -----------------------
+
+
+@pytest.mark.req(id="RQ-25")
+def test_a_suite_exceeding_one_heartbeat_interval_sends_at_least_one_heartbeat(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`session-liveness`'s "A long suite's last contact advances during
+    execution" scenario -- `_BEAT_INTERVAL_SECONDS` shrunk to make every
+    `pytest_runtest_logreport` call a beat opportunity, proving the wiring
+    fires for real rather than merely never being due within the suite's
+    real wall-clock duration."""
+    beats: list[str] = []
+
+    def _capture(address: str, run_id: str, *, timeout: float) -> None:
+        beats.append(run_id)
+
+    monkeypatch.setattr("pytest_vantage.recorder.send_heartbeat", _capture)
+    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
+    )
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=3)
+    assert len(beats) >= 1
+
+
+@pytest.mark.req(id="RQ-25")
+def test_a_fast_suite_emits_no_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """RQ-25's measured profile -- 1,000 tests at ~10 ms each is a
+    ~10-second suite, comfortably inside one `_BEAT_INTERVAL_SECONDS`
+    (30.0) window. Proven directly against `Recorder._maybe_beat`'s timing
+    guard, called 1,000 times in a tight loop right after construction,
+    rather than spawning 1,000 real subprocess tests -- the real elapsed
+    wall-clock time for that loop is a small fraction of a second, well
+    under the interval, exactly like RQ-25's own measured suite.
+    """
+    from pytest_vantage.recorder import Recorder
+
+    beats: list[str] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send_heartbeat",
+        lambda *args, **kwargs: beats.append("beat"),
+    )
+
+    class _ConfigDouble:
+        def getoption(self, name: str, default: object = None) -> object:
+            return None
+
+    recorder = Recorder(_ConfigDouble(), "http://127.0.0.1:1", 1.0)  # type: ignore[arg-type]
+    for _ in range(1000):
+        recorder._maybe_beat()
+
+    assert beats == []
+
+
 # --- End-to-end xdist (task 6.5, RQ-1 + RQ-27) ------------------------------
 
 

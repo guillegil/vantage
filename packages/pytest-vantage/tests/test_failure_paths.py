@@ -698,6 +698,79 @@ def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
     assert _combined_output(result).count("VantageWarning:") == 2
 
 
+# --- Activity-driven beats (design.md D30, task 4.16/4.17) ------------------
+
+
+@pytest.mark.req(id="RQ-21")
+def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still_recorded(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """design.md D30: `_last_beat_at` is assigned before the send, so a
+    failing send is not retried on the very next report -- and `_maybe_beat`
+    is `@liveness_isolated`, which latches after its first failure. Across
+    five tests (five beat opportunities, forced by a near-zero
+    `_BEAT_INTERVAL_SECONDS`), that is exactly one warning, never one per
+    beat -- and `accumulate` running first (D30) means every test's result
+    still reaches the finish-write, whose own `send` is unpatched, so the
+    real `vantage_server` ends up with all five.
+
+    A `conftest.py` written into the pytester's own directory, not
+    `monkeypatch`: this test needs `runpytest_subprocess` (an in-process
+    `runpytest` would let a `pytest_sessionstart`-era warning escape into
+    THIS session's own capture, the same phenomenon
+    `_combined_output`'s docstring names), and `monkeypatch` cannot reach
+    into a genuinely separate process.
+    """
+    pytester.makeconftest(
+        "import pytest_vantage.recorder as recorder\n"
+        "recorder._BEAT_INTERVAL_SECONDS = 0.0\n"
+        "def _fail_heartbeat(*args, **kwargs):\n"
+        "    raise RuntimeError('boom')\n"
+        "recorder.send_heartbeat = _fail_heartbeat\n"
+    )
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
+    )
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}"
+    )
+
+    result.assert_outcomes(passed=5)
+    assert result.ret == 0
+    assert _combined_output(result).count("VantageWarning:") == 1
+    assert len(vantage_server.results()) == 5
+
+
+@pytest.mark.req(id="RQ-21")
+def test_start_write_and_heartbeat_failure_share_one_flag_leaving_two_warnings_total(
+    pytester: pytest.Pytester,
+) -> None:
+    """design.md D29: the start-write and the heartbeat are both wrapped by
+    `liveness_isolated`, sharing `_liveness_disabled`. When the start-write
+    fails against a server that fails every connection, the liveness path
+    latches before the first heartbeat is ever attempted -- forcing a beat
+    opportunity on every test (via the same near-zero
+    `_BEAT_INTERVAL_SECONDS` conftest trick) must not add a third warning on
+    top of the one liveness warning and the one reporting warning this
+    server already produces (mirrors
+    `test_server_accepts_then_closes_without_responding` above, with the
+    beat opportunity made real rather than merely absent by timing)."""
+    pytester.makeconftest(
+        "import pytest_vantage.recorder as recorder\nrecorder._BEAT_INTERVAL_SECONDS = 0.0\n"
+    )
+    with _StubServer(_accept_then_close) as server:
+        pytester.makepyfile(
+            test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
+        )
+        result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
+
+    result.assert_outcomes(passed=5)
+    assert result.ret == 0
+    assert _combined_output(result).count("VantageWarning:") == 2
+
+
 @pytest.mark.req(id="RQ-21")
 def test_every_recorder_hook_is_fault_isolated() -> None:
     """RQ-21 says *every* hook is fault-isolated, and the two that exist are.
