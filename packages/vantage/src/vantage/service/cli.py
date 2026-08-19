@@ -26,6 +26,7 @@ import uvicorn
 
 from vantage.core.config.resolution import resolve_server_config
 from vantage.service.app import create_app
+from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -89,7 +90,12 @@ def main(argv: list[str] | None = None) -> None:
 
     warn_if_bound_wide(config.host)
 
-    store = SqliteExecutionStore(config.database_path)
+    try:
+        store = SqliteExecutionStore(config.database_path)
+    except SchemaVersionError as exc:
+        print(f"vantage: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
     app = create_app(store)
     uvicorn.run(app, host=config.host, port=config.port)
 

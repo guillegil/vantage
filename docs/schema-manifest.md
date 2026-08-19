@@ -47,7 +47,7 @@ redundant storage.
 
 ## Tables
 
-**Ten tables, thirteen indexes.** `PRAGMA foreign_keys=ON` is set by every
+**Ten tables, fourteen indexes.** `PRAGMA foreign_keys=ON` is set by every
 connection in `vantage/storage/connection.py` (PR4), not by `schema.sql`
 itself — SQLite ignores unenforced foreign keys by default, so the
 `REFERENCES` clauses below only take effect once a connection turns the
@@ -65,9 +65,14 @@ migration *framework*, not a version stamp — without `schema_version` a
 future migration cannot identify what it is migrating.
 
 *Not counted among the five `—` columns above*: `meta` is a structural
-table describing the schema itself, not a session fact, and Milestone 1's
-`schema.sql` creates it but does not populate its rows (that lands with
-`connection.py`, PR4).
+table describing the schema itself, not a session fact. It is genuinely
+populated at creation now (ADR-0013, `session-lifecycle`): `schema.sql`
+stamps `schema_version` itself, as its own last statement, atomically with
+the schema it describes; `connection.py` stamps `created_at`/`created_by`
+best-effort immediately after. `schema_version` is load-bearing —
+`open_database` refuses to open a database whose stamp is absent or does
+not match this build's `_SCHEMA_VERSION`, in either direction, rather than
+altering it (ADR-0013).
 
 ### `run` — the only table Milestone 1 populates
 
@@ -75,6 +80,7 @@ table describing the schema itself, not a session fact, and Milestone 1's
 | --- | --- | --- | --- |
 | `id` | TEXT PK | RQ-1 | **M1** |
 | `received_at` | TEXT NOT NULL | — | **M1** |
+| `last_contact_at` | TEXT NULL | RQ-44 | M2 |
 | `started_at` | TEXT NOT NULL | RQ-31 | **M1** |
 | `finished_at` | TEXT NULL | RQ-31 | **M1** |
 | `exit_status` | INTEGER NULL | RQ-31 | **M1** |
@@ -289,7 +295,7 @@ directory design.md D9 creates at `0700` (RQ-40.2).
 
 ## Indexes
 
-Thirteen, all created `IF NOT EXISTS` in `schema.sql`:
+Fourteen, all created `IF NOT EXISTS` in `schema.sql`:
 
 1. `run(started_at)`
 2. **`run(received_at)`**
@@ -304,12 +310,15 @@ Thirteen, all created `IF NOT EXISTS` in `schema.sql`:
 11. `result_marker(result_id, name)`
 12. `result_parameter(result_id)`
 13. `result_artifact(content_hash)`
+14. `run(last_contact_at)`
 
 The failure index (5) is not decoration: RQ-8's criterion is that twenty
 tests failing at one source line come back as one group, a
 `GROUP BY failure_path, failure_lineno`. `run(received_at)` (2) is the
 arrival-order index the Milestone 4 read API needs, created now per
-ADR-5 rather than later.
+ADR-5 rather than later. `run(last_contact_at)` (14) supports the
+liveness-derivation reads this change's schema makes expressible, added by
+`session-lifecycle` alongside the column it indexes.
 
 <!-- RQ-29 -->
 ## Comparison recorded (RQ-29 verification of record)

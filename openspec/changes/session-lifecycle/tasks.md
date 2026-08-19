@@ -145,49 +145,49 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
       confirm the plugin still imports nothing but pytest and the standard
       library (`rg -n '^import|^from' packages/pytest-vantage/src`, RQ-24).
 
-## Phase 3: Schema — `last_contact_at`, version stamp, refusal (PR 3)
+## Phase 3: Schema — `last_contact_at`, version stamp, refusal (PR 3) — COMPLETE
 
-- [ ] 3.1 RED `packages/vantage/tests/test_connection.py`: opening a database
+- [x] 3.1 RED `packages/vantage/tests/test_connection.py`: opening a database
       whose `meta` table has no `schema_version` row is refused
       (`SchemaVersionError`), naming the version found (absent) and required.
-- [ ] 3.2 RED, same file: `schema_version < 2`, and `schema_version > 2`, are
+- [x] 3.2 RED, same file: `schema_version < 2`, and `schema_version > 2`, are
       both refused, each naming both versions (D28's superset rule).
-- [ ] 3.3 RED, same file: a refusal issues **no DDL** — snapshot
+- [x] 3.3 RED, same file: a refusal issues **no DDL** — snapshot
       `sqlite_master` before and after the refused open and assert equality
       — and the connection is closed before the error is raised (RQ-29.2).
-- [ ] 3.4 RED, same file: opening a database with `schema_version == 2`
+- [x] 3.4 RED, same file: opening a database with `schema_version == 2`
       succeeds and applies no schema-altering statement.
-- [ ] 3.5 GREEN `packages/vantage/src/vantage/storage/schema.sql`: add
+- [x] 3.5 GREEN `packages/vantage/src/vantage/storage/schema.sql`: add
       `run.last_contact_at TEXT NULL` immediately after `received_at`; add
       `CREATE INDEX IF NOT EXISTS idx_run_last_contact_at ON run
       (last_contact_at)` (index 14); append `INSERT OR IGNORE INTO meta (key,
       value) VALUES ('schema_version', '2')` as the file's last statement, so
       it commits atomically with `_apply_schema`'s existing
       `BEGIN IMMEDIATE`…`COMMIT`. Update the header comment's index count.
-- [ ] 3.6 GREEN `packages/vantage/src/vantage/storage/connection.py`:
+- [x] 3.6 GREEN `packages/vantage/src/vantage/storage/connection.py`:
       `_SCHEMA_VERSION = 2`; `SchemaVersionError(RuntimeError)`; replace `if
       not _schema_already_applied(conn): _apply_schema(conn)` with the
       explicit two-branch form — applied ⇒ check version, not applied ⇒
       apply schema; best-effort `created_at`/`created_by` rows in `meta`
       after creation.
-- [ ] 3.7 GREEN `packages/vantage/src/vantage/service/cli.py`: catch
+- [x] 3.7 GREEN `packages/vantage/src/vantage/service/cli.py`: catch
       `SchemaVersionError` at start-up (reached via
       `SqliteExecutionStore.__init__` from `cli.py:92`), print the message to
       stderr, exit non-zero — same shape as the existing
       `DatabaseDirectoryNotWritableError` handling.
-- [ ] 3.8 Update `docs/schema-manifest.md`: add the `run.last_contact_at`
+- [x] 3.8 Update `docs/schema-manifest.md`: add the `run.last_contact_at`
       row (`TEXT NULL`, RQ-44, M2), index 14, and correct the `meta` table
       note — it is now genuinely populated at creation, not merely reserved.
-- [ ] 3.9 RED then GREEN `packages/vantage/tests/test_schema_manifest.py`:
+- [x] 3.9 RED then GREEN `packages/vantage/tests/test_schema_manifest.py`:
       `test_fresh_database_matches_the_recorded_ground_truth` moves from
       **10 tables / 125 columns / 13 indexes** to **10 tables / 126 columns /
       14 indexes**.
-- [ ] 3.10 Write `docs/adr/0013-refuse-databases-from-an-older-schema-version.md`
+- [x] 3.10 Write `docs/adr/0013-refuse-databases-from-an-older-schema-version.md`
       — Nygard (Status: Proposed in the PR), imperative title, linked to
       ADR-5 and RQ-29. Record both rejected alternatives named in D37:
       `ALTER TABLE … ADD COLUMN` migration, and opening read-only in
       degraded mode.
-- [ ] 3.11 GREEN gate: `uv run --extra dev pytest packages/vantage/tests/
+- [x] 3.11 GREEN gate: `uv run --extra dev pytest packages/vantage/tests/
       test_connection.py packages/vantage/tests/test_schema_manifest.py`,
       `git diff --exit-code -- packages/vantage/src/vantage/storage/schema.sql`
       shows only this slice's addition (no unrelated drift).
