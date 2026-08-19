@@ -127,3 +127,47 @@ def test_derive_presentation_returns_a_plain_str_never_an_enum() -> None:
 
     assert type(presentation) is str
     assert presentation in PRESENTATIONS
+
+
+@pytest.mark.req(id="RQ-44")
+def test_a_recorded_exit_status_is_never_abandoned_however_stale() -> None:
+    """A run that reported is never abandoned, and `interrupted` alone does
+    not say whether it reported.
+
+    pytest's `INTERNAL_ERROR` (exit status 3) is the case that proves it: the
+    recorder leaves `finished_at` null for it and sets `interrupted` only for
+    status 2, so a session that DID send a finish report used to derive
+    identically to one that was killed and never reported at all. The
+    requirement's own rationale is that a report arriving is what rules
+    abandonment out. Found by review, 2026-08-19.
+    """
+    started = datetime(2026, 8, 19, 9, 0, tzinfo=timezone.utc)
+    long_after = started + timedelta(hours=1)
+    grace = timedelta(minutes=15)
+
+    internal_error = Execution(
+        identity=Identity("a" * 32),
+        started_at=started,
+        finished_at=None,
+        exit_status=3,
+        interrupted=False,
+        interrupt_reason=None,
+    )
+    never_reported = Execution(
+        identity=Identity("b" * 32),
+        started_at=started,
+        finished_at=None,
+        exit_status=None,
+        interrupted=False,
+        interrupt_reason=None,
+    )
+
+    assert (
+        derive_presentation(internal_error, last_contact_at=started, now=long_after, grace=grace)
+        == "interrupted"
+    )
+    # The control: without an exit status nothing arrived, and staleness wins.
+    assert (
+        derive_presentation(never_reported, last_contact_at=started, now=long_after, grace=grace)
+        == "abandoned"
+    )

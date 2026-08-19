@@ -12,6 +12,7 @@ itself.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -90,8 +91,26 @@ def resolve_server_config(
     )
 
 
+class ServerConfigError(ValueError):
+    """A configuration value this server cannot run with.
+
+    Raised during resolution, before anything binds a port or opens a
+    database, so an unusable value fails at startup rather than producing a
+    server that runs and quietly answers wrong.
+    """
+
+
 def _resolve_grace_period(cli_grace_period: float | None) -> tuple[float, ConfigSource]:
     if cli_grace_period is not None:
+        # `argparse type=float` accepts 0, -1, nan and inf. Any of them makes
+        # every unfinished run derive as abandoned the instant it is read,
+        # including sessions heartbeating normally -- a silently useless server
+        # rather than one that refused to start. The plugin already rejects a
+        # nonsensical timeout this way; this is the server-side equivalent.
+        if not math.isfinite(cli_grace_period) or cli_grace_period <= 0:
+            raise ServerConfigError(
+                f"--grace-period must be a positive number of seconds, got {cli_grace_period!r}"
+            )
         return cli_grace_period, ConfigSource.CLI
     return _DEFAULT_GRACE_PERIOD_SECONDS, ConfigSource.DEFAULT
 
@@ -119,5 +138,6 @@ __all__ = [
     "ConfigSource",
     "DEFAULT_GRACE_PERIOD_SECONDS",
     "ServerConfig",
+    "ServerConfigError",
     "resolve_server_config",
 ]

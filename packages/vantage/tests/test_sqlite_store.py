@@ -69,3 +69,39 @@ def test_finish_write_leaves_received_at_started_at_and_last_contact_at_untouche
         assert after_last_contact_at == before_last_contact_at
     finally:
         store.close()
+
+
+@pytest.mark.req(id="RQ-44")
+def test_touch_last_contact_normalizes_a_non_utc_contact_before_storing_it(
+    tmp_path: Path,
+) -> None:
+    """`touch_last_contact` is a public port method: its signature accepts any
+    aware `datetime`, not only the UTC ones the route happens to pass today.
+
+    Stamping a `+02:00` value with a `+00:00` suffix would store it two hours
+    ahead of the truth and then compare it lexicographically against
+    genuinely-UTC rows. The in-memory adapter compares real `datetime` objects
+    and gets this input right, so trusting the caller is also what would make
+    the two adapters disagree on an input the shared contract suite never
+    exercises. Found by review, 2026-08-19.
+    """
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        identity = "7" * 32
+        started = datetime(2026, 8, 19, 9, 0, 0, tzinfo=timezone.utc)
+        store.record_session(
+            _start_only_execution(identity, started=started), results=(), received_at=started
+        )
+
+        # 12:00+02:00 is 10:00 UTC -- one hour after the start, not three.
+        in_madrid = datetime(2026, 8, 19, 12, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+        assert store.touch_last_contact(identity, in_madrid) is True
+
+        stored = store._conn.execute(  # noqa: SLF001
+            "SELECT last_contact_at FROM run WHERE id = ?", (identity,)
+        ).fetchone()[0]
+        assert datetime.fromisoformat(stored) == in_madrid
+        assert stored.endswith("+00:00")
+        assert stored.startswith("2026-08-19T10:00:00")
+    finally:
+        store.close()

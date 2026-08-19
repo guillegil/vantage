@@ -226,3 +226,33 @@ def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies
     conn.close()
 
     assert captured == []
+
+
+def test_creating_a_database_survives_a_username_lookup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`getpass.getuser()` only normalises its failures to `OSError` on 3.13+;
+    its own docstring records the change. On 3.10-3.12 -- three of this
+    project's four CI legs -- it raises `KeyError` from `pwd.getpwuid`, which
+    is what a container run as an unmapped uid with no `LOGNAME`/`USER` in the
+    environment produces.
+
+    `created_by` is a convenience row. Losing it must cost nothing; aborting
+    `open_database` would stop the server from starting at all. Found by
+    review, 2026-08-19.
+    """
+
+    def _no_such_user() -> str:
+        raise KeyError("getpwuid(): uid not found: 1234")
+
+    monkeypatch.setattr("vantage.storage.connection.getpass.getuser", _no_such_user)
+
+    conn = open_database(tmp_path / "store" / "vantage.db")
+    try:
+        stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
+    finally:
+        conn.close()
+
+    # The database exists and is usable; only the convenience row is absent.
+    assert stored["schema_version"] == "2"
+    assert "created_by" not in stored
