@@ -272,15 +272,15 @@ sees one form. Decided 2026-08-18.
 
 ## Phase 8: End-to-end capture (PR 8)
 
-- [ ] 8.1 Extend `packages/pytest-vantage/tests/vantage_test_server.py` with `results()` and
+- [x] 8.1 Extend `packages/pytest-vantage/tests/vantage_test_server.py` with `results()` and
       `catalogue_entry(node_id)` accessors over the in-memory store.
-- [ ] 8.2 RED `packages/pytest-vantage/tests/test_result_capture.py` (pytester subprocess +
+- [x] 8.2 RED `packages/pytest-vantage/tests/test_result_capture.py` (pytester subprocess +
       real server): a fixture raising before the body → `error`; `@pytest.mark.skip` →
       `skipped`; failing `xfail` → `xfailed`; passing non-strict `xfail` → `xpassed`; a test
       passing with a raising teardown is **not** `passed` (RQ-4.1–4.5).
-- [ ] 8.3 RED: an 8s fixture with a 0.1s body → `setup_duration >= 8` and `call_duration < 1`;
+- [x] 8.3 RED: an 8s fixture with a 0.1s body → `setup_duration >= 8` and `call_duration < 1`;
       a setup failure → `call_duration is None`, not `0.0` (RQ-5.1, RQ-5.2).
-- [ ] 8.4 RED: filtering stored results by file path alone returns every test defined in that
+- [x] 8.4 RED: filtering stored results by file path alone returns every test defined in that
       file (RQ-9.1); a module-level test stores a null class name (RQ-9.2).
 
 ## Phase 9: xdist, catalogue, and the sweep (PR 9)
