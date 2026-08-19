@@ -136,10 +136,18 @@ Five requirements have a subtlety that costs a rewrite if missed:
 ## Conventions
 
 **Requirement traceability, for the identifiers that already exist.** Every test
-that verifies one carries its ID: `@pytest.mark.req("RQ-12")`. Where verification
+that verifies one carries its ID: `@pytest.mark.req(id="RQ-12")`. Where verification
 is not a test — a CI matrix, a benchmark script — the ID goes in a comment on the
 relevant block. The invariant is that `grep -r "RQ-12"` finds the thing that
 proves it.
+
+**The `id=` keyword is load-bearing, not style.** pytest matches marker arguments
+in a `-m` expression only when they were applied as keywords. With the marker
+applied positionally, `-m 'req("RQ-12")'` **selects the entire suite** — 197 of
+197, nothing deselected — and so does an identifier that cannot exist. The filter
+fails open, which makes it worse than no filter: it reports green over a set it
+never narrowed. Applied as `req(id=...)`, selection works and an unknown ID
+correctly collects nothing. Verified on pytest 9.1.1, 2026-08-19.
 
 **No new `RQ-xx` identifiers are minted.** Decided 2026-08-18. The existing ones
 stay because they are executable — 55 markers, `--strict-markers` is on, and CI
@@ -207,7 +215,7 @@ uv sync                                  # whole workspace, one lockfile
 uv run pytest                            # every package
 uv run pytest packages/pytest-vantage    # one distribution
 uv run pytest -k test_name               # one test
-uv run pytest -m 'req("RQ-2")'           # everything verifying one requirement
+uv run pytest -m 'req(id="RQ-2")'        # everything verifying one requirement
 uv run ruff format . && uv run ruff check --fix .
 uv run mypy .                            # strict
 uv run deptry .                          # undeclared / unused dependencies

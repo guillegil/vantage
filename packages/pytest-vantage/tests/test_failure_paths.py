@@ -202,7 +202,7 @@ class _Instrumented:
         raise KeyboardInterrupt
 
 
-@pytest.mark.req("RQ-21")
+@pytest.mark.req(id="RQ-21")
 def test_fault_isolated_catches_exception_and_latches_after_first_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -287,7 +287,7 @@ def test_warn_falls_back_to_stderr_when_no_terminal_reporter_is_registered(
 # --- RQ-37: the server cannot be reached at all (task 6.7) -------------------
 
 
-@pytest.mark.req("RQ-37")
+@pytest.mark.req(id="RQ-37")
 def test_closed_port_warns_naming_the_address_and_runs_unrecorded(
     pytester: pytest.Pytester,
 ) -> None:
@@ -303,7 +303,7 @@ def test_closed_port_warns_naming_the_address_and_runs_unrecorded(
     assert output.count("VantageWarning:") == 1
 
 
-@pytest.mark.req("RQ-37")
+@pytest.mark.req(id="RQ-37")
 def test_unresolvable_host_warns_naming_the_address_and_runs_unrecorded(
     pytester: pytest.Pytester,
 ) -> None:
@@ -319,7 +319,7 @@ def test_unresolvable_host_warns_naming_the_address_and_runs_unrecorded(
     assert output.count("VantageWarning:") == 1
 
 
-@pytest.mark.req("RQ-37")
+@pytest.mark.req(id="RQ-37")
 def test_recorder_is_not_registered_when_the_preflight_fails(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -336,7 +336,7 @@ def test_recorder_is_not_registered_when_the_preflight_fails(
     assert not any(isinstance(plugin, Recorder) for plugin in config.pluginmanager.get_plugins())
 
 
-@pytest.mark.req("RQ-37")
+@pytest.mark.req(id="RQ-37")
 def test_preflight_falls_back_to_the_scheme_default_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -369,7 +369,7 @@ def test_preflight_falls_back_to_the_scheme_default_port(
     assert attempted == [("example.com", 80), ("example.com", 443), ("example.com", 8765)]
 
 
-@pytest.mark.req("RQ-37")
+@pytest.mark.req(id="RQ-37")
 def test_two_hundred_tests_produce_exactly_one_warning_naming_the_address(
     pytester: pytest.Pytester,
 ) -> None:
@@ -391,7 +391,7 @@ def test_two_hundred_tests_produce_exactly_one_warning_naming_the_address(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req("RQ-37")
+@pytest.mark.req(id="RQ-37")
 def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -438,7 +438,7 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
 # --- RQ-21: something goes wrong while reporting (task 6.9) -----------------
 
 
-@pytest.mark.req("RQ-21")
+@pytest.mark.req(id="RQ-21")
 def test_reporting_error_preserves_passing_exit_status_and_warns_once(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -466,7 +466,7 @@ def test_reporting_error_preserves_passing_exit_status_and_warns_once(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req("RQ-21")
+@pytest.mark.req(id="RQ-21")
 def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -485,7 +485,7 @@ def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req("RQ-21")
+@pytest.mark.req(id="RQ-21")
 def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester) -> None:
     with _StubServer(_accept_then_close) as server:
         pytester.makepyfile(test_sample=_PASSING_TEST)
@@ -496,7 +496,7 @@ def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req("RQ-21")
+@pytest.mark.req(id="RQ-21")
 def test_server_accepts_and_never_answers_finishes_within_timeout_plus_five_seconds(
     pytester: pytest.Pytester,
 ) -> None:
@@ -559,7 +559,7 @@ def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req("RQ-21")
+@pytest.mark.req(id="RQ-21")
 def test_every_recorder_hook_is_fault_isolated() -> None:
     """RQ-21 says *every* hook is fault-isolated, and the two that exist are.
 

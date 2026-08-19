@@ -89,7 +89,7 @@ def sqlite_client(sqlite_store: SqliteExecutionStore) -> TestClient:
     return TestClient(create_app(sqlite_store))
 
 
-@pytest.mark.req("RQ-41")
+@pytest.mark.req(id="RQ-41")
 def test_well_formed_report_is_stored_and_acknowledged(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -103,7 +103,7 @@ def test_well_formed_report_is_stored_and_acknowledged(
     assert store.get_execution("a" * 32) is not None
 
 
-@pytest.mark.req("RQ-41")
+@pytest.mark.req(id="RQ-41")
 def test_retried_report_is_idempotent(client: TestClient, store: InMemoryExecutionStore) -> None:
     report = _well_formed_report("b" * 32)
 
@@ -118,7 +118,7 @@ def test_retried_report_is_idempotent(client: TestClient, store: InMemoryExecuti
     assert store.count_executions() == 1
 
 
-@pytest.mark.req("RQ-41")
+@pytest.mark.req(id="RQ-41")
 @pytest.mark.parametrize("path", ["/runs", "/api/runs"])
 def test_unversioned_path_is_refused(client: TestClient, path: str) -> None:
     response = client.post(path, json=_well_formed_report())
@@ -126,7 +126,7 @@ def test_unversioned_path_is_refused(client: TestClient, path: str) -> None:
     assert response.status_code == 404
 
 
-@pytest.mark.req("RQ-41")
+@pytest.mark.req(id="RQ-41")
 def test_report_carrying_results_stores_them_with_the_run(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -152,7 +152,7 @@ def test_report_carrying_results_stores_them_with_the_run(
     assert stored["packages/vantage/tests/test_a.py::test_two"].outcome == "failed"
 
 
-@pytest.mark.req("RQ-41")
+@pytest.mark.req(id="RQ-41")
 @pytest.mark.parametrize("results_value", [None, []], ids=["null", "empty-list"])
 def test_report_with_null_or_empty_results_section_writes_no_result_rows(
     client: TestClient, store: InMemoryExecutionStore, results_value: list[Any] | None
@@ -172,7 +172,7 @@ def test_report_with_null_or_empty_results_section_writes_no_result_rows(
     assert store.count_results() == 0
 
 
-@pytest.mark.req("RQ-41")
+@pytest.mark.req(id="RQ-41")
 @pytest.mark.parametrize("results_value", [None, []], ids=["null", "empty-list"])
 def test_session_report_accepts_a_null_or_empty_results_section(
     results_value: list[Any] | None,
@@ -188,7 +188,7 @@ def test_session_report_accepts_a_null_or_empty_results_section(
     assert payload.results == results_value
 
 
-@pytest.mark.req("RQ-41")
+@pytest.mark.req(id="RQ-41")
 def test_replayed_report_with_results_does_not_duplicate_them(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -206,7 +206,7 @@ def test_replayed_report_with_results_does_not_duplicate_them(
     assert store.count_results() == 1
 
 
-@pytest.mark.req("RQ-41")
+@pytest.mark.req(id="RQ-41")
 def test_unknown_result_key_is_tolerated_and_named_deduplicated_in_ignored(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -228,7 +228,7 @@ def test_unknown_result_key_is_tolerated_and_named_deduplicated_in_ignored(
     assert store.count_results() == 2
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
     """The Pydantic hop of the four-hop `""`-vs-`None` guard (design.md D18):
     `param_id: ""` and `param_id: null` on the wire must arrive as distinct
@@ -253,7 +253,7 @@ def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
     assert zero_duration.duration == 0.0
 
 
-@pytest.mark.req("RQ-13")
+@pytest.mark.req(id="RQ-13")
 def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
     sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
 ) -> None:
@@ -281,7 +281,7 @@ def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
     assert entry.last_seen_run_id == "7" * 32
 
 
-@pytest.mark.req("RQ-30")
+@pytest.mark.req(id="RQ-30")
 def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
 ) -> None:

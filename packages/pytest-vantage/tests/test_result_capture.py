@@ -67,7 +67,7 @@ def test_passes_but_teardown_raises(raising_teardown_fixture):
 """
 
 
-@pytest.mark.req("RQ-4")
+@pytest.mark.req(id="RQ-4")
 def test_five_outcome_shapes_recorded_end_to_end(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -113,7 +113,7 @@ def test_with_slow_setup(slow_fixture):
 """
 
 
-@pytest.mark.req("RQ-5")
+@pytest.mark.req(id="RQ-5")
 def test_setup_and_call_durations_are_measured_independently(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -151,7 +151,7 @@ def test_it(broken_fixture):
 """
 
 
-@pytest.mark.req("RQ-5")
+@pytest.mark.req(id="RQ-5")
 def test_setup_failure_leaves_call_duration_null_not_zero(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -177,7 +177,7 @@ def test_setup_failure_leaves_call_duration_null_not_zero(
 _TWO_TESTS_IN_ONE_FILE = "def test_one():\n    assert True\n\n\ndef test_two():\n    assert True\n"
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 def test_filtering_by_file_path_returns_every_test_defined_in_that_file(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -208,7 +208,7 @@ def test_filtering_by_file_path_returns_every_test_defined_in_that_file(
     assert from_file_b == {"test_one", "test_two"}
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 def test_module_level_test_stores_a_null_class_name(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -253,7 +253,7 @@ _TEST_EXECUTION_FILE = (
 )
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 def test_empty_param_id_survives_the_real_server_hop_end_to_end(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose

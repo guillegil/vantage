@@ -31,7 +31,7 @@ def _execution(hex_id: str) -> Execution:
     )
 
 
-@pytest.mark.req("RQ-38")
+@pytest.mark.req(id="RQ-38")
 def test_two_concurrent_sessions_both_leave_a_run_entry(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:
@@ -60,7 +60,7 @@ def test_two_concurrent_sessions_both_leave_a_run_entry(tmp_path: Path) -> None:
         store.close()
 
 
-@pytest.mark.req("RQ-38")
+@pytest.mark.req(id="RQ-38")
 def test_two_concurrent_two_hundred_test_sessions_leave_four_hundred_results(
     tmp_path: Path,
 ) -> None:
@@ -95,7 +95,7 @@ def test_two_concurrent_two_hundred_test_sessions_leave_four_hundred_results(
         store.close()
 
 
-@pytest.mark.req("RQ-38")
+@pytest.mark.req(id="RQ-38")
 def test_ten_simultaneous_sessions_leave_ten_run_entries_and_raise_nothing(
     tmp_path: Path,
 ) -> None:

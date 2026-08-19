@@ -21,7 +21,7 @@ _PLUGIN_DIR = _SRC_ROOT / "pytest_vantage"
 _ALLOWED = frozenset(sys.stdlib_module_names) | {"pytest"}
 
 
-@pytest.mark.req("RQ-24")
+@pytest.mark.req(id="RQ-24")
 def test_every_plugin_import_resolves_to_stdlib_or_pytest() -> None:
     result = walk_package(
         _PLUGIN_DIR,
@@ -35,7 +35,7 @@ def test_every_plugin_import_resolves_to_stdlib_or_pytest() -> None:
     ]
 
 
-@pytest.mark.req("RQ-24")
+@pytest.mark.req(id="RQ-24")
 def test_the_walk_is_not_vacuous() -> None:
     result = walk_package(
         _PLUGIN_DIR,

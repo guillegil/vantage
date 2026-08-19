@@ -56,7 +56,7 @@ def _report(
     return report
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 @pytest.mark.parametrize(
     (
         "node_id",
@@ -130,7 +130,7 @@ def test_decompose_identity_class_name_and_unparametrised_param_id(
         assert identity.param_id is None  # None must stay None, never a computed ""
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 def test_decompose_identity_empty_brackets_is_empty_string_not_none() -> None:
     """The brackets are the evidence of parametrisation; their content is
     not (design.md D18). This is not a hypothetical case -- this exact node
@@ -154,7 +154,7 @@ def test_decompose_identity_empty_brackets_is_empty_string_not_none() -> None:
     assert identity.param_id is not None
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 def test_decompose_identity_slices_on_first_and_last_bracket_not_partition_symmetry() -> None:
     """A parameter id that itself contains brackets must survive intact.
     Slicing on the first `"["` and the last `"]"` gets this right; a
@@ -168,7 +168,7 @@ def test_decompose_identity_slices_on_first_and_last_bracket_not_partition_symme
     assert identity.param_id == "[0]"
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 def test_decompose_identity_directory_containing_brackets_is_not_mistaken_for_a_parameter() -> None:
     """A directory component may itself contain brackets (design.md D18
     addendum). The parameter section must be located within the remainder
@@ -186,7 +186,7 @@ def test_decompose_identity_directory_containing_brackets_is_not_mistaken_for_a_
     assert identity.param_id == "x"
 
 
-@pytest.mark.req("RQ-9")
+@pytest.mark.req(id="RQ-9")
 def test_decompose_identity_rejects_a_string_with_no_double_colon_at_all() -> None:
     """Every real pytest node id has at least one `"::"` separating the
     file path from the test path (design.md D18 addendum). A string with
@@ -216,7 +216,7 @@ _D17_ROWS: list[_D17Row] = [
 ]
 
 
-@pytest.mark.req("RQ-4")
+@pytest.mark.req(id="RQ-4")
 @pytest.mark.parametrize(
     ("setup_outcome", "call_spec", "teardown_outcome", "expected_outcome"),
     _D17_ROWS,
@@ -239,7 +239,7 @@ def test_derive_outcome_all_nine_d17_precedence_rows(
 # --- Phase 7, task 7.2: a strict xfail that passes is failed, not xpassed ----
 
 
-@pytest.mark.req("RQ-4")
+@pytest.mark.req(id="RQ-4")
 def test_derive_outcome_strict_xfail_that_passes_is_failed_not_xpassed() -> None:
     """pytest sets `outcome="failed"` with `wasxfail` entirely ABSENT for
     `[XPASS(strict)]` (verified against `_pytest/skipping.py`'s
@@ -265,7 +265,7 @@ _KEEPS_OWN_WORD: list[tuple[_ReportOutcome, str | None, str]] = [
 ]
 
 
-@pytest.mark.req("RQ-4")
+@pytest.mark.req(id="RQ-4")
 @pytest.mark.parametrize(
     ("call_outcome", "call_wasxfail", "expected_outcome"),
     _KEEPS_OWN_WORD,
@@ -286,7 +286,7 @@ def test_derive_outcome_teardown_failure_downgrades_only_a_passed_result(
 # --- Phase 7, task 7.4: the JSON hop -- null vs zero -------------------------
 
 
-@pytest.mark.req("RQ-5")
+@pytest.mark.req(id="RQ-5")
 def test_build_result_phase_duration_null_vs_zero_survives_the_json_hop() -> None:
     """A phase that never ran serialises as JSON `null`, never `0.0`; a
     genuine `0.0` survives as `0.0` -- never `x or None` (design.md D17),
@@ -313,7 +313,7 @@ def test_build_result_phase_duration_null_vs_zero_survives_the_json_hop() -> Non
 # --- Phase 7, task 7.5: resolution, not attendance ---------------------------
 
 
-@pytest.mark.req("RQ-4")
+@pytest.mark.req(id="RQ-4")
 def test_build_result_returns_none_when_teardown_was_never_seen() -> None:
     """design.md D16, "resolution, not attendance": setup+call with no
     teardown (e.g. interrupted mid-session) is DROPPED, not invented --

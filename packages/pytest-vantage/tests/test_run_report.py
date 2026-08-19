@@ -60,7 +60,7 @@ def test_isoformat_utc_preserves_nonzero_microseconds() -> None:
 # --- Registration (task 6.3/6.4) --------------------------------------------
 
 
-@pytest.mark.req("RQ-1")
+@pytest.mark.req(id="RQ-1")
 def test_recorder_registered_only_when_vantage_flag_is_present(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
@@ -90,8 +90,8 @@ def test_recorder_registered_only_when_vantage_flag_is_present(
 # --- End-to-end (task 6.1, RQ-1 + RQ-31) ------------------------------------
 
 
-@pytest.mark.req("RQ-1")
-@pytest.mark.req("RQ-31")
+@pytest.mark.req(id="RQ-1")
+@pytest.mark.req(id="RQ-31")
 def test_completed_session_writes_one_row_with_ordered_timestamps(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -110,7 +110,7 @@ def test_completed_session_writes_one_row_with_ordered_timestamps(
     assert execution.finished_at > execution.started_at
 
 
-@pytest.mark.req("RQ-1")
+@pytest.mark.req(id="RQ-1")
 def test_second_invocation_gets_a_distinct_identifier(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -126,7 +126,7 @@ def test_second_invocation_gets_a_distinct_identifier(
     assert executions[0].identity.value != executions[1].identity.value
 
 
-@pytest.mark.req("RQ-1")
+@pytest.mark.req(id="RQ-1")
 def test_zero_test_collection_still_writes_one_row(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -139,7 +139,7 @@ def test_zero_test_collection_still_writes_one_row(
     assert len(vantage_server.executions()) == 1
 
 
-@pytest.mark.req("RQ-1")
+@pytest.mark.req(id="RQ-1")
 def test_failed_collection_still_writes_one_row(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -157,7 +157,7 @@ def test_failed_collection_still_writes_one_row(
     assert len(vantage_server.executions()) == 1
 
 
-@pytest.mark.req("RQ-31")
+@pytest.mark.req(id="RQ-31")
 def test_sigint_leaves_start_time_and_null_end_time(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -198,8 +198,8 @@ def test_sigint_leaves_start_time_and_null_end_time(
 # --- End-to-end xdist (task 6.5, RQ-1 + RQ-27) ------------------------------
 
 
-@pytest.mark.req("RQ-1")
-@pytest.mark.req("RQ-27")
+@pytest.mark.req(id="RQ-1")
+@pytest.mark.req(id="RQ-27")
 def test_xdist_run_leaves_exactly_one_run_entry(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose

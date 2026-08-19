@@ -20,8 +20,8 @@ _CORE_DIR = _SRC_ROOT / "vantage" / "core"
 _STDLIB = frozenset(sys.stdlib_module_names)
 
 
-@pytest.mark.req("RQ-26")
-@pytest.mark.req("RQ-30")
+@pytest.mark.req(id="RQ-26")
+@pytest.mark.req(id="RQ-30")
 def test_every_core_import_resolves_to_the_standard_library() -> None:
     result = walk_package(
         _CORE_DIR,
@@ -35,7 +35,7 @@ def test_every_core_import_resolves_to_the_standard_library() -> None:
     ]
 
 
-@pytest.mark.req("RQ-26")
+@pytest.mark.req(id="RQ-26")
 def test_the_walk_is_not_vacuous() -> None:
     result = walk_package(
         _CORE_DIR,
