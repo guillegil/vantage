@@ -19,6 +19,16 @@ from pathlib import Path
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
 
+# design.md D34: the default grace period is a multiple of the default
+# heartbeat interval, not an invented round number -- the "hint" name marks
+# that `pytest_vantage.recorder._BEAT_INTERVAL_SECONDS` is declared
+# separately, on the other side of the HTTP boundary (RQ-24/ADR-9 forbid
+# sharing code across it); this copy only derives a default, so a divergence
+# between the two changes the multiple, never correctness.
+_BEAT_INTERVAL_HINT_SECONDS = 30.0
+_DEFAULT_GRACE_BEATS = 30
+_DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_BEATS * _BEAT_INTERVAL_HINT_SECONDS  # 900.0
+
 
 class ConfigSource(str, Enum):
     """Where a resolved value came from. **Never `StrEnum`** -- that is
@@ -38,6 +48,8 @@ class ServerConfig:
     database_source: ConfigSource
     host: str
     port: int
+    grace_period_seconds: float
+    grace_source: ConfigSource
 
 
 def resolve_server_config(
@@ -46,10 +58,11 @@ def resolve_server_config(
     env_database: str | None,
     cli_host: str | None,
     cli_port: int | None,
+    cli_grace_period: float | None,
     home: Path,
     xdg_data_home: str | None,
 ) -> ServerConfig:
-    """Resolve the server's database path and bind address.
+    """Resolve the server's database path, bind address, and grace period.
 
     Database precedence: ``--database`` > ``VANTAGE_DATABASE`` >
     ``$XDG_DATA_HOME/vantage/vantage.db``, default
@@ -59,18 +72,28 @@ def resolve_server_config(
     enabling recording in someone else's project, while this server is
     started deliberately by whoever runs it.
 
-    Host and port take only a CLI value or the fixed default -- design.md
-    D11 names no environment variable for either.
+    Host, port and the grace period each take only a CLI value or a fixed
+    default -- design.md D11/D34 name no environment variable for any of
+    the three.
     """
     database_path, database_source = _resolve_database_path(
         cli_database, env_database, home, xdg_data_home
     )
+    grace_period_seconds, grace_source = _resolve_grace_period(cli_grace_period)
     return ServerConfig(
         database_path=database_path,
         database_source=database_source,
         host=cli_host if cli_host is not None else _DEFAULT_HOST,
         port=cli_port if cli_port is not None else _DEFAULT_PORT,
+        grace_period_seconds=grace_period_seconds,
+        grace_source=grace_source,
     )
+
+
+def _resolve_grace_period(cli_grace_period: float | None) -> tuple[float, ConfigSource]:
+    if cli_grace_period is not None:
+        return cli_grace_period, ConfigSource.CLI
+    return _DEFAULT_GRACE_PERIOD_SECONDS, ConfigSource.DEFAULT
 
 
 def _resolve_database_path(
@@ -87,4 +110,14 @@ def _resolve_database_path(
     return data_home / "vantage" / "vantage.db", ConfigSource.DEFAULT
 
 
-__all__ = ["ConfigSource", "ServerConfig", "resolve_server_config"]
+DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_PERIOD_SECONDS
+"""Public alias for `service/app.py`'s `create_app` default (design.md D34) --
+so the "30 beats" derivation lives in exactly one place rather than being
+duplicated as a bare literal at the `create_app` call site."""
+
+__all__ = [
+    "ConfigSource",
+    "DEFAULT_GRACE_PERIOD_SECONDS",
+    "ServerConfig",
+    "resolve_server_config",
+]

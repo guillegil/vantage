@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from vantage.storage.connection import open_database
+from vantage.storage.connection import SchemaVersionError, open_database
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCHEMA_SQL = _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"
@@ -108,5 +108,121 @@ def test_reopening_an_existing_database_issues_no_ddl(
 
     second = open_database(db_path)
     second.close()
+
+    assert captured == []
+
+
+def _seed_meta_only_database(db_path: Path, *, schema_version_value: str | None) -> None:
+    """Simulate a database whose `meta` table exists (so `open_database` treats
+    the schema as already applied) but whose `schema_version` row is absent or
+    set to an arbitrary value -- exactly the shape D28 found every pre-change
+    database in, and the shape a database from a different release would have.
+
+    Built with a plain `sqlite3.connect`, never `open_database`, so the test
+    controls the stamped version independently of whatever `schema.sql` itself
+    currently stamps.
+    """
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        if schema_version_value is not None:
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', ?)",
+                (schema_version_value,),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_opening_a_database_with_no_schema_version_row_is_refused(tmp_path: Path) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+    _seed_meta_only_database(db_path, schema_version_value=None)
+
+    with pytest.raises(SchemaVersionError) as exc_info:
+        open_database(db_path)
+
+    message = str(exc_info.value)
+    assert "absent" in message
+    assert "2" in message
+
+
+def test_opening_a_database_with_an_older_schema_version_is_refused(tmp_path: Path) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+    _seed_meta_only_database(db_path, schema_version_value="1")
+
+    with pytest.raises(SchemaVersionError) as exc_info:
+        open_database(db_path)
+
+    message = str(exc_info.value)
+    assert "1" in message
+    assert "2" in message
+
+
+def test_opening_a_database_with_a_newer_schema_version_is_refused(tmp_path: Path) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+    _seed_meta_only_database(db_path, schema_version_value="3")
+
+    with pytest.raises(SchemaVersionError) as exc_info:
+        open_database(db_path)
+
+    message = str(exc_info.value)
+    assert "3" in message
+    assert "2" in message
+
+
+def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+    _seed_meta_only_database(db_path, schema_version_value="1")
+
+    before = sqlite3.connect(str(db_path))
+    before_master = before.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+    ).fetchall()
+    before.close()
+
+    created: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def _capturing_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn = cast(sqlite3.Connection, real_connect(*args, **kwargs))
+        created.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", _capturing_connect)
+
+    with pytest.raises(SchemaVersionError):
+        open_database(db_path)
+
+    # `open_database` made exactly one `sqlite3.connect` call; proving it is
+    # unusable after the refusal proves `close()` ran as part of raising, not
+    # merely eventually via garbage collection.
+    assert len(created) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        created[0].execute("SELECT 1")
+
+    monkeypatch.undo()
+    after = sqlite3.connect(str(db_path))
+    after_master = after.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
+    ).fetchall()
+    after.close()
+
+    assert after_master == before_master
+
+
+def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies_no_ddl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+    _seed_meta_only_database(db_path, schema_version_value="2")
+
+    captured = _spy_on_executescript(monkeypatch)
+
+    conn = open_database(db_path)
+    conn.close()
 
     assert captured == []

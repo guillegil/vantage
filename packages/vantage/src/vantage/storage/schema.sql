@@ -1,6 +1,6 @@
 -- Vantage database schema (RQ-29: complete schema from first use, ADR-5).
 --
--- All ten tables and their thirteen indexes are declared here, whole, and
+-- All ten tables and their fourteen indexes are declared here, whole, and
 -- applied the first time a database is opened (vantage/storage/connection.py,
 -- PR4). Every statement is IF NOT EXISTS so a second process opening the same
 -- fresh database races safely (design.md D8) and reopening an existing
@@ -9,7 +9,11 @@
 -- Milestone 1 populates only the marked `run` columns; the other nine tables
 -- exist empty until the milestone that writes them. No migration framework
 -- ships in Phase 1 (ADR-5) -- `meta.schema_version` is the seam, not a
--- substitute for one.
+-- substitute for one. This file stamps that seam itself, as its own last
+-- statement (ADR-0013, design.md D28): a database created without ever
+-- passing through this file has no `schema_version` row at all, which
+-- `vantage/storage/connection.py`'s open-time refusal treats as "absent",
+-- refused the same as an explicitly older version.
 --
 -- Column-by-column traceability to requirements lives in
 -- docs/schema-manifest.md, not in this file's comments -- this file is the
@@ -42,6 +46,7 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS run (
     id                            TEXT PRIMARY KEY,
     received_at                   TEXT NOT NULL,
+    last_contact_at               TEXT NULL,
     started_at                    TEXT NOT NULL,
     finished_at                   TEXT NULL,
     exit_status                   INTEGER NULL,
@@ -228,11 +233,12 @@ CREATE TABLE IF NOT EXISTS result_artifact (
 );
 
 -- ---------------------------------------------------------------------------
--- Indexes -- thirteen in total (docs/schema-manifest.md enumerates the same
+-- Indexes -- fourteen in total (docs/schema-manifest.md enumerates the same
 -- list). The failure index (5) is RQ-8's criterion that twenty tests failing
 -- at one source line come back as one `GROUP BY failure_path, failure_lineno`
 -- group. `run(received_at)` (2) is the arrival-order index the Milestone 4
--- read API needs, created now per ADR-5.
+-- read API needs, created now per ADR-5. `run(last_contact_at)` (14) is the
+-- liveness-derivation index this change adds (RQ-44).
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_started_at
     ON run (started_at);                                            -- 1
@@ -260,3 +266,17 @@ CREATE INDEX IF NOT EXISTS idx_result_parameter_result_id
     ON result_parameter (result_id);                                -- 12
 CREATE INDEX IF NOT EXISTS idx_result_artifact_content_hash
     ON result_artifact (content_hash);                              -- 13
+CREATE INDEX IF NOT EXISTS idx_run_last_contact_at
+    ON run (last_contact_at);                                       -- 14
+
+-- ---------------------------------------------------------------------------
+-- Schema version stamp (ADR-0013, design.md D28) -- must be the last
+-- statement in this file. `_apply_schema` in connection.py wraps the whole
+-- script in one `BEGIN IMMEDIATE` ... `COMMIT`, so this stamp commits
+-- atomically with the schema it describes: no crash between "tables exist"
+-- and "version recorded" can leave one without the other. `OR IGNORE` is the
+-- DML register of the same `IF NOT EXISTS` idempotence the rest of this file
+-- relies on, so reapplying this script against an already-stamped database
+-- changes nothing.
+-- ---------------------------------------------------------------------------
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '2');

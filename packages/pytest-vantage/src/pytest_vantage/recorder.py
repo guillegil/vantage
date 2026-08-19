@@ -1,9 +1,7 @@
 """`Recorder` -- the hook implementation registered by `plugin.py` only once
 activation and the reachability preflight both succeed (design.md D2a, D6).
 Assembles the session report and sends it exactly once, from
-`pytest_sessionfinish`, never per test (RQ-25's shape) -- Phase 7 adds
-`pytest_runtest_logreport`, which only accumulates in memory and never sends
-anything itself (design.md D16).
+`pytest_sessionfinish`, never per test (RQ-25's shape).
 
 `pytest_sessionstart` (design.md D32) sends a second, narrower report before
 the first test runs: the session's identity and start time, `finished_at:
@@ -14,6 +12,23 @@ only the observability of a session that never finishes; the finish-write's
 own `INSERT` branch produces exactly today's complete row when no start row
 exists, which is what makes degrading quietly past one warning acceptable
 rather than a new half-state.
+
+`pytest_runtest_logreport` accumulates every phase report in memory (design.md
+D16) and, from Phase 4, calls `_maybe_beat()` afterwards -- a separately
+`liveness_isolated`-wrapped helper, never a decorator on the hook itself,
+because a beat that raised inside the already-`fault_isolated` hook body
+would be caught by the OUTER decorator and latch `_disabled`, taking result
+accumulation down with it (design.md D30). `accumulate` runs first, always,
+so a beat failure can never precede the accumulation of the report that
+triggered it. `_last_beat_at` is assigned before the send, not after, so a
+failing or slow send is not retried on the very next report -- one stall per
+interval, never one per test. `time.monotonic()` only, never wall clock, so
+an NTP step or a DST transition cannot fire a beat storm or suppress beats
+for an hour. `_maybe_beat` shares `liveness_isolated`'s `_liveness_disabled`
+flag with `pytest_sessionstart` (design.md D29): a failed start-write already
+latches the liveness path before the first beat opportunity, so a session
+whose start-write fails never attempts a beat at all, and either way the
+whole liveness path is at most one warning, never one per attempt.
 
 Every other hook is wrapped in `pytest_vantage.boundary.fault_isolated`: an
 error raised anywhere in the reporting path -- assembling the report,
@@ -27,6 +42,7 @@ the rest of this package).
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -35,7 +51,13 @@ import pytest
 from pytest_vantage.boundary import fault_isolated, liveness_isolated
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.config import resolve_liveness_timeout
-from pytest_vantage.transport import send
+from pytest_vantage.transport import send, send_heartbeat
+
+# design.md D30: activity-driven, not a timer thread -- a beat is only ever
+# attempted from inside `pytest_runtest_logreport`, at most this often.
+# RQ-25's measured profile (1,000 tests at ~10 ms, a ~10-second suite) never
+# reaches this interval, so it fires zero beats.
+_BEAT_INTERVAL_SECONDS = 30.0
 
 # `pytest.ExitCode.INTERRUPTED` (2) and `pytest.ExitCode.INTERNAL_ERROR` (3):
 # design.md D1 -- `finished_at` is null iff the session did not end in an
@@ -79,7 +101,11 @@ class Recorder:
     disagree. `_liveness_timeout` is `resolve_liveness_timeout(timeout)`
     (design.md D31): a fixed ~200-byte liveness request must not be bounded
     by the same, potentially much larger, timeout the full finish-write
-    report is allowed.
+    report is allowed. `_last_beat_at` is captured here too, at
+    `time.monotonic()` -- the start-write already establishes freshness
+    (`last_contact_at = received_at`, design.md D27), so the first beat
+    opportunity does not fire until a full interval after construction, not
+    immediately at the first test.
     """
 
     def __init__(self, config: pytest.Config, address: str, timeout: float) -> None:
@@ -92,6 +118,7 @@ class Recorder:
         self._disabled = False
         self._liveness_disabled = False
         self._results: dict[str, _Pending] = {}
+        self._last_beat_at = time.monotonic()
 
     @liveness_isolated
     def pytest_sessionstart(self) -> None:
@@ -123,10 +150,26 @@ class Recorder:
     @fault_isolated
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
         """The one hook xdist forwards to the controller (design.md D16,
-        D19 layer 1). Only accumulates; sends nothing -- resolution into a
-        `results[]` entry happens later, in `pytest_sessionfinish`.
+        D19 layer 1). Accumulates first, always -- resolution into a
+        `results[]` entry happens later, in `pytest_sessionfinish` -- then
+        offers a beat opportunity, wrapped separately so it cannot raise
+        into this already-`fault_isolated` hook body (design.md D30).
         """
         accumulate(self._results, report)
+        self._maybe_beat()
+
+    @liveness_isolated
+    def _maybe_beat(self) -> None:
+        """Send a heartbeat if `_BEAT_INTERVAL_SECONDS` has elapsed since the
+        last one (design.md D30). `_last_beat_at` is assigned before the
+        send, not after -- a failing or slow send is not retried on the very
+        next report, one stall per interval rather than one per test.
+        """
+        now = time.monotonic()
+        if now - self._last_beat_at < _BEAT_INTERVAL_SECONDS:
+            return
+        self._last_beat_at = now
+        send_heartbeat(self._address, self._run_id, timeout=self._liveness_timeout)
 
     @fault_isolated
     def pytest_sessionfinish(self, exitstatus: int) -> None:

@@ -394,3 +394,47 @@ class ExecutionStoreContract:
 
         entry_after = store.get_catalogue_entry(stable_node_id)
         assert entry_after == entry_before
+
+    @pytest.mark.req(id="RQ-44")
+    def test_touch_last_contact_is_monotonic_and_reports_unknown_runs(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D33, task 4.1: `touch_last_contact` advances on a known
+        run (returns True); a second, earlier-or-equal contact leaves it
+        unchanged (returns False, the monotonic guard); an unknown execution
+        id also returns False -- the route disambiguates the two `False`
+        cases itself, by calling `get_execution` (D33), not this method."""
+        identity = "2" + "0" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start = _start_only_execution(identity, started=started)
+        store.record_session(start, results=(), received_at=started)
+
+        first_contact = started + timedelta(seconds=30)
+        assert store.touch_last_contact(identity, first_contact) is True
+
+        earlier_contact = first_contact - timedelta(seconds=5)
+        assert store.touch_last_contact(identity, earlier_contact) is False
+
+        equal_contact = first_contact
+        assert store.touch_last_contact(identity, equal_contact) is False
+
+        later_contact = first_contact + timedelta(seconds=5)
+        assert store.touch_last_contact(identity, later_contact) is True
+
+        assert store.touch_last_contact("9" * 32, later_contact) is False
+
+        # A heartbeat touches the contact clock and NOTHING else. Without
+        # this read-back the assertions above are satisfied by the return
+        # value alone, and an adapter whose UPDATE also fabricated a
+        # `finished_at` would pass every one of them -- verified by
+        # mutation, which left the whole suite green. The store is the only
+        # place that can say so, because the route never reads these fields
+        # back and `Execution` is what the client reported, not what was
+        # stored beside it.
+        after = store.get_execution(identity)
+        assert after is not None
+        assert after.started_at == started
+        assert after.finished_at is None
+        assert after.exit_status is None
+        assert after.interrupted is False
+        assert after.interrupt_reason is None

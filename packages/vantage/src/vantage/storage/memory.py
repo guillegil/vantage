@@ -18,6 +18,15 @@ is not `None`) applies over an existing start-only row (`stored.exit_status
 is None`), never the reverse, and a report that changes nothing is a no-op.
 The shared contract suite requires both adapters to agree, so this is a
 second mechanism proving the guard, not a stub copying it.
+
+``_last_contact`` is a second dict, keyed the same way as ``_executions``,
+because ``Execution`` itself carries no ``last_contact_at`` field (design.md
+D1) -- that column is a storage-adapter concern, not part of the domain
+dataclass. It is set only on the insert branch of ``record_session`` (D27),
+left alone on the conflict branch, and advanced by ``touch_last_contact``
+under the same monotonic guard the SQLite adapter enforces with SQL (D33) --
+no lexicographic-width hazard here, since real `datetime` objects compare
+exactly, unlike the SQLite adapter's stored TEXT.
 """
 
 from __future__ import annotations
@@ -40,19 +49,22 @@ class InMemoryExecutionStore:
         self._executions: dict[str, Execution] = {}
         self._catalogue: dict[str, CatalogueEntry] = {}
         self._results: dict[tuple[str, str, int], Result] = {}
+        self._last_contact: dict[str, datetime] = {}
 
     def record_session(
         self, execution: Execution, *, results: Sequence[Result], received_at: datetime
     ) -> bool:
         # `received_at` is part of the port's signature (the two-clocks point,
-        # design.md D1) but nothing in this adapter's contract surface reads
-        # it back -- `get_execution` returns only what the client reported.
-        del received_at
+        # design.md D1); `get_execution` still returns only what the client
+        # reported, but `received_at` is now the insert-branch source for
+        # `_last_contact` (D27) -- the one place this adapter's contract
+        # surface reads it back is `touch_last_contact`'s monotonic guard.
         identity = execution.identity.value
         stored = self._executions.get(identity)
         created = stored is None
         if stored is None:
             self._executions[identity] = execution
+            self._last_contact[identity] = received_at
         elif stored.exit_status is None and execution.exit_status is not None:
             # Mirrors the SQLite adapter's `DO UPDATE ... WHERE` (design.md
             # D25): `exit_status`, never `finished_at`, is the discriminator,
@@ -99,6 +111,15 @@ class InMemoryExecutionStore:
     def get_execution(self, execution_id: str) -> Execution | None:
         return self._executions.get(execution_id)
 
+    def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
+        if execution_id not in self._executions:
+            return False
+        current = self._last_contact.get(execution_id)
+        if current is not None and contacted_at <= current:
+            return False
+        self._last_contact[execution_id] = contacted_at
+        return True
+
     def count_executions(self) -> int:
         return len(self._executions)
 
@@ -119,3 +140,4 @@ class InMemoryExecutionStore:
         self._executions.clear()
         self._catalogue.clear()
         self._results.clear()
+        self._last_contact.clear()
