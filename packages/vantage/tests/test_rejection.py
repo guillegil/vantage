@@ -745,3 +745,88 @@ def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
         "an unhandled ClientDisconnect reached uvicorn's ASGI exception "
         f"wrapper instead of being handled: {error_capture.records}"
     )
+
+
+@pytest.mark.req(id="RQ-3")
+@pytest.mark.req(id="RQ-42")
+def test_finish_report_truncated_after_an_accepted_start_write_leaves_the_start_row_intact(
+    store: InMemoryExecutionStore,
+) -> None:
+    """`run-recording`'s "Finish report truncated after an accepted
+    start-write" (RQ-3.2) and `session-ingestion`'s matching RQ-42.3
+    scenario. `test_truncated_body_raw_socket` above proves only the
+    no-prior-report case (``count_executions() == 0``); it would be wrong
+    to extend that assertion here, because the start-write's row MUST
+    survive. A start-write is accepted first through the same real app,
+    then a finish report for that same run id is truncated in transit
+    through the identical raw-socket harness -- the row it left behind must
+    still be exactly what the start-write wrote, not removed and not
+    overwritten by a partial finish.
+    """
+    app = create_app(store)
+    run_id = "d" * 32
+    start_report = {
+        "run": {
+            "id": run_id,
+            "started_at": "2026-08-15T09:14:02.481930+00:00",
+            "finished_at": None,
+            "exit_status": None,
+            "interrupted": False,
+            "interrupt_reason": None,
+        }
+    }
+    accept_response = TestClient(app).post("/api/v1/runs", json=start_report)
+    assert accept_response.status_code == 201
+    assert store.count_executions() == 1
+
+    signal = _AsgiCompletionSignal(app)
+    error_capture = _UvicornErrorCapture()
+
+    with _RawSocketServer(signal) as server, error_capture:
+        # Deliberately short: promises 500 bytes via Content-Length, sends a
+        # small fraction of that, then stops -- same shape as
+        # `test_truncated_body_raw_socket`, but a finish report for a run id
+        # that already has an accepted start-write.
+        truncated_body = ('{"run": {"id": "' + run_id + '", "finished_at"').encode()
+        promised_length = 500
+        request_head = (
+            f"POST /api/v1/runs HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{server.port}\r\n"
+            f"Content-Type: application/json\r\n"
+            f"Content-Length: {promised_length}\r\n"
+            f"Connection: close\r\n"
+            f"\r\n"
+        ).encode()
+
+        client_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        client_sock.settimeout(5)
+        try:
+            client_sock.connect(("127.0.0.1", server.port))
+            client_sock.sendall(request_head + truncated_body)
+            assert len(truncated_body) < promised_length
+            client_sock.shutdown(socket.SHUT_WR)
+            try:
+                received = client_sock.recv(4096)
+            except OSError:
+                received = b""
+        finally:
+            client_sock.close()
+
+        completed = signal.completed.wait(timeout=5)
+
+    assert completed, "the server never finished handling the truncated finish report"
+    assert received == b""
+    # The assertion of record: the start-write's row survives the rejected
+    # finish exactly as written -- present, one row, no result rows, still a
+    # null `finished_at` -- neither removed nor overwritten by the partial
+    # finish report.
+    assert store.count_executions() == 1
+    stored = store.get_execution(run_id)
+    assert stored is not None
+    assert stored.finished_at is None
+    assert stored.exit_status is None
+    assert store.count_results() == 0
+    assert not error_capture.records, (
+        "an unhandled ClientDisconnect reached uvicorn's ASGI exception "
+        f"wrapper instead of being handled: {error_capture.records}"
+    )

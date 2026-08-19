@@ -323,19 +323,19 @@ Gates measure the tests that exist, not the scenarios that should have them.
 - [ ] 5.3 RED, same file: a **still-running** session already has a run
       entry with a start time and a null end time (RQ-1.5) — query the
       server while the child is still executing, before it finishes.
-- [ ] 5.4 RED `packages/vantage/tests/test_rejection.py`: a finish report
+- [x] 5.4 RED `packages/vantage/tests/test_rejection.py`: a finish report
       **truncated in transit after an accepted start-write** leaves the run
       entry as the start-write left it — present, null `finished_at`, no
       result rows — rather than removing it (`run-recording` RQ-3.2,
       `session-ingestion` RQ-42.3, the second scenario of each). The existing
       `test_truncated_body_raw_socket` covers only the no-prior-report case.
-- [ ] 5.5 RED `packages/vantage/tests/test_ingestion.py` (W1): a heartbeat
+- [x] 5.5 RED `packages/vantage/tests/test_ingestion.py` (W1): a heartbeat
       for a **known** run whose `last_contact_at` is already ahead of the
       beat answers **200**, not 404. `touch_last_contact` returns `False`
       there, so this is the only case that distinguishes a 404 resolved from
       `get_execution` from one inferred off a zero rowcount. Today all four
       heartbeat tests pass against the wrong implementation.
-- [ ] 5.6 RED `packages/vantage/tests/vantage_port_contract.py` or
+- [x] 5.6 RED `packages/vantage/tests/vantage_port_contract.py` or
       `test_sqlite_store.py` (W2): `received_at`, `started_at` and
       `last_contact_at` are **not advanced** by the finish-write. Neither
       column is exposed on `Execution`, so no existing test can observe them
