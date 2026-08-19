@@ -49,7 +49,14 @@ def test_finish_write_leaves_received_at_started_at_and_last_contact_at_untouche
         select_run = "SELECT received_at, started_at, last_contact_at FROM run WHERE id = ?"
         before = store._conn.execute(select_run, (identity,)).fetchone()  # noqa: SLF001
 
-        finish = _execution(identity, finished=True, started=started)
+        # A DIFFERENT start time on the finish-write, deliberately. Handing it
+        # the same `started` literal made the assertion below compare a value
+        # with itself: it held whether or not the upsert overwrote the column,
+        # and adding `started_at = excluded.started_at` to the DO UPDATE list
+        # left the whole suite green. Its `received_at` and `last_contact_at`
+        # siblings already bite, because their values differ.
+        disagreeing_start = started + timedelta(hours=3)
+        finish = _execution(identity, finished=True, started=disagreeing_start)
         later_received = received + timedelta(hours=1)
         store.record_session(finish, results=(), received_at=later_received)
 

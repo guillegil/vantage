@@ -352,3 +352,51 @@ Gates measure the tests that exist, not the scenarios that should have them.
 - [x] 5.9 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
       `uv run mypy .`, `uv run ruff check .`, `uv run deptry .`. State which
       matrix legs ran locally and which were left to CI.
+
+## Phase 6: The heartbeat's own wire, actually exercised (PR 6)
+
+Added 2026-08-19 after verify round two. Round one graded
+`session-liveness`'s "A long suite's last contact advances during execution"
+as PARTIAL; round two re-derived it **by mutation** and it is UNTESTED.
+
+`send_heartbeat` is never invoked against a real server anywhere in the suite —
+both of its test references monkeypatch it away. So the chain has its first and
+third links tested and its middle one not at all:
+
+```
+plugin decides to beat  ->  send_heartbeat POSTs  ->  route advances contact
+        tested                    UNTESTED                    tested
+```
+
+Reproduced independently by the orchestrator: changing the path suffix to
+`/HEARTBEAT-TYPO` leaves **246 passed**. A monkeypatched transport function
+silently voids every end-to-end scenario that depends on its wire format, and
+no number of green tests will say so.
+
+- [x] 6.1 RED `packages/pytest-vantage/tests/test_run_report.py`: run a suite
+      against the real `vantage_server` fixture **without patching
+      `send_heartbeat`**, long enough to cross one beat interval, and assert
+      the **server's** `last_contact_at` for that run advances past the
+      value the start-write recorded. Read it from the server's store, not
+      from a captured call — `touch_last_contact` on `vantage_server.store`
+      is wrapped (not replaced: the real implementation still runs) so the
+      wrapper can read the store's own pre-update value, exactly what the
+      start-write recorded, before the first real heartbeat overwrites it.
+      **Verified by mutation before calling it done**: broke
+      `_HEARTBEAT_PATH_SUFFIX` in `transport.py` to `/HEARTBEAT-TYPO` — RED
+      (`no heartbeat ever reached the server's touch_last_contact`, 1
+      failed / 246 passed), reverted — clean. Also mutated the HTTP method
+      (`POST`→`GET`, RED: 405) and the run-id/suffix ordering (RED: 404),
+      both reverted.
+- [x] 6.2 Keep the suite's wall-clock honest. `_BEAT_INTERVAL_SECONDS` is
+      driven to `0.0` via `monkeypatch` for this test only (the same
+      technique task 4.18's wiring test already established) — the
+      production default (`30.0`) is never touched. Cost measured at 0.40 s
+      standalone; not marked `slow` (comparable to the existing unmarked
+      wiring test, well under the `slow` marker's real-elapsed-time
+      threshold used elsewhere in this suite, e.g. the 8 s duration test).
+- [x] 6.3 GREEN gate: `uv run --extra dev pytest` — **247 passed, zero
+      warnings**, 25.88 s serial / 10.97 s under `-n auto`. `uv run mypy .`
+      clean (58 source files). `uv run ruff check .` clean. `uv run ruff
+      format --check .` — 58 files already formatted. `uv run deptry .`
+      clean.
