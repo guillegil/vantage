@@ -9,6 +9,8 @@ side of that boundary.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from vantage.core.domain.result import Result
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
@@ -237,3 +239,52 @@ def test_module_level():
     in_class = _by_function_name(results, "test_in_class")
     assert module_level.identity.class_name is None
     assert in_class.identity.class_name == "TestInClass"
+
+
+# --- Task 9.8: the last unproven hop of the ""-vs-NULL guard (D18) ---------
+
+# The repo's OWN test suite, not a hand-built payload (design.md D18's
+# example is this exact node id): `test_execution.py`'s own parametrize
+# list includes `""` among its "bad value" cases, so
+# `...test_identity_rejects_anything_but_32_lowercase_hex_characters[]` is a
+# real, already-existing parametrised test whose id is the empty string.
+_TEST_EXECUTION_FILE = (
+    Path(__file__).resolve().parents[3] / "packages/vantage/tests/test_execution.py"
+)
+
+
+@pytest.mark.req("RQ-9")
+def test_empty_param_id_survives_the_real_server_hop_end_to_end(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """D18 names four hops for `""`-vs-`None` (JSON, Pydantic, the core
+    dataclass, SQLite); Phases 1, 3, 4, 6 and 7 each prove one, and task
+    8.4 proved `class_name`/`file_path` end to end -- but nothing before
+    this ran the WHOLE chain (pytest's own hooks, through the plugin, over
+    HTTP, into the server) for a real parametrised test whose parameter id
+    is itself the empty string. Runs the actual in-repo case alongside a
+    genuinely unparametrised test from the same file, in the same session,
+    so both ends of the absent-versus-empty distinction are proven together.
+    """
+    empty_param_case = (
+        f"{_TEST_EXECUTION_FILE}::test_identity_rejects_anything_but_32_lowercase_hex_characters[]"
+    )
+    unparametrised_case = (
+        f"{_TEST_EXECUTION_FILE}::test_identity_accepts_32_lowercase_hex_characters"
+    )
+
+    pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={vantage_server.address}",
+        empty_param_case,
+        unparametrised_case,
+    )
+
+    results = vantage_server.results()
+    empty_param = _by_function_name(
+        results, "test_identity_rejects_anything_but_32_lowercase_hex_characters"
+    )
+    unparametrised = _by_function_name(results, "test_identity_accepts_32_lowercase_hex_characters")
+    assert empty_param.identity.param_id == ""
+    assert unparametrised.identity.param_id is None
