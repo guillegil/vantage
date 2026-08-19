@@ -126,7 +126,7 @@ class Recorder:
         address: str,
         timeout: float,
         *,
-        lifecycle_available: bool = True,
+        lifecycle_available: bool = False,
     ) -> None:
         self._config = config
         self._address = address
