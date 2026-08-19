@@ -10,7 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from vantage.core.config.resolution import ConfigSource, ServerConfig, resolve_server_config
+from vantage.core.config.resolution import (
+    ConfigSource,
+    ServerConfig,
+    ServerConfigError,
+    resolve_server_config,
+)
 
 
 def _resolve(
@@ -136,3 +141,18 @@ def test_cli_main_carries_the_resolved_grace_period_into_the_app(
 
     app = served["app"]
     assert app.state.grace_period == 60.0  # type: ignore[attr-defined]
+
+
+@pytest.mark.req(id="RQ-44")
+@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+def test_a_nonsensical_grace_period_is_refused_at_resolution(value: float) -> None:
+    """`argparse type=float` accepts 0, -1, nan and inf.
+
+    Any of the first three makes every unfinished run derive as abandoned the
+    instant it is read -- including sessions heartbeating normally -- so the
+    server would run and answer wrong rather than refuse to start. The plugin
+    already rejects a nonsensical timeout this way; this is the server-side
+    equivalent. Found by review, 2026-08-19.
+    """
+    with pytest.raises(ServerConfigError):
+        _resolve(cli_grace_period=value)

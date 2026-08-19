@@ -190,7 +190,15 @@ def _stamp_creation_metadata(conn: sqlite3.Connection) -> None:
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('created_by', ?)",
             (getpass.getuser(),),
         )
-    except (sqlite3.Error, OSError):
+    except (sqlite3.Error, OSError, KeyError, ImportError):
+        # `getpass.getuser()` only normalises its failures to `OSError` on
+        # 3.13+; its own docstring records the change. On 3.10-3.12 -- three of
+        # this project's four CI legs -- it raises `KeyError` from
+        # `pwd.getpwuid(os.getuid())` when the uid has no passwd entry, and
+        # `ImportError` on Windows with no `USERNAME` set. Creating a database
+        # inside a container run as an unmapped uid would otherwise abort the
+        # server at startup, which contradicts this function's whole contract:
+        # these two rows are a convenience and losing them costs nothing.
         _LOGGER.warning("failed to stamp created_at/created_by in meta", exc_info=True)
 
 

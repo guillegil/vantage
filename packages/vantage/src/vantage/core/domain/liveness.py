@@ -52,7 +52,14 @@ def derive_presentation(
     """
     if execution.finished_at is not None:
         return "finished"
-    if execution.interrupted:
+    if execution.interrupted or execution.exit_status is not None:
+        # Any recorded exit status means a report arrived, and the
+        # requirement's own rationale is that a run which reported is never
+        # abandoned. pytest's INTERNAL_ERROR (status 3) is the case that forced
+        # this: the recorder leaves `finished_at` null for it and marks
+        # `interrupted` only for status 2, so keying on `interrupted` alone
+        # made a session that DID report indistinguishable from one that never
+        # did. Found by review, 2026-08-19.
         return "interrupted"
     reference = last_contact_at if last_contact_at is not None else execution.started_at
     if now - reference > grace:

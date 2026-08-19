@@ -59,7 +59,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -157,14 +157,19 @@ def _fixed_width_isoformat(moment: datetime) -> str:
     """Fixed-width ISO-8601 UTC text: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`.
 
     Mirrors `pytest_vantage.recorder.isoformat_utc` exactly (D27). Every
-    caller here already holds a UTC-aware `datetime` (`received_at` and
-    `contacted_at` are both `datetime.now(timezone.utc)` at the call site in
-    `service/routes/runs.py`), so `strftime` alone is sufficient -- no
-    `astimezone` normalization is needed. Used only for `last_contact_at`,
+    `astimezone(timezone.utc)` first, rather than trusting the caller.
+    `touch_last_contact` is a public port method whose signature accepts any
+    `datetime`, and `strftime` alone would stamp a `+02:00` value with a
+    `+00:00` suffix -- storing it two hours ahead of the truth and then
+    comparing it lexicographically against genuinely-UTC rows. The in-memory
+    adapter compares real `datetime` objects and gets that input right, so
+    trusting the caller is also what would make the two adapters disagree.
+
+    Used only for `last_contact_at`,
     the one column this module compares lexicographically (`< ?`); every
     other timestamp column keeps plain `.isoformat()`, unaffected.
     """
-    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
 def _row_to_execution(row: tuple[object, ...]) -> Execution:
