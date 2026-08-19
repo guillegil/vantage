@@ -49,18 +49,18 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
 
 ## Phase 1: Storage — monotonic upsert, created probe, memory adapter (PR 1)
 
-- [ ] 1.1 RED `packages/vantage/tests/vantage_port_contract.py`: finish-after-start
+- [x] 1.1 RED `packages/vantage/tests/vantage_port_contract.py`: finish-after-start
       applies in full (start then finish, `exit_status` NULL→int).
-- [ ] 1.2 RED, same file: **reordered start-after-finish is a no-op** — the
+- [x] 1.2 RED, same file: **reordered start-after-finish is a no-op** — the
       recorded finish, its exit fields and its result rows are unchanged
       (`run-recording` "A reordered start-write never nulls a recorded finish").
-- [ ] 1.3 RED, same file: replayed finish (finish-after-finish) is a no-op,
+- [x] 1.3 RED, same file: replayed finish (finish-after-finish) is a no-op,
       first finish wins (RQ-41, unchanged semantics, new discriminator).
-- [ ] 1.4 RED, same file: duplicate start-after-start is a no-op.
-- [ ] 1.5 RED, same file (D26): `record_session` returns `True` only on a true
+- [x] 1.4 RED, same file: duplicate start-after-start is a no-op.
+- [x] 1.5 RED, same file (D26): `record_session` returns `True` only on a true
       first insert; a finish applied over an existing start-only row, and a
       true duplicate, both return `False`.
-- [ ] 1.6 RED `packages/vantage/tests/test_rejection.py`: rename
+- [x] 1.6 RED `packages/vantage/tests/test_rejection.py`: rename
       `test_five_hundred_results_reach_storage_in_one_commit` to
       `test_finish_report_reaches_storage_in_one_commit`; add an assertion that
       `finished_at` and `exit_status` actually landed, on top of the existing
@@ -68,34 +68,34 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
       cosmetic and a `DO NOTHING` regression would still pass it. Carry the
       Measurements paragraph (252,511 bytes body, ~2,021,039 bytes peak) with
       the renamed test, unchanged.
-- [ ] 1.7 RED, same file: new sibling running that same finish-write **after**
+- [x] 1.7 RED, same file: new sibling running that same finish-write **after**
       a prior accepted start-write — asserts one commit, 500 result rows, and
       the finish fields applied.
-- [ ] 1.8 RED, same file: new `test_start_write_reaches_storage_in_one_commit`
+- [x] 1.8 RED, same file: new `test_start_write_reaches_storage_in_one_commit`
       — one commit, one run row, `finished_at IS NULL`, zero result rows.
-- [ ] 1.9 RED, same file: new
+- [x] 1.9 RED, same file: new
       `test_reordered_start_write_never_nulls_a_recorded_finish` — the
       slice-1 acceptance criterion, an explicitly reordered pair, using the
       existing `_CommitCountingConnection` wrapper unchanged.
-- [ ] 1.10 GREEN `packages/vantage/src/vantage/storage/sqlite_store.py`:
+- [x] 1.10 GREEN `packages/vantage/src/vantage/storage/sqlite_store.py`:
       `_INSERT_RUN` → `_UPSERT_RUN` — `ON CONFLICT(id) DO UPDATE SET
       finished_at, exit_status, interrupted, interrupt_reason ... WHERE
       run.exit_status IS NULL AND excluded.exit_status IS NOT NULL` (D25).
       **Do not add `last_contact_at` to this statement yet** — the column
       does not exist until Phase 3; it is added there. `received_at` and
       `started_at` are never written on the conflict path.
-- [ ] 1.11 GREEN, same file (D26): one `SELECT 1 FROM run WHERE id = ?`
+- [x] 1.11 GREEN, same file (D26): one `SELECT 1 FROM run WHERE id = ?`
       immediately after `BEGIN IMMEDIATE`, before the write, to determine
       `created` — never `cursor.rowcount`, never `last_insert_rowid()`. Add
       the docstring sentence justifying `SELECT`-then-write under the same
       transaction and lock (no window exists between them here).
-- [ ] 1.12 GREEN `packages/vantage/src/vantage/storage/memory.py`: replace
+- [x] 1.12 GREEN `packages/vantage/src/vantage/storage/memory.py`: replace
       `if created: self._executions[identity] = execution` with the same
       guard, `stored.exit_status is None and execution.exit_status is not
       None`, and the matching created-detection semantics (RQ-30 parity).
-- [ ] 1.13 REFACTOR: update `sqlite_store.py` and `memory.py` module
+- [x] 1.13 REFACTOR: update `sqlite_store.py` and `memory.py` module
       docstrings to cite D25/D26, matching the existing D3/D5/D8 convention.
-- [ ] 1.14 GREEN gate: `uv run --extra dev pytest packages/vantage/tests/
+- [x] 1.14 GREEN gate: `uv run --extra dev pytest packages/vantage/tests/
       vantage_port_contract.py packages/vantage/tests/test_rejection.py
       packages/vantage/tests/test_sqlite_store.py
       packages/vantage/tests/test_memory_store.py`, `uv run mypy .` clean. No

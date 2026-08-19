@@ -30,7 +30,7 @@ from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
 from vantage.service.schemas import _Outcome
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _execution, _result
+from vantage_port_contract import _execution, _result, _start_only_execution
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -353,7 +353,23 @@ class _CommitCountingConnection:
 
 
 @pytest.mark.req(id="RQ-3")
-def test_five_hundred_results_reach_storage_in_one_commit(tmp_path: Path) -> None:
+def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
+    """Renamed from `test_five_hundred_results_reach_storage_in_one_commit`
+    (design.md D35, task 1.6) -- the Analysis argument moved from one commit
+    per *session* to one commit per *report*, and this is the finish-write's
+    premise. The rename alone would be cosmetic: without the finish-field
+    assertions below, a `DO NOTHING` regression that dropped every finish
+    field on conflict would still satisfy the commit count and row counts.
+
+    **Measurements:** the 500-result finish-write generated here measures
+    252,511 bytes in body size (via `test_five_hundred_results_fit_within_the_body_cap`);
+    server peak memory traced for one such finish-write request reaches
+    approximately 2,021,039 bytes (`test_server_peak_memory_for_one_five_hundred_result_request`).
+    These measurements are diagnostic; they inform payload size budgeting and
+    resource planning for deployments. Future changes to the result schema or
+    the batch-insert strategy MUST re-run this test via `tracemalloc` at
+    request time and justify any material increase.
+    """
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     counting = _CommitCountingConnection(adapter._conn)
     adapter._conn = counting  # type: ignore[assignment]
@@ -374,6 +390,107 @@ def test_five_hundred_results_reach_storage_in_one_commit(tmp_path: Path) -> Non
         # this test, so the test has to carry the weight.
         assert adapter.count_results() == 500
         assert adapter.count_executions() == 1
+        stored = adapter.get_execution(execution.identity.value)
+        assert stored is not None
+        assert stored.finished_at == execution.finished_at
+        assert stored.exit_status == execution.exit_status
+    finally:
+        adapter.close()
+
+
+@pytest.mark.req(id="RQ-3")
+def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_commit(
+    tmp_path: Path,
+) -> None:
+    """design.md D25, D35, task 1.7: the same finish-write, run after a
+    prior accepted start-write for the same run id -- one commit, the same
+    500 result rows, and the finish fields actually applied through the
+    conflict (`DO UPDATE`) branch rather than the insert branch."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+
+    try:
+        identity = "f" + "1" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start = _start_only_execution(identity, started=started)
+        adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+
+        counting = _CommitCountingConnection(adapter._conn)
+        adapter._conn = counting  # type: ignore[assignment]
+
+        finish = _execution(identity, finished=True, started=started)
+        results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
+
+        created = adapter.record_session(
+            finish, results=results, received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is False
+        assert counting.commit_count == 1
+        assert adapter.count_results() == 500
+        assert adapter.count_executions() == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at == finish.finished_at
+        assert stored.exit_status == finish.exit_status
+    finally:
+        adapter.close()
+
+
+@pytest.mark.req(id="RQ-3")
+def test_start_write_reaches_storage_in_one_commit(tmp_path: Path) -> None:
+    """design.md D35, task 1.8: the start-write's own commit-count premise --
+    one commit, one run row, a null `finished_at`, and zero result rows,
+    since a start report carries none."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    counting = _CommitCountingConnection(adapter._conn)
+    adapter._conn = counting  # type: ignore[assignment]
+
+    try:
+        identity = "f" + "2" * 31
+        start = _start_only_execution(identity)
+
+        created = adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+
+        assert created is True
+        assert counting.commit_count == 1
+        assert adapter.count_results() == 0
+        assert adapter.count_executions() == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at is None
+    finally:
+        adapter.close()
+
+
+@pytest.mark.req(id="RQ-3")
+def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> None:
+    """design.md D25, task 1.9: the slice-1 acceptance criterion, driven
+    through the same `_CommitCountingConnection` wrapper the rest of this
+    module uses -- an explicitly reordered pair, finish then start."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+
+    try:
+        identity = "f" + "3" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        finish = _execution(identity, finished=True, started=started)
+        results = [_result("packages/vantage/tests/test_bulk.py::test_reordered")]
+        adapter.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
+
+        counting = _CommitCountingConnection(adapter._conn)
+        adapter._conn = counting  # type: ignore[assignment]
+
+        late_start = _start_only_execution(identity, started=started)
+        created = adapter.record_session(
+            late_start, results=(), received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is False
+        assert counting.commit_count == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at == finish.finished_at
+        assert stored.exit_status == finish.exit_status
+        assert adapter.count_results() == 1
     finally:
         adapter.close()
 

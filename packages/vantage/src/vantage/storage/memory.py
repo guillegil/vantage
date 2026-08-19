@@ -11,6 +11,13 @@ is keyed by node id with the same `MAX`-style monotonicity guard the SQLite
 adapter enforces with SQL (design.md D20), and results are keyed by
 ``(run_id, node_id, attempt)`` with first-write-wins, mirroring the SQLite
 adapter's ``ON CONFLICT ... DO NOTHING`` (design.md D19 layer 3).
+
+`record_session` carries the same monotonic upsert guard as the SQLite
+adapter's ``DO UPDATE`` branch (design.md D25): a finish-write (`exit_status`
+is not `None`) applies over an existing start-only row (`stored.exit_status
+is None`), never the reverse, and a report that changes nothing is a no-op.
+The shared contract suite requires both adapters to agree, so this is a
+second mechanism proving the guard, not a stub copying it.
 """
 
 from __future__ import annotations
@@ -42,9 +49,22 @@ class InMemoryExecutionStore:
         # it back -- `get_execution` returns only what the client reported.
         del received_at
         identity = execution.identity.value
-        created = identity not in self._executions
-        if created:
+        stored = self._executions.get(identity)
+        created = stored is None
+        if stored is None:
             self._executions[identity] = execution
+        elif stored.exit_status is None and execution.exit_status is not None:
+            # Mirrors the SQLite adapter's `DO UPDATE ... WHERE` (design.md
+            # D25): `exit_status`, never `finished_at`, is the discriminator,
+            # and `started_at` is never advanced on this path.
+            self._executions[identity] = Execution(
+                identity=stored.identity,
+                started_at=stored.started_at,
+                finished_at=execution.finished_at,
+                exit_status=execution.exit_status,
+                interrupted=execution.interrupted,
+                interrupt_reason=execution.interrupt_reason,
+            )
 
         for result in results:
             self._upsert_catalogue_entry(execution, result.identity)

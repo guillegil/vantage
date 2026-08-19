@@ -1,12 +1,25 @@
 """SQLite adapter for `ExecutionStore` (RQ-30.1, RQ-38.1) -- design.md D5, D8,
-D19-D22.
+D19-D22, D25, D26.
 
-Idempotency is settled inside the `INSERT` itself, never by a preceding
-`SELECT`: `record_session` uses `INSERT ... ON CONFLICT(id) DO NOTHING` and
-reads the row count the INSERT itself produced to decide its boolean return
-(D3, D5). A `SELECT`-then-`INSERT` shape would leave a window in which two
-concurrent replays of the same `run.id` both pass the `SELECT` and both
-attempt the `INSERT` -- the exact race this adapter exists to avoid.
+A run row is now written by `INSERT ... ON CONFLICT(id) DO UPDATE`, not
+`DO NOTHING` (D25): a start-write and a finish-write share one `id`, and the
+finish-write must be able to apply over a row the start-write already
+created. The `DO UPDATE`'s own `WHERE run.exit_status IS NULL AND
+excluded.exit_status IS NOT NULL` is the monotonic guard -- `exit_status`,
+never `finished_at`, is the discriminator, because a Ctrl-C session reports
+an integer exit status with a null finish time. `received_at` and
+`started_at` are never advanced on the conflict path.
+
+Under `DO UPDATE`, `cursor.rowcount` can no longer answer "was this row
+created?" -- an applied conflict also reports one changed row (D26). One
+`SELECT 1 FROM run WHERE id = ?` immediately after `BEGIN IMMEDIATE`, before
+the write, decides `created` instead. This *is* a `SELECT`-then-write shape,
+and the reasoning that used to rule that out still applies to every other
+use of this connection -- but not here: `BEGIN IMMEDIATE` takes the
+`RESERVED` lock for the whole transaction before the `SELECT` runs, and
+`self._lock` serialises the server's threadpool, so the probe reads under
+precisely the lock the write will write under. There is no window here for
+two concurrent replays to both pass the `SELECT` and both attempt the write.
 
 Concurrency is a two-layer net (D8), and neither layer alone is sufficient:
 a `threading.Lock` held across the whole transaction serialises the several
@@ -48,13 +61,22 @@ from vantage.storage.connection import open_database
 # limit (design.md D20).
 _MAX_PLACEHOLDERS = 500
 
-_INSERT_RUN = """
+# `last_contact_at` is not written here yet -- the column does not exist
+# until Phase 3 (design.md D25's note above the equivalent end-state block).
+_UPSERT_RUN = """
     INSERT INTO run (
         id, received_at, started_at, finished_at,
         exit_status, interrupted, interrupt_reason
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO NOTHING
+    ON CONFLICT(id) DO UPDATE SET
+        finished_at      = excluded.finished_at,
+        exit_status      = excluded.exit_status,
+        interrupted      = excluded.interrupted,
+        interrupt_reason = excluded.interrupt_reason
+     WHERE run.exit_status IS NULL AND excluded.exit_status IS NOT NULL
 """
+
+_PROBE_RUN_EXISTS = "SELECT 1 FROM run WHERE id = ?"
 
 _SELECT_RUN = """
     SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason
@@ -274,16 +296,22 @@ class SqliteExecutionStore:
     def record_session(
         self, execution: Execution, *, results: Sequence[Result], received_at: datetime
     ) -> bool:
-        # Four statements, one transaction, one fixed order (design.md D22):
-        # run insert, catalogue upsert, surrogate-key resolve, result insert.
-        # The order is required, not tidy -- `PRAGMA foreign_keys=ON` is set
-        # on every connection, so `result.run_id`, `test_case.last_seen_run_id`
-        # and `result.test_case_id` each need their referent to exist first.
+        # Five statements, one transaction, one fixed order (design.md D22,
+        # extended by D26): existence probe, run upsert, catalogue upsert,
+        # surrogate-key resolve, result insert. The order is required, not
+        # tidy -- `PRAGMA foreign_keys=ON` is set on every connection, so
+        # `result.run_id`, `test_case.last_seen_run_id` and
+        # `result.test_case_id` each need their referent to exist first.
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
-                cursor = self._conn.execute(
-                    _INSERT_RUN,
+                probe = self._conn.execute(
+                    _PROBE_RUN_EXISTS, (execution.identity.value,)
+                ).fetchone()
+                created = probe is None
+
+                self._conn.execute(
+                    _UPSERT_RUN,
                     (
                         execution.identity.value,
                         received_at.isoformat(),
@@ -294,7 +322,6 @@ class SqliteExecutionStore:
                         execution.interrupt_reason,
                     ),
                 )
-                created = cursor.rowcount == 1
 
                 if results:
                     catalogue_rows = _catalogue_rows(execution, results)
