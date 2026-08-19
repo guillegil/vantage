@@ -277,6 +277,7 @@ def _write_sleeping_git_shim(directory: Path, *, sleep_seconds: float, forward: 
 
 
 @pytest.mark.slow
+@pytest.mark.slow
 def test_hung_git_bounded_at_capture_level(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
@@ -293,6 +294,7 @@ def test_hung_git_bounded_at_capture_level(tmp_path: Path, monkeypatch: pytest.M
     _assert_all_null(snapshot)
 
 
+@pytest.mark.slow
 @pytest.mark.slow
 def test_whole_capture_budget_not_per_invocation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
