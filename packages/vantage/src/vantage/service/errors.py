@@ -33,13 +33,13 @@ MAX_REPORT_BYTES = 1024 * 1024  # 1 MiB
 
 
 # A path segment safe to echo: a schema field name, or a list index. The
-# allow-list is deliberate -- see `_safe_segment`.
+# allow-list is deliberate -- see `safe_segment`.
 _SAFE_SEGMENT = re.compile(r"\A([A-Za-z_][A-Za-z0-9_]{0,63}|[0-9]{1,9})\Z")
 
 _UNNAMEABLE_SEGMENT = "<unnamed>"
 
 
-def _safe_segment(part: object) -> str:
+def safe_segment(part: object) -> str:
     """Return ``part`` only when it is a name this schema could have declared.
 
     Almost every ``loc`` segment is a field name from our own models, and
@@ -53,6 +53,12 @@ def _safe_segment(part: object) -> str:
     So this is an allow-list too, for the same reason the module docstring
     gives: a deny-list of dangerous characters has to guess right every
     time, and it only has to be wrong once.
+
+    Public (not module-private) because `service/routes/runs.py` reuses it
+    for `Acknowledgement.ignored` (design.md D15 / Threat Matrix): an unknown
+    key on a tolerated `ResultReport` is exactly the same "client-chosen,
+    not a schema name" case this function exists for, just on the accept
+    path instead of the reject path.
     """
     text = str(part)
     return text if _SAFE_SEGMENT.match(text) else _UNNAMEABLE_SEGMENT
@@ -64,7 +70,7 @@ def _dotted_path(location: Iterable[object]) -> str:
     and never the ``"body"`` segment FastAPI prepends (it names the
     transport layer, not anything the client wrote in the payload).
     """
-    return ".".join(_safe_segment(part) for part in location if part != "body")
+    return ".".join(safe_segment(part) for part in location if part != "body")
 
 
 def _fields_from_errors(errors: Iterable[Mapping[str, Any]]) -> list[str]:
@@ -198,4 +204,5 @@ __all__ = [
     "RejectionError",
     "UnsupportedMediaTypeError",
     "register_error_handlers",
+    "safe_segment",
 ]
