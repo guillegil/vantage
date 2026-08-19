@@ -17,11 +17,14 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.result import CaseIdentity, Result
 from vantage.core.ports.storage import ExecutionStore
 
 
-def _execution(hex_id: str, *, finished: bool = True) -> Execution:
-    started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+def _execution(hex_id: str, *, finished: bool = True, started: datetime | None = None) -> Execution:
+    started = (
+        started if started is not None else datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+    )
     return Execution(
         identity=Identity(hex_id),
         started_at=started,
@@ -29,6 +32,42 @@ def _execution(hex_id: str, *, finished: bool = True) -> Execution:
         exit_status=0 if finished else None,
         interrupted=not finished,
         interrupt_reason=None if finished else "ctrl-c",
+    )
+
+
+def _result(
+    node_id: str,
+    *,
+    outcome: str = "passed",
+    param_id: str | None = None,
+    duration: float | None = 0.003,
+    setup_outcome: str | None = "passed",
+    call_outcome: str | None = "passed",
+    teardown_outcome: str | None = "passed",
+    setup_duration: float | None = 0.001,
+    call_duration: float | None = 0.001,
+    teardown_duration: float | None = 0.001,
+) -> Result:
+    started = datetime(2026, 8, 15, 9, 0, 1, tzinfo=timezone.utc)
+    return Result(
+        identity=CaseIdentity(
+            node_id=node_id,
+            file_path=node_id.split("::", 1)[0],
+            class_name=None,
+            function_name=node_id.rsplit("::", 1)[-1],
+            param_id=param_id,
+        ),
+        outcome=outcome,
+        duration=duration,
+        started_at=started,
+        finished_at=started + timedelta(seconds=duration or 0),
+        setup_outcome=setup_outcome,
+        call_outcome=call_outcome,
+        teardown_outcome=teardown_outcome,
+        setup_duration=setup_duration,
+        call_duration=call_duration,
+        teardown_duration=teardown_duration,
+        worker_id=None,
     )
 
 
@@ -74,3 +113,161 @@ class ExecutionStoreContract:
     @pytest.mark.req("RQ-30")
     def test_get_execution_returns_none_for_an_unknown_id(self, store: ExecutionStore) -> None:
         assert store.get_execution("d" * 32) is None
+
+    @pytest.mark.req("RQ-30")
+    def test_recording_a_session_with_results_persists_both(self, store: ExecutionStore) -> None:
+        execution = _execution("e" * 32)
+        results = (_result("t.py::test_a"), _result("t.py::test_b"))
+
+        created = store.record_session(
+            execution, results=results, received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is True
+        assert store.count_results() == 2
+
+    @pytest.mark.req("RQ-41")
+    def test_replaying_the_same_report_does_not_duplicate_results(
+        self, store: ExecutionStore
+    ) -> None:
+        execution = _execution("f" * 32)
+        results = (_result("t.py::test_a"), _result("t.py::test_b"))
+        store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
+
+        replayed = store.record_session(
+            execution, results=results, received_at=datetime.now(timezone.utc)
+        )
+
+        assert replayed is False
+        assert store.count_results() == 2
+
+    @pytest.mark.req("RQ-5")
+    def test_get_results_preserves_phase_outcomes_and_durations_exactly(
+        self, store: ExecutionStore
+    ) -> None:
+        execution = _execution("1" + "a" * 31)
+        never_ran_call = _result(
+            "t.py::test_setup_failure",
+            outcome="error",
+            setup_outcome="failed",
+            call_outcome=None,
+            teardown_outcome=None,
+            call_duration=None,
+            teardown_duration=None,
+        )
+        instant = _result("t.py::test_instant", outcome="passed", call_duration=0.0)
+        store.record_session(
+            execution,
+            results=(never_ran_call, instant),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        stored = {r.identity.node_id: r for r in store.get_results(execution.identity.value)}
+
+        assert stored["t.py::test_setup_failure"].call_duration is None
+        assert stored["t.py::test_setup_failure"].call_outcome is None
+        assert stored["t.py::test_setup_failure"].setup_outcome == "failed"
+        assert stored["t.py::test_instant"].call_duration == 0.0
+
+    @pytest.mark.req("RQ-9")
+    def test_empty_param_id_is_distinct_from_no_param_id(self, store: ExecutionStore) -> None:
+        execution = _execution("3" + "c" * 31)
+        empty_param = _result("t.py::test_x[]", param_id="")
+        no_param = _result("t.py::test_y", param_id=None)
+        store.record_session(
+            execution,
+            results=(empty_param, no_param),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        stored = store.get_results(execution.identity.value)
+        by_node_id = {r.identity.node_id: r.identity.param_id for r in stored}
+
+        assert by_node_id["t.py::test_x[]"] == ""
+        assert by_node_id["t.py::test_y"] is None
+        without_param = [r for r in stored if r.identity.param_id is None]
+        assert [r.identity.node_id for r in without_param] == ["t.py::test_y"]
+
+    @pytest.mark.req("RQ-13")
+    def test_catalogue_entry_advances_last_seen_and_keeps_first_seen(
+        self, store: ExecutionStore
+    ) -> None:
+        node_id = "t.py::test_recurring"
+        first_execution = _execution("4" + "d" * 31)
+        store.record_session(
+            first_execution,
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        entry_after_first = store.get_catalogue_entry(node_id)
+        assert entry_after_first is not None
+        assert entry_after_first.first_seen_at == first_execution.started_at
+        assert entry_after_first.last_seen_at == first_execution.started_at
+        assert entry_after_first.last_seen_run_id == first_execution.identity.value
+
+        second_execution = _execution(
+            "5" + "e" * 31, started=first_execution.started_at + timedelta(days=1)
+        )
+        store.record_session(
+            second_execution,
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        entry_after_second = store.get_catalogue_entry(node_id)
+        assert entry_after_second is not None
+        assert entry_after_second.first_seen_at == first_execution.started_at
+        assert entry_after_second.last_seen_at == second_execution.started_at
+        assert entry_after_second.last_seen_run_id == second_execution.identity.value
+
+    @pytest.mark.req("RQ-13")
+    def test_an_older_session_does_not_roll_back_the_catalogue_entry(
+        self, store: ExecutionStore
+    ) -> None:
+        node_id = "t.py::test_recurring_2"
+        later_execution = _execution("6" + "f" * 31)
+        store.record_session(
+            later_execution,
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        older_execution = _execution(
+            "7" + "0" * 31, started=later_execution.started_at - timedelta(days=1)
+        )
+        store.record_session(
+            older_execution,
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        entry = store.get_catalogue_entry(node_id)
+        assert entry is not None
+        assert entry.last_seen_at == later_execution.started_at
+        assert entry.last_seen_run_id == later_execution.identity.value
+
+    @pytest.mark.req("RQ-13")
+    def test_a_report_without_a_node_id_leaves_its_catalogue_entry_untouched(
+        self, store: ExecutionStore
+    ) -> None:
+        stable_node_id = "t.py::test_untouched"
+        other_node_id = "t.py::test_other"
+        first_execution = _execution("8" + "1" * 31)
+        store.record_session(
+            first_execution,
+            results=(_result(stable_node_id),),
+            received_at=datetime.now(timezone.utc),
+        )
+        entry_before = store.get_catalogue_entry(stable_node_id)
+        assert entry_before is not None
+
+        second_execution = _execution("9" + "2" * 31)
+        store.record_session(
+            second_execution,
+            results=(_result(other_node_id),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        entry_after = store.get_catalogue_entry(stable_node_id)
+        assert entry_after == entry_before

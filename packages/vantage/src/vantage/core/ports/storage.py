@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Protocol
 
 from vantage.core.domain.execution import Execution
-from vantage.core.domain.result import Result
+from vantage.core.domain.result import CatalogueEntry, Result
 
 
 class ExecutionStore(Protocol):
@@ -26,6 +26,18 @@ class ExecutionStore(Protocol):
 
     def count_executions(self) -> int:
         """Return how many executions are stored."""
+        ...
+
+    def get_results(self, execution_id: str) -> Sequence[Result]:
+        """Return every result stored for `execution_id` (RQ-4, RQ-5, RQ-9)."""
+        ...
+
+    def count_results(self) -> int:
+        """Return how many result rows are stored across all executions (RQ-12, RQ-38.2)."""
+        ...
+
+    def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
+        """Return the catalogue entry for `node_id`, or None if never observed (RQ-13)."""
         ...
 
     def close(self) -> None:
