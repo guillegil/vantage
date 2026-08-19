@@ -52,6 +52,10 @@ vantage = { workspace = true }
 [tool.pytest.ini_options]
 markers = [
     "req(id): the requirement (RQ-nn) this test verifies",
+    # Opt OUT with `-m 'not slow'`, never opt in. The default run is the
+    # complete one, so a slow test cannot quietly stop running because some
+    # config drifted -- the same reason --strict-markers is on.
+    "slow: measures real elapsed time and cannot be made fast without ceasing to measure",
 ]
 addopts = "--strict-markers"
 pythonpath = ["packages/vantage/tests"]

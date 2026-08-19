@@ -216,6 +216,7 @@ uv run pytest                            # every package
 uv run pytest packages/pytest-vantage    # one distribution
 uv run pytest -k test_name               # one test
 uv run pytest -m 'req(id="RQ-2")'        # everything verifying one requirement
+uv run pytest -m 'not slow'              # the fast local loop; CI always runs everything
 uv run ruff format . && uv run ruff check --fix .
 uv run mypy .                            # strict
 uv run deptry .                          # undeclared / unused dependencies

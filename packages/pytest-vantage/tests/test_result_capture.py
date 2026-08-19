@@ -113,6 +113,7 @@ def test_with_slow_setup(slow_fixture):
 """
 
 
+@pytest.mark.slow
 @pytest.mark.req(id="RQ-5")
 def test_setup_and_call_durations_are_measured_independently(
     pytester: pytest.Pytester,
