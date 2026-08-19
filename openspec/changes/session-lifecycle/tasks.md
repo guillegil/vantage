@@ -103,45 +103,45 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
 
 ## Phase 2: Plugin — start-write and the non-latching failure path (PR 2)
 
-- [ ] 2.1 RED `packages/pytest-vantage/tests/test_failure_paths.py`: extend
+- [x] 2.1 RED `packages/pytest-vantage/tests/test_failure_paths.py`: extend
       `boundary.py`'s decorator factory tests — a failure isolated by the new
       liveness path does **not** set `_disabled` and does **not** consult it;
       the existing `fault_isolated` path is untouched (name, behaviour,
       message all identical, so no existing test moves).
-- [ ] 2.2 RED, same file: a failing start-write emits exactly one warning and
+- [x] 2.2 RED, same file: a failing start-write emits exactly one warning and
       the session still completes and reports its ordinary exit status
       (`recording-fault-tolerance` "A failed heartbeat does not stop result
       recording", applied here to the start-write's own isolated failure).
-- [ ] 2.3 RED `packages/pytest-vantage/tests/test_run_report.py` (or the
+- [x] 2.3 RED `packages/pytest-vantage/tests/test_run_report.py` (or the
       module covering `recorder.py`'s hooks): `pytest_sessionstart` sends a
       report with `finished_at: null`, no `results`, and the session's
       `run_id`; `_started_at` captured in `__init__` matches the value later
       sent by `pytest_sessionfinish` (D32's "identical `started_at`" claim).
-- [ ] 2.4 RED, same file: the start-write request uses
+- [x] 2.4 RED, same file: the start-write request uses
       `resolve_liveness_timeout(report_timeout)`, not the finish-write's
       `resolve_report_timeout` value, when the two differ.
-- [ ] 2.5 GREEN `packages/pytest-vantage/src/pytest_vantage/boundary.py`:
+- [x] 2.5 GREEN `packages/pytest-vantage/src/pytest_vantage/boundary.py`:
       `_isolated(flag, description)` factory; `fault_isolated =
       _isolated("_disabled", "error while reporting")` (unchanged behaviour);
       `liveness_isolated = _isolated("_liveness_disabled", "error while
       reporting session liveness")` (D29).
-- [ ] 2.6 GREEN `packages/pytest-vantage/src/pytest_vantage/config.py`:
+- [x] 2.6 GREEN `packages/pytest-vantage/src/pytest_vantage/config.py`:
       `resolve_liveness_timeout(report_timeout) -> min(_MAX_SHORT_TIMEOUT,
       report_timeout)`, `_MAX_SHORT_TIMEOUT = 2.0` (D31).
-- [ ] 2.7 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`: add
+- [x] 2.7 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`: add
       `pytest_sessionstart`, decorated `@liveness_isolated` (D32 — not
       `@fault_isolated`, so a failed start-write degrades to exactly
       Milestone-1 behaviour once the finish-write's insert branch runs).
-- [ ] 2.8 GREEN `packages/pytest-vantage/src/pytest_vantage/transport.py`: add
+- [x] 2.8 GREEN `packages/pytest-vantage/src/pytest_vantage/transport.py`: add
       `send_heartbeat(address, run_id, *, timeout)` **as a distinct function**,
       not a `path` parameter on the existing `send` (D31) — used by Phase 4,
       declared here so the module's shape is settled once.
-- [ ] 2.9 Confirm, **by reading**, `plugin.py:142-143` — `if
+- [x] 2.9 Confirm, **by reading**, `plugin.py:142-143` — `if
       hasattr(config, "workerinput"): return` remains the first statement of
       `pytest_configure`, before `Recorder` construction (D36). No edit
       expected; record that the invariant still holds after this slice's hook
       additions.
-- [ ] 2.10 GREEN gate: `uv run --extra dev pytest packages/pytest-vantage`,
+- [x] 2.10 GREEN gate: `uv run --extra dev pytest packages/pytest-vantage`,
       confirm the plugin still imports nothing but pytest and the standard
       library (`rg -n '^import|^from' packages/pytest-vantage/src`, RQ-24).
 

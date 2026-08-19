@@ -13,6 +13,7 @@ add ceremony without adding proof.
 
 from __future__ import annotations
 
+import itertools
 import socket
 import subprocess
 import sys
@@ -22,7 +23,7 @@ import warnings
 from collections.abc import Callable
 
 import pytest
-from pytest_vantage.boundary import VantageWarning, _warn, fault_isolated
+from pytest_vantage.boundary import VantageWarning, _warn, fault_isolated, liveness_isolated
 from pytest_vantage.plugin import _preflight_reachable
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
@@ -227,6 +228,77 @@ def test_fault_isolated_never_catches_keyboard_interrupt() -> None:
 
     with pytest.raises(KeyboardInterrupt):
         instance.raises_keyboard_interrupt()
+
+
+# --- Unit: `liveness_isolated`, the second, non-latching-onto-`_disabled`
+# decorator (design.md D29) --------------------------------------------------
+#
+# `fault_isolated`'s own tests above are untouched -- its name, behaviour and
+# message are unchanged by the `_isolated(flag, description)` factory this
+# decorator is built from. These tests prove the new path is independent in
+# both directions: a liveness failure never sets `_disabled`, and the two
+# flags never read or write each other's state.
+
+
+class _DualInstrumented:
+    def __init__(self, config: object) -> None:
+        self._config = config
+        self._disabled = False
+        self._liveness_disabled = False
+        self.calls = 0
+
+    @fault_isolated
+    def reporting_raises(self) -> None:
+        self.calls += 1
+        raise RuntimeError("reporting boom")
+
+    @liveness_isolated
+    def liveness_raises(self) -> None:
+        self.calls += 1
+        raise RuntimeError("liveness boom")
+
+
+def test_liveness_isolated_latches_its_own_flag_and_leaves_disabled_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings_seen: list[str] = []
+    monkeypatch.setattr(
+        "pytest_vantage.boundary._warn",
+        lambda config, message: warnings_seen.append(message),
+    )
+    instance = _DualInstrumented(config=None)
+
+    instance.liveness_raises()
+    instance.liveness_raises()
+
+    # The latch, not a second catch, is what keeps this at one warning --
+    # same shape as `fault_isolated`'s own latching test above.
+    assert instance.calls == 1
+    assert len(warnings_seen) == 1
+    assert "error while reporting session liveness" in warnings_seen[0]
+    assert instance._liveness_disabled is True
+    assert instance._disabled is False
+
+
+def test_liveness_isolated_and_fault_isolated_flags_never_read_or_set_each_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("pytest_vantage.boundary._warn", lambda config, message: None)
+    instance = _DualInstrumented(config=None)
+
+    instance.liveness_raises()
+    assert instance._liveness_disabled is True
+    # A failure isolated by the liveness path must leave `_disabled`
+    # untouched -- proven by exercising the reporting path afterwards and
+    # seeing it still run instead of being silently skipped.
+    assert instance._disabled is False
+    instance.reporting_raises()
+    assert instance.calls == 2
+
+    instance.reporting_raises()
+    assert instance.calls == 2  # the second call did not reach the body -- latched on its own flag
+    assert instance._disabled is True
+    assert instance._liveness_disabled is True  # unchanged, still latched from earlier
 
 
 # --- Unit: `_warn`'s fallback chain ------------------------------------------
@@ -486,6 +558,49 @@ def test_reporting_error_preserves_failing_exit_status_and_warns_once(
 
 
 @pytest.mark.req(id="RQ-21")
+def test_failing_start_write_warns_once_and_the_session_still_completes(
+    pytester: pytest.Pytester,
+) -> None:
+    """design.md D32: the start-write is `@liveness_isolated`, not
+    `@fault_isolated` -- its own failure must never cost the session its
+    ordinary exit status. `_StubServer` fails only its SECOND accepted
+    connection (the start-write) and answers correctly from the THIRD
+    onward (the finish-write): the FIRST connection is the bare TCP
+    preflight, which needs no response at all to succeed.
+
+    `runpytest_subprocess`, not in-process `runpytest`: a `VantageWarning`
+    raised this early (`pytest_sessionstart`, before the first test runs)
+    prints straight to the real stderr via Python's default
+    `warnings.showwarning` in an in-process run -- the same reason
+    `_combined_output`'s own docstring gives for `pytest_configure`'s
+    preflight warnings -- so only a subprocess run's piped stderr reliably
+    captures it here.
+    """
+    connections_seen = itertools.count(1)
+
+    def _fail_second_connection_only(conn: socket.socket) -> None:
+        connection_number = next(connections_seen)
+        if connection_number < 3:
+            return  # 1: the preflight (no response needed); 2: the start-write (fails)
+        conn.recv(65536)
+        body = b'{"run_id": "x", "status": "created", "ignored": []}'
+        conn.sendall(
+            b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\n\r\n"
+            + body
+        )
+
+    with _StubServer(_fail_second_connection_only) as server:
+        pytester.makepyfile(test_sample=_PASSING_TEST)
+        result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    assert _combined_output(result).count("VantageWarning:") == 1
+
+
+@pytest.mark.req(id="RQ-21")
 def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester) -> None:
     with _StubServer(_accept_then_close) as server:
         pytester.makepyfile(test_sample=_PASSING_TEST)
@@ -493,7 +608,11 @@ def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    assert _combined_output(result).count("VantageWarning:") == 1
+    # Two warnings, not one (design.md D29): `_accept_then_close` misbehaves
+    # for every connection it accepts, so both the start-write and the
+    # finish-write fail against it -- one liveness warning, one reporting
+    # warning. That is correct and must not collapse into one.
+    assert _combined_output(result).count("VantageWarning:") == 2
 
 
 @pytest.mark.req(id="RQ-21")
@@ -514,7 +633,9 @@ def test_server_accepts_and_never_answers_finishes_within_timeout_plus_five_seco
     result.assert_outcomes(passed=1)
     assert result.ret == 0
     assert elapsed < 1.0 + 5.0
-    assert _combined_output(result).count("VantageWarning:") == 1
+    # Two warnings, not one (design.md D29) -- see
+    # `test_server_accepts_then_closes_without_responding` above.
+    assert _combined_output(result).count("VantageWarning:") == 2
 
 
 # --- Threat matrix "Untrusted response" (task 6.11/6.12) --------------------
@@ -535,8 +656,9 @@ def test_oversized_response_is_bounded_and_does_not_hang(pytester: pytest.Pytest
     assert result.ret == 0
     # The truncated 64 KiB chunk of the unbounded body is not valid JSON
     # either, so this doubles as the "malformed acknowledgement is a
-    # warning, never an exception" proof.
-    assert _combined_output(result).count("VantageWarning:") == 1
+    # warning, never an exception" proof. Two warnings, not one (design.md
+    # D29) -- see `test_server_accepts_then_closes_without_responding` above.
+    assert _combined_output(result).count("VantageWarning:") == 2
 
 
 def test_non_json_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -> None:
@@ -546,7 +668,9 @@ def test_non_json_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    assert _combined_output(result).count("VantageWarning:") == 1
+    # Two warnings, not one (design.md D29) -- see
+    # `test_server_accepts_then_closes_without_responding` above.
+    assert _combined_output(result).count("VantageWarning:") == 2
 
 
 def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -> None:
@@ -556,7 +680,9 @@ def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    assert _combined_output(result).count("VantageWarning:") == 1
+    # Two warnings, not one (design.md D29) -- see
+    # `test_server_accepts_then_closes_without_responding` above.
+    assert _combined_output(result).count("VantageWarning:") == 2
 
 
 @pytest.mark.req(id="RQ-21")

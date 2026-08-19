@@ -57,6 +57,75 @@ def test_isoformat_utc_preserves_nonzero_microseconds() -> None:
     assert formatted == "2026-08-15T09:14:02.481930+00:00"
 
 
+# --- The start-write (task 2.3/2.4, design.md D32) --------------------------
+
+
+@pytest.mark.req(id="RQ-1")
+def test_session_start_sends_a_report_with_no_results_matching_the_finish_writes_started_at(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`pytest_sessionstart` sends a report with `finished_at: null`, no
+    `results`, and the session's `run_id`; `_started_at` is captured once in
+    `__init__`, so the value the start-write sends is the identical value
+    the finish-write sends later (design.md D32's "identical `started_at`"
+    claim) -- not a second, independent `datetime.now()` call.
+
+    `send` is patched to capture every call rather than actually perform it,
+    so both requests' exact bodies are directly inspectable; the preflight
+    itself still runs for real against `vantage_server`, proving activation.
+    """
+    sent: list[dict[str, object]] = []
+
+    def _capture(address: str, report: dict[str, object], *, timeout: float) -> None:
+        sent.append(report)
+
+    monkeypatch.setattr("pytest_vantage.recorder.send", _capture)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert len(sent) == 2
+    start_report, finish_report = sent
+    assert start_report["run"]["finished_at"] is None  # type: ignore[index]
+    assert "results" not in start_report
+    assert finish_report["run"]["finished_at"] is not None  # type: ignore[index]
+    assert start_report["run"]["id"] == finish_report["run"]["id"]  # type: ignore[index]
+    assert start_report["run"]["started_at"] == finish_report["run"]["started_at"]  # type: ignore[index]
+
+
+@pytest.mark.req(id="RQ-21")
+def test_start_write_uses_the_liveness_timeout_not_the_report_timeout(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """design.md D31: the start-write is bounded by
+    `resolve_liveness_timeout(report_timeout)`, not the finish-write's own
+    `resolve_report_timeout` value -- a stall at t=0, before the first test
+    runs, is the exact "slow or stuck?" failure ADR-9 names. Configuring
+    `--vantage-timeout=5.0` makes the two bounds genuinely differ (`min(2.0,
+    5.0) == 2.0`), so a regression that reused the report timeout for both
+    requests is caught rather than accidentally passing.
+    """
+    timeouts: list[float] = []
+
+    def _capture(address: str, report: dict[str, object], *, timeout: float) -> None:
+        timeouts.append(timeout)
+
+    monkeypatch.setattr("pytest_vantage.recorder.send", _capture)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-timeout=5.0"
+    )
+
+    result.assert_outcomes(passed=1)
+    assert timeouts == [2.0, 5.0]
+
+
 # --- Registration (task 6.3/6.4) --------------------------------------------
 
 

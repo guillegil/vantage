@@ -5,10 +5,20 @@ Assembles the session report and sends it exactly once, from
 `pytest_runtest_logreport`, which only accumulates in memory and never sends
 anything itself (design.md D16).
 
-Every hook is wrapped in `pytest_vantage.boundary.fault_isolated`: an error
-raised anywhere in the reporting path -- assembling the report, sending it,
-a server that never answers -- becomes one warning and never the suite's
-exit status (RQ-21).
+`pytest_sessionstart` (design.md D32) sends a second, narrower report before
+the first test runs: the session's identity and start time, `finished_at:
+null`, no `results`. It is wrapped in
+`pytest_vantage.boundary.liveness_isolated`, never `fault_isolated` -- a
+failed start-write must never cost the session its results. Its loss costs
+only the observability of a session that never finishes; the finish-write's
+own `INSERT` branch produces exactly today's complete row when no start row
+exists, which is what makes degrading quietly past one warning acceptable
+rather than a new half-state.
+
+Every other hook is wrapped in `pytest_vantage.boundary.fault_isolated`: an
+error raised anywhere in the reporting path -- assembling the report,
+sending it, a server that never answers -- becomes one warning and never the
+suite's exit status (RQ-21).
 
 Never imports `pytest_vantage.plugin`: registration is the plugin's job, not
 this module's (RQ-24 keeps every import here to stdlib and `pytest`, same as
@@ -22,8 +32,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from pytest_vantage.boundary import fault_isolated
+from pytest_vantage.boundary import fault_isolated, liveness_isolated
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
+from pytest_vantage.config import resolve_liveness_timeout
 from pytest_vantage.transport import send
 
 # `pytest.ExitCode.INTERRUPTED` (2) and `pytest.ExitCode.INTERNAL_ERROR` (3):
@@ -51,23 +62,55 @@ class Recorder:
     """Registered by `plugin.py::pytest_configure` once activation and the
     reachability preflight both succeed.
 
-    One request per session (RQ-25): the report is assembled in memory and
-    sent exactly once, from `pytest_sessionfinish`. `_results` accumulates
-    every phase report `pytest_runtest_logreport` receives (design.md D16).
-    `_config` is kept only so a hook that fails can route its warning
-    through the terminal reporter (`boundary._warn`); `_disabled` is the
-    fault-isolation latch `fault_isolated` reads and sets -- once `True`,
-    every further hook call on this instance is a silent no-op.
+    One finish-write per session (RQ-25): the report is assembled in memory
+    and sent exactly once, from `pytest_sessionfinish`. `_results`
+    accumulates every phase report `pytest_runtest_logreport` receives
+    (design.md D16). `_config` is kept only so a hook that fails can route
+    its warning through the terminal reporter (`boundary._warn`); `_disabled`
+    is the fault-isolation latch `fault_isolated` reads and sets -- once
+    `True`, every further reporting hook call on this instance is a silent
+    no-op. `_liveness_disabled` is the independent latch `liveness_isolated`
+    reads and sets for `pytest_sessionstart` -- it never reads or sets
+    `_disabled`, and `_disabled` never reads or sets it (design.md D29).
+
+    `_started_at` is captured once, here, so the start-write and the
+    finish-write report the identical value (design.md D32) -- a second
+    `datetime.now()` call in `pytest_sessionstart` would make the two
+    disagree. `_liveness_timeout` is `resolve_liveness_timeout(timeout)`
+    (design.md D31): a fixed ~200-byte liveness request must not be bounded
+    by the same, potentially much larger, timeout the full finish-write
+    report is allowed.
     """
 
     def __init__(self, config: pytest.Config, address: str, timeout: float) -> None:
         self._config = config
         self._address = address
         self._timeout = timeout
+        self._liveness_timeout = resolve_liveness_timeout(timeout)
         self._run_id = uuid.uuid4().hex
         self._started_at = datetime.now(timezone.utc)
         self._disabled = False
+        self._liveness_disabled = False
         self._results: dict[str, _Pending] = {}
+
+    @liveness_isolated
+    def pytest_sessionstart(self) -> None:
+        """Reports the session's identity and start time before the first
+        test runs (design.md D32). `finished_at: null`, no `results` --
+        `_UPSERT_RUN`'s insert branch (design.md D25) takes this report's
+        `exit_status: None` as "no finish yet", never as an error.
+        """
+        report: dict[str, object] = {
+            "run": {
+                "id": self._run_id,
+                "started_at": isoformat_utc(self._started_at),
+                "finished_at": None,
+                "exit_status": None,
+                "interrupted": False,
+                "interrupt_reason": None,
+            },
+        }
+        send(self._address, report, timeout=self._liveness_timeout)
 
     @fault_isolated
     def pytest_report_header(self) -> str:
