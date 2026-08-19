@@ -341,7 +341,7 @@ Gates measure the tests that exist, not the scenarios that should have them.
       column is exposed on `Execution`, so no existing test can observe them
       — read them directly. Adding `last_contact_at = excluded.last_contact_at`
       to the `DO UPDATE` list currently leaves all 241 tests green.
-- [ ] 5.7 REFACTOR `test_a_fast_suite_emits_no_heartbeat` (W3): it asserts
+- [x] 5.7 REFACTOR `test_a_fast_suite_emits_no_heartbeat` (W3): it asserts
       only that no beat arrived, and `@liveness_isolated` swallows anything
       the beat path raises — so deleting `_last_beat_at` keeps it green while
       emitting a warning per test. Assert warning-freedom as well, so a

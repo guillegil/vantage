@@ -296,7 +296,9 @@ def test_a_suite_exceeding_one_heartbeat_interval_sends_at_least_one_heartbeat(
 
 
 @pytest.mark.req(id="RQ-25")
-def test_a_fast_suite_emits_no_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_fast_suite_emits_no_heartbeat(
+    monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+) -> None:
     """RQ-25's measured profile -- 1,000 tests at ~10 ms each is a
     ~10-second suite, comfortably inside one `_BEAT_INTERVAL_SECONDS`
     (30.0) window. Proven directly against `Recorder._maybe_beat`'s timing
@@ -304,6 +306,17 @@ def test_a_fast_suite_emits_no_heartbeat(monkeypatch: pytest.MonkeyPatch) -> Non
     rather than spawning 1,000 real subprocess tests -- the real elapsed
     wall-clock time for that loop is a small fraction of a second, well
     under the interval, exactly like RQ-25's own measured suite.
+
+    `_maybe_beat` is wrapped in `@liveness_isolated` (design.md D30), which
+    swallows whatever the beat path raises and turns it into a
+    `VantageWarning` instead of propagating -- so `beats == []` alone
+    cannot distinguish "correctly suppressed, no attempt made" from "the
+    timing guard is broken and every attempt raised, silently, latched
+    after the first failure" (W3). Asserting the suite stayed warning-free
+    as well closes that gap: deleting `_last_beat_at` leaves `beats == []`
+    unchanged but emits exactly one `VantageWarning` -- confirmed by
+    reverting the fix and observing this assertion, and only this one,
+    fail.
     """
     from pytest_vantage.recorder import Recorder
 
@@ -322,6 +335,7 @@ def test_a_fast_suite_emits_no_heartbeat(monkeypatch: pytest.MonkeyPatch) -> Non
         recorder._maybe_beat()
 
     assert beats == []
+    assert len(recwarn) == 0, [str(w.message) for w in recwarn.list]
 
 
 # --- End-to-end xdist (task 6.5, RQ-1 + RQ-27) ------------------------------
