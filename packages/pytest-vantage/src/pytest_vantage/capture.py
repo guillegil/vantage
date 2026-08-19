@@ -1,16 +1,21 @@
-"""Plugin-local decomposition of the pytest node id (design.md D18, RQ-9).
+"""Plugin-local decomposition of the pytest node id (design.md D18, RQ-9),
+and -- from Phase 7 -- phase accumulation, outcome derivation and result
+payload assembly (design.md D16, D17).
 
-`vantage.core.domain.result.CaseIdentity` is the shape this information
-eventually takes once it reaches the server, but `pytest-vantage` cannot
-import `vantage` (RQ-24) -- this module owns a plain stdlib structure of its
-own rather than reaching across the package boundary to reuse that
-dataclass. Standard library and `pytest` only -- never `xdist`, not even
-guarded by `try` (`test_plugin_imports.py` is the guard).
+`vantage.core.domain.result.CaseIdentity`/`Result` are the shapes this
+information eventually takes, but `pytest-vantage` cannot import `vantage`
+(RQ-24) -- this module owns plain stdlib structures of its own instead.
+Standard library and `pytest` only -- never `xdist` (`test_plugin_imports.py`
+is the guard); `pytest` itself is this distribution's one declared
+dependency, and every report `Recorder` hands here IS a `pytest.TestReport`.
 """
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import NamedTuple
+
+import pytest
 
 
 class DecomposedIdentity(NamedTuple):
@@ -93,4 +98,170 @@ def decompose(node_id: str) -> DecomposedIdentity:
     )
 
 
-__all__ = ["DecomposedIdentity", "decompose"]
+def _isoformat_utc(moment: datetime) -> str:
+    """Fixed-width ISO-8601 UTC text, matching `recorder.py`'s
+    `isoformat_utc` exactly (design.md D1) -- duplicated here rather than
+    imported, since `recorder.py` imports FROM this module and the reverse
+    would be circular.
+    """
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+
+
+class _Pending:
+    """Accumulates the up-to-three reports pytest emits for one test's
+    lifecycle, keyed by node id in `Recorder._results` (design.md D16). A
+    `dict[str, _Pending]` gives insertion order for free, and a duplicate
+    report for the same node id and phase overwrites rather than duplicates
+    (D19 layer 1's supporting mechanism).
+    """
+
+    __slots__ = ("setup", "call", "teardown")
+
+    def __init__(self) -> None:
+        self.setup: pytest.TestReport | None = None
+        self.call: pytest.TestReport | None = None
+        self.teardown: pytest.TestReport | None = None
+
+    def record(self, report: pytest.TestReport) -> None:
+        setattr(self, report.when, report)
+
+
+def accumulate(pending: dict[str, _Pending], report: pytest.TestReport) -> None:
+    """Record one phase report into `pending`, keyed by `report.nodeid`
+    (design.md D16). Called from `Recorder.pytest_runtest_logreport`, once
+    per phase report pytest fires -- never sends anything itself."""
+    pending.setdefault(report.nodeid, _Pending()).record(report)
+
+
+def derive_outcome(
+    setup: pytest.TestReport, call: pytest.TestReport | None, teardown: pytest.TestReport
+) -> str:
+    """Derive the overall outcome from the three phase reports, in design.md
+    D17's fixed nine-row precedence order. `call` is `None` only when
+    `setup.outcome` is not `"passed"` (pytest never runs call after a failed
+    or skipped setup).
+
+    Two consequences easy to get wrong: a teardown failure downgrades ONLY a
+    `passed` call result (row 8) -- every other verdict keeps its own word.
+    A **strict** `xfail` that passes has `outcome="failed"` with `wasxfail`
+    entirely ABSENT (verified against `_pytest/skipping.py`), so row 7
+    cannot fire for it and it falls through to row 6 (`failed`), not
+    `xpassed`. `wasxfail`'s PRESENCE (`hasattr`), never its truthiness, is
+    what matters -- pytest sometimes sets the reason to `""`.
+    """
+    if setup.outcome == "failed":
+        return "error"
+    if setup.outcome == "skipped":
+        return "skipped"
+    if call is None:
+        raise AssertionError("setup passed but no call report was recorded (design.md D17)")
+    if call.outcome == "skipped":
+        return "xfailed" if hasattr(call, "wasxfail") else "skipped"
+    if call.outcome == "failed":
+        return "xfailed" if hasattr(call, "wasxfail") else "failed"
+    if hasattr(call, "wasxfail"):
+        return "xpassed"
+    if teardown.outcome == "failed":
+        return "error"
+    return "passed"
+
+
+def _phase_duration(report: pytest.TestReport | None) -> float | None:
+    """`None` when the phase never ran, never `0.0` (design.md D17, RQ-5.2).
+    Plain attribute access, never `report.duration or None`, which would
+    turn a genuine `0.0` into `None`.
+    """
+    if report is None:
+        return None
+    return report.duration
+
+
+def _phase_timestamp(report: pytest.TestReport, attribute: str) -> str | None:
+    """`getattr(report, "start"/"stop", None)` -- epoch floats on pytest
+    >= 8 (design.md D16) -- via `datetime.fromtimestamp(..., timezone.utc)`.
+    Never `datetime.UTC` (3.11+, above this project's 3.10 floor).
+    """
+    epoch = getattr(report, attribute, None)
+    if epoch is None:
+        return None
+    return _isoformat_utc(datetime.fromtimestamp(epoch, timezone.utc))
+
+
+def _worker_id(report: pytest.TestReport) -> str | None:
+    """A `getattr` chain, never an xdist import (RQ-24, design.md D16):
+    `report.worker_id` first, then `report.node.gateway.id`. `None` when
+    neither is present.
+    """
+    worker_id = getattr(report, "worker_id", None)
+    if worker_id is not None:
+        return str(worker_id)
+    gateway = getattr(getattr(report, "node", None), "gateway", None)
+    gateway_id = getattr(gateway, "id", None)
+    return str(gateway_id) if gateway_id is not None else None
+
+
+def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
+    """Build one wire-shape `results[]` entry from an accumulated `_Pending`
+    (design.md D16-D18). Returns `None` -- dropped, never invented -- when
+    the teardown report was never seen: a half-observed test (e.g. one
+    interrupted mid-call) is worse reported as whole than not at all
+    ("resolution, not attendance", D16).
+    """
+    if pending.teardown is None:
+        return None
+    setup = pending.setup
+    if setup is None:
+        raise AssertionError("a teardown report implies a setup report was seen first")
+    call = pending.call
+    teardown = pending.teardown
+
+    identity = decompose(node_id)
+    outcome = derive_outcome(setup, call, teardown)
+
+    setup_duration = _phase_duration(setup)
+    call_duration = _phase_duration(call)
+    teardown_duration = _phase_duration(teardown)
+    durations = [d for d in (setup_duration, call_duration, teardown_duration) if d is not None]
+    duration = sum(durations) if durations else None
+
+    return {
+        "node_id": identity.node_id,
+        "file_path": identity.file_path,
+        "class_name": identity.class_name,
+        "function_name": identity.function_name,
+        "param_id": identity.param_id,
+        "outcome": outcome,
+        "duration": duration,
+        "started_at": _phase_timestamp(setup, "start"),
+        "finished_at": _phase_timestamp(teardown, "stop"),
+        "setup_outcome": setup.outcome,
+        "call_outcome": call.outcome if call is not None else None,
+        "teardown_outcome": teardown.outcome,
+        "setup_duration": setup_duration,
+        "call_duration": call_duration,
+        "teardown_duration": teardown_duration,
+        "worker_id": _worker_id(setup),
+    }
+
+
+def assemble_results(pending: dict[str, _Pending]) -> list[dict[str, object]]:
+    """Build the `results` array in insertion (execution) order (design.md
+    D16). Entries with no teardown report are dropped (`build_result`
+    returning `None`).
+    """
+    results: list[dict[str, object]] = []
+    for entry_node_id, entry in pending.items():
+        result = build_result(entry_node_id, entry)
+        if result is not None:
+            results.append(result)
+    return results
+
+
+__all__ = [
+    "DecomposedIdentity",
+    "accumulate",
+    "assemble_results",
+    "build_result",
+    "decompose",
+    "derive_outcome",
+]

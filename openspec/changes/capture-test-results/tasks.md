@@ -247,24 +247,24 @@ sees one form. Decided 2026-08-18.
 
 ## Phase 7: Plugin — phases, outcome, assembly (PR 7)
 
-- [ ] 7.1 RED `test_capture.py`, table-driven over synthetic report doubles: all nine D17
+- [x] 7.1 RED `test_capture.py`, table-driven over synthetic report doubles: all nine D17
       precedence rows — setup failed → `error` (RQ-4.1); setup skipped → `skipped` (RQ-4.2);
       call skipped/failed with `wasxfail` → `xfailed` (RQ-4.3); call passed with `wasxfail` →
       `xpassed` (RQ-4.4); call passed with teardown failed → `error` (RQ-4.5).
-- [ ] 7.2 RED, **its own test**: a **strict** `xfail` that passes is `failed`, not `xpassed` —
+- [x] 7.2 RED, **its own test**: a **strict** `xfail` that passes is `failed`, not `xpassed` —
       pytest sets `outcome="failed"` with `wasxfail` absent for `[XPASS(strict)]`. RQ-4.4
       describes only the non-strict case; reading `wasxfail` naively mislabels this one.
-- [ ] 7.3 RED: a teardown failure downgrades **only** a `passed` result; a `failed` result
+- [x] 7.3 RED: a teardown failure downgrades **only** a `passed` result; a `failed` result
       keeps its own word and the teardown failure stays visible in `teardown_outcome`.
-- [ ] 7.4 RED: a phase that never ran serialises as `null`, never `0.0`, and a genuine `0.0`
+- [x] 7.4 RED: a phase that never ran serialises as `null`, never `0.0`, and a genuine `0.0`
       survives as `0.0` — the **JSON hop** of the `""`-vs-NULL family (D17).
-- [ ] 7.5 RED: a test resolved only through setup and call, with no teardown report, is
+- [x] 7.5 RED: a test resolved only through setup and call, with no teardown report, is
       **dropped** rather than invented — "resolution, not attendance" (D16).
-- [ ] 7.6 GREEN `capture.py`: `_Pending` accumulation in `dict[str, _Pending]` (insertion
+- [x] 7.6 GREEN `capture.py`: `_Pending` accumulation in `dict[str, _Pending]` (insertion
       order = execution order, duplicate report = overwrite), `derive_outcome`, payload
       assembly. Timestamps via `datetime.fromtimestamp(..., timezone.utc)` — **never
       `datetime.UTC`** (3.11+). `worker_id` read through a `getattr` chain.
-- [ ] 7.7 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`: add
+- [x] 7.7 GREEN `packages/pytest-vantage/src/pytest_vantage/recorder.py`: add
       `pytest_runtest_logreport` (the one hook xdist forwards to the controller) and attach
       `results` to the report already sent from `pytest_sessionfinish`. **Still exactly one
       HTTP request per session** (ADR-9, RQ-25.2). `plugin.py` is unchanged — its xdist
