@@ -1,5 +1,5 @@
 """SQLite adapter for `ExecutionStore` (RQ-30.1, RQ-38.1) -- design.md D5, D8,
-D19-D22, D25, D26.
+D19-D22, D25-D27, D33.
 
 A run row is now written by `INSERT ... ON CONFLICT(id) DO UPDATE`, not
 `DO NOTHING` (D25): a start-write and a finish-write share one `id`, and the
@@ -41,6 +41,17 @@ unconditional overwrite, so a late-arriving report with an older
 result insert (D19 layer 3) is `ON CONFLICT(run_id, node_id, attempt) DO
 NOTHING`, which makes a replayed report a silent no-op rather than an error
 (RQ-41).
+
+`last_contact_at` is written by the creating report only (D27): the insert
+branch of `_UPSERT_RUN` sets it to `received_at`, and the conflict branch
+never advances it -- a finished or interrupted run is not stale, it is done.
+`touch_last_contact`'s `_TOUCH_LAST_CONTACT` is its own monotonic `UPDATE`
+(D33), mirroring `_UPSERT_RUN`'s `exit_status` guard with a `last_contact_at
+< ?` comparison instead. That comparison is lexicographic, correct only at
+fixed width -- `_fixed_width_isoformat` mirrors
+`pytest_vantage.recorder.isoformat_utc` so every value this module writes to
+`last_contact_at` carries the same width, the same latent hazard D27 records
+for `test_case.last_seen_at`'s `MAX` but does not fix.
 """
 
 from __future__ import annotations
@@ -61,13 +72,15 @@ from vantage.storage.connection import open_database
 # limit (design.md D20).
 _MAX_PLACEHOLDERS = 500
 
-# `last_contact_at` is not written here yet -- the column does not exist
-# until Phase 3 (design.md D25's note above the equivalent end-state block).
+# `last_contact_at` is written on the insert branch only (D27) -- the
+# conflict branch's `DO UPDATE SET` list never names it, so a finish-write
+# applied over an existing start-only row leaves it exactly where the
+# creating report set it.
 _UPSERT_RUN = """
     INSERT INTO run (
-        id, received_at, started_at, finished_at,
+        id, received_at, last_contact_at, started_at, finished_at,
         exit_status, interrupted, interrupt_reason
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
         finished_at      = excluded.finished_at,
         exit_status      = excluded.exit_status,
@@ -77,6 +90,18 @@ _UPSERT_RUN = """
 """
 
 _PROBE_RUN_EXISTS = "SELECT 1 FROM run WHERE id = ?"
+
+# D33's monotonic guard: mirrors `_UPSERT_RUN`'s `exit_status` `WHERE`, but on
+# `last_contact_at` itself rather than a separate discriminator column -- an
+# out-of-order beat (an earlier or equal `contacted_at` than what is already
+# stored) changes zero rows, exactly like a reordered start-write changes
+# zero rows under `_UPSERT_RUN`.
+_TOUCH_LAST_CONTACT = """
+    UPDATE run
+       SET last_contact_at = ?
+     WHERE id = ?
+       AND (last_contact_at IS NULL OR last_contact_at < ?)
+"""
 
 _SELECT_RUN = """
     SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason
@@ -126,6 +151,20 @@ _SELECT_TEST_CASE = """
            first_seen_at, last_seen_at, last_seen_run_id
     FROM test_case WHERE node_id = ?
 """
+
+
+def _fixed_width_isoformat(moment: datetime) -> str:
+    """Fixed-width ISO-8601 UTC text: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`.
+
+    Mirrors `pytest_vantage.recorder.isoformat_utc` exactly (D27). Every
+    caller here already holds a UTC-aware `datetime` (`received_at` and
+    `contacted_at` are both `datetime.now(timezone.utc)` at the call site in
+    `service/routes/runs.py`), so `strftime` alone is sufficient -- no
+    `astimezone` normalization is needed. Used only for `last_contact_at`,
+    the one column this module compares lexicographically (`< ?`); every
+    other timestamp column keeps plain `.isoformat()`, unaffected.
+    """
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
 def _row_to_execution(row: tuple[object, ...]) -> Execution:
@@ -315,6 +354,7 @@ class SqliteExecutionStore:
                     (
                         execution.identity.value,
                         received_at.isoformat(),
+                        _fixed_width_isoformat(received_at),
                         execution.started_at.isoformat(),
                         execution.finished_at.isoformat() if execution.finished_at else None,
                         execution.exit_status,
@@ -343,6 +383,12 @@ class SqliteExecutionStore:
         if row is None:
             return None
         return _row_to_execution(row)
+
+    def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
+        with self._lock:
+            formatted = _fixed_width_isoformat(contacted_at)
+            cursor = self._conn.execute(_TOUCH_LAST_CONTACT, (formatted, execution_id, formatted))
+            return cursor.rowcount == 1
 
     def count_executions(self) -> int:
         row = self._conn.execute("SELECT COUNT(*) FROM run").fetchone()

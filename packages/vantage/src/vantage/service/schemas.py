@@ -188,3 +188,16 @@ class Acknowledgement(BaseModel):
     run_id: str
     status: str
     ignored: list[str] = []
+
+
+class HeartbeatAcknowledgement(BaseModel):
+    """The response body for `POST /runs/{run_id}/heartbeat` (design.md D33).
+
+    A distinct model from `Acknowledgement` rather than a reuse with
+    `ignored` defaulted -- the heartbeat request carries no `results`
+    section, so there is nothing that could ever populate `ignored`, and a
+    field that can never be non-empty does not belong on the response shape.
+    """
+
+    run_id: str
+    status: str
