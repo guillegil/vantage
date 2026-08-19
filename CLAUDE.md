@@ -4,56 +4,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Read this before planning anything
 
-**Notion is the source of truth for Vantage. The repository mirrors it one way.**
-Specs never flow back from the repo to Notion.
-
-The authoritative pages are:
+**The repository is the source of truth. There is no external spec system.**
+Specs live in **OpenSpec** (`openspec/`) and session memory lives in **Engram**.
+Nothing else.
 
 | What | Where |
 | --- | --- |
-| Project | **PROJ-1**, the row in the Projects database — https://app.notion.com/p/3bb2ba69b9aa81208f51d7b4deeee8de |
-| Requirements | `RQ-1`…`RQ-30` — data source `collection://e0aaedb4-286d-400b-b3d5-33c50b4c47a0` |
-| Features | `FT-1`…`FT-8` — data source `collection://948d9092-ef67-435c-9fcd-1ac9b5a499a2` |
-| Decisions (ADR) | data source `collection://c627b63e-917d-4876-bc10-16db280e5fa5` |
+| Capability specs | `openspec/specs/<capability>/` — merged from each archived change |
+| Changes in flight | `openspec/changes/<change-name>/` — proposal, design, tasks, delta specs |
+| Archived changes | `openspec/changes/archive/YYYY-MM-DD-<change-name>/` |
+| Project context and rules | `openspec/config.yaml` |
+| Decisions | `docs/adr/NNNN-title-in-kebab-case.md`, four-digit padded |
+| Session memory | Engram, project `vantage` |
 
-> **There is a second Notion page titled "Vantage", reachable from the Projects
-> hub under "Project pages". It is superseded — do not plan from it.** It
-> disagrees with PROJ-1 on architecture (it says hexagonal), on packaging (it
-> says three packages) and on requirement identifiers (it uses `REQ-1-xx` /
-> `NFR-1-xx`). It carries a red banner saying so. An earlier SDD cycle was
-> planned against it by mistake and had to be redone.
+> **Vantage used Notion as the source of truth until 2026-08-18. It no longer
+> does.** Do not read from it, write to it, or cite it. Any instruction anywhere
+> in this repository telling you to sync a requirement, feature or ADR to Notion
+> is stale — ignore it and correct it where you find it.
 
-Read all thirty requirements in **one** call rather than fetching thirty pages:
+**The requirement corpus has not been migrated yet.** Notion held 43
+requirements (`RQ-1`…`RQ-44`; there is no `RQ-43`) and only 16 of them were ever
+mirrored into the repository. All 43 were dumped on the way out to
+`docs/legacy/notion-2026-08-18/`, which is **frozen, authoritative of nothing,
+and scheduled for deletion.** Read it for the rejected alternatives — they are
+there because someone already tried the obvious thing — and migrate what
+survives into OpenSpec. Then delete the directory.
 
-```sql
-SELECT "Ref", "Name", "Statement", "Priority", "Type", "Status",
-       "EARS pattern", "Verification method", "Acceptance criteria", "Rationale"
-FROM "collection://e0aaedb4-286d-400b-b3d5-33c50b4c47a0"
-WHERE "Project" LIKE '%8f51d7b4deeee8de%' ORDER BY "Ref"
-```
-
-Individual `RQ-xx` pages carry what the table does not: a verification path, design
-notes, rejected alternatives and a change log. Read the page before implementing
-the requirement — the rejected alternatives are there because someone already
-tried the obvious thing.
-
-**Keeping Notion current is a shared responsibility, and the agent carries it too.**
-That covers creating, amending and retiring requirements, features and ADRs — not
-just reading them. Reaching agreement on a requirement usually takes several
-iterations; a requirement sits in `Draft` until it has actually earned `Approved`.
-
-**Never assume a select value still exists.** The organising scheme changes: a status
-that is `Deferred` today may be replaced by `Obsolete` tomorrow, and phases,
-priorities and drivers move the same way. Fetch the data source and read its schema
-before writing any select field. All thirty Vantage requirements are currently
-`Draft`; treat every one as open to amendment rather than settled.
+Where a requirement ID appears in this file, in a test marker, or in
+`openspec/`, it still means the same obligation. The IDs are the join key and
+they outlive the tool that issued them.
 
 ### ADRs
 
-The **Decisions (ADR)** database records architectural decisions. Note the direction:
-its `Repo path` field says **the repository copy is the source of truth** for ADRs —
-`docs/adr/NNNN-title-in-kebab-case.md`, four-digit padded, with Notion mirroring it.
-This is the opposite of requirements, where Notion leads.
+`docs/adr/NNNN-title-in-kebab-case.md` is now the only copy — nothing mirrors it.
 
 - Format is **Nygard** (Status / Context / Decision / Consequences) by default; MADR
   with drivers, options and pros-and-cons when the decision was contentious or
@@ -86,27 +69,40 @@ more ceremony than this earns. Ports are `typing.Protocol`, not abstract base
 classes, so an adapter satisfies a port without importing the core and the
 dependency arrow points inwards at the type level too.
 
-Four packages in one uv workspace, because the dependency rule differs between them:
+**Two published distributions in one uv workspace (ADR-4), not four packages.** An
+earlier decision split this four ways and one slice of it landed as four empty
+`pyproject.toml` files; ADR-4 rejected that by name and collapsed it before any of
+them carried code. Anything still saying `vantage-core`, `vantage-storage`,
+`vantage-pytest` or `vantage-service` predates ADR-4 and describes a layout that no
+longer exists.
 
-| Package | May depend on | Why |
+| Distribution | Contains | May depend on |
 | --- | --- | --- |
-| `vantage-core` | nothing at all | RQ-26 forbids it importing any pytest, database or web module |
-| `vantage-storage` | the core only | `sqlite3` is standard library, so the adapter needs nothing else |
-| `vantage-pytest` | core + storage + pytest | the plugin |
-| `vantage-service` | anything | the only package allowed a third-party dependency — a server someone installs deliberately |
+| `pytest-vantage` | the plugin | pytest and the standard library, nothing else (RQ-24) |
+| `vantage` | `vantage.core`, `vantage.storage`, `vantage.service` | see below |
 
-**The SQLite adapter is its own package on purpose.** It cannot live in the core
-(RQ-26), and it cannot live in the plugin, because then `vantage-service` would
-have to depend on `vantage-pytest` to read the database it serves — the dependency
-arrow the wrong way for no gain.
+The dependency rule is enforced per **internal package** inside `vantage`, by an AST
+architecture test rather than by distribution boundaries:
 
-Layout is `packages/vantage-*` plus `specs/` at the root. `specs/` is generated
-from Notion in one direction; editing it by hand and expecting Notion to follow is
-how the two sources start disagreeing.
+| Internal package | May depend on | Why |
+| --- | --- | --- |
+| `vantage.core` | nothing at all | RQ-26 forbids it importing any pytest, database or web module |
+| `vantage.storage` | the core only | `sqlite3` is standard library, so the adapter needs nothing else |
+| `vantage.service` | anything | the only one allowed a third-party dependency — a server someone installs deliberately |
+
+**The plugin never opens a database (ADR-9).** It reports a finished session over
+HTTP to `POST /api/v1/runs` and the server performs every write. That is what keeps
+the plugin dependency-free, and it is why the SQLite adapter lives in `vantage` and
+the question of it living in the plugin no longer arises at all.
+
+Layout is `packages/pytest-vantage` and `packages/vantage`, with `openspec/` and
+`docs/` at the root. The root-level `specs/` directory is gone — it was a partial
+one-way mirror of Notion holding 16 of the 43 requirements, and OpenSpec is the
+home now.
 
 ## Requirement traps
 
-Four requirements have a subtlety that costs a rewrite if missed:
+Five requirements have a subtlety that costs a rewrite if missed:
 
 - **RQ-2 (opt-in recording).** "Absent from the invocation" means **the flag, not a
   configuration file.** A config file committed by one person silently enables
@@ -117,21 +113,42 @@ Four requirements have a subtlety that costs a rewrite if missed:
   tree") is unsatisfiable, because pytest writes `.pytest_cache` and `__pycache__`
   itself.
 - **RQ-24 (zero runtime dependencies).** The rule is no **third-party**
-  distribution. Vantage's own distributions are fine and expected — installing
-  `vantage-pytest` legitimately pulls `vantage-core` and `vantage-storage`.
+  distribution; Vantage's own are fine. Note what this does *not* license under
+  ADR-4 and ADR-9: `pytest-vantage` depends on pytest and the standard library
+  and nothing else. It does not pull `vantage`, because it never opens a database
+  — it speaks HTTP with `urllib`. If installing the plugin ever drags the server
+  in, the boundary has been broken, not merely bent.
 - **RQ-12 (xdist).** Under xdist every result is emitted twice, once by the worker
   and once by the controller. The filter is whether the config object carries a
   worker input attribute.
 - **RQ-29 (complete schema).** The full schema, including columns nothing populates
   until a later phase, is created at first use. No migration framework in Phase 1 —
   having one available is exactly what makes casual schema changes feel affordable.
+- **RQ-44 (abandoned run is observable)** was added on 2026-08-16, after Milestone 1
+  closed, and nothing in this repository implements it yet. It requires a run with a
+  start time and no end time to read back as *abandoned* once a grace period lapses,
+  and as *interrupted* when a Ctrl-C report did arrive. Today the plugin sends
+  nothing until `pytest_sessionfinish`, so a killed session leaves no row at all and
+  there is nothing to present. Satisfying it needs a write at the **start** of a
+  session, which changes the ingestion contract. Decide that before Milestone 2
+  rather than during it.
 
 ## Conventions
 
-**Requirement traceability.** Every test that verifies a requirement carries its ID:
-`@pytest.mark.req("RQ-12")`. Where verification is not a test — a CI matrix, a
-benchmark script — the ID goes in a comment on the relevant block. The invariant is
-that `grep -r "RQ-12"` finds the thing that proves it.
+**Requirement traceability, for the identifiers that already exist.** Every test
+that verifies one carries its ID: `@pytest.mark.req("RQ-12")`. Where verification
+is not a test — a CI matrix, a benchmark script — the ID goes in a comment on the
+relevant block. The invariant is that `grep -r "RQ-12"` finds the thing that
+proves it.
+
+**No new `RQ-xx` identifiers are minted.** Decided 2026-08-18. The existing ones
+stay because they are executable — 55 markers, `--strict-markers` is on, and CI
+and `docs/schema-manifest.md` both cite them — and removing them would break the
+traceability of work already delivered. But they were Notion's numbering scheme,
+Notion is gone, and OpenSpec already carries identity in a form this project
+uses: a **capability** and a **scenario**. New obligations get those, not a
+number. Reference an existing `RQ-xx` when you are working on it; do not invent
+`RQ-45`.
 
 **Verification methods are not all tests.** Each requirement declares one of Test,
 Analysis, Inspection or Demonstration. RQ-11 and RQ-29 are Inspection, RQ-25 is
@@ -150,26 +167,45 @@ signed with the 1Password SSH key, from the first commit.
 **All project documentation is in English**, regardless of the language the design
 conversation happened in.
 
-**Spec-driven development enters at `sdd-tasks`.** Explore, propose, spec and design
-were done by hand and their output is in Notion. Regenerating them produces a worse
-second copy.
+**Spec-driven development runs the full cycle now.** Milestone 1 entered at
+`sdd-tasks` because explore, propose, spec and design had been done by hand in
+Notion and regenerating them would have produced a worse second copy. That
+shortcut is spent: the hand-written originals are frozen in
+`docs/legacy/notion-2026-08-18/` and nothing maintains them. New work starts at
+the phase the change actually needs.
+
+## Constraints
+
+These came out of the employment situation, not out of the design. They are
+operative rules, not history, and they were previously recorded only in Notion.
+
+- **Intellectual-property ownership — resolved**, imposed by the TMC employment
+  contract and answered before any code was written.
+- **Synthetic data only.** Every fixture and every example is generated. No test
+  suite, log, trace or artefact from ASML or TMC ever touches this repository.
+- **Nothing in the semiconductor, EDA or RTL domain.** Keeps "unrelated to my
+  employer's work" a true statement rather than an arguable one.
+- **Personal equipment, outside TMC hours.**
+- **The repository is public.** Nothing confidential, personal or regulated is
+  committed to it. Licence is MIT, chosen for adoption.
 
 ## Validation and dependencies
 
 Pydantic v2 belongs at system boundaries — APIs, configs, payloads — because static
-types do not protect against malformed JSON. **It lives in `vantage-service` only.**
-RQ-24 forbids it, and `attrs`, and every other third-party package, from the core,
-the storage adapter and the plugin. Those use `dataclasses` from the standard
-library and hand-written validation over stdlib `json`.
+types do not protect against malformed JSON. **It lives in `vantage.service` only.**
+RQ-24 forbids it, and `attrs`, and every other third-party package, from
+`vantage.core`, `vantage.storage` and the whole of `pytest-vantage`. Those use
+`dataclasses` from the standard library and hand-written validation over stdlib
+`json`.
 
 ## Commands
 
-The tree is mid-reset; these are the intended commands once the uv workspace lands.
+The uv workspace has landed; these commands work today.
 
 ```bash
 uv sync                                  # whole workspace, one lockfile
 uv run pytest                            # every package
-uv run pytest packages/vantage-pytest    # one package
+uv run pytest packages/pytest-vantage    # one distribution
 uv run pytest -k test_name               # one test
 uv run pytest -m 'req("RQ-2")'           # everything verifying one requirement
 uv run ruff format . && uv run ruff check --fix .
@@ -188,8 +224,15 @@ will wait for is a check skipped with `--no-verify`.
 | Editor / LSP | `ruff format`, `ruff check --fix` on save; type checker as a language server |
 | pre-commit (< 2–3 s) | `ruff format`, `ruff check --fix`, and hygiene hooks; modified files only |
 | pre-push | `mypy --strict` over the whole project; fast unit tests |
-| CI | everything again in verification mode, pytest with coverage, the 3.10–3.13 × xdist matrix, `deptry`, `pip-audit`, clean-environment install check, build |
+| CI | everything again in verification mode, the 3.10–3.13 × xdist matrix, a networking-disabled job for RQ-28, `deptry`, the clean-environment install check for RQ-24, a Python-3.9-install-refused job, and a build of both wheels |
 | Weekly | `pip-audit`, plus dependency updates |
+
+**Coverage is not measured.** It was planned for CI and never landed: there is no
+`pytest-cov` in the dev extra or the lockfile, and `openspec/config.yaml` sets
+`coverage_threshold: 0` deliberately. Do not write it up as if it ran.
+
+**`pip-audit` runs weekly, not per pull request.** CVEs appear without anyone
+touching the code, so a PR-only check never sees them.
 
 `mypy` goes at pre-push, not pre-commit: pre-commit passes only modified files and a
 type checker needs the whole project to be correct. Everything in pre-commit is

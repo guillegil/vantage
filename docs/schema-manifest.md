@@ -2,7 +2,7 @@
 
 > **Source of truth for the schema is `docs/schema-manifest.md` and
 > `packages/vantage/src/vantage/storage/schema.sql` together — the two are
-> compared against each other, not against Notion.** This file is the
+> compared against each other.** This file is the
 > column-by-column record RQ-29 verifies **by Inspection**; the SQL file is
 > its implementation, applied whole by `vantage/storage/connection.py`
 > (PR4) the first time a database is created. Every `CREATE` statement in

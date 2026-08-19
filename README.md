@@ -84,6 +84,7 @@ Where verification is not a test -- a CI matrix job, an inspection artifact --
 the ID goes in a comment on the block that proves it. The invariant:
 `grep -r "RQ-12"` reaches the thing that proves RQ-12.
 
-Requirements live in Notion under PROJ-1 and nowhere else. This repository
-mirrors them one way; ADRs go the other way, with `docs/adr/` as the source
-of truth and Notion mirroring it.
+Specs live in `openspec/` and decisions in `docs/adr/`. Both are authored here;
+nothing mirrors them anywhere else. The requirement corpus predates that and is
+still being migrated — see `docs/legacy/notion-2026-08-18/`, which is frozen and
+scheduled for deletion.

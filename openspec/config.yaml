@@ -2,13 +2,14 @@
 schema: spec-driven
 
 context: |
-  SOURCE OF TRUTH: Notion, not this repository. The project row is PROJ-1 in the Projects
-  database; requirements are RQ-1..RQ-42, features FT-1..FT-8, decisions are ADRs.
-  specs/requirements.md mirrors the Milestone 1 subset verbatim, generated one way --
-  read it rather than pasting requirement text into prompts.
-  A SECOND Notion page titled "Vantage" exists under the Projects hub and is SUPERSEDED —
-  it says hexagonal, three packages and REQ-1-xx/NFR-1-xx identifiers. Do not plan from it.
-  See CLAUDE.md for the one-query way to read all requirements and for this warning in full.
+  SOURCE OF TRUTH: this repository. Specs live in openspec/, decisions in docs/adr/,
+  session memory in Engram. Notion was the source of truth until 2026-08-18 and is not
+  used any more -- do not read from it or write to it.
+  The requirement corpus is NOT migrated yet. All 43 requirements (RQ-1..RQ-44; there is
+  no RQ-43) were dumped on the way out to docs/legacy/notion-2026-08-18/, which is FROZEN,
+  authoritative of nothing, and scheduled for deletion once migrated into openspec/.
+  Read it for the rejected alternatives, not as instruction. The RQ-xx/FT-xx identifiers
+  remain the join key and still mean the same obligations.
 
   Architecture: CLEAN, not hexagonal (ADR-3 rejects hexagonal by name). Ports are
   typing.Protocol, never abstract base classes, so an adapter satisfies a port without
@@ -53,8 +54,9 @@ context: |
 rules:
   proposal:
     - Include a rollback plan for risky or schema-affecting changes
-    - Cross-check scope against the RQ/FT databases under PROJ-1 in Notion before scoping,
-      never against the superseded narrative page
+    - Cross-check scope against openspec/specs/ and, for a requirement not migrated yet,
+      against docs/legacy/notion-2026-08-18/ -- reading the latter for intent, never as
+      an authoritative current statement
     - State the changed-line forecast against the review budget; do not silently exceed it
   specs:
     - Use Given/When/Then for scenarios
@@ -75,10 +77,11 @@ rules:
       to edit a conftest
   apply:
     guidelines:
-      - Respect the four-package boundaries; vantage-core imports only the standard library,
-        enforced by an AST architecture test that also asserts it examined something
-      - Keep vantage-core, vantage-storage and vantage-pytest free of third-party runtime
-        dependencies (RQ-24)
+      - Respect the internal-package boundaries inside vantage; vantage.core imports only
+        the standard library, enforced by an AST architecture test that also asserts it
+        examined something
+      - Keep vantage.core, vantage.storage and the whole of pytest-vantage free of
+        third-party runtime dependencies (RQ-24)
       - The schema is created complete at first use, including later-phase columns (RQ-29),
         and no Phase 1 release alters an existing database
       - Never use StrEnum or datetime.UTC — the floor is Python 3.10
@@ -90,9 +93,6 @@ rules:
     coverage_threshold: 0
   archive:
     - Warn before merging destructive deltas
-    - Update the corresponding Notion pages after archiving. Keeping Notion current is a
-      shared responsibility the agent carries too, and it covers creating, amending and
-      retiring requirements, features and ADRs — not just reading them
     - When correcting an artifact held in both OpenSpec files and Engram, correct BOTH.
       A stale Engram observation is more dangerous than a stale file, because phase agents
       are told to search Engram first and a file at least shows its age in git history

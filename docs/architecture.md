@@ -7,7 +7,8 @@ two published distributions with an HTTP boundary between them
 
 This file is a map. The decisions live in `docs/adr/`; the Milestone 1 design
 lives in `openspec/changes/milestone-1-write-one-row/design.md`; the
-requirements live in Notion under PROJ-1 and nowhere else.
+requirements are being migrated into `openspec/` from the frozen dump in
+`docs/legacy/notion-2026-08-18/`.
 
 ## Two distributions, one repository
 
