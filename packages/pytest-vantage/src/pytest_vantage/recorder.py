@@ -48,7 +48,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from pytest_vantage.boundary import fault_isolated, liveness_isolated
+from pytest_vantage.boundary import _warn, fault_isolated, liveness_isolated
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.config import resolve_liveness_timeout
 from pytest_vantage.transport import send, send_heartbeat
@@ -106,13 +106,33 @@ class Recorder:
     (`last_contact_at = received_at`, design.md D27), so the first beat
     opportunity does not fire until a full interval after construction, not
     immediately at the first test.
+
+    `_lifecycle_available` is what `plugin.py`'s capability probe found
+    (design decisions D38-D42, `plugin-server-compatibility`), defaulting to
+    `True` for a caller that never passes it (this module's own direct-
+    construction tests predate the probe). `False` means the server cannot
+    finish the job a start-write or heartbeat would begin -- both
+    `pytest_sessionstart` and `_maybe_beat` return immediately rather than
+    attempting either, and `pytest_sessionstart` warns exactly once, on the
+    liveness latch, before doing so (D41: the previous release's shape, not
+    a new half-state). `pytest_sessionfinish` is untouched either way -- that
+    is what makes "degraded" mean "record exactly as before", not a third
+    state.
     """
 
-    def __init__(self, config: pytest.Config, address: str, timeout: float) -> None:
+    def __init__(
+        self,
+        config: pytest.Config,
+        address: str,
+        timeout: float,
+        *,
+        lifecycle_available: bool = True,
+    ) -> None:
         self._config = config
         self._address = address
         self._timeout = timeout
         self._liveness_timeout = resolve_liveness_timeout(timeout)
+        self._lifecycle_available = lifecycle_available
         self._run_id = uuid.uuid4().hex
         self._started_at = datetime.now(timezone.utc)
         self._disabled = False
@@ -126,7 +146,23 @@ class Recorder:
         test runs (design.md D32). `finished_at: null`, no `results` --
         `_UPSERT_RUN`'s insert branch (design.md D25) takes this report's
         `exit_status: None` as "no finish yet", never as an error.
+
+        Degrades instead when `_lifecycle_available` is `False` (design
+        decisions D38-D41): the server cannot finish the job a start-write
+        would begin, so none is sent. Warns once here, naming the address,
+        and latches `_liveness_disabled` directly -- the same flag
+        `liveness_isolated` itself sets on a raised exception -- so every
+        later `_maybe_beat` call this session is a silent no-op via the
+        decorator's own latch check, without a second warning.
         """
+        if not self._lifecycle_available:
+            self._liveness_disabled = True
+            _warn(
+                self._config,
+                f"vantage: {self._address} predates the session lifecycle, "
+                "this session's start and heartbeats will not be recorded",
+            )
+            return
         report: dict[str, object] = {
             "run": {
                 "id": self._run_id,
@@ -164,7 +200,19 @@ class Recorder:
         last one (design.md D30). `_last_beat_at` is assigned before the
         send, not after -- a failing or slow send is not retried on the very
         next report, one stall per interval rather than one per test.
+
+        Returns immediately when `_lifecycle_available` is `False` (design
+        decisions D38-D41), same as `pytest_sessionstart` -- in the ordinary
+        case `pytest_sessionstart` has already latched `_liveness_disabled`
+        by the time any beat opportunity arises, so `liveness_isolated`'s own
+        latch check already skips this body without reaching here at all.
+        This check stays anyway rather than relying on that ordering: it is
+        what makes "no heartbeat when the lifecycle is unavailable" true of
+        this function by its own logic, not merely a side effect of when it
+        happens to be called.
         """
+        if not self._lifecycle_available:
+            return
         now = time.monotonic()
         if now - self._last_beat_at < _BEAT_INTERVAL_SECONDS:
             return

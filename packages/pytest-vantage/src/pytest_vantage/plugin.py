@@ -26,8 +26,13 @@ from urllib.parse import urlparse
 import pytest
 
 from pytest_vantage.boundary import _warn
-from pytest_vantage.config import resolve_report_timeout, resolve_server_address
+from pytest_vantage.config import (
+    resolve_liveness_timeout,
+    resolve_report_timeout,
+    resolve_server_address,
+)
 from pytest_vantage.recorder import Recorder
+from pytest_vantage.transport import fetch_capabilities
 
 # design.md D6: "connect_timeout: min(2.0, report_timeout), applies to the
 # preflight probe" -- the preflight must not itself wait as long as a full
@@ -79,8 +84,14 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def _preflight_reachable(address: str, timeout: float) -> bool:
     """A bare TCP connect, not an HTTP request (design.md D6) -- proves only
     that something is listening at `address`, never anything about the
-    protocol or route. Sends no bytes, so RQ-2 stays untouched: this only
-    runs once activation has already been confirmed.
+    protocol or route. This function itself sends no bytes -- but, since
+    `plugin-server-compatibility`, that is no longer true of the preflight
+    step as a whole: `pytest_configure` follows a successful call to this
+    function with a real HTTP capability request
+    (`transport.fetch_capabilities`, design decisions D38-D42). RQ-2 stays
+    untouched either way, because none of this runs until activation has
+    already been confirmed -- it is "sends no bytes" that stops being an
+    accurate claim about the preflight taken together, not RQ-2.
 
     `ConnectionRefusedError` (nothing listening) and `socket.gaierror` (the
     host does not resolve) are both `OSError` subclasses, so catching
@@ -112,7 +123,8 @@ def _activation_requested(config: pytest.Config) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """The always-imported hook. Four steps, in this order (design.md D2, D6):
+    """The always-imported hook. Five steps, in this order (design.md D2, D6;
+    design decisions D38-D42 for the capability probe):
 
     1. Under xdist, every worker re-runs this hook -- unguarded, ``-n 4``
        would leave four workers' recorders plus the controller's, breaking
@@ -129,8 +141,18 @@ def pytest_configure(config: pytest.Config) -> None:
        failed preflight warns once, naming the address, and returns without
        registering a recorder -- the session then runs to completion with
        zero further overhead and nothing recorded.
-    4. The recorder is registered only once both activation and the
-       preflight succeed.
+    4. Once the preflight succeeds, a capability probe
+       (``transport.fetch_capabilities``) asks whether the server
+       advertises ``session_lifecycle`` -- bounded by
+       ``resolve_liveness_timeout``, never the report timeout (D42), so a
+       slow or hanging server cannot put the full report timeout in front of
+       every session. Anything other than an explicit positive answer,
+       including the ``404`` an older server answers (D39), degrades: the
+       recorder still gets registered below, but records exactly as the
+       previous release did (D41) rather than half-recording against a
+       server that cannot finish the job.
+    5. The recorder is registered once activation and the preflight succeed,
+       carrying whatever the capability probe found.
 
     A server that answers the preflight and later disappears, or starts
     failing partway through reporting, is not this function's concern --
@@ -156,4 +178,8 @@ def pytest_configure(config: pytest.Config) -> None:
     if not _preflight_reachable(address, connect_timeout):
         _warn(config, f"vantage: cannot reach {address}, this session will not be recorded")
         return
-    config.pluginmanager.register(Recorder(config, address, timeout))
+    liveness_timeout = resolve_liveness_timeout(timeout)
+    lifecycle_available = fetch_capabilities(address, timeout=liveness_timeout)
+    config.pluginmanager.register(
+        Recorder(config, address, timeout, lifecycle_available=lifecycle_available)
+    )
