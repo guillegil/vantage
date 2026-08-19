@@ -90,6 +90,16 @@ now.**
 The contradiction is real and recorded rather than resolved. It becomes
 blocking the day a launch surface is designed, not before. Revisit at Phase 3.
 
+## Note · Catalogue `last_seen_at` monotonicity is now UTC-normalized at the boundary
+
+Found reviewing Phase 3 of `capture-test-results` (Engram observation 62): D20's
+`MAX(...)` guard on `test_case.last_seen_at` compares stored TEXT lexicographically,
+which is only correct when every writer normalizes to the same UTC offset. Fixed in
+Phase 5: `vantage.service.routes.runs` normalizes every timestamp — `run` and each
+`result`, aware or naive — to UTC before it reaches the store. The guard is now sound
+for any client speaking the HTTP boundary (ADR-9), not only this project's own
+`pytest-vantage` plugin, which already normalized on its own side.
+
 ## OQ-10 · The interface document is hand-written, with an automatic drift test
 
 The OpenAPI document is authored by hand and is the contract; the code conforms

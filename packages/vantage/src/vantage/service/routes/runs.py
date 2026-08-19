@@ -1,7 +1,7 @@
 """`POST /api/v1/runs` -- session report ingestion (RQ-41, RQ-42, design.md D3, D5).
 
-**The 201-vs-200 decision comes from the boolean `record_execution` already
-returns.** `record_execution` is `INSERT ... ON CONFLICT(id) DO NOTHING`,
+**The 201-vs-200 decision comes from the boolean `record_session` already
+returns.** `record_session` is `INSERT ... ON CONFLICT(id) DO NOTHING`,
 deciding its own return value from the INSERT's own row count -- no
 preceding `SELECT`. This route does not ask the store whether the id exists
 and then decide: that would reintroduce, at the HTTP layer, precisely the
@@ -30,12 +30,21 @@ threat matrix requires:
 
 Nothing is written before all three steps succeed, so a rejection at any
 step leaves `count_executions() == 0`.
+
+**`results` is optional and its absence is not an error (design.md D15).**
+`payload.results` is `None` (section absent) or `[]` (nothing collected) as
+often as it is a populated list -- both mean zero result rows, not a
+rejection. `record_session`'s `results` parameter is keyword-only and
+required (design.md D21), so this route always passes a list, even an empty
+one, rather than special-casing the absent-section case.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime, timezone
+from typing import overload
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -43,6 +52,7 @@ from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
 from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.result import CaseIdentity, Result
 from vantage.service.errors import (
     MAX_REPORT_BYTES,
     IncompleteBodyError,
@@ -50,23 +60,96 @@ from vantage.service.errors import (
     InvalidReportError,
     PayloadTooLargeError,
     UnsupportedMediaTypeError,
+    safe_segment,
 )
-from vantage.service.schemas import Acknowledgement, RunReport, SessionReport
+from vantage.service.schemas import Acknowledgement, ResultReport, RunReport, SessionReport
 
 router = APIRouter()
 
 _JSON_MEDIA_TYPE = "application/json"
 
 
+@overload
+def _normalize_to_utc(value: datetime) -> datetime: ...
+@overload
+def _normalize_to_utc(value: None) -> None: ...
+def _normalize_to_utc(value: datetime | None) -> datetime | None:
+    """The one helper every timestamp that reaches the store goes through
+    (Phase 5 UTC-normalization addendum, Engram observation 62's resolution).
+
+    `test_case.last_seen_at` is TEXT and D20's monotonicity guard advances it
+    with `MAX(...)` -- a **lexicographic** comparison, correct only when
+    every stored string carries the same offset and the same width. The
+    plugin already normalizes (`pytest_vantage.recorder.isoformat_utc`), but
+    ADR-9 exists precisely so a client in another language can talk to this
+    server without normalizing, so the boundary must not trust the wire.
+
+    An **aware** value converts with `astimezone(timezone.utc)`. A **naive**
+    value is stamped `replace(tzinfo=timezone.utc)` -- never `astimezone()`
+    on a naive value, which silently assumes the SERVER's local zone and
+    would make the stored instant depend on where the server happens to run.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _to_execution(run: RunReport) -> Execution:
     return Execution(
         identity=Identity(run.id),
-        started_at=run.started_at,
-        finished_at=run.finished_at,
+        started_at=_normalize_to_utc(run.started_at),
+        finished_at=_normalize_to_utc(run.finished_at),
         exit_status=run.exit_status,
         interrupted=run.interrupted,
         interrupt_reason=run.interrupt_reason,
     )
+
+
+def _to_result(item: ResultReport) -> Result:
+    # `started_at`/`finished_at` go through `_normalize_to_utc`, same as
+    # `_to_execution` above -- one path, not two (Phase 5 UTC-normalization
+    # addendum). This used to be deliberately absent (see the Phase 3-era
+    # Engram observation 62 finding); it stops being true here.
+    return Result(
+        identity=CaseIdentity(
+            node_id=item.node_id,
+            file_path=item.file_path,
+            class_name=item.class_name,
+            function_name=item.function_name,
+            param_id=item.param_id,
+        ),
+        outcome=item.outcome,
+        duration=item.duration,
+        started_at=_normalize_to_utc(item.started_at),
+        finished_at=_normalize_to_utc(item.finished_at),
+        setup_outcome=item.setup_outcome,
+        call_outcome=item.call_outcome,
+        teardown_outcome=item.teardown_outcome,
+        setup_duration=item.setup_duration,
+        call_duration=item.call_duration,
+        teardown_duration=item.teardown_duration,
+        worker_id=item.worker_id,
+    )
+
+
+def _ignored_result_keys(results: Sequence[ResultReport]) -> list[str]:
+    """Deduplicated `results[].<name>` for every unknown key tolerated by
+    `ResultReport`'s `extra="allow"` (design.md D15).
+
+    Insertion order, one entry per key name regardless of how many results
+    carried it -- 500 results sharing one unknown key produce one entry, not
+    500 (D15's own example). Each name is routed through the same
+    `safe_segment` allow-list `errors.py` uses for rejection bodies: an
+    unknown result key is client-chosen text, exactly the kind of value that
+    allow-list exists to make safe to echo (design.md, Threat Matrix).
+    """
+    seen: dict[str, None] = {}
+    for item in results:
+        for key in item.model_extra or {}:
+            seen.setdefault(f"results[].{safe_segment(key)}", None)
+    return list(seen)
 
 
 def _require_json_media_type(request: Request) -> None:
@@ -129,13 +212,17 @@ async def create_run(request: Request) -> JSONResponse:
 
     store = request.app.state.store
     execution = _to_execution(payload.run)
+    reported_results = payload.results or []
+    results = [_to_result(item) for item in reported_results]
 
-    created = store.record_execution(execution, received_at=datetime.now(timezone.utc))
+    created = store.record_session(
+        execution, results=results, received_at=datetime.now(timezone.utc)
+    )
 
     acknowledgement = Acknowledgement(
         run_id=payload.run.id,
         status="created" if created else "duplicate",
-        ignored=[],
+        ignored=_ignored_result_keys(reported_results),
     )
     return JSONResponse(
         status_code=201 if created else 200,

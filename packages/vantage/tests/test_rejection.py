@@ -7,18 +7,32 @@ Runs the app factory (`vantage.service.app.create_app`) against an injected
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import socket
+import sqlite3
 import threading
 import time
-from typing import Any
+import tracemalloc
+from collections.abc import Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, get_args
 
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
+from vantage.core.domain.result import OUTCOMES
 from vantage.service.app import create_app
+from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
+from vantage.service.schemas import _Outcome
 from vantage.storage.memory import InMemoryExecutionStore
+from vantage.storage.sqlite_store import SqliteExecutionStore
+from vantage_port_contract import _execution, _result
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -32,6 +46,47 @@ def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
             "interrupt_reason": None,
         }
     }
+
+
+def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
+    """One well-formed `results[]` entry (design.md D15 interface example) --
+    mirrors `test_ingestion.py`'s helper of the same name and shape."""
+    entry: dict[str, Any] = {
+        "node_id": node_id,
+        "file_path": node_id.split("::", 1)[0],
+        "class_name": None,
+        "function_name": node_id.rsplit("::", 1)[-1],
+        "param_id": None,
+        "outcome": "passed",
+        "duration": 0.0031,
+        "started_at": "2026-08-18T09:14:02.481930+00:00",
+        "finished_at": "2026-08-18T09:14:02.485012+00:00",
+        "setup_outcome": "passed",
+        "call_outcome": "passed",
+        "teardown_outcome": "passed",
+        "setup_duration": 0.0008,
+        "call_duration": 0.0019,
+        "teardown_duration": 0.0004,
+        "worker_id": None,
+    }
+    entry.update(overrides)
+    return entry
+
+
+def _bulk_results_report(
+    run_id: str, count: int, *, malformed_index: int | None = None
+) -> dict[str, Any]:
+    """A well-formed report carrying `count` results, one of which is
+    deliberately malformed at `malformed_index` (task 5.1/5.5/5.6 fixture)."""
+    report = _well_formed_report(run_id)
+    results = []
+    for index in range(count):
+        entry = _result_entry(f"packages/vantage/tests/test_bulk.py::test_{index}")
+        if index == malformed_index:
+            entry["outcome"] = "not-a-real-outcome"
+        results.append(entry)
+    report["results"] = results
+    return report
 
 
 @pytest.fixture
@@ -176,6 +231,162 @@ def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -
 
     assert response.status_code == 422
     assert max(len(field) for field in response.json()["fields"]) < 128
+
+
+# --- Phase 5: whole-report rejection, atomicity, measurement ---------------
+
+
+@pytest.mark.req("RQ-42")
+@pytest.mark.req("RQ-3")
+def test_one_malformed_result_among_five_hundred_rejects_the_whole_report(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """RQ-42.1 with RQ-3.2: one malformed entry deep inside a large `results`
+    list rejects the entire report, not the 250 valid entries ahead of it.
+    Pydantic validates the whole model before this route ever converts a
+    single entry or calls `record_session` -- rejection is whole-report,
+    never partial (design.md D19's sibling guarantee)."""
+    report = _bulk_results_report("2" + "a" * 31, 500, malformed_index=250)
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 422
+    assert store.count_executions() == 0
+    assert store.count_results() == 0
+
+
+@pytest.mark.req("RQ-42")
+def test_duplicate_node_id_inside_one_report_is_422_whole_report(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """D19 layer 2: a duplicate `node_id` inside one report is rejected
+    loudly and wholesale -- the layer that catches a plugin defect before it
+    ever reaches the silent replay backstop (D19 layer 3)."""
+    node_id = "packages/vantage/tests/test_dup.py::test_one"
+    report = _well_formed_report("3" + "b" * 31)
+    report["results"] = [_result_entry(node_id), _result_entry(node_id, outcome="failed")]
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 422
+    assert store.count_executions() == 0
+    assert store.count_results() == 0
+
+
+@pytest.mark.req("RQ-42")
+def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
+    client: TestClient,
+) -> None:
+    """Threat-derived (design.md D15/Threat Matrix): the rejection body names
+    the offending field through the existing `safe_segment` allow-list, and
+    the node id **value** is never echoed anywhere in the response."""
+    node_id = "packages/vantage/tests/test_secret_path.py::test_should_not_leak"
+    report = _well_formed_report("4" + "c" * 31)
+    report["results"] = [_result_entry(node_id), _result_entry(node_id, outcome="failed")]
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 422
+    assert node_id not in response.text
+    body = response.json()
+    assert "results" in body["fields"]
+    for field in body["fields"]:
+        assert safe_segment(field) == field
+
+
+@pytest.mark.req("RQ-3")
+def test_five_hundred_results_fit_within_the_body_cap() -> None:
+    """D23: the cap is not raised in this change -- it is measured against.
+    Builds a 500-result report through the same wire-shaped assembly the
+    other tests in this module use and reports the real byte count."""
+    report = _bulk_results_report("5" + "d" * 31, 500)
+    encoded = json.dumps(report).encode("utf-8")
+
+    print(f"500-result report size: {len(encoded)} bytes (cap {MAX_REPORT_BYTES})")
+    assert len(encoded) < MAX_REPORT_BYTES
+
+
+@pytest.mark.req("RQ-3")
+def test_server_peak_memory_for_one_five_hundred_result_request(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """D23: server-side peak memory for one 500-result request is measured,
+    not asserted against an invented threshold."""
+    report = _bulk_results_report("6" + "e" * 31, 500)
+
+    tracemalloc.start()
+    try:
+        response = client.post("/api/v1/runs", json=report)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    print(f"peak traced memory for one 500-result request: {peak} bytes")
+    assert response.status_code == 201
+    assert store.count_results() == 500
+
+
+class _CommitCountingConnection:
+    """Wraps a real `sqlite3.Connection`, counting only `COMMIT` statements.
+
+    RQ-3.3 (D21): `record_session` must reach storage in exactly one commit
+    for the whole batch, not one per result or one per statement. Wrapping
+    the connection is the only way to observe that from outside
+    `SqliteExecutionStore` without weakening the adapter's own commit
+    discipline for the sake of a test.
+    """
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+        self.commit_count = 0
+
+    def execute(self, sql: str, parameters: Sequence[object] = ()) -> sqlite3.Cursor:
+        if sql.strip() == "COMMIT":
+            self.commit_count += 1
+        return self._real.execute(sql, parameters)
+
+    def executemany(self, sql: str, seq_of_parameters: Any) -> sqlite3.Cursor:
+        return self._real.executemany(sql, seq_of_parameters)
+
+    def close(self) -> None:
+        self._real.close()
+
+
+@pytest.mark.req("RQ-3")
+def test_five_hundred_results_reach_storage_in_one_commit(tmp_path: Path) -> None:
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    counting = _CommitCountingConnection(adapter._conn)
+    adapter._conn = counting  # type: ignore[assignment]
+
+    try:
+        execution = _execution("f" + "0" * 31)
+        results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
+
+        created = adapter.record_session(
+            execution, results=results, received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is True
+        assert counting.commit_count == 1
+    finally:
+        adapter.close()
+
+
+@pytest.mark.req("RQ-30")
+def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None:
+    """The six outcome strings live in three places (design.md, Interfaces
+    section): `schema.sql`'s CHECK, `OUTCOMES`, and the service `_Outcome`
+    Literal. Parses the CHECK clause itself instead of trusting a fourth,
+    hand-typed copy here -- the CHECK is the ground truth this test protects."""
+    schema_sql = (
+        _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"CHECK \(outcome IN \(([^)]+)\)\)", schema_sql)
+    assert match is not None
+    schema_outcomes = frozenset(value.strip(" '") for value in match.group(1).split(","))
+
+    assert schema_outcomes == OUTCOMES
+    assert schema_outcomes == frozenset(get_args(_Outcome))
 
 
 # --- Raw-socket truncation (task 3.7) ---------------------------------------
