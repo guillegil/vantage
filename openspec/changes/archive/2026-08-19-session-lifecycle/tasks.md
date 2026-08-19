@@ -294,3 +294,109 @@ Bases: PR 1 → tracker branch (`ft/session-lifecycle`); PR *n* → PR *n−1* b
       RQ-29|RQ-21|RQ-25|RQ-44|RQ-26|RQ-30|RQ-24"` each reach the test that
       proves them; confirm `derive_presentation`'s new obligations carry no
       new `RQ-xx` marker.
+
+## Phase 5: The scenarios the task list forgot (PR 5)
+
+Added 2026-08-19 after `sdd-verify` returned `blocked` with five untested spec
+scenarios. **All 61 earlier tasks were genuinely done** — the gap is upstream of
+apply: `design.md`'s Integration and E2E test-layer rows were never decomposed
+into tasks, so three criteria this change was commissioned to restore shipped
+written-but-unproven, and two regression paths ship green.
+
+The suite reported 241 passed and zero warnings while none of this was covered.
+Gates measure the tests that exist, not the scenarios that should have them.
+
+- [x] 5.1 RED `packages/pytest-vantage/tests/test_run_report.py`: a session
+      killed with **SIGKILL** mid-run leaves a run entry present, holding a
+      start time and a null end time (`run-recording` RQ-1.6). Use
+      `pytester.popen`, wait until the child is past `pytest_sessionstart`,
+      then `os.kill(pid, signal.SIGKILL)`. The existing
+      `test_server_dropped_mid_session_preserves_exit_status_and_warns_once`
+      is the pattern for the popen/wait shape, including its
+      `stdin=subprocess.DEVNULL` note — on 3.10 `communicate()` flushes a
+      closed stdin and raises.
+- [x] 5.2 RED, same file: that entry carries **no interrupt reason** and is
+      not marked interrupted (RQ-31.3). This asserts an **absence**: SIGKILL
+      cannot be caught, so no code of this project runs to record one. The
+      contrast with the existing SIGINT test is the point — assert both in
+      one place if it makes the distinction legible.
+- [x] 5.3 RED, same file: a **still-running** session already has a run
+      entry with a start time and a null end time (RQ-1.5) — query the
+      server while the child is still executing, before it finishes.
+- [x] 5.4 RED `packages/vantage/tests/test_rejection.py`: a finish report
+      **truncated in transit after an accepted start-write** leaves the run
+      entry as the start-write left it — present, null `finished_at`, no
+      result rows — rather than removing it (`run-recording` RQ-3.2,
+      `session-ingestion` RQ-42.3, the second scenario of each). The existing
+      `test_truncated_body_raw_socket` covers only the no-prior-report case.
+- [x] 5.5 RED `packages/vantage/tests/test_ingestion.py` (W1): a heartbeat
+      for a **known** run whose `last_contact_at` is already ahead of the
+      beat answers **200**, not 404. `touch_last_contact` returns `False`
+      there, so this is the only case that distinguishes a 404 resolved from
+      `get_execution` from one inferred off a zero rowcount. Today all four
+      heartbeat tests pass against the wrong implementation.
+- [x] 5.6 RED `packages/vantage/tests/vantage_port_contract.py` or
+      `test_sqlite_store.py` (W2): `received_at`, `started_at` and
+      `last_contact_at` are **not advanced** by the finish-write. Neither
+      column is exposed on `Execution`, so no existing test can observe them
+      — read them directly. Adding `last_contact_at = excluded.last_contact_at`
+      to the `DO UPDATE` list currently leaves all 241 tests green.
+- [x] 5.7 REFACTOR `test_a_fast_suite_emits_no_heartbeat` (W3): it asserts
+      only that no beat arrived, and `@liveness_isolated` swallows anything
+      the beat path raises — so deleting `_last_beat_at` keeps it green while
+      emitting a warning per test. Assert warning-freedom as well, so a
+      crashed path stops being indistinguishable from a suppressed one.
+- [x] 5.8 Tick `proposal.md`'s Success Criteria that are now genuinely met,
+      and leave unticked any that are not. They are all still `[ ]`,
+      including the three naming exactly these criteria.
+- [x] 5.9 GREEN gate: `uv run --extra dev pytest` with **zero warnings**,
+      `uv run mypy .`, `uv run ruff check .`, `uv run deptry .`. State which
+      matrix legs ran locally and which were left to CI.
+
+## Phase 6: The heartbeat's own wire, actually exercised (PR 6)
+
+Added 2026-08-19 after verify round two. Round one graded
+`session-liveness`'s "A long suite's last contact advances during execution"
+as PARTIAL; round two re-derived it **by mutation** and it is UNTESTED.
+
+`send_heartbeat` is never invoked against a real server anywhere in the suite —
+both of its test references monkeypatch it away. So the chain has its first and
+third links tested and its middle one not at all:
+
+```
+plugin decides to beat  ->  send_heartbeat POSTs  ->  route advances contact
+        tested                    UNTESTED                    tested
+```
+
+Reproduced independently by the orchestrator: changing the path suffix to
+`/HEARTBEAT-TYPO` leaves **246 passed**. A monkeypatched transport function
+silently voids every end-to-end scenario that depends on its wire format, and
+no number of green tests will say so.
+
+- [x] 6.1 RED `packages/pytest-vantage/tests/test_run_report.py`: run a suite
+      against the real `vantage_server` fixture **without patching
+      `send_heartbeat`**, long enough to cross one beat interval, and assert
+      the **server's** `last_contact_at` for that run advances past the
+      value the start-write recorded. Read it from the server's store, not
+      from a captured call — `touch_last_contact` on `vantage_server.store`
+      is wrapped (not replaced: the real implementation still runs) so the
+      wrapper can read the store's own pre-update value, exactly what the
+      start-write recorded, before the first real heartbeat overwrites it.
+      **Verified by mutation before calling it done**: broke
+      `_HEARTBEAT_PATH_SUFFIX` in `transport.py` to `/HEARTBEAT-TYPO` — RED
+      (`no heartbeat ever reached the server's touch_last_contact`, 1
+      failed / 246 passed), reverted — clean. Also mutated the HTTP method
+      (`POST`→`GET`, RED: 405) and the run-id/suffix ordering (RED: 404),
+      both reverted.
+- [x] 6.2 Keep the suite's wall-clock honest. `_BEAT_INTERVAL_SECONDS` is
+      driven to `0.0` via `monkeypatch` for this test only (the same
+      technique task 4.18's wiring test already established) — the
+      production default (`30.0`) is never touched. Cost measured at 0.40 s
+      standalone; not marked `slow` (comparable to the existing unmarked
+      wiring test, well under the `slow` marker's real-elapsed-time
+      threshold used elsewhere in this suite, e.g. the 8 s duration test).
+- [x] 6.3 GREEN gate: `uv run --extra dev pytest` — **247 passed, zero
+      warnings**, 25.88 s serial / 10.97 s under `-n auto`. `uv run mypy .`
+      clean (58 source files). `uv run ruff check .` clean. `uv run ruff
+      format --check .` — 58 files already formatted. `uv run deptry .`
+      clean.

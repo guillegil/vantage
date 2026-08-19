@@ -366,6 +366,38 @@ def test_heartbeat_cannot_touch_finish_fields(
     assert after.interrupt_reason == before.interrupt_reason
 
 
+@pytest.mark.req(id="RQ-44")
+def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """W1: the 404 is resolved by `get_execution`, never by a zero-rowcount
+    update -- the one case that distinguishes the two implementations is a
+    *known* run whose stored `last_contact_at` is already ahead of this
+    beat, so `touch_last_contact` itself returns `False`. Every other
+    heartbeat test's incoming beat is strictly later than the stored
+    contact, so `rowcount` would also be 1 there and could not catch a
+    regression to the wrong implementation. Setting `_last_contact` directly
+    into the future, rather than issuing two real heartbeats, is what
+    guarantees the beat under test is provably earlier without a timing race.
+    """
+    report = _well_formed_report("4" + "a" * 31)
+    report["run"]["finished_at"] = None
+    report["run"]["exit_status"] = None
+    client.post("/api/v1/runs", json=report)
+    run_id = report["run"]["id"]
+    far_future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    store._last_contact[run_id] = far_future  # noqa: SLF001
+
+    response = client.post(f"/api/v1/runs/{run_id}/heartbeat")
+
+    assert response.status_code == 200
+    assert response.json() == {"run_id": run_id, "status": "acknowledged"}
+    # The monotonic guard rejected the earlier beat: the stored contact is
+    # unchanged, yet the response is still 200 -- a rowcount-based 404 would
+    # have answered 404 here.
+    assert store._last_contact[run_id] == far_future  # noqa: SLF001
+
+
 # --- Phase 4: `app.state.grace_period` (design.md D34, task 4.14) ----------
 
 

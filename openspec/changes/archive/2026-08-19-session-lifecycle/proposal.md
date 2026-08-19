@@ -236,23 +236,50 @@ repository.
 
 ## Success Criteria
 
-- [ ] A SIGKILL'd session leaves a run entry with a start time, a null end time and
+- [x] A SIGKILL'd session leaves a run entry with a start time, a null end time and
       **no interrupt reason** — RQ-31.3 fully satisfied, and restored to the spec.
-- [ ] RQ-1.5 and RQ-1.6 are back in `run-recording/spec.md` with passing scenarios.
-- [ ] A finish-write following a start-write applies in full; a reordered start-write
-      never nulls a recorded finish.
+      Proven by `test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_reason`
+      (Phase 5, task 5.1/5.2).
+- [x] RQ-1.5 and RQ-1.6 are back in `run-recording/spec.md` with passing scenarios.
+      Proven by `test_a_still_running_session_already_has_a_run_entry` (RQ-1.5) and
+      the SIGKILL test above (RQ-1.6) — Phase 5, tasks 5.1/5.3.
+- [x] A finish-write following a start-write applies in full; a reordered start-write
+      never nulls a recorded finish. Proven since Phase 1
+      (`test_finish_after_start_applies_in_full`,
+      `test_reordered_start_after_finish_never_nulls_the_recorded_finish`).
 - [ ] `last_contact_at` advances while a suite runs and stops when the process dies.
-- [ ] A run whose last contact is older than the grace period derives as *abandoned*;
+      Still only partial (verify-report W5): a beat being *sent* is proven
+      end-to-end, but nothing joins that to `last_contact_at` itself advancing on
+      the server, and Phase 5 did not add that test.
+- [x] A run whose last contact is older than the grace period derives as *abandoned*;
       a Ctrl-C run derives as *interrupted*; a fresh one derives as *running*. Grace
-      is measured from last contact.
-- [ ] A heartbeat failing mid-session still lets that session's results be recorded,
-      with one warning.
+      is measured from last contact. Proven by `test_liveness.py`, unchanged since
+      Phase 4.
+- [x] A heartbeat failing mid-session still lets that session's results be recorded,
+      with one warning. Proven by
+      `test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still_recorded`,
+      unchanged since Phase 4.
 - [ ] RQ-3.2 and RQ-42.3 carry explicit `MODIFIED` deltas — no scenario in
-      `openspec/specs/` contradicts shipped behaviour.
-- [ ] RQ-3's Analysis argument and its premise test describe per-report atomicity.
-- [ ] `docs/schema-manifest.md` matches a freshly created schema (RQ-29 Inspection).
-- [ ] An ADR records the schema-evolution policy, `Proposed` in the PR.
-- [ ] Every slice lands under 500 changed lines.
+      `openspec/specs/` contradicts shipped behaviour. The delta half is done
+      (`openspec/changes/session-lifecycle/specs/run-recording/spec.md` and
+      `session-ingestion/spec.md` both carry the correction as `MODIFIED`), but this
+      change is not archived yet: `openspec/specs/session-ingestion/spec.md` and
+      `openspec/specs/run-recording/spec.md` still carry the old, now-contradicted
+      wording ("the run table stays empty" / "no run entry ... is present either")
+      until archive merges the delta. Left unticked deliberately — this criterion
+      names a post-archive state, not a Phase 5 one.
+- [x] RQ-3's Analysis argument and its premise test describe per-report atomicity.
+      `specs/run-recording/spec.md`'s RQ-3 Analysis argument and
+      `test_start_write_reaches_storage_in_one_commit` /
+      `test_finish_report_reaches_storage_in_one_commit`, both since Phase 1.
+- [x] `docs/schema-manifest.md` matches a freshly created schema (RQ-29 Inspection).
+      Done in Phase 3, unchanged.
+- [x] An ADR records the schema-evolution policy, `Proposed` in the PR.
+      `docs/adr/0013-refuse-databases-from-an-older-schema-version.md`, Phase 3.
+- [ ] Every slice lands under 500 changed lines. Verify-report W8 records Phase 4's
+      actual figure as 770 changed lines against the 500-line budget (the native
+      attempt was acquired retroactively for that phase, so the ledger shows 0,
+      which is an accounting gap, not a passing measurement). Left unticked.
 
 ## Proposal question round
 

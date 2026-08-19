@@ -68,6 +68,13 @@ NOT store the parseable subset: RQ-3 requires a session to be observable in
 full or not at all, and a session stored minus the entries that failed to parse
 is a partial write wearing the appearance of a whole one.
 
+Rejecting a report never removes or alters a run entry created by an earlier
+*accepted* report for the same session. A rejected report stores nothing
+**from that report**; it does not undo what a prior accepted report already
+wrote.
+(Previously: RQ-42.3 asserted a truncated report leaves the run table empty
+in every case, which assumed no prior report for the session could exist.)
+
 #### Scenario: Missing required field (RQ-42.1)
 - GIVEN an empty database
 - WHEN a report with a missing required field is submitted
@@ -78,10 +85,16 @@ is a partial write wearing the appearance of a whole one.
 - WHEN a payload that is not valid JSON is submitted
 - THEN the response reports the rejection and the run table stays empty
 
-#### Scenario: Body truncated midway (RQ-42.3)
-- GIVEN an empty database
+#### Scenario: Body truncated midway, no prior report (RQ-42.3)
+- GIVEN an empty database with no prior report for this session
 - WHEN a report is submitted whose body is truncated midway
 - THEN the response reports the rejection and the run table stays empty
+
+#### Scenario: Finish report truncated after an accepted start-write (RQ-42.3, RQ-3.2)
+- GIVEN a session whose start-write has already been accepted, leaving a run entry with a null `finished_at`
+- WHEN that session's finish report is submitted with its body truncated midway
+- THEN the response reports the rejection
+- AND the run entry is left exactly as the start-write wrote it — a start time, a null `finished_at`, and no result rows — rather than the run table being emptied or the finish report's data being applied
 
 #### Scenario: One malformed result rejects the whole report (RQ-42.1, with RQ-3.2)
 - GIVEN an empty database
