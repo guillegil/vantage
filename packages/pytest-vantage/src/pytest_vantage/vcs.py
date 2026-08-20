@@ -96,6 +96,40 @@ def _field(result: subprocess.CompletedProcess[str] | None) -> str | None:
     return result.stdout.strip() if result is not None and result.returncode == 0 else None
 
 
+_MAX_SUBJECT_BYTES = 64 * 1024 + 1024
+"""The plugin's cap, deliberately ABOVE the server's 64 KiB semantic bound
+(design.md D49). Cutting at or below it would deliver a long subject already
+short, so the server would find nothing to truncate and record
+`vcs_commit_subject_truncated = 0` -- a false zero it has no way to detect.
+The extra kibibyte is the margin that keeps the server's flag honest.
+"""
+
+
+def _bounded_subject(value: str | None) -> str | None:
+    """One line, and never large enough to threaten the report's size cap
+    (design.md D44, D49).
+
+    `git`'s `%s` folds a multi-line first paragraph into one line, so the
+    newline cut is belt-and-braces rather than the primary mechanism -- but
+    it costs nothing and this value is stored, so a newline that ever did
+    escape must not be able to forge a second log line.
+
+    The byte cap is not belt-and-braces. `%s` is unbounded: a commit message
+    whose first paragraph is 200 000 characters yields a 200 001-byte
+    subject, measured, and without this the session report could exceed
+    `MAX_REPORT_BYTES` and be rejected as a unit -- losing every result in
+    that session to a commit message. Sliced on UTF-8 bytes at a character
+    boundary, never on characters.
+    """
+    if value is None:
+        return None
+    line = value.split("\n", 1)[0]
+    encoded = line.encode("utf-8")
+    if len(encoded) <= _MAX_SUBJECT_BYTES:
+        return line
+    return encoded[:_MAX_SUBJECT_BYTES].decode("utf-8", errors="ignore")
+
+
 def _build_env() -> dict[str, str]:
     env = dict(os.environ)
     env.update(_ENV_OVERRIDES)
@@ -167,7 +201,7 @@ def capture(rootpath: Path) -> VcsSnapshot:
     if commit is not None:
         # design.md D44: skipped entirely when invocation 2 returned null.
         subject_argv = ["git", "show", "--no-patch", "--no-show-signature", "--format=%s", "HEAD"]
-        commit_subject = _field(invoke(subject_argv))
+        commit_subject = _bounded_subject(_field(invoke(subject_argv)))
 
     dirty_field = _field(invoke(["git", "status", "--porcelain", "--untracked-files=no"]))
     dirty = None if dirty_field is None else bool(dirty_field)

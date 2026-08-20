@@ -315,3 +315,62 @@ def test_whole_capture_budget_not_per_invocation(
     assert snapshot.root is not None  # the gate succeeds (3s < the initial 5s budget)
     # ...but not every later invocation fits inside the shared budget.
     assert not (snapshot.commit and snapshot.branch and snapshot.dirty is not None)
+
+
+def test_a_huge_commit_subject_is_bounded_before_it_reaches_the_wire(
+    tmp_path: Path,
+) -> None:
+    """`git`'s `%s` is unbounded.
+
+    Measured: a commit whose first paragraph is 200 000 characters yields a
+    200 001-byte subject. Nothing capped it, so it would ride the session
+    report whole -- and a large enough one pushes the report past
+    `MAX_REPORT_BYTES`, which the server rejects as a unit. Every result in
+    that session would be lost to a commit message.
+
+    The cap sits deliberately ABOVE the server's 64 KiB bound so the server
+    still sees something to truncate and its flag stays honest (design.md
+    D49). Found by review after Phase 1 shipped without it.
+    """
+    repo = tmp_path / "huge"
+    repo.mkdir()
+    _git("init", "-q", ".", cwd=repo)
+    _git("config", "user.email", "t@t", cwd=repo)
+    _git("config", "user.name", "t", cwd=repo)
+    (repo / "a").write_text("a")
+    _git("add", "a", cwd=repo)
+    # Via a file, not argv: a 200 000-character argument raises
+    # `OSError: [Errno 7] Argument list too long` before git ever sees it.
+    message = tmp_path / "message"
+    message.write_text("x" * 200_000)
+    _git("commit", "-q", "-F", str(message), cwd=repo)
+
+    snapshot = vcs.capture(repo)
+
+    assert snapshot.commit_subject is not None
+    encoded = snapshot.commit_subject.encode("utf-8")
+    assert len(encoded) == vcs._MAX_SUBJECT_BYTES  # noqa: SLF001
+    # Above the server's own bound, so the server still truncates and records
+    # the flag truthfully rather than seeing an already-short value.
+    assert len(encoded) > 64 * 1024
+
+
+def test_a_multi_line_first_paragraph_stores_as_one_line(tmp_path: Path) -> None:
+    """`%s` folds a multi-line first paragraph with spaces rather than
+    returning only the literal first line — verified against real git — so
+    the stored value is one line either way. The explicit cut is what makes
+    that true of any `%s` behaviour, not only today's.
+    """
+    repo = tmp_path / "multiline"
+    repo.mkdir()
+    _git("init", "-q", ".", cwd=repo)
+    _git("config", "user.email", "t@t", cwd=repo)
+    _git("config", "user.name", "t", cwd=repo)
+    (repo / "a").write_text("a")
+    _git("add", "a", cwd=repo)
+    _git("commit", "-q", "-m", "first line\nsecond line", "-m", "body", cwd=repo)
+
+    snapshot = vcs.capture(repo)
+
+    assert snapshot.commit_subject is not None
+    assert "\n" not in snapshot.commit_subject
