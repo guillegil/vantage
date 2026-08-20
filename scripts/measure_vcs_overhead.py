@@ -235,7 +235,11 @@ def _run_pytest_session(test_dir: Path, *, vantage_address: str | None) -> float
         "-p",
         "no:cacheprovider",
     ]
-    argv += ["--vantage", vantage_address] if vantage_address else ["-p", "no:vantage"]
+    argv += (
+        ["--vantage", "--vantage-server", vantage_address]
+        if vantage_address
+        else ["-p", "no:vantage"]
+    )
     start = time.perf_counter()
     subprocess.run(  # noqa: S603 -- literal argv, shell=False, benchmark-only
         argv, cwd=test_dir.parent, capture_output=True, text=True, check=False

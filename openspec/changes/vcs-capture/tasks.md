@@ -311,7 +311,7 @@ Modifies `packages/vantage/src/vantage/storage/sqlite_store.py`,
       CLAUDE.md); reports the git cost separately from the report cost,
       and `--untracked-files=no` separately from default `git status`, so
       D44's flag choice is justified by a number.
-- [ ] 5.2 Run the harness by hand (not in CI); transcribe the **medians**,
+- [x] 5.2 Run the harness by hand (not in CI); transcribe the **medians**,
       the machine, the git version, the Python version and the date as a
       **Measurements** paragraph into
       `openspec/changes/vcs-capture/specs/version-control-context/spec.md`
