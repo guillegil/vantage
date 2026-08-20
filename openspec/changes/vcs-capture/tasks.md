@@ -196,41 +196,41 @@ Modifies `packages/vantage/src/vantage/core/domain/execution.py`,
 owed by this phase alone — it lands the wire and the domain merge that
 Phase 4's endpoint- and storage-level scenarios need.
 
-- [ ] 3.1 RED domain test module: `VcsContext.merged_over(previous)`
+- [x] 3.1 RED domain test module: `VcsContext.merged_over(previous)`
       coalesces **per field**, null → value only, never value → null; a
       partial incoming snapshot does not clobber a fuller previous one —
       the in-memory mirror of D48's SQL `COALESCE`, proven independently
       before the adapter uses it.
-- [ ] 3.2 RED `test_schemas.py`: `VcsReport` is `extra="forbid"` — an
+- [x] 3.2 RED `test_schemas.py`: `VcsReport` is `extra="forbid"` — an
       unknown field inside the `vcs` section is rejected; `commit:
       Field(max_length=64)` accepts a 64-hex SHA-256 value, never a
       40-hex pattern.
-- [ ] 3.3 RED `test_truncation.py` (create): `truncate()` — a 100 KiB
+- [x] 3.3 RED `test_truncation.py` (create): `truncate()` — a 100 KiB
       subject truncates to ≤64 KiB of UTF-8 with the flag `True`; a 1 KiB
       subject stores whole with the flag `False`; a multi-byte character
       sitting on the 64 KiB boundary is never split.
-- [ ] 3.4 RED `test_truncation.py`: the plugin's own cap sits **above**
+- [x] 3.4 RED `test_truncation.py`: the plugin's own cap sits **above**
       the server's bound — a subject between 64 KiB and 64 KiB + 1 KiB
       still arrives long enough that the server sets the truncation flag;
       assert this directly (the D49 false-zero defect this change is
       built to avoid).
-- [ ] 3.5 RED routes test module: `_to_execution` maps `vcs=None` when the
+- [x] 3.5 RED routes test module: `_to_execution` maps `vcs=None` when the
       section is absent **or** every field in it is null (unit-level
       precursor to Phase 4's endpoint-level scenarios).
-- [ ] 3.6 GREEN `execution.py`: `VcsContext` frozen/slots dataclass +
+- [x] 3.6 GREEN `execution.py`: `VcsContext` frozen/slots dataclass +
       `merged_over`; `Execution.vcs: VcsContext | None = None` appended
       with a default — every existing construction site keeps working.
-- [ ] 3.7 GREEN `schemas.py`: `VcsReport(BaseModel)`,
+- [x] 3.7 GREEN `schemas.py`: `VcsReport(BaseModel)`,
       `extra="forbid"`, five required fields, `commit: str | None =
       Field(max_length=64)`; `SessionReport.vcs: VcsReport | None = None`.
-- [ ] 3.8 GREEN `truncation.py` (create): `MAX_TEXT_FIELD_BYTES = 64 *
+- [x] 3.8 GREEN `truncation.py` (create): `MAX_TEXT_FIELD_BYTES = 64 *
       1024`; `truncate(value: str | None) -> tuple[str | None, bool]` —
       encode UTF-8, slice at the byte bound, `decode(errors="ignore")`,
       never split a multi-byte character.
-- [ ] 3.9 GREEN `routes/runs.py`: `_to_execution` normalises the `vcs`
+- [x] 3.9 GREEN `routes/runs.py`: `_to_execution` normalises the `vcs`
       section per the all-null test (3.5) and applies `truncate()` to
       `commit_subject`, setting `commit_subject_truncated`.
-- [ ] 3.10 GREEN gate:
+- [x] 3.10 GREEN gate:
       `uv run --extra dev pytest packages/vantage/tests -k "execution or schemas or truncation"`,
       `uv run mypy .` clean, confirm `vantage.core` gains no new import
       (RQ-26 AST architecture test still passes).
