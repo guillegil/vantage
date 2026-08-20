@@ -67,7 +67,13 @@ def _vcs(
     commit: str | None = "a" * 40,
     branch: str | None = "main",
     commit_subject: str | None = "a commit subject",
-    commit_subject_truncated: bool = False,
+    # `True` by default, deliberately. With `False`, both branches of the
+    # conflict clause's `CASE WHEN excluded.vcs_commit_subject IS NOT NULL`
+    # return the same value, so replacing the whole CASE with a bare
+    # `excluded.vcs_commit_subject_truncated` left every test green while
+    # producing a subject stored whole and flagged as untruncated -- a false
+    # zero the server cannot detect. Found by mutation, 2026-08-20.
+    commit_subject_truncated: bool = True,
     dirty: bool | None = False,
     root: str | None = "/repo",
 ) -> VcsContext:
@@ -488,6 +494,53 @@ class ExecutionStoreContract:
         stored = store.get_execution(identity)
         assert stored is not None
         assert stored.vcs == _vcs()
+
+    def test_a_partial_finish_snapshot_does_not_clobber_a_fuller_start_one(
+        self, store: ExecutionStore
+    ) -> None:
+        """The case that discriminates a per-FIELD merge from a per-OBJECT one.
+
+        Every other vcs contract test hands both writes the same snapshot or
+        no snapshot at all, and under either of those a whole-object swap and
+        a per-column `COALESCE` agree. So `merged_over` shipped correct but
+        unguarded: reverting it to
+        `stored.vcs if execution.vcs is None else execution.vcs` left all 326
+        tests green while the two adapters silently diverged. Found by
+        mutation, 2026-08-20.
+
+        The asymmetry is not contrived. A detached HEAD yields a snapshot with
+        a null branch, and a repository with no commits yields one with a null
+        commit and a null subject -- so a report whose snapshot is a strict
+        subset of an earlier one is what git itself produces.
+        """
+        identity = "2" + "6" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        full = _vcs()
+        store.record_session(
+            _start_only_execution(identity, started=started, vcs=full),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        # A strict subset: only the commit survives, as a detached-HEAD or
+        # unborn-branch read would produce.
+        partial = _vcs(branch=None, commit_subject=None, dirty=None, root=None)
+        store.record_session(
+            _execution(identity, finished=True, started=started, vcs=partial),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        stored = store.get_execution(identity)
+        assert stored is not None
+        assert stored.vcs is not None
+        # Null never clobbers a recorded value; the fuller snapshot survives
+        # field by field rather than being replaced wholesale.
+        assert stored.vcs.branch == full.branch
+        assert stored.vcs.commit_subject == full.commit_subject
+        assert stored.vcs.dirty == full.dirty
+        assert stored.vcs.root == full.root
+        assert stored.vcs.commit == full.commit
 
     def test_identical_vcs_snapshots_across_start_and_finish_apply_once(
         self, store: ExecutionStore
