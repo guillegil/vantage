@@ -334,18 +334,18 @@ Modifies `packages/vantage/src/vantage/storage/sqlite_store.py`,
       `test_schema_manifest.py::test_fresh_database_matches_the_recorded_ground_truth`
       and confirm it needs **no** new column/index counts — the schema is
       unchanged, only queries changed (D48).
-- [ ] 5.6 RQ-24 regression: run the existing clean-environment install
+- [x] 5.6 RQ-24 regression: run the existing clean-environment install
       check; confirm `pytest-vantage` still depends on pytest and the
       standard library only (`subprocess`/`shutil` are stdlib) — no new
       distribution, installing the plugin still never drags the server in.
-- [ ] 5.7 RQ-26 regression: run the existing AST architecture test;
+- [x] 5.7 RQ-26 regression: run the existing AST architecture test;
       confirm `VcsContext` adds no import to `vantage.core`.
-- [ ] 5.8 Traceability sweep:
+- [x] 5.8 Traceability sweep:
       `rg "RQ-10|RQ-23|RQ-39|RQ-21|RQ-24|RQ-25|RQ-26|RQ-22|RQ-30|RQ-29|RQ-41"`
       across the new and modified test files; confirm every marker
       resolves to a real test and that no new `RQ-xx` identifier was
       minted anywhere in this change.
-- [ ] 5.9 Final gate: `uv run ruff format . && uv run ruff check --fix .`,
+- [x] 5.9 Final gate: `uv run ruff format . && uv run ruff check --fix .`,
       `uv run mypy .`, `uv run deptry .`; run `uv run --extra dev pytest`
       locally on the interpreter available in this environment and the
       `-n auto` xdist path; **state explicitly** which of the 3.10–3.13
