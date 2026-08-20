@@ -24,6 +24,7 @@ import warnings
 from collections.abc import Callable
 
 import pytest
+from pytest_vantage import vcs
 from pytest_vantage.boundary import VantageWarning, _warn, fault_isolated, liveness_isolated
 from pytest_vantage.plugin import _preflight_reachable
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
@@ -918,7 +919,7 @@ def test_capability_probe_404_sends_no_start_write_and_no_heartbeat(
     assert b"POST /api/v1/runs " in finish_request
     _headers, _sep, finish_body = finish_request.partition(b"\r\n\r\n")
     payload = json.loads(finish_body)
-    assert set(payload) == {"run", "results"}
+    assert set(payload) == {"run", "results", "vcs"}
     assert set(payload["run"]) == {
         "id",
         "started_at",
@@ -1018,8 +1019,14 @@ def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
         lambda *a, **k: calls.append("send_heartbeat"),
     )
     monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
+    # This test is about the lifecycle-degraded gate, not vcs capture --
+    # neutralise it rather than spawning a real `git` subprocess for
+    # something this test does not exercise.
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
 
     class _ConfigDouble:
+        rootpath = "unused"
+
         def getoption(self, name: str, default: object = None) -> object:
             return None
 
@@ -1035,6 +1042,109 @@ def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
     recorder._maybe_beat()
 
     assert calls == []
+
+
+# --- VCS capture isolation (design.md D43, D51; recording-fault-tolerance) --
+
+
+def test_git_failure_disables_nothing_else(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recording-fault-tolerance: "A git failure disables nothing else in
+    the same session". Mutation-shaped, per the spec's own verification
+    note: `vcs.capture` itself never raises by its own contract (design.md
+    D43), so patching it TO raise is what proves the WRAPPER around it -- a
+    third, non-latching isolation path, neither `fault_isolated` nor
+    `liveness_isolated` -- rather than `vcs.capture`'s own behaviour.
+    Neither latch flag may be touched by this failure, and the session must
+    survive with nulls, not merely without a crash: every result and the
+    run row itself must still land.
+    """
+    from pytest_vantage.recorder import Recorder
+
+    original_init = Recorder.__init__
+    created: list[Recorder] = []
+
+    def _spy_init(self: Recorder, *args: object, **kwargs: object) -> None:
+        original_init(self, *args, **kwargs)  # type: ignore[arg-type]
+        created.append(self)
+
+    monkeypatch.setattr("pytest_vantage.recorder.Recorder.__init__", _spy_init)
+
+    def _raise(rootpath: object) -> vcs.VcsSnapshot:
+        raise RuntimeError("git exploded")
+
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", _raise)
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
+    )
+
+    # The escaped exception is exactly what `_capture_vcs` warns about once
+    # -- an in-process run's own `pytest_configure`-era warning escapes THIS
+    # session's capture, the same phenomenon `_combined_output`'s docstring
+    # names above, so it is asserted here rather than left to leak.
+    with pytest.warns(VantageWarning, match="could not read the git repository"):
+        result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=3)
+    assert result.ret == 0
+    assert len(created) == 1
+    recorder = created[0]
+    # Not merely "did not crash" -- neither latch this failure could have
+    # touched is set, proving it used neither existing isolation path.
+    assert recorder._disabled is False
+    assert recorder._liveness_disabled is False
+    executions = vantage_server.executions()
+    assert len(executions) == 1
+    assert len(vantage_server.results()) == 3
+
+
+@pytest.mark.slow
+def test_hung_git_does_not_delay_session(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """recording-fault-tolerance: "A hung git is bounded at five seconds".
+    A fake `git` on `PATH` that sleeps well past the whole-capture budget,
+    wired through a REAL `Recorder` -- unlike `test_vcs.py`'s
+    component-level precursor of the same name, this proves the budget
+    bounds `Recorder.__init__` itself, and that the run is still stored
+    with all five snapshot fields null.
+    """
+    shim_dir = pytester.path / "shim"
+    shim_dir.mkdir()
+    shim_path = shim_dir / "git"
+    shim_path.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(30)\n")
+    shim_path.chmod(0o755)
+    monkeypatch.setenv("PATH", str(shim_dir))
+
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send",
+        lambda address, report, *, timeout: sent.append(report),
+    )
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    started = time.monotonic()
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+    elapsed = time.monotonic() - started
+
+    result.assert_outcomes(passed=1)
+    # The whole-capture budget (5s), not several 5s timeouts stacked, plus
+    # slack for the rest of a one-test session.
+    assert elapsed < 5.0 + 5.0
+    assert sent, "no report captured -- the session never reached the finish-write"
+    finish_report = sent[-1]
+    assert finish_report["vcs"] == {
+        "commit": None,
+        "branch": None,
+        "commit_subject": None,
+        "dirty": None,
+        "root": None,
+    }
 
 
 @pytest.mark.req(id="RQ-21")

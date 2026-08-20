@@ -136,11 +136,11 @@ Modifies `packages/pytest-vantage/src/pytest_vantage/recorder.py`.
 `plugin.py` and `boundary.py` are **unchanged** (D43, D51) — confirmed by
 reading, not assumed.
 
-- [ ] 2.1 RED `test_run_report.py`: `_vcs_section()` serialises the
+- [x] 2.1 RED `test_run_report.py`: `_vcs_section()` serialises the
       **identical** snapshot on both `pytest_sessionstart` and
       `pytest_sessionfinish` reports — the snapshot is captured once in
       `__init__` and never re-read (precursor to D51's idempotent upsert).
-- [ ] 2.2 RED `test_failure_paths.py::test_git_failure_disables_nothing_else`
+- [x] 2.2 RED `test_failure_paths.py::test_git_failure_disables_nothing_else`
       — **mutation-shaped**: `vcs.capture` patched to raise (acceptable
       here per the spec's own verification note — the object under test is
       the isolation boundary, not git's behaviour). Assert pytest exits 0,
@@ -150,24 +150,24 @@ reading, not assumed.
       boundary is proven by the session surviving with nulls, not merely by
       not crashing. *(Scenario: A git failure disables nothing else in the
       same session)*
-- [ ] 2.3 RED
+- [x] 2.3 RED
       `test_failure_paths.py::test_hung_git_does_not_delay_session` — a
       fake `git` shim on `PATH` that sleeps past 5 s, wired through a real
       `Recorder`; assert the session completes without delay beyond the
       capture budget and the run is stored with all six vcs fields null.
       *(Scenario: A hung git is bounded at five seconds)*
-- [ ] 2.4 RED
+- [x] 2.4 RED
       `test_run_report.py::test_passing_suite_exit_status_survives_unreadable_repository`
       — an unreadable-repository fixture (reuse Phase 1's corrupt-`.git`
       fixture) wired through a real `Recorder`; a suite of passing tests;
       assert pytest exits 0. *(Scenario: A passing suite's exit status
       survives an unreadable repository, RQ-39.3)*
-- [ ] 2.5 RED
+- [x] 2.5 RED
       `test_run_report.py::test_failing_suite_exit_status_survives_unreadable_repository`
       — same fixture, one failing test; assert pytest exits 1. *(Scenario:
       A failing suite's exit status survives an unreadable repository,
       RQ-39.3)*
-- [ ] 2.6 GREEN `recorder.py`: `Recorder.__init__` calls
+- [x] 2.6 GREEN `recorder.py`: `Recorder.__init__` calls
       `vcs.capture(Path(str(config.rootpath)))`, wrapped in its own
       non-latching `try/except Exception` — distinct from `boundary.py`'s
       `fault_isolated`/`liveness_isolated`, no `_disabled` flag, every call
@@ -177,12 +177,12 @@ reading, not assumed.
       reaching pytest's `wrap_session`. Warns at most once via the existing
       `_warn` when `self._vcs.warning is not None`. One private
       `_vcs_section()` serialises the held snapshot for both reports (D51).
-- [ ] 2.7 Confirm, **by reading**, `plugin.py`'s xdist controller-only guard
+- [x] 2.7 Confirm, **by reading**, `plugin.py`'s xdist controller-only guard
       (`if hasattr(config, "workerinput"): return`) still precedes
       `Recorder` construction after this slice's hook additions — no
       worker ever spawns `git` (D36, D51). No edit expected; record that
       the invariant still holds.
-- [ ] 2.8 GREEN gate: `uv run --extra dev pytest packages/pytest-vantage`,
+- [x] 2.8 GREEN gate: `uv run --extra dev pytest packages/pytest-vantage`,
       confirm ≤5 `git` invocations per session and zero per test (RQ-25
       process-count check), confirm the plugin still imports nothing but
       pytest and the standard library (RQ-24).

@@ -45,13 +45,45 @@ from __future__ import annotations
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
+from pytest_vantage import vcs
 from pytest_vantage.boundary import _warn, fault_isolated, liveness_isolated
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.config import resolve_liveness_timeout
 from pytest_vantage.transport import send, send_heartbeat
+
+# design.md D51: `vcs.capture` never raises by its own contract (D43) -- this
+# text is used only if that contract is somehow defeated (e.g. a test
+# mutating it, per the recording-fault-tolerance spec's own verification
+# note). It is deliberately the same wording `vcs.py` itself uses for its
+# "gate failed" cases, so a user sees one consistent phrase regardless of
+# which layer actually caught the failure.
+_VCS_CAPTURE_ESCAPED_WARNING = "could not read the git repository"
+
+
+def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
+    """The third, non-latching isolation path (design.md D43, D51): not
+    `fault_isolated`, not `liveness_isolated` -- both latch, and reusing
+    either would turn "record the run with nulls" into "record nothing"
+    (the exact wrong implementation RQ-23 criterion 2 exists to catch). No
+    flag on `Recorder` backs this function; every call is independent, and
+    there is only ever one call, from `__init__`.
+
+    `vcs.capture` already handles every failure it can encounter internally
+    and never raises -- this wrapper exists only so that anything which
+    somehow escapes it still degrades to an empty snapshot and one warning,
+    rather than reaching pytest's own `wrap_session` as an INTERNALERROR:
+    `Recorder.__init__` runs inside `pytest_configure`, which is not
+    hook-wrapped (RQ-21 criterion 5's named failure).
+    """
+    try:
+        return vcs.capture(rootpath)
+    except Exception:  # the same outer net vcs.py's own docstring names, never BaseException
+        return vcs.VcsSnapshot(warning=_VCS_CAPTURE_ESCAPED_WARNING)
+
 
 # design.md D30: activity-driven, not a timer thread -- a beat is only ever
 # attempted from inside `pytest_runtest_logreport`, at most this often.
@@ -118,6 +150,15 @@ class Recorder:
     a new half-state). `pytest_sessionfinish` is untouched either way -- that
     is what makes "degraded" mean "record exactly as before", not a third
     state.
+
+    `_vcs` is captured once here, via `_capture_vcs` (design.md D51), never
+    re-read -- `_vcs_section()` serialises the SAME snapshot for both
+    `pytest_sessionstart` and `pytest_sessionfinish`, so the two reports can
+    never disagree about the repository state that produced the results.
+    Safe to call unconditionally in `__init__`, which runs inside
+    `pytest_configure` and is not itself hook-wrapped, only because
+    `_capture_vcs` cannot raise. A non-`None` warning is emitted at most
+    once, through the same `_warn` the preflight and every hook already use.
     """
 
     def __init__(
@@ -139,6 +180,21 @@ class Recorder:
         self._liveness_disabled = False
         self._results: dict[str, _Pending] = {}
         self._last_beat_at = time.monotonic()
+        self._vcs = _capture_vcs(Path(str(config.rootpath)))
+        if self._vcs.warning is not None:
+            _warn(config, f"vantage: {self._vcs.warning}")
+
+    def _vcs_section(self) -> dict[str, object]:
+        """Serialises the snapshot held since `__init__` (design.md D51) --
+        never re-read, so the start report and the finish report describe
+        the identical repository state that produced the results."""
+        return {
+            "commit": self._vcs.commit,
+            "branch": self._vcs.branch,
+            "commit_subject": self._vcs.commit_subject,
+            "dirty": self._vcs.dirty,
+            "root": self._vcs.root,
+        }
 
     @liveness_isolated
     def pytest_sessionstart(self) -> None:
@@ -172,6 +228,7 @@ class Recorder:
                 "interrupted": False,
                 "interrupt_reason": None,
             },
+            "vcs": self._vcs_section(),
         }
         send(self._address, report, timeout=self._liveness_timeout)
 
@@ -235,6 +292,7 @@ class Recorder:
                 "interrupt_reason": None,
             },
             "results": assemble_results(self._results),
+            "vcs": self._vcs_section(),
         }
         send(self._address, report, timeout=self._timeout)
 

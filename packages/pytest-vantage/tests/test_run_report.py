@@ -19,8 +19,10 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
+from pytest_vantage import vcs
 from vantage.core.domain.execution import Execution
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
@@ -174,6 +176,143 @@ def test_recorder_registered_only_when_vantage_flag_is_present(
 
     assert any(isinstance(plugin, Recorder) for plugin in active.pluginmanager.get_plugins())
     assert not any(isinstance(plugin, Recorder) for plugin in inactive.pluginmanager.get_plugins())
+
+
+# --- VCS wiring (task 2.1-2.8, design.md D43-D46, D51) -----------------------
+
+
+def _corrupt_git_repo(rootpath: Path) -> None:
+    """Reuses Phase 1's `test_vcs.py::test_corrupt_git_entry_records_nulls_and_warns_once`
+    fixture shape (a `.git` directory with a truncated `HEAD`, no objects) --
+    not a mock, a real repository `git` itself cannot read (design.md D45's
+    "corrupt repository" case, gate exits 128, `.git` exists)."""
+    (rootpath / ".git").mkdir(parents=True)
+    (rootpath / ".git" / "HEAD").write_text("ref: ")
+
+
+def test_vcs_section_is_identical_on_both_reports(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """design.md D51: the snapshot is captured once, in `__init__`, and
+    never re-read -- both the start report and the finish report must
+    serialise the IDENTICAL snapshot. `vcs.capture` is patched to return a
+    DIFFERENT snapshot on every call it might receive; if `Recorder` re-read
+    at finish time, the two reports would disagree. They cannot, because
+    there is only ever one call to disagree with itself.
+    """
+    call_count = [0]
+
+    def _fake_capture(rootpath: Path) -> vcs.VcsSnapshot:
+        call_count[0] += 1
+        return vcs.VcsSnapshot(
+            commit=f"commit-{call_count[0]}",
+            branch="main",
+            commit_subject="a message",
+            dirty=call_count[0] % 2 == 0,
+            root=str(rootpath),
+        )
+
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", _fake_capture)
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send",
+        lambda address, report, *, timeout: sent.append(report),
+    )
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert len(sent) == 2
+    start_report, finish_report = sent
+    assert start_report["vcs"] == finish_report["vcs"]
+    # The FIRST capture, never a later one -- proves it was not re-read.
+    assert start_report["vcs"]["commit"] == "commit-1"  # type: ignore[index]
+    assert call_count[0] == 1
+
+
+@pytest.mark.req(id="RQ-39")
+def test_passing_suite_exit_status_survives_unreadable_repository(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    _corrupt_git_repo(pytester.path)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}"
+    )
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    # A vacuous pass (git never invoked at all) would look identical to a
+    # real recovery -- this closes that gap: the corrupt repository IS read
+    # and IS what triggers exactly one warning (design.md D45).
+    output = result.stdout.str() + result.stderr.str()
+    assert output.count("VantageWarning:") == 1
+    assert "could not read the git repository" in output
+
+
+@pytest.mark.req(id="RQ-39")
+def test_failing_suite_exit_status_survives_unreadable_repository(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    _corrupt_git_repo(pytester.path)
+    pytester.makepyfile(test_sample="def test_it():\n    assert False\n")
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}"
+    )
+
+    result.assert_outcomes(failed=1)
+    assert result.ret == 1
+    output = result.stdout.str() + result.stderr.str()
+    assert output.count("VantageWarning:") == 1
+    assert "could not read the git repository" in output
+
+
+@pytest.mark.req(id="RQ-25")
+def test_git_invocation_count_does_not_scale_with_test_count(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RQ-25 process-count (design.md Testing Strategy row): `vcs.py`'s own
+    five-invocation ceiling (Phase 1) already bounds ONE `capture()` call --
+    this proves the wiring only ever makes that one call per SESSION, not
+    one per test. A session with five tests spawns exactly as many `git`
+    processes as a session with one -- never five times as many.
+    """
+    real_run = subprocess.run
+    calls: list[list[str]] = []
+
+    def _counting_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv and argv[0] == "git":
+            calls.append(list(argv))
+        return real_run(argv, **kwargs)  # type: ignore[call-overload,no-any-return]
+
+    monkeypatch.setattr("pytest_vantage.vcs.subprocess.run", _counting_run)
+
+    pytester.makepyfile(test_one="def test_a():\n    assert True\n")
+    pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}").assert_outcomes(
+        passed=1
+    )
+    after_one_test = len(calls)
+    assert 0 < after_one_test <= 5
+
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
+    )
+    pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}").assert_outcomes(
+        passed=6
+    )  # test_one's test is still collected too
+
+    # A second, independent session -- five more tests -- adds exactly one
+    # more session's worth of `git` calls, never five more.
+    assert len(calls) - after_one_test == after_one_test
 
 
 # --- End-to-end (task 6.1, RQ-1 + RQ-31) ------------------------------------
@@ -508,8 +647,14 @@ def test_a_fast_suite_emits_no_heartbeat(
         "pytest_vantage.recorder.send_heartbeat",
         lambda *args, **kwargs: beats.append("beat"),
     )
+    # This test is about the beat timing guard, not vcs capture -- neutralise
+    # it rather than spawning a real `git` subprocess for something this
+    # test does not exercise.
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
 
     class _ConfigDouble:
+        rootpath = "unused"
+
         def getoption(self, name: str, default: object = None) -> object:
             return None
 
