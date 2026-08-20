@@ -32,10 +32,34 @@ exactly, unlike the SQLite adapter's stored TEXT.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 
-from vantage.core.domain.execution import Execution
+from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
+
+
+def _normalized_vcs(vcs: VcsContext | None) -> VcsContext | None:
+    """The same all-null normalisation rule the SQLite adapter's
+    `_row_to_execution` applies on every read (design.md D48) -- applied
+    here on write instead, because this adapter stores the Python object
+    directly rather than re-deriving it from row columns on every read. In
+    production `_to_execution` already normalises before either adapter
+    sees the value; this is the second, independent enforcement `vcs=None`
+    normalisation (task 4.5) proves at the contract level so the two
+    adapters cannot drift apart."""
+    if vcs is None:
+        return None
+    if (
+        vcs.commit is None
+        and vcs.branch is None
+        and vcs.commit_subject is None
+        and vcs.dirty is None
+        and vcs.root is None
+    ):
+        return None
+    return vcs
+
 
 # `attempt` is not on the wire (design.md D19); every result in Phase 1/2/3
 # is attempt 0, matching the schema's `DEFAULT 0`.
@@ -63,12 +87,25 @@ class InMemoryExecutionStore:
         stored = self._executions.get(identity)
         created = stored is None
         if stored is None:
-            self._executions[identity] = execution
+            self._executions[identity] = replace(execution, vcs=_normalized_vcs(execution.vcs))
             self._last_contact[identity] = received_at
         elif stored.exit_status is None and execution.exit_status is not None:
             # Mirrors the SQLite adapter's `DO UPDATE ... WHERE` (design.md
             # D25): `exit_status`, never `finished_at`, is the discriminator,
             # and `started_at` is never advanced on this path.
+            #
+            # `vcs` merges under the SAME guard, own task 4.12 (design.md
+            # D48): `execution.vcs.merged_over(stored.vcs)` is the per-FIELD
+            # coalesce -- null -> value only, never value -> null -- the
+            # in-memory mirror of the SQLite adapter's per-column SQL
+            # `COALESCE`. `stored.vcs if execution.vcs is None else
+            # execution.vcs` (whole-object coalesce) is NOT the same rule:
+            # it diverges the moment one report carries a partial snapshot
+            # (a detached HEAD, a repository with no commits), which a
+            # per-field merge tolerates and a whole-object swap does not.
+            merged_vcs = _normalized_vcs(
+                stored.vcs if execution.vcs is None else execution.vcs.merged_over(stored.vcs)
+            )
             self._executions[identity] = Execution(
                 identity=stored.identity,
                 started_at=stored.started_at,
@@ -76,6 +113,7 @@ class InMemoryExecutionStore:
                 exit_status=execution.exit_status,
                 interrupted=execution.interrupted,
                 interrupt_reason=execution.interrupt_reason,
+                vcs=merged_vcs,
             )
 
         for result in results:

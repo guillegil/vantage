@@ -63,7 +63,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
-from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.storage.connection import open_database
 
@@ -76,16 +76,37 @@ _MAX_PLACEHOLDERS = 500
 # conflict branch's `DO UPDATE SET` list never names it, so a finish-write
 # applied over an existing start-only row leaves it exactly where the
 # creating report set it.
+#
+# The six `vcs_*` columns join the conflict branch under the SAME row-level
+# `exit_status` guard (design.md D48) -- not a second, independent
+# condition. `COALESCE(excluded.vcs_*, run.vcs_*)` is monotonic in the only
+# direction that matters: null -> value, never value -> null, so a
+# finish-write that carries no vcs data cannot clobber a snapshot the
+# start-write already recorded. `vcs_commit_subject_truncated` is NOT
+# coalesced independently -- its `CASE` keys on whether the INCOMING subject
+# is non-null, so the flag always travels with the value it describes,
+# never surviving a subject that came from the other report.
 _UPSERT_RUN = """
     INSERT INTO run (
         id, received_at, last_contact_at, started_at, finished_at,
-        exit_status, interrupted, interrupt_reason
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        exit_status, interrupted, interrupt_reason,
+        vcs_commit, vcs_branch, vcs_commit_subject, vcs_commit_subject_truncated,
+        vcs_dirty, vcs_root
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
         finished_at      = excluded.finished_at,
         exit_status      = excluded.exit_status,
         interrupted      = excluded.interrupted,
-        interrupt_reason = excluded.interrupt_reason
+        interrupt_reason = excluded.interrupt_reason,
+        vcs_commit         = COALESCE(excluded.vcs_commit,         run.vcs_commit),
+        vcs_branch         = COALESCE(excluded.vcs_branch,         run.vcs_branch),
+        vcs_commit_subject = COALESCE(excluded.vcs_commit_subject, run.vcs_commit_subject),
+        vcs_dirty          = COALESCE(excluded.vcs_dirty,          run.vcs_dirty),
+        vcs_root           = COALESCE(excluded.vcs_root,           run.vcs_root),
+        vcs_commit_subject_truncated =
+            CASE WHEN excluded.vcs_commit_subject IS NOT NULL
+                 THEN excluded.vcs_commit_subject_truncated
+                 ELSE run.vcs_commit_subject_truncated END
      WHERE run.exit_status IS NULL AND excluded.exit_status IS NOT NULL
 """
 
@@ -104,7 +125,9 @@ _TOUCH_LAST_CONTACT = """
 """
 
 _SELECT_RUN = """
-    SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason
+    SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
+           vcs_commit, vcs_branch, vcs_commit_subject, vcs_commit_subject_truncated,
+           vcs_dirty, vcs_root
     FROM run WHERE id = ?
 """
 
@@ -172,8 +195,60 @@ def _fixed_width_isoformat(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
+def _vcs_columns(vcs: VcsContext | None) -> tuple[object, ...]:
+    """The six `vcs_*` `_UPSERT_RUN` parameters (design.md D48).
+
+    `vcs_dirty` is `INTEGER NULL` with no default -- written as `1`, `0` or
+    `NULL`, and never `0` for "unknown", which would have a run recorded
+    outside a repository claim a clean working tree.
+    """
+    if vcs is None:
+        return (None, None, None, 0, None, None)
+    return (
+        vcs.commit,
+        vcs.branch,
+        vcs.commit_subject,
+        1 if vcs.commit_subject_truncated else 0,
+        None if vcs.dirty is None else (1 if vcs.dirty else 0),
+        vcs.root,
+    )
+
+
+def _row_to_vcs_context(row: tuple[object, ...]) -> VcsContext | None:
+    """The all-null normalisation rule (design.md D48), applied to the five
+    value columns -- `vcs_commit_subject_truncated` is excluded from the
+    check, matching `_to_execution`'s own rule (task 3.5/3.9): a run
+    recorded outside a repository reads back as `None`, never as a
+    `VcsContext` full of nulls."""
+    commit, branch, commit_subject, commit_subject_truncated, dirty, root = row
+    if (
+        commit is None
+        and branch is None
+        and commit_subject is None
+        and dirty is None
+        and root is None
+    ):
+        return None
+    return VcsContext(
+        commit=cast("str | None", commit),
+        branch=cast("str | None", branch),
+        commit_subject=cast("str | None", commit_subject),
+        commit_subject_truncated=bool(commit_subject_truncated),
+        dirty=None if dirty is None else bool(dirty),
+        root=cast("str | None", root),
+    )
+
+
 def _row_to_execution(row: tuple[object, ...]) -> Execution:
-    identity_value, started_at, finished_at, exit_status, interrupted, interrupt_reason = row
+    (
+        identity_value,
+        started_at,
+        finished_at,
+        exit_status,
+        interrupted,
+        interrupt_reason,
+        *vcs_row,
+    ) = row
     # `id` and `started_at` are `NOT NULL` in `schema.sql` -- a `cast`, not a
     # runtime check, documents that without an assert statement (S101).
     return Execution(
@@ -183,6 +258,7 @@ def _row_to_execution(row: tuple[object, ...]) -> Execution:
         exit_status=exit_status if isinstance(exit_status, int) else None,
         interrupted=bool(interrupted),
         interrupt_reason=interrupt_reason if isinstance(interrupt_reason, str) else None,
+        vcs=_row_to_vcs_context(tuple(vcs_row)),
     )
 
 
@@ -365,6 +441,7 @@ class SqliteExecutionStore:
                         execution.exit_status,
                         1 if execution.interrupted else 0,
                         execution.interrupt_reason,
+                        *_vcs_columns(execution.vcs),
                     ),
                 )
 

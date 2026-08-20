@@ -241,40 +241,40 @@ Modifies `packages/vantage/src/vantage/storage/sqlite_store.py`,
 `packages/vantage/src/vantage/storage/memory.py`,
 `packages/vantage/tests/vantage_port_contract.py`. **Depends on Phase 3.**
 
-- [ ] 4.1 RED `vantage_port_contract.py`: a second report with a null
+- [x] 4.1 RED `vantage_port_contract.py`: a second report with a null
       `vcs` section leaves recorded vcs values intact (COALESCE semantics,
       both adapters).
-- [ ] 4.2 RED `vantage_port_contract.py`: a start-then-finish pair with
+- [x] 4.2 RED `vantage_port_contract.py`: a start-then-finish pair with
       identical vcs snapshots applies once (idempotent, both adapters).
-- [ ] 4.3 RED `vantage_port_contract.py`: a reordered start-write still
+- [x] 4.3 RED `vantage_port_contract.py`: a reordered start-write still
       changes nothing, vcs columns included (both adapters).
-- [ ] 4.4 RED `test_sqlite_store.py`: `typeof(vcs_branch) = 'null'` after a
+- [x] 4.4 RED `test_sqlite_store.py`: `typeof(vcs_branch) = 'null'` after a
       run recorded outside a repository — asserted via SQL `typeof`, never
       falsy-equality, which `''` would also satisfy.
-- [ ] 4.5 RED `vantage_port_contract.py`: `vcs=None` normalisation — an
+- [x] 4.5 RED `vantage_port_contract.py`: `vcs=None` normalisation — an
       absent section and an all-null section both read back
       `execution.vcs is None`, in **both** adapters (D48's two
       normalisation rules, proven at the contract level so they cannot
       drift apart).
-- [ ] 4.6 RED
+- [x] 4.6 RED
       `test_ingestion.py::test_report_with_vcs_section_persists_six_fields`
       — POST `/api/v1/runs` with a `vcs` section against an empty
       database; assert the run entry holds the reported commit, branch,
       commit subject and dirty flag. *(Scenario: A report carrying a vcs
       section persists its six fields)*
-- [ ] 4.7 RED
+- [x] 4.7 RED
       `test_ingestion.py::test_report_without_vcs_section_still_records_run`
       — a well-formed report with no `vcs` key (the pre-change plugin
       shape); assert the run row holds all six vcs fields null and the
       response acknowledges it, rather than the report being rejected.
       *(Scenario: A report with no vcs section still records its run)*
-- [ ] 4.8 RED
+- [x] 4.8 RED
       `test_ingestion.py::test_vcs_section_accepted_without_capability_check`
       — a running server that has never advertised a vcs-related
       capability still accepts and stores a `vcs` section, no prior probe
       required. *(Scenario: The endpoint accepts a vcs section without any
       capability check)*
-- [ ] 4.9 RED `vantage_port_contract.py` or `test_sqlite_store.py` —
+- [x] 4.9 RED `vantage_port_contract.py` or `test_sqlite_store.py` —
       **Inspection, awaiting `read-api`**: a run recorded from a directory
       that is not a git repository is retrievable via `count_executions`
       and `get_execution` with all six vcs fields null; the test's own
@@ -282,22 +282,22 @@ Modifies `packages/vantage/src/vantage/storage/sqlite_store.py`,
       only, and is **not claimed as met** until `read-api` exposes an
       actual list. *(Scenario: Absent repository's run is retrievable in
       storage, pending a run list, RQ-23.2)*
-- [ ] 4.10 GREEN `sqlite_store.py`: `_UPSERT_RUN` 8 → 14 columns; insert
+- [x] 4.10 GREEN `sqlite_store.py`: `_UPSERT_RUN` 8 → 14 columns; insert
       branch writes all six `vcs_*`; conflict branch
       `COALESCE(excluded.vcs_*, run.vcs_*)` per column, `CASE` on
       `vcs_commit_subject_truncated` keyed to whether
       `excluded.vcs_commit_subject IS NOT NULL`, under the unchanged
       `exit_status` WHERE (D48).
-- [ ] 4.11 GREEN `sqlite_store.py`: `_SELECT_RUN`/`_row_to_execution` reads
+- [x] 4.11 GREEN `sqlite_store.py`: `_SELECT_RUN`/`_row_to_execution` reads
       the six columns back into `VcsContext | None`, the same all-null
       test as `_to_execution` (3.5).
-- [ ] 4.12 GREEN `memory.py`: **own task, not folded into 4.10/4.11** — the
+- [x] 4.12 GREEN `memory.py`: **own task, not folded into 4.10/4.11** — the
       conflict path calls `VcsContext.merged_over` instead of `stored.vcs
       if execution.vcs is None else execution.vcs`; the latter diverges
       from per-column `COALESCE` the moment one report carries a partial
       snapshot, and this was the exact bug class missing from the last
       change's affected-areas table.
-- [ ] 4.13 GREEN gate:
+- [x] 4.13 GREEN gate:
       `uv run --extra dev pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py packages/vantage/tests/test_ingestion.py`,
       `uv run mypy .` clean.
 

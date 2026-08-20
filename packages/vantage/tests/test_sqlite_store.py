@@ -105,3 +105,43 @@ def test_touch_last_contact_normalizes_a_non_utc_contact_before_storing_it(
         assert stored.startswith("2026-08-19T10:00:00")
     finally:
         store.close()
+
+
+def test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository(
+    tmp_path: Path,
+) -> None:
+    """design.md D48, task 4.4: a run recorded with `vcs=None` (outside a
+    repository) must write SQL `NULL` to `vcs_branch`, not `''` -- asserted
+    via `typeof(...)`, which distinguishes the two, never falsy-equality
+    (`not value`), which `''` would also satisfy."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        identity = "8" * 32
+        execution = _execution(identity, vcs=None)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        row = store._conn.execute(  # noqa: SLF001
+            "SELECT typeof(vcs_branch), typeof(vcs_commit), typeof(vcs_commit_subject),"
+            " typeof(vcs_dirty), typeof(vcs_root), typeof(vcs_commit_subject_truncated)"
+            " FROM run WHERE id = ?",
+            (identity,),
+        ).fetchone()
+
+        (
+            branch_type,
+            commit_type,
+            subject_type,
+            dirty_type,
+            root_type,
+            truncated_type,
+        ) = row
+        assert branch_type == "null"
+        assert commit_type == "null"
+        assert subject_type == "null"
+        assert dirty_type == "null"
+        assert root_type == "null"
+        # `vcs_commit_subject_truncated` is `INTEGER NOT NULL DEFAULT 0` --
+        # unlike its five siblings it is never SQL NULL.
+        assert truncated_type == "integer"
+    finally:
+        store.close()
