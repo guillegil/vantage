@@ -320,17 +320,17 @@ Modifies `packages/vantage/src/vantage/storage/sqlite_store.py`,
       10 s profile, ~6% of the 1 s profile) so the recorded result can
       disagree with it. State that a future change to the argv or
       invocation count MUST re-run it.
-- [ ] 5.3 Write
+- [x] 5.3 Write
       `docs/adr/0014-execute-git-from-the-plugin-as-a-bounded-fail-closed-subprocess.md`
       — Nygard, `Status: Proposed` in the PR, imperative title, linked to
       ADR-9 and to RQ-10/RQ-23/RQ-39; record the rejected `.git`-parser
       alternative and its reversal cost (D52).
-- [ ] 5.4 Update `docs/schema-manifest.md`: move the five `vcs_*` rows from
+- [x] 5.4 Update `docs/schema-manifest.md`: move the five `vcs_*` rows from
       reserved/unpopulated to populated; confirm `vcs_commit_subject`
       keeps its `†` marking the `vcs_commit_subject_truncated` sibling, so
       five rows correctly cover six columns, matching the manifest's own
       existing dagger convention.
-- [ ] 5.5 Run
+- [x] 5.5 Run
       `test_schema_manifest.py::test_fresh_database_matches_the_recorded_ground_truth`
       and confirm it needs **no** new column/index counts — the schema is
       unchanged, only queries changed (D48).

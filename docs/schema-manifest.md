@@ -98,11 +98,11 @@ altering it (ADR-0013).
 | `plugins` † | TEXT NULL (JSON) | RQ-11 | M3 |
 | `xdist_enabled` | INTEGER NULL | RQ-12 | M3 |
 | `xdist_worker_count` | INTEGER NULL | RQ-12 | M3 |
-| `vcs_commit` | TEXT NULL | RQ-10 / RQ-23 / RQ-39 | M3 |
-| `vcs_branch` | TEXT NULL | RQ-10 / RQ-23 / RQ-39 | M3 |
-| `vcs_commit_subject` † | TEXT NULL | RQ-10 / RQ-23 / RQ-39 | M3 |
-| `vcs_dirty` | INTEGER NULL, **no default** | RQ-10 / RQ-23 / RQ-39 | M3 |
-| `vcs_root` | TEXT NULL | RQ-10 / RQ-23 / RQ-39 | M3 |
+| `vcs_commit` | TEXT NULL | RQ-10 / RQ-23 / RQ-39 | **M3** |
+| `vcs_branch` | TEXT NULL | RQ-10 / RQ-23 / RQ-39 | **M3** |
+| `vcs_commit_subject` † | TEXT NULL | RQ-10 / RQ-23 / RQ-39 | **M3** |
+| `vcs_dirty` | INTEGER NULL, **no default** | RQ-10 / RQ-23 / RQ-39 | **M3** |
+| `vcs_root` | TEXT NULL | RQ-10 / RQ-23 / RQ-39 | **M3** |
 | `collected_count` | INTEGER NULL | — | M2 |
 
 **The five `vcs_*` columns are driven by three requirements, not one.**
@@ -113,12 +113,16 @@ with no gap, and all three record the run — which is why the product
 rule (every invocation gets a row) is not weakened by a missing
 repository.
 
-Two Milestone 3 writer obligations the schema must permit, both already
-satisfied by the types above: every `vcs_*` column must be written as SQL
+Two writer obligations the schema had to permit, both satisfied by the
+types above and now exercised by `sqlite_store.py`'s `_UPSERT_RUN`
+(`vcs-capture`, RQ-10/RQ-23/RQ-39): every `vcs_*` column is written as SQL
 `NULL`, never an empty string (an empty string is indistinguishable from
 a branch name that failed to read); and `vcs_dirty` has no default,
 because defaulting to 0 would make a run recorded outside a repository
-claim a clean working tree.
+claim a clean working tree. The five rows above moved from a forecast
+(`M3`, unpopulated) to a landed writer (`**M3**`, populated) without any
+schema change — the columns were already correctly typed and nullable;
+only the query that fills them changed.
 
 ### `test_case` — the RQ-13 catalogue
 
