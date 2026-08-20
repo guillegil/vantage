@@ -9,12 +9,9 @@ from __future__ import annotations
 import pytest
 from vantage.service.truncation import MAX_TEXT_FIELD_BYTES, truncate
 
-# design.md D49: the plugin's own cap is `64 * 1024 + 1024` -- a size guard
-# that must sit ABOVE the server's semantic bound so a subject the plugin
-# lets through is never already short enough to hide from the server. This
-# module never imports pytest_vantage (RQ-24/RQ-26: `vantage.service` does
-# not depend on the plugin distribution), so the plugin's constant is
-# reproduced here as a literal for the window it describes.
+# design.md D49: the plugin's own cap, `64 * 1024 + 1024`, sits ABOVE the
+# server's bound. `vantage.service` never imports `pytest_vantage`
+# (RQ-24/RQ-26), so the plugin's constant is reproduced here as a literal.
 _PLUGIN_CAP_BYTES = 64 * 1024 + 1024
 
 
@@ -45,39 +42,31 @@ def test_truncate_cuts_a_large_subject_to_at_most_the_byte_bound_with_flag_true(
 
 
 def test_truncate_never_splits_a_multi_byte_character_on_the_boundary() -> None:
-    """A UTF-8-encoded 'n with tilde' is 2 bytes. Constructed so the boundary
-    falls in the MIDDLE of the character: 65535 ASCII bytes, then one 2-byte
-    character straddling byte 65536. Slicing raw bytes at 65536 would keep
-    only the character's first (invalid, incomplete) byte; the correct
-    result drops the whole character rather than storing a mangled one.
+    """'ñ' is 2 UTF-8 bytes. Constructed so the boundary falls MID-character:
+    65535 ASCII bytes then one straddling 2-byte character. A raw byte slice
+    at 65536 would keep only its first, incomplete byte; the correct result
+    drops the whole character instead of storing it mangled.
     """
-    subject = ("a" * (MAX_TEXT_FIELD_BYTES - 1)) + "ñ"  # "ñ", 2 bytes
+    subject = ("a" * (MAX_TEXT_FIELD_BYTES - 1)) + "ñ"
 
     value, truncated = truncate(subject)
 
     assert value is not None
-    encoded = value.encode("utf-8")
-    assert len(encoded) <= MAX_TEXT_FIELD_BYTES
-    # The straddling character was dropped whole, not split: what remains
-    # decodes cleanly and is exactly the ASCII run, nothing more.
+    assert len(value.encode("utf-8")) <= MAX_TEXT_FIELD_BYTES
     assert value == "a" * (MAX_TEXT_FIELD_BYTES - 1)
     assert truncated is True
 
 
 @pytest.mark.parametrize(
     "length",
-    [
-        MAX_TEXT_FIELD_BYTES + 1,  # just over the server's own bound
-        _PLUGIN_CAP_BYTES,  # exactly at the plugin's promised cap
-    ],
+    [MAX_TEXT_FIELD_BYTES + 1, _PLUGIN_CAP_BYTES],
+    ids=["just_over_server_bound", "at_plugin_cap"],
 )
 def test_truncate_sets_the_flag_for_any_subject_the_plugin_can_ever_send(length: int) -> None:
-    """design.md D49's false-zero defect, asserted directly: the plugin's
-    cap sits ABOVE the server's bound, so every subject length the plugin
-    can possibly let through -- from one byte over the server's bound up to
-    the plugin's own cap -- must still trip the server's truncation flag. A
-    server bound wrongly raised to meet or exceed the plugin's cap would
-    fail this test for the smaller of the two parametrised lengths.
+    """design.md D49's false-zero defect, asserted directly: every subject
+    length the plugin can let through -- from one byte over the server's
+    bound up to the plugin's own cap -- must trip the truncation flag. A
+    server bound wrongly raised to meet the plugin's cap fails this test.
     """
     subject = "a" * length
 

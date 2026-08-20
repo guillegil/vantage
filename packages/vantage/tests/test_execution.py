@@ -107,13 +107,14 @@ def test_vcs_context_merged_over_a_partial_incoming_snapshot_keeps_prior_fields(
         dirty=False,
         root="/repo",
     )
+    # commit is non-null (overwrites); the rest are null (inherit previous).
     incoming = VcsContext(
-        commit="b" * 40,  # non-null: this DOES overwrite
-        branch=None,  # null: inherits from previous
-        commit_subject=None,  # null: inherits from previous
+        commit="b" * 40,
+        branch=None,
+        commit_subject=None,
         commit_subject_truncated=False,
-        dirty=None,  # null: inherits from previous
-        root=None,  # null: inherits from previous
+        dirty=None,
+        root=None,
     )
 
     merged = incoming.merged_over(previous)
@@ -142,9 +143,7 @@ def test_vcs_context_merged_over_truncated_flag_travels_with_commit_subject() ->
         root="/repo",
     )
 
-    # incoming has no subject at all: the flag must come FROM previous too,
-    # travelling with the subject it was cut for -- not left at its own
-    # (default, non-truncated) value.
+    # No subject at all: the flag must come from previous too.
     incoming_without_subject = VcsContext(
         commit=None,
         branch=None,
@@ -159,8 +158,7 @@ def test_vcs_context_merged_over_truncated_flag_travels_with_commit_subject() ->
     assert merged.commit_subject == "A very long subject that got cut"
     assert merged.commit_subject_truncated is True
 
-    # incoming HAS a (short, untruncated) subject: the flag follows THAT
-    # subject, even though previous's subject was truncated.
+    # A short, untruncated subject: the flag follows it, not previous's.
     incoming_with_subject = VcsContext(
         commit=None,
         branch=None,

@@ -1,23 +1,18 @@
 """RQ-22's uniform 64 KiB bound, first written here (design.md D49).
 
-**Where**: the server owns this, in one pure helper reached from
-`service/routes/runs.py`. `errors.py::safe_segment` is not applied here --
-that is an allow-list for echoing CLIENT-CHOSEN text back in a response
-body; a commit subject is stored data, the same class as
-`interrupt_reason`, and it is never echoed in an acknowledgement or a
-rejection (ADR-8 owns output encoding, not this module).
+The server owns this in one pure helper reached from
+`service/routes/runs.py`. `errors.py::safe_segment` does not apply -- that
+allow-lists CLIENT-CHOSEN text for echoing back; a commit subject is stored
+data, never echoed (ADR-8 owns output encoding, not this module).
 
-**The bound is on UTF-8 BYTES, cut at a character boundary.** RQ-22 says 64
-KiB, a byte quantity. `value[:65536]` slices Python characters, not bytes --
-for a string of two-byte characters that stores twice the intended amount.
-The only correct sequence is: encode to UTF-8, slice the BYTES at the
-boundary, then decode with ``errors="ignore"`` so a multi-byte character
-left straddling the cut is dropped whole rather than stored mangled.
+**The bound is on UTF-8 BYTES, cut at a character boundary.** `value[:65536]`
+slices Python characters, not bytes, and can store twice the intended amount
+for two-byte characters. The correct sequence: encode to UTF-8, slice the
+BYTES at the boundary, decode with ``errors="ignore"`` so a multi-byte
+character left straddling the cut is dropped whole, never stored mangled.
 
-This is the project's first truncation implementation
-(``rg _truncated packages/vantage/src`` finds the six `vcs_*` columns and no
-writer before this change) -- built so RQ-22 can adopt
-`MAX_TEXT_FIELD_BYTES`/`truncate` unchanged when it lands its own writer.
+The project's first truncation writer -- built so RQ-22 can adopt
+`MAX_TEXT_FIELD_BYTES`/`truncate` unchanged when it lands its own.
 """
 
 from __future__ import annotations

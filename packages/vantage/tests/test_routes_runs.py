@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from vantage.service.routes.runs import _to_execution
 from vantage.service.schemas import RunReport, VcsReport
+from vantage.service.truncation import MAX_TEXT_FIELD_BYTES
 
 
 def _run_report(**overrides: object) -> RunReport:
@@ -73,10 +74,7 @@ def test_to_execution_maps_a_well_formed_vcs_section_to_a_vcs_context() -> None:
 
 
 def test_to_execution_truncates_an_oversized_commit_subject_and_sets_the_flag() -> None:
-    """`_to_execution` applies `truncate()` to `commit_subject`, setting
-    `commit_subject_truncated` (design.md D49, tasks.md 3.9)."""
-    from vantage.service.truncation import MAX_TEXT_FIELD_BYTES
-
+    """`_to_execution` applies `truncate()` to `commit_subject` (D49, 3.9)."""
     vcs = VcsReport.model_validate(
         {
             "commit": "a" * 40,

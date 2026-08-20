@@ -1,8 +1,6 @@
 """`VcsReport`'s wire shape (design.md D47): `extra="forbid"`, and a
-`commit` field that accepts a SHA-256 (64 hex chars), never a pattern
-anchored at 40 -- git is migrating away from SHA-1, and a 40-hex pattern
-would `422` a report from a SHA-256 repository over a field nothing reads
-yet.
+`commit` field that accepts a SHA-256 (64 hex chars), never a 40-hex
+pattern -- git is migrating away from SHA-1.
 """
 
 from __future__ import annotations

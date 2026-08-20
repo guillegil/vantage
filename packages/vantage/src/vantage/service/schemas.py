@@ -145,19 +145,12 @@ class VcsReport(BaseModel):
 
     ``extra="forbid"``, matching `RunReport` rather than `ResultReport`: an
     unknown field *inside* `vcs` means the two sides disagree about what a
-    VCS snapshot is -- the same reasoning the module docstring gives for
-    `RunReport`, not the enrichment case `ResultReport`'s `extra="allow"`
-    exists for. This asymmetry is deliberate, not an inconsistency to fix.
-
-    ``commit`` is bounded with ``max_length=64``, never a 40-hex pattern: a
-    SHA-256 repository produces 64 hex characters, and a pattern anchored at
-    40 would reject a valid report over a field nothing reads yet.
-
-    Every field is required with no default, matching `RunReport`'s rule --
-    all five nulls must be sent explicitly by a repository-less session, not
-    substituted by an omission. There is deliberately no
-    ``commit_subject_truncated`` field: the server owns the bound and the
-    flag (design.md D49), and the plugin has nothing to claim it with.
+    VCS snapshot is, not `ResultReport`'s enrichment case. ``commit`` is
+    bounded with ``max_length=64``, never a 40-hex pattern -- a SHA-256
+    repository produces 64 hex characters. Every field is required with no
+    default, matching `RunReport`'s rule: all five nulls must be sent
+    explicitly. No ``commit_subject_truncated`` field: the server owns the
+    bound and the flag (design.md D49).
     """
 
     model_config = ConfigDict(extra="forbid")
