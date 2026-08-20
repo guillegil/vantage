@@ -303,7 +303,7 @@ Modifies `packages/vantage/src/vantage/storage/sqlite_store.py`,
 
 ## Phase 5: Measurement, ADR, docs, traceability (PR 5)
 
-- [ ] 5.1 Write `scripts/measure_vcs_overhead.py` (create) — five paired
+- [x] 5.1 Write `scripts/measure_vcs_overhead.py` (create) — five paired
       runs interleaved (A/B/A/B…), medians not means; two profiles
       (1,000 × ~10 ms and 1,000 × ~1 ms, RQ-25's own profiles); two
       repositories (this repository, and a synthetic repository with
