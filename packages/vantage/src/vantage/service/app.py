@@ -14,6 +14,11 @@ included with any other prefix, or none, would answer where it must 404.
 **Every rejection is shaped by `service/errors.py`**, registered here once,
 so no route can answer a rejection in a different shape (design.md D5,
 RQ-42).
+
+**The generated interface documents are disabled** (design.md Q5, D66): a
+document FastAPI generated from this same route table could never fail a
+drift check against that table. `routes/read.py`'s `GET /api/v1/openapi.yaml`
+serves the hand-written replacement instead.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ def create_app(
     resolved `ServerConfig.grace_period_seconds` through without this
     module's default ever drifting out of sync with `resolution.py`'s.
     """
-    app = FastAPI()
+    app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.state.store = store
     app.state.grace_period = grace_period_seconds
     app.include_router(runs_router, prefix="/api/v1")

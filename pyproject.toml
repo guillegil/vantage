@@ -31,6 +31,10 @@ dev = [
     # guard (5.3/5.4). Dev-only: neither `pytest-vantage` nor `vantage`
     # depends on it (RQ-24, RQ-27's "without xdist" half of the CI matrix).
     "pytest-xdist>=3.5",
+    # Parses `openapi/v1.yaml` in tests only -- never at runtime (design.md
+    # Q5, task 6.11). `types-PyYAML` is its stub, for `mypy --strict`.
+    "pyyaml>=6.0",
+    "types-PyYAML>=6.0",
 ]
 
 # This root pyproject.toml is the uv workspace root, not a published
@@ -103,5 +107,7 @@ ignore_notebooks = true
 # direct `import` in this project's code.
 [tool.deptry.per_rule_ignores]
 DEP001 = ["importwalk", "vantage_port_contract", "vantage_test_server"]
-DEP002 = ["ruff", "mypy", "deptry", "pip-audit", "httpx2", "pytest-xdist"]
+# `types-PyYAML` is a stub package mypy reads, never itself imported --
+# same category as the CLI-only tools below.
+DEP002 = ["ruff", "mypy", "deptry", "pip-audit", "httpx2", "pytest-xdist", "types-PyYAML"]
 DEP003 = ["fastapi", "pydantic", "starlette", "uvicorn"]

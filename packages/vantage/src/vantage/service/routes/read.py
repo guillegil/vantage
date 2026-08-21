@@ -29,9 +29,10 @@ by `service/errors.py`'s `InvalidIdentityError`, never a proxy `414`.
 
 from __future__ import annotations
 
+import importlib.resources
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Path, Query, Request
+from fastapi import APIRouter, Path, Query, Request, Response
 
 from vantage.core.domain.execution import VcsContext
 from vantage.core.domain.liveness import derive_presentation
@@ -59,6 +60,14 @@ from vantage.service.schemas import (
 router = APIRouter()
 
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
+
+# Read once at import time, not per request -- the bytes never change
+# while the process runs. Comes from inside the installed distribution,
+# never `docs/` (design.md Q5), via the anchor `openapi/__init__.py` exists
+# for.
+_OPENAPI_DOCUMENT_BYTES = (
+    importlib.resources.files("vantage.service.openapi").joinpath("v1.yaml").read_bytes()
+)
 
 
 def _vcs_response(vcs: VcsProjection | VcsContext | None) -> RunVcsResponse | None:
@@ -215,6 +224,13 @@ async def list_history(
     page = store.list_history(node_id=node_id, limit=limit, offset=offset)
     items = [_history_entry(entry) for entry in page.items]
     return HistoryResponse(items=items, has_more=page.has_more)
+
+
+@router.get("/openapi.yaml")
+async def get_openapi_document() -> Response:
+    """Raw bytes, `application/yaml`, never parsed at runtime (design.md
+    Q5). Itself a `read`-tagged, documented path (task 6.8)."""
+    return Response(content=_OPENAPI_DOCUMENT_BYTES, media_type="application/yaml")
 
 
 __all__ = ["router"]

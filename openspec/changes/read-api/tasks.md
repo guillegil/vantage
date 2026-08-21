@@ -377,65 +377,65 @@ Creates `packages/vantage/src/vantage/service/openapi/__init__.py`,
 `packages/vantage/src/vantage/service/app.py`, `pyproject.toml` (workspace
 root), `docs/api/v1-ingestion.md`. **Depends on PR4, PR5.**
 
-- [ ] 6.1 RED `test_interface_document.py::test_openapi_yaml_serves_the_handwritten_bytes`
+- [x] 6.1 RED `test_interface_document.py::test_openapi_yaml_serves_the_handwritten_bytes`
       — `GET /api/v1/openapi.yaml` returns the exact bytes loaded via
       `importlib.resources.files("vantage.service.openapi")`,
       `media_type == "application/yaml"`; the body is parsed with `pyyaml`
       only inside this test, never at runtime. *(api-interface-document →
       Machine-readable interface document)*
-- [ ] 6.2 RED `..._test_generated_documents_are_disabled` —
+- [x] 6.2 RED `..._test_generated_documents_are_disabled` —
       `GET /openapi.json`, `GET /docs`, `GET /redoc` each answer `404`.
       *(The generated interface documents are disabled)*
-- [ ] 6.3 RED `..._test_a_served_but_undocumented_route_is_reported` — the
+- [x] 6.3 RED `..._test_a_served_but_undocumented_route_is_reported` — the
       drift check over `mounted - declared` is empty against the real app;
       then, in a second app built with one extra test-only route not
       declared in the document, assert the check reports it — **the
       falsifier**: the check must be able to fail. *(A served-but-
       undocumented endpoint is reported; The document is not derived from
       the route table it checks)*
-- [ ] 6.4 RED `..._test_a_documented_but_unserved_path_is_reported` — the
+- [x] 6.4 RED `..._test_a_documented_but_unserved_path_is_reported` — the
       reverse direction, `declared - mounted`, is empty against the real
       app; assert it is computed and would report a mismatch (not only the
       one direction the scenario names).
-- [ ] 6.5 RED `..._test_every_read_operation_is_get_and_every_write_operation_is_not`
+- [x] 6.5 RED `..._test_every_read_operation_is_get_and_every_write_operation_is_not`
       — the document's `read`-tagged operations are all `GET`; its
       `write`-tagged operations are not; the two session-report and
       heartbeat endpoints are tagged `write`. *(D53 consistency check;
       session-ingestion → Ingestion endpoints are marked as writing, not
       reading)*
-- [ ] 6.6 RED `..._test_every_documented_path_answers_2xx` — a binding table
+- [x] 6.6 RED `..._test_every_documented_path_answers_2xx` — a binding table
       maps every `(path, method)` the document declares to a callable
       producing valid parameters against a dedicated fixture database
       (separate from PR7's read-only fixture, per D65); assert every
       response is `2xx`, including `GET /api/v1/capabilities` and
       `GET /api/v1/openapi.yaml` themselves. *(Every documented path
       answers 2xx)*
-- [ ] 6.7 GREEN `openapi/__init__.py` (create): the `importlib.resources`
+- [x] 6.7 GREEN `openapi/__init__.py` (create): the `importlib.resources`
       anchor module.
-- [ ] 6.8 GREEN `openapi/v1.yaml` (create): hand-written OpenAPI 3.1 YAML
+- [x] 6.8 GREEN `openapi/v1.yaml` (create): hand-written OpenAPI 3.1 YAML
       covering every mounted path — `POST /api/v1/runs`,
       `POST /api/v1/runs/{run_id}/heartbeat` tagged `write`;
       `GET /api/v1/runs`, `GET /api/v1/runs/{run_id}`,
       `GET /api/v1/runs/{run_id}/results`, `GET /api/v1/tests/history`,
       `GET /api/v1/capabilities`, `GET /api/v1/openapi.yaml` tagged `read`.
-- [ ] 6.9 GREEN `routes/read.py` (or `app.py`): `GET /api/v1/openapi.yaml`
+- [x] 6.9 GREEN `routes/read.py` (or `app.py`): `GET /api/v1/openapi.yaml`
       route serving the anchored bytes as-is.
-- [ ] 6.10 GREEN `app.py`: `FastAPI(openapi_url=None, docs_url=None,
+- [x] 6.10 GREEN `app.py`: `FastAPI(openapi_url=None, docs_url=None,
       redoc_url=None)`.
-- [ ] 6.11 GREEN `pyproject.toml` (workspace root): add `pyyaml` to the
+- [x] 6.11 GREEN `pyproject.toml` (workspace root): add `pyyaml` to the
       `dev` optional-dependencies group only — never a runtime dependency
       of `vantage`. Run `uv run deptry .`; confirm it passes with no new
       ignore entry needed, because `pyyaml` is a genuine `import yaml`
       inside `test_interface_document.py`, unlike the CLI-only dev tools
       `DEP002` already ignores.
-- [ ] 6.12 Modify `docs/api/v1-ingestion.md`: remove the request-shape
+- [x] 6.12 Modify `docs/api/v1-ingestion.md`: remove the request-shape
       example and the response-status table (now stated by the document
       itself); add a header line naming `openapi/v1.yaml` as the contract
       and this file as the reasoning; keep the `extra=` asymmetry
       explanation, the `<unnamed>` allow-list rationale, and the
       "nothing written before 201/200" guarantee — one source per fact
       (D56).
-- [ ] 6.13 Gate: `uv run pytest packages/vantage/tests/test_interface_document.py`,
+- [x] 6.13 Gate: `uv run pytest packages/vantage/tests/test_interface_document.py`,
       `uv run mypy .` clean, `uv run deptry .` clean.
 
 ## Phase 7: Read-only proof, latency, ADR-0015, OQ-9 (PR7)
