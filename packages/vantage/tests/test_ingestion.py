@@ -33,6 +33,19 @@ def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
     }
 
 
+def _vcs_section(**overrides: Any) -> dict[str, Any]:
+    """One well-formed `vcs` section (design.md D47's wire shape)."""
+    section: dict[str, Any] = {
+        "commit": "a" * 40,
+        "branch": "main",
+        "commit_subject": "a commit subject",
+        "dirty": False,
+        "root": "/repo",
+    }
+    section.update(overrides)
+    return section
+
+
 def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
     """One well-formed `results[]` entry (design.md D15 interface example).
 
@@ -116,6 +129,64 @@ def test_retried_report_is_idempotent(client: TestClient, store: InMemoryExecuti
     assert body["run_id"] == "b" * 32
     assert body["status"] == "duplicate"
     assert store.count_executions() == 1
+
+
+def test_report_with_vcs_section_persists_six_fields(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """design.md D47/D48, task 4.6. *(Scenario: A report carrying a vcs
+    section persists its six fields, `session-ingestion`)*."""
+    report = _well_formed_report("2" + "0" * 31)
+    report["vcs"] = _vcs_section()
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    execution = store.get_execution("2" + "0" * 31)
+    assert execution is not None
+    assert execution.vcs is not None
+    assert execution.vcs.commit == "a" * 40
+    assert execution.vcs.branch == "main"
+    assert execution.vcs.commit_subject == "a commit subject"
+    assert execution.vcs.dirty is False
+    assert execution.vcs.root == "/repo"
+    assert execution.vcs.commit_subject_truncated is False
+
+
+def test_report_without_vcs_section_still_records_run(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """design.md D47, task 4.7 -- the supported skew case for a plugin that
+    predates this change. *(Scenario: A report with no vcs section still
+    records its run, `session-ingestion`)*."""
+    report = _well_formed_report("2" + "1" * 31)
+    assert "vcs" not in report
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "created"
+    execution = store.get_execution("2" + "1" * 31)
+    assert execution is not None
+    assert execution.vcs is None
+
+
+def test_vcs_section_accepted_without_capability_check(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """design.md D47, task 4.8 -- `routes/capabilities.py` is unchanged, no
+    flag ever advertises a vcs-related capability, and none is required
+    before this section is accepted. *(Scenario: The endpoint accepts a vcs
+    section without any capability check, `session-ingestion`)*."""
+    report = _well_formed_report("2" + "2" * 31)
+    report["vcs"] = _vcs_section()
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    execution = store.get_execution("2" + "2" * 31)
+    assert execution is not None
+    assert execution.vcs is not None
 
 
 @pytest.mark.req(id="RQ-41")

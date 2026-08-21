@@ -1,4 +1,10 @@
-"""`Identity` validation and `Execution`'s frozen, nullable shape (design.md, Interfaces)."""
+"""`Identity` validation and `Execution`'s frozen, nullable shape (design.md, Interfaces).
+
+`VcsContext.merged_over` (design.md D48) is the in-memory mirror of the
+storage adapters' per-column `COALESCE`: null -> value only, never value ->
+null. It is proven here, independently of either storage adapter, before
+Phase 4 wires it into `memory.py`'s conflict branch.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,7 @@ from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 
 import pytest
-from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.execution import Execution, Identity, VcsContext
 
 
 def test_identity_accepts_32_lowercase_hex_characters() -> None:
@@ -71,3 +77,114 @@ def test_execution_is_frozen() -> None:
 
     with pytest.raises(FrozenInstanceError):
         execution.exit_status = 1  # type: ignore[misc]
+
+
+def test_vcs_context_merged_over_none_previous_returns_self_unchanged() -> None:
+    incoming = VcsContext(
+        commit="a" * 40,
+        branch="main",
+        commit_subject="Fix the thing",
+        commit_subject_truncated=False,
+        dirty=True,
+        root="/repo",
+    )
+
+    merged = incoming.merged_over(None)
+
+    assert merged == incoming
+
+
+def test_vcs_context_merged_over_a_partial_incoming_snapshot_keeps_prior_fields() -> None:
+    """A detached HEAD / no-commits report: some fields null, others not.
+    The previous, fuller snapshot must fill exactly the null fields -- never
+    the other way around (design.md D48's own "must not clobber" wording).
+    """
+    previous = VcsContext(
+        commit="a" * 40,
+        branch="main",
+        commit_subject="Old subject",
+        commit_subject_truncated=False,
+        dirty=False,
+        root="/repo",
+    )
+    # commit is non-null (overwrites); the rest are null (inherit previous).
+    incoming = VcsContext(
+        commit="b" * 40,
+        branch=None,
+        commit_subject=None,
+        commit_subject_truncated=False,
+        dirty=None,
+        root=None,
+    )
+
+    merged = incoming.merged_over(previous)
+
+    assert merged == VcsContext(
+        commit="b" * 40,
+        branch="main",
+        commit_subject="Old subject",
+        commit_subject_truncated=False,
+        dirty=False,
+        root="/repo",
+    )
+
+
+def test_vcs_context_merged_over_truncated_flag_travels_with_commit_subject() -> None:
+    """The `CASE` in D48's SQL keys `vcs_commit_subject_truncated` to
+    whether `excluded.vcs_commit_subject IS NOT NULL` -- the flag follows
+    the subject it describes, not the other fields' own coalesce.
+    """
+    previous = VcsContext(
+        commit="a" * 40,
+        branch="main",
+        commit_subject="A very long subject that got cut",
+        commit_subject_truncated=True,
+        dirty=False,
+        root="/repo",
+    )
+
+    # No subject at all: the flag must come from previous too.
+    incoming_without_subject = VcsContext(
+        commit=None,
+        branch=None,
+        commit_subject=None,
+        commit_subject_truncated=False,
+        dirty=None,
+        root=None,
+    )
+
+    merged = incoming_without_subject.merged_over(previous)
+
+    assert merged.commit_subject == "A very long subject that got cut"
+    assert merged.commit_subject_truncated is True
+
+    # A short, untruncated subject: the flag follows it, not previous's.
+    incoming_with_subject = VcsContext(
+        commit=None,
+        branch=None,
+        commit_subject="Short",
+        commit_subject_truncated=False,
+        dirty=None,
+        root=None,
+    )
+
+    merged_with_subject = incoming_with_subject.merged_over(previous)
+
+    assert merged_with_subject.commit_subject == "Short"
+    assert merged_with_subject.commit_subject_truncated is False
+
+
+def test_execution_vcs_defaults_to_none_for_every_existing_construction_site() -> None:
+    """`Execution.vcs` is appended with a default so every pre-existing
+    construction site -- three test doubles broke this way in Phase 2 --
+    keeps working unmodified (design.md D48, tasks.md 3.6)."""
+    execution = Execution(
+        identity=Identity("a" * 32),
+        started_at=datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc),
+        finished_at=None,
+        exit_status=None,
+        interrupted=False,
+        interrupt_reason=None,
+    )
+
+    assert execution.vcs is None

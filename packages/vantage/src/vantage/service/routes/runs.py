@@ -51,7 +51,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
-from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.result import CaseIdentity, Result
 from vantage.service.errors import (
     MAX_REPORT_BYTES,
@@ -69,7 +69,9 @@ from vantage.service.schemas import (
     ResultReport,
     RunReport,
     SessionReport,
+    VcsReport,
 )
+from vantage.service.truncation import truncate
 
 router = APIRouter()
 
@@ -104,7 +106,36 @@ def _normalize_to_utc(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
-def _to_execution(run: RunReport) -> Execution:
+def _to_vcs_context(vcs: VcsReport | None) -> VcsContext | None:
+    """Normalises the `vcs` section (design.md D48): `None` when the
+    section is absent OR every field in it is null -- a session recorded
+    outside a repository reads back as `execution.vcs is None`, never as a
+    `VcsContext` full of nulls. `truncate()` is applied to `commit_subject`
+    here, and only here, so `commit_subject_truncated` is always set
+    consistently with the value it describes (design.md D49).
+    """
+    if vcs is None:
+        return None
+    commit_subject, commit_subject_truncated = truncate(vcs.commit_subject)
+    if (
+        vcs.commit is None
+        and vcs.branch is None
+        and commit_subject is None
+        and vcs.dirty is None
+        and vcs.root is None
+    ):
+        return None
+    return VcsContext(
+        commit=vcs.commit,
+        branch=vcs.branch,
+        commit_subject=commit_subject,
+        commit_subject_truncated=commit_subject_truncated,
+        dirty=vcs.dirty,
+        root=vcs.root,
+    )
+
+
+def _to_execution(run: RunReport, vcs: VcsReport | None) -> Execution:
     return Execution(
         identity=Identity(run.id),
         started_at=_normalize_to_utc(run.started_at),
@@ -112,6 +143,7 @@ def _to_execution(run: RunReport) -> Execution:
         exit_status=run.exit_status,
         interrupted=run.interrupted,
         interrupt_reason=run.interrupt_reason,
+        vcs=_to_vcs_context(vcs),
     )
 
 
@@ -219,7 +251,7 @@ async def create_run(request: Request) -> JSONResponse:
         raise InvalidReportError.from_errors(exc.errors()) from exc
 
     store = request.app.state.store
-    execution = _to_execution(payload.run)
+    execution = _to_execution(payload.run, payload.vcs)
     reported_results = payload.results or []
     results = [_to_result(item) for item in reported_results]
 

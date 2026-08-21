@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Literal
 
 import pytest
+from pytest_vantage import vcs
 from pytest_vantage.capture import (
     _Pending,
     accumulate,
@@ -429,8 +430,12 @@ def test_recorder_sends_the_assembled_results_in_the_one_session_post(
         sent.append(report)
 
     monkeypatch.setattr("pytest_vantage.recorder.send", _capture)
+    # This test is about assembled results in the finish-write, not vcs
+    # capture -- neutralise it rather than spawning a real `git` subprocess
+    # for something this test does not exercise.
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
     recorder = Recorder(
-        config=None,  # type: ignore[arg-type]
+        config=SimpleNamespace(rootpath="unused"),  # type: ignore[arg-type]
         address="http://example.invalid",
         timeout=1.0,
         lifecycle_available=True,

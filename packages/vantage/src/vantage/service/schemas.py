@@ -140,6 +140,28 @@ class ResultReport(BaseModel):
     worker_id: str | None
 
 
+class VcsReport(BaseModel):
+    """The ``vcs`` section of a session report (design.md D47).
+
+    ``extra="forbid"``, matching `RunReport` rather than `ResultReport`: an
+    unknown field *inside* `vcs` means the two sides disagree about what a
+    VCS snapshot is, not `ResultReport`'s enrichment case. ``commit`` is
+    bounded with ``max_length=64``, never a 40-hex pattern -- a SHA-256
+    repository produces 64 hex characters. Every field is required with no
+    default, matching `RunReport`'s rule: all five nulls must be sent
+    explicitly. No ``commit_subject_truncated`` field: the server owns the
+    bound and the flag (design.md D49).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    commit: str | None = Field(max_length=64)
+    branch: str | None
+    commit_subject: str | None
+    dirty: bool | None
+    root: str | None
+
+
 class SessionReport(BaseModel):
     """The envelope submitted to `POST /api/v1/runs` (design.md D1).
 
@@ -151,12 +173,19 @@ class SessionReport(BaseModel):
     section". `None` (the section is absent) and `[]` (the session collected
     nothing) are both legal and both mean zero result rows: a reverted
     plugin against an un-reverted server still must have its run stored.
+
+    ``vcs`` is `None` by default for the same reason -- an older plugin's
+    report carries no such key, and `extra="ignore"` on this envelope drops
+    an unrecognised key rather than rejecting the whole report (design.md
+    D47). No capability gate exists for it: a flag nothing branches on would
+    advertise a gate that does not exist.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     run: RunReport
     results: list[ResultReport] | None = None
+    vcs: VcsReport | None = None
 
     @field_validator("results")
     @classmethod
