@@ -617,7 +617,7 @@ by the node id) are referenced and relied on, never re-argued.
   ┌─ the document is the boundary ───────────────────────────────────────┐
   │  tag: read   → read-only digest-pair harness calls it        (D53, D65)│
   │  tag: write  → excluded by name; session-ingestion's scope     (D53)   │
-  │  every op    → drift check against app.routes                  (D66)   │
+  │  every op    → drift check against app.openapi()               (D66)   │
   └──────────────────────────────────────────────────────────────────────┘
 ```
 

@@ -32,6 +32,7 @@ paths:
         - $ref: '#/components/parameters/offset'
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
+        "422": {description: limit below 1 or offset below 0 -- not a page.}
   /runs/{run_id}:
     get:
       operationId: get_run_detail
@@ -64,6 +65,7 @@ paths:
       responses:
         "200": {description: A page of results., content: {application/json: {schema: {$ref: '#/components/schemas/ResultsResponse'}}}}
         "404": {description: No run with that id has been recorded.}
+        "422": {description: limit below 1 or offset below 0 -- not a page.}
   /tests/history:
     get:
       operationId: list_history
@@ -113,9 +115,30 @@ components:
     # Response bodies are stated in full, the same as request bodies --
     # this document is the contract for what the read surface returns, and
     # a `type: object` stub would leave every read response opaque to a
-    # generated client. The duplication D56 warns about is bounded by
-    # `test_routes_read.py`'s exact-key-set assertions: if these shapes and
-    # `service/schemas.py` ever diverge, a test goes red.
+    # generated client.
+    #
+    # The duplication D56 warns about is bounded by the schema checks at the
+    # end of `test_interface_document.py`. They parse this file and read
+    # `service/schemas.py`'s `model_fields` independently -- neither side is
+    # generated from the other -- and compare, in both directions:
+    #
+    #   * which schemas are declared, against the models bound to them;
+    #   * each schema's property names, against its model's field names;
+    #   * each schema's `required` list (what the client must send on a
+    #     request, what it can rely on receiving in a response);
+    #   * whether each property admits `null`, against whether the field's
+    #     annotation admits `None`;
+    #   * every declared `enum`, against `OUTCOMES` / `PRESENTATIONS` -- the
+    #     domain frozensets that decide what the server can emit.
+    #
+    # Stated narrowly on purpose (verify round 2): the earlier version of
+    # this comment claimed `test_routes_read.py`'s key-set assertions bounded
+    # the drift, and they do not -- they compare a response against a literal
+    # written in that test file and never open this document. Three tampers
+    # here alone left the whole suite green. What is still unchecked, and is
+    # named rather than implied: the JSON `type` and `format` keywords, and
+    # the `pattern` / `maxLength` constraints. A `string` declared where the
+    # model holds an `int` would drift silently.
     Acknowledgement:
       type: object
       required: [run_id, status, ignored]

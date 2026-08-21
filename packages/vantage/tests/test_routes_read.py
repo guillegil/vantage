@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS
+from vantage.core.domain.result import CaseIdentity, Result
 from vantage.core.ports.storage import ExecutionStore, HistoryEntry, Page
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
@@ -41,6 +42,18 @@ _TRUNCATION_COMMIT = "face0004" * 5
 def _run_id(seed: int) -> str:
     """A well-formed 32-lowercase-hex identity, unique per `seed`."""
     return f"{seed:032x}"
+
+
+def _instant(wire_value: str) -> datetime:
+    """The instant an ISO-8601 timestamp on the wire denotes.
+
+    Compares timestamps by *instant* rather than by string, so these tests
+    assert the value the response carries and not Pydantic's chosen spelling
+    of it -- a serializer that switched between `+00:00` and `Z` would
+    otherwise fail every timestamp assertion for no behavioural reason. The
+    `Z` substitution is for Python 3.10, whose `fromisoformat` does not
+    accept the military suffix (this project's floor, CLAUDE.md)."""
+    return datetime.fromisoformat(wire_value.replace("Z", "+00:00"))
 
 
 def _execution(
@@ -121,18 +134,29 @@ def test_run_list_returns_items_and_has_more_envelope(
 
     **Shape and value are different properties and this test holds both.**
     The exact key sets assert the shape a field-by-field response model
-    produces, never `from_attributes`'s incidental extras. The `item["vcs"]`
-    equality then asserts every one of the five projected values reaches the
-    wire intact: a key-set check alone stays green while `_vcs_response`
-    hardcodes `dirty=None` or `commit=None`, which is exactly how five
-    fields could be silently destroyed on the wire."""
+    produces, never `from_attributes`'s incidental extras. The value
+    assertions then assert that every scalar reaches the wire intact: a
+    key-set check alone stays green while `_run_list_item` hardcodes
+    `finished_at=None` or `_vcs_response` hardcodes `dirty=None`, which is
+    exactly how a field could be silently destroyed on the wire.
+
+    Every fixture value here is deliberately off the default: `started_at`
+    and `finished_at` are three distinct instants apart, and `exit_status` is
+    `7` rather than the `0` a swap would coincidentally match (verify round
+    2, WARNING-1 -- five of this builder's seven fields were mutable with the
+    suite green). `presentation` and `interrupted` are asserted on varied
+    fixtures by `test_run_list_presentation_and_interruption_are_per_run`,
+    which needs runs this one is not."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(1)
+    started_at = now - timedelta(hours=1)
+    finished_at = now - timedelta(minutes=17)
     store.record_session(
         _execution(
             run_id,
-            started_at=now - timedelta(hours=1),
-            finished_at=now,
+            started_at=started_at,
+            finished_at=finished_at,
+            exit_status=7,
             vcs=_vcs(
                 commit=_LIST_COMMIT,
                 branch="release/list-envelope",
@@ -142,7 +166,7 @@ def test_run_list_returns_items_and_has_more_envelope(
             ),
         ),
         results=[],
-        received_at=now - timedelta(hours=1),
+        received_at=started_at,
     )
 
     response = client.get("/api/v1/runs")
@@ -163,6 +187,10 @@ def test_run_list_returns_items_and_has_more_envelope(
         "vcs",
     }
     assert item["id"] == run_id
+    assert _instant(item["started_at"]) == started_at
+    assert _instant(item["finished_at"]) == finished_at
+    assert item["exit_status"] == 7
+    assert item["interrupted"] is False
     assert item["presentation"] == "finished"
     assert set(item["vcs"].keys()) == {
         "commit",
@@ -178,6 +206,88 @@ def test_run_list_returns_items_and_has_more_envelope(
         "commit_subject_truncated": False,
         "dirty": True,
     }
+
+
+def test_run_list_presentation_and_interruption_are_per_run(
+    store: InMemoryExecutionStore,
+) -> None:
+    """*(session-liveness -> Abandoned run is observable, at the list layer;
+    design.md D62 -- `derive_presentation` gets its first caller.)*
+
+    **The list path calls `derive_presentation` and until verify round 2
+    nothing observed that it did.** Every liveness scenario was demonstrated
+    through run *detail*, so `_run_list_item` could hardcode
+    `presentation="finished"` -- never calling the function whose first
+    caller is the entire point of D62 -- and the whole suite stayed green.
+    One run per branch of the derivation, in one list response, is what makes
+    that mutation fail: a constant cannot be right for four runs at once.
+
+    `interrupted` is asserted here rather than in 4.1 for the same reason a
+    constant needs contradicting fixtures: 4.1's run is not interrupted, so
+    only a run that *is* can catch the flag being hardcoded false. The
+    interrupted run additionally separates the two: it presents as
+    `interrupted` while carrying `interrupted: true`, so neither field can be
+    derived from the other by accident."""
+    now = datetime.now(timezone.utc)
+    finished_run = _run_id(40)
+    interrupted_run = _run_id(41)
+    abandoned_run = _run_id(42)
+    running_run = _run_id(43)
+    store.record_session(
+        _execution(
+            finished_run,
+            started_at=now - timedelta(hours=3),
+            finished_at=now - timedelta(hours=2, minutes=50),
+        ),
+        results=[],
+        received_at=now - timedelta(hours=3),
+    )
+    store.record_session(
+        _execution(
+            interrupted_run,
+            started_at=now - timedelta(hours=2),
+            finished_at=None,
+            exit_status=2,
+            interrupted=True,
+            interrupt_reason="KeyboardInterrupt",
+        ),
+        results=[],
+        received_at=now - timedelta(hours=2),
+    )
+    store.record_session(
+        _execution(
+            abandoned_run,
+            started_at=now - timedelta(minutes=90),
+            finished_at=None,
+            exit_status=None,
+        ),
+        results=[],
+        received_at=now - timedelta(minutes=90),
+    )
+    store.record_session(
+        _execution(
+            running_run,
+            started_at=now - timedelta(seconds=30),
+            finished_at=None,
+            exit_status=None,
+        ),
+        results=[],
+        received_at=now - timedelta(seconds=5),
+    )
+    client = _client_with_grace(store, grace_period_seconds=60)
+
+    response = client.get("/api/v1/runs")
+
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["items"]}
+    assert {run: items[run]["presentation"] for run in items} == {
+        finished_run: "finished",
+        interrupted_run: "interrupted",
+        abandoned_run: "abandoned",
+        running_run: "running",
+    }
+    assert items[interrupted_run]["interrupted"] is True
+    assert items[abandoned_run]["interrupted"] is False
 
 
 # --- 4.2 --------------------------------------------------------------
@@ -348,6 +458,87 @@ def test_run_detail_response_contains_no_vcs_root(
     assert _KNOWN_ROOT not in response.text
 
 
+def test_run_detail_carries_every_stored_field_by_value(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(history-read-api -> Test history -> the full record stays reachable
+    via run detail; design.md D57.)*
+
+    **Every one of the eight detail fields, asserted by value** (verify round
+    2, WARNING-1 -- six of them could be nulled, shifted or replaced with a
+    constant while the suite stayed green). Two runs rather than one, because
+    a single fixture cannot populate both halves of the record: an orderly
+    run carries `finished_at` and no `interrupt_reason`, a Ctrl-C run carries
+    the reason and no `finished_at`, and a builder that hardcoded either to
+    `None` would still satisfy whichever run happens to be null there.
+
+    The two runs also disagree on `id`, `started_at` and `exit_status`, so
+    `id=<constant>` fails on whichever run it is not, and a `started_at`
+    shifted by a fixed offset fails on both."""
+    now = datetime.now(timezone.utc)
+    orderly_run = _run_id(50)
+    orderly_started_at = now - timedelta(hours=4)
+    orderly_finished_at = now - timedelta(hours=3, minutes=11)
+    ctrl_c_run = _run_id(51)
+    ctrl_c_started_at = now - timedelta(hours=2, minutes=7)
+    ctrl_c_reason = "KeyboardInterrupt during tests/test_slow.py::test_waits"
+    store.record_session(
+        _execution(
+            orderly_run,
+            started_at=orderly_started_at,
+            finished_at=orderly_finished_at,
+            exit_status=3,
+            vcs=_vcs(),
+        ),
+        results=[],
+        received_at=orderly_started_at,
+    )
+    store.record_session(
+        _execution(
+            ctrl_c_run,
+            started_at=ctrl_c_started_at,
+            finished_at=None,
+            exit_status=2,
+            interrupted=True,
+            interrupt_reason=ctrl_c_reason,
+            vcs=None,
+        ),
+        results=[],
+        received_at=ctrl_c_started_at,
+    )
+
+    orderly = client.get(f"/api/v1/runs/{orderly_run}").json()
+    ctrl_c = client.get(f"/api/v1/runs/{ctrl_c_run}").json()
+
+    assert set(orderly.keys()) == {
+        "id",
+        "started_at",
+        "finished_at",
+        "exit_status",
+        "interrupted",
+        "interrupt_reason",
+        "presentation",
+        "vcs",
+    }
+    assert orderly["id"] == orderly_run
+    assert _instant(orderly["started_at"]) == orderly_started_at
+    assert _instant(orderly["finished_at"]) == orderly_finished_at
+    assert orderly["exit_status"] == 3
+    assert orderly["interrupted"] is False
+    assert orderly["interrupt_reason"] is None
+    assert orderly["presentation"] == "finished"
+    assert orderly["vcs"] is not None
+
+    assert ctrl_c["id"] == ctrl_c_run
+    assert _instant(ctrl_c["started_at"]) == ctrl_c_started_at
+    assert ctrl_c["finished_at"] is None
+    assert ctrl_c["exit_status"] == 2
+    assert ctrl_c["interrupted"] is True
+    assert ctrl_c["interrupt_reason"] == ctrl_c_reason
+    assert ctrl_c["presentation"] == "interrupted"
+    assert ctrl_c["vcs"] is None
+
+
 # --- 4.7 --------------------------------------------------------------
 
 
@@ -499,6 +690,83 @@ def test_results_route_returns_paginated_envelope(
     # falsify.
 
 
+def test_result_item_carries_every_stored_column_by_value(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(history-read-api -> Bounded pagination -> the results envelope's
+    item shape; design.md D57 -- `_result_item` is built field by field.)*
+
+    **All sixteen columns, asserted by value.** 5.1 checks `node_id` and
+    `outcome`; verify round 2 mutated the other fourteen -- every phase
+    outcome, every phase duration, the whole decomposed identity -- and the
+    suite stayed green for all of them, including non-null swaps of
+    `file_path` and `function_name`. A dict equality over the item is what
+    closes that: it is the one assertion shape that cannot be satisfied by a
+    builder that drops or transposes a column.
+
+    Every value is distinct from every other, including across the four
+    outcome columns and the four duration columns, so a transposition fails
+    as loudly as a null. That makes the fixture an odd *derivation* --
+    `outcome` is `xpassed` over an `xfailed` call phase -- which is
+    deliberate: these are four independently recorded columns and this test
+    is about whether each reaches the wire as itself, not about whether the
+    plugin's derivation is sound (that is `test_result.py`'s subject)."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(60)
+    started_at = datetime(2026, 3, 4, 5, 6, 7, 891011, tzinfo=timezone.utc)
+    finished_at = started_at + timedelta(seconds=4.25)
+    node_id = "tests/test_field_fidelity.py::FidelityGroup::test_every_column[case-7]"
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[
+            Result(
+                identity=CaseIdentity(
+                    node_id=node_id,
+                    file_path="tests/test_field_fidelity.py",
+                    class_name="FidelityGroup",
+                    function_name="test_every_column",
+                    param_id="case-7",
+                ),
+                outcome="xpassed",
+                duration=4.25,
+                started_at=started_at,
+                finished_at=finished_at,
+                setup_outcome="passed",
+                call_outcome="xfailed",
+                teardown_outcome="skipped",
+                setup_duration=0.125,
+                call_duration=4.0,
+                teardown_duration=0.0625,
+                worker_id="gw7",
+            )
+        ],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/results")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert _instant(item["started_at"]) == started_at
+    assert _instant(item["finished_at"]) == finished_at
+    assert {key: value for key, value in item.items() if not key.endswith("ed_at")} == {
+        "node_id": node_id,
+        "file_path": "tests/test_field_fidelity.py",
+        "class_name": "FidelityGroup",
+        "function_name": "test_every_column",
+        "param_id": "case-7",
+        "outcome": "xpassed",
+        "duration": 4.25,
+        "setup_outcome": "passed",
+        "call_outcome": "xfailed",
+        "teardown_outcome": "skipped",
+        "setup_duration": 0.125,
+        "call_duration": 4.0,
+        "teardown_duration": 0.0625,
+        "worker_id": "gw7",
+    }
+
+
 # --- 5.2 --------------------------------------------------------------
 
 
@@ -524,16 +792,25 @@ def test_history_route_returns_newest_first_with_full_vcs(
     distinct fixtures -- ordering and an exact key set alone leave
     `_history_entry(duration=None)` and `_vcs_response(commit=None)`
     undetectable. The two entries disagree on every field, so a swap between
-    them fails as loudly as a null."""
+    them fails as loudly as a null.
+
+    The entry's two timestamps are asserted the same way (verify round 2,
+    WARNING-1): the four fixture instants are all distinct, so neither
+    `started_at` shifted by a constant offset nor `finished_at` nulled nor
+    the pair transposed survives."""
     now = datetime.now(timezone.utc)
     node_id = "tests/test_a.py::test_shared"
     older_run = _run_id(21)
     newer_run = _run_id(22)
+    older_started_at = now - timedelta(hours=2)
+    older_finished_at = now - timedelta(minutes=100)
+    newer_started_at = now - timedelta(hours=1)
+    newer_finished_at = now - timedelta(minutes=41)
     store.record_session(
         _execution(
             older_run,
-            started_at=now - timedelta(hours=2),
-            finished_at=now,
+            started_at=older_started_at,
+            finished_at=older_finished_at,
             vcs=_vcs(
                 commit=_HISTORY_OLDER_COMMIT,
                 branch="main",
@@ -543,13 +820,13 @@ def test_history_route_returns_newest_first_with_full_vcs(
             ),
         ),
         results=[_result(node_id, duration=1.5)],
-        received_at=now - timedelta(hours=2),
+        received_at=older_started_at,
     )
     store.record_session(
         _execution(
             newer_run,
-            started_at=now - timedelta(hours=1),
-            finished_at=now,
+            started_at=newer_started_at,
+            finished_at=newer_finished_at,
             vcs=_vcs(
                 commit=_HISTORY_NEWER_COMMIT,
                 branch="feature",
@@ -559,7 +836,7 @@ def test_history_route_returns_newest_first_with_full_vcs(
             ),
         ),
         results=[_result(node_id, outcome="failed", duration=0.125)],
-        received_at=now - timedelta(hours=1),
+        received_at=newer_started_at,
     )
 
     response = client.get("/api/v1/tests/history", params={"node_id": node_id})
@@ -586,6 +863,8 @@ def test_history_route_returns_newest_first_with_full_vcs(
     }
     assert newer["outcome"] == "failed"
     assert newer["duration"] == 0.125
+    assert _instant(newer["started_at"]) == newer_started_at
+    assert _instant(newer["finished_at"]) == newer_finished_at
     assert older["vcs"] == {
         "commit": _HISTORY_OLDER_COMMIT,
         "branch": "main",
@@ -595,6 +874,8 @@ def test_history_route_returns_newest_first_with_full_vcs(
     }
     assert older["outcome"] == "passed"
     assert older["duration"] == 1.5
+    assert _instant(older["started_at"]) == older_started_at
+    assert _instant(older["finished_at"]) == older_finished_at
 
 
 # --- 5.4 --------------------------------------------------------------
@@ -636,6 +917,38 @@ def test_history_route_response_contains_no_vcs_root(
     response = client.get("/api/v1/tests/history", params={"node_id": node_id})
 
     assert _KNOWN_ROOT not in response.text
+
+
+def test_history_entry_for_a_non_repository_run_carries_a_null_vcs_key(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(version-control-context -> A non-repository execution has a null VCS
+    context, not an omitted entry -- route level.)*
+
+    The scenario is written about what a caller reads back, and until verify
+    round 2 it was covered only by `test_list_history_null_vcs_entry_present_not_omitted`
+    at the port. This closes it through the surface it describes, the same
+    way `test_absent_repository_run_appears_in_list_undistinguished` already
+    does for the run list. `"vcs" in entry` and `entry["vcs"] is None` are
+    two assertions rather than one because they fail for different reasons:
+    an omitted key and a null value are exactly the distinction the scenario
+    names, and `entry.get("vcs") is None` cannot tell them apart."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(70)
+    node_id = "tests/test_outside_a_repository.py::test_runs_anyway"
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=None),
+        results=[_result(node_id)],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get("/api/v1/tests/history", params={"node_id": node_id})
+
+    assert response.status_code == 200
+    entry = response.json()["items"][0]
+    assert entry["run_id"] == run_id
+    assert "vcs" in entry
+    assert entry["vcs"] is None
 
 
 # --- 5.6 --------------------------------------------------------------

@@ -527,9 +527,9 @@ until PR6 merges.**
 |---|----------|-----------|------|
 | 1 | Reading leaves stored data unchanged | history-read-api | 7.2 |
 | 2 | The main-file digest is stable despite WAL checkpointing | history-read-api | 7.3 |
-| 3 | Executions return newest first, with full VCS context | history-read-api | 3.1 (contract), 5.3 (route — ordering, exact key set, and all six enumerated values asserted *by value*; value fidelity added in verify round 1) |
+| 3 | Executions return newest first, with full VCS context | history-read-api | 3.1 (contract), 5.3 (route — ordering, exact key set, and all six enumerated values asserted *by value*; value fidelity added in verify round 1, extended to the entry's two timestamps in round 2) |
 | 4 | An unknown test yields empty history, not an error | history-read-api | 3.2 (contract), 5.4 (route) |
-| 5 | A non-repository execution has a null VCS context, not an omitted entry | history-read-api | 3.3 |
+| 5 | A non-repository execution has a null VCS context, not an omitted entry | history-read-api | 3.3 (contract, both adapters), plus `test_routes_read.py::test_history_entry_for_a_non_repository_run_carries_a_null_vcs_key` (route level — the surface the scenario is written about; added in verify round 2) |
 | 6 | `vcs_root` appears in no history entry | history-read-api | 5.3 (Test — the exact key-set assertion in `test_history_route_returns_newest_first_with_full_vcs` excludes `root`; kills Tamper E), 5.5 (**Inspection**, not Test — structurally unfalsifiable, same reasoning as 4.2; credited in verify round 1) |
 | 7 | List responses exclude traceback and captured output (Inspection) | history-read-api | 7.6 |
 | 8 | The commit subject is bounded in list responses | history-read-api | 2.6 |
@@ -547,9 +547,9 @@ until PR6 merges.**
 | 20 | Not a git repository records nulls | version-control-context | already verified — `vcs-capture` (archived) `test_vcs.py::test_not_a_repository_records_nulls_and_no_warning`; unchanged by this delta; re-confirmed by 7.12's full-suite gate |
 | 21 | Absent repository emits no warning | version-control-context | same as #20 — 7.12 |
 | 22 | Absent repository's run appears in the run list | version-control-context | 2.5 (contract), 7.9 (Demonstration through the live list — the promotion this change makes) |
-| 23 | A run past its grace period reads back as abandoned | session-liveness | 4.8 |
-| 24 | A run inside its grace period reads back as running | session-liveness | 4.9 |
-| 25 | A Ctrl-C interrupted run reads back as interrupted | session-liveness | 4.10 |
+| 23 | A run past its grace period reads back as abandoned | session-liveness | 4.8 (detail), plus `test_routes_read.py::test_run_list_presentation_and_interruption_are_per_run` (list — added in verify round 2; the list path called `derive_presentation` with nothing observing that it did) |
+| 24 | A run inside its grace period reads back as running | session-liveness | 4.9 (detail), plus the same round-2 list-path test as #23 |
+| 25 | A Ctrl-C interrupted run reads back as interrupted | session-liveness | 4.10 (detail), plus the same round-2 list-path test as #23 |
 | 26 | Abandonment invents no stored field | session-liveness | 4.11 |
 
 **All 26 spec scenarios trace to at least one task.** Scenarios 20 and 21 are
