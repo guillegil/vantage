@@ -407,6 +407,15 @@ def test_results_route_returns_paginated_envelope(
     item = body["items"][0]
     assert item["node_id"] == "tests/test_a.py::test_one"
     assert item["outcome"] == "passed"
+    # No `assert "traceback" not in item` here (task 7.6, history-read-api ->
+    # Lean list projections -> Inspection). `Result` has no traceback or
+    # captured-output field yet -- nothing this route could serve even if it
+    # tried -- so an exclusion assertion on this body would pass whether the
+    # exclusion is real or the field simply does not exist, which is not a
+    # test, only the appearance of one. This stays Inspection, honestly,
+    # until failure capture lands a `traceback` field on `Result`; only then
+    # does `ResultItemResponse` omitting it become a claim this test can
+    # falsify.
 
 
 # --- 5.2 --------------------------------------------------------------
@@ -569,3 +578,36 @@ def test_history_route_overlong_identity_is_422_not_414(client: TestClient) -> N
     body = response.json()
     assert body["error"] == "invalid_identity"
     assert overlong not in response.text
+
+
+# --- 7.9 --------------------------------------------------------------
+
+
+def test_absent_repository_run_appears_in_list_undistinguished(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(version-control-context -> Absent repository -> Absent repository's
+    run appears in the run list)*. Promotes that scenario from Inspection to
+    Test, through the live `GET /api/v1/runs` endpoint this change adds --
+    the criterion `history-read-api` was deferred to supply."""
+    now = datetime.now(timezone.utc)
+    repo_run_id = _run_id(90)
+    absent_run_id = _run_id(91)
+    store.record_session(
+        _execution(repo_run_id, started_at=now - timedelta(hours=2), finished_at=now, vcs=_vcs()),
+        results=[],
+        received_at=now - timedelta(hours=2),
+    )
+    store.record_session(
+        _execution(absent_run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=None),
+        results=[],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get("/api/v1/runs")
+
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["items"]}
+    assert set(items) == {repo_run_id, absent_run_id}
+    assert items[absent_run_id]["vcs"] is None
+    assert items[repo_run_id]["vcs"] is not None
