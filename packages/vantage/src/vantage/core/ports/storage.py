@@ -1,13 +1,93 @@
-"""The storage port: what any `ExecutionStore` adapter must implement (RQ-30)."""
+"""The storage port: what any `ExecutionStore` adapter must implement (RQ-30).
+
+The read types below (`Page`, `RunListEntry`, `RunDetail`, `HistoryEntry`)
+and the pagination constants land here in Phase 1 of the read-api change
+(design.md D57, D58, D61). `ExecutionStore` itself gains no method in this
+slice -- adding one without both adapters implementing it in the same commit
+would break every call site's structural conformance under `mypy --strict`
+(tasks.md Phase 1); the four read methods and the two adapters land together
+starting in Phase 2.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.execution import Execution
+from vantage.core.domain.projection import VcsProjection
 from vantage.core.domain.result import CatalogueEntry, Result
+
+MAX_PAGE_ITEMS = 200
+"""The hard cap on items in one page (design.md D61) -- clamped in the
+adapter, never rejected; a request for more is satisfied up to this many."""
+
+MAX_IDENTITY_CHARS = 1024
+"""The bound on a client-chosen test identity value (design.md D54) -- a
+1,024-character identity percent-encodes to at most ~3 KiB, comfortably
+inside the common 8 KiB request-line buffer."""
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Page(Generic[T]):
+    """A bounded page of items (design.md D58). No `total` -- no scenario
+    asks for one, and a total would need a `COUNT(*)` on every page.
+
+    No `slots=True`: dataclass slot-recreation combined with `Generic` is a
+    hazard on this project's Python 3.10 floor, and this envelope gains
+    nothing from slots.
+    """
+
+    items: tuple[T, ...]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RunListEntry:
+    """One row of `list_runs` (design.md D57, D58, D59).
+
+    `execution.vcs` is always `None` here -- the lean VCS data rides beside
+    it in `vcs`, a `VcsProjection`, so there is exactly one place a list
+    entry's VCS data can be read from. A list entry carrying both a
+    populated `execution.vcs` and this field would be two answers to one
+    question.
+    """
+
+    execution: Execution
+    last_contact_at: datetime | None
+    vcs: VcsProjection | None
+
+
+@dataclass(frozen=True, slots=True)
+class RunDetail:
+    """The full-record return of `get_run_detail` (design.md D57, D58, D59).
+
+    `execution.vcs` is the whole, unbounded `VcsContext` -- the detail path
+    keeps the full record reachable, which is the other half of the
+    lean-list rule.
+    """
+
+    execution: Execution
+    last_contact_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryEntry:
+    """One row of `list_history` -- a test's execution in one run
+    (design.md D57, D58, D59, D60). `vcs` is a lean `VcsProjection`, the
+    same read-display bound `RunListEntry` applies."""
+
+    run_id: str
+    started_at: datetime
+    finished_at: datetime | None
+    last_contact_at: datetime | None
+    outcome: str
+    duration: float | None
+    vcs: VcsProjection | None
 
 
 class ExecutionStore(Protocol):

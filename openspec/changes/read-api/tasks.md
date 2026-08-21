@@ -84,38 +84,38 @@ out of structural conformance mid-slice). Stdlib only — the existing AST
 architecture test enforcing `vantage.core` import isolation, unchanged, still
 applies and still passes.
 
-- [ ] 1.1 RED `test_projection.py::test_subject_bounded_at_120_chars_sets_flag`
+- [x] 1.1 RED `test_projection.py::test_subject_bounded_at_120_chars_sets_flag`
       — a `VcsContext` whose `commit_subject` is 200 characters and
       `commit_subject_truncated=False`; `project_vcs` returns a
       `VcsProjection` whose `commit_subject` is the first 120 characters and
       `commit_subject_truncated is True`. *(history-read-api → Lean list
       projections → The commit subject is bounded in list responses, D60)*
-- [ ] 1.2 RED `test_projection.py::test_capture_truncation_flag_survives_even_when_short`
+- [x] 1.2 RED `test_projection.py::test_capture_truncation_flag_survives_even_when_short`
       — a `VcsContext` with `commit_subject_truncated=True` and a
       `commit_subject` under 120 characters; `project_vcs` still returns
       `commit_subject_truncated is True` — the other half of the disjunction,
       independent of display width. *(Lean list projections → The truncation
       flag never surfaces independently of its subject, D60)*
-- [ ] 1.3 RED `test_projection.py::test_null_vcs_context_projects_to_none` —
+- [x] 1.3 RED `test_projection.py::test_null_vcs_context_projects_to_none` —
       `project_vcs(None) is None`. *(history-read-api → Test history → A
       non-repository execution has a null VCS context, not an omitted entry)*
-- [ ] 1.4 RED `test_projection.py::test_vcs_projection_has_no_root_field` —
+- [x] 1.4 RED `test_projection.py::test_vcs_projection_has_no_root_field` —
       `"root" not in {f.name for f in dataclasses.fields(VcsProjection)}` —
       the exclusion is structural, not a runtime assertion. *(Lean list
       projections → `vcs_root` appears in no run list or run detail response,
       D59)*
-- [ ] 1.5 GREEN `projection.py` (create): `LIST_COMMIT_SUBJECT_CHARS = 120`;
+- [x] 1.5 GREEN `projection.py` (create): `LIST_COMMIT_SUBJECT_CHARS = 120`;
       `VcsProjection` (frozen, slots dataclass, no `root` field); `project_vcs`
       per 1.1–1.4.
-- [ ] 1.6 RED `test_storage_types.py` (create): `Page` carries `items: tuple`
+- [x] 1.6 RED `test_storage_types.py` (create): `Page` carries `items: tuple`
       and `has_more: bool` and no `total` field; `RunListEntry`,
       `RunDetail`, `HistoryEntry` carry the fields listed in `design.md`'s
       Interfaces/Contracts section; `MAX_PAGE_ITEMS == 200`;
       `MAX_IDENTITY_CHARS == 1024`.
-- [ ] 1.7 GREEN `storage.py`: add `Page`, `RunListEntry`, `RunDetail`,
+- [x] 1.7 GREEN `storage.py`: add `Page`, `RunListEntry`, `RunDetail`,
       `HistoryEntry`, `MAX_PAGE_ITEMS`, `MAX_IDENTITY_CHARS`. The
       `ExecutionStore` Protocol itself is untouched in this slice.
-- [ ] 1.8 Gate: `uv run pytest packages/vantage/tests/test_projection.py packages/vantage/tests/test_storage_types.py packages/vantage/tests/test_architecture.py`,
+- [x] 1.8 Gate: `uv run pytest packages/vantage/tests/test_projection.py packages/vantage/tests/test_storage_types.py packages/vantage/tests/test_architecture.py`,
       `uv run mypy .` clean; confirm `projection.py` imports nothing but
       `dataclasses` and `__future__` (the existing architecture test covers
       this; run it explicitly here as the first gate touching `vantage.core`).
