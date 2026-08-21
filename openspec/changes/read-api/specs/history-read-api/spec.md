@@ -154,3 +154,32 @@ matrix.
 - GIVEN a fixture of 500 runs and 100,000 results
 - WHEN a test's history is requested repeatedly against that fixture
 - THEN the 95th-percentile server-side response time and the slowest single response observed are both measured and committed to this spec as numbers
+
+**Measurements** (`scripts/measure_history_latency.py`, 2026-08-21,
+Linux-6.18.33.2-microsoft-standard-WSL2-x86_64, Python 3.10.21, git 2.55.0).
+Fixture: 500 runs × 200 results (100,000 results), ~200 distinct node ids, a
+target present in every run and a second present in exactly one. 5 warm-up
+requests discarded, then 200 timed requests against `GET
+/api/v1/tests/history`, server-side, in-process (no socket):
+
+- **p95 (nearest-rank, n=200): 3.70 ms**
+- **max (slowest single response): 11.59 ms**
+
+Both are comfortably inside the 100 ms budget — 96.3 ms of headroom at p95 —
+which supports D63's claim that the read path needs no new index: a ~500-row
+scan over existing indexes costs low single-digit milliseconds, not a
+meaningful fraction of the budget.
+
+The same run also re-measured `measure_vcs_overhead.py`'s synthetic-
+repository 10 ms profile (D63): **OFF = 11.062 s, ON = 11.160 s, delta =
+97.7 ms (0.88 %)** against the 2 % budget of 221.2 ms, leaving **≈123.5 ms**
+of headroom — more than D63's previously recorded ≈55 ms figure, because
+that delta (97.7 ms) is itself lower than the 164.8 ms this run-to-run
+measurement recorded before. This is ordinary variance the paired,
+interleaved methodology already accounts for (medians, not means), not a
+correction to D63's number, which this benchmark does not overwrite. It does
+not contradict D63: headroom is unchanged in kind and, on this run, larger,
+not smaller.
+
+A future change to the history query or its indexes MUST re-run
+`scripts/measure_history_latency.py` and update this paragraph.

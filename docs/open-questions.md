@@ -16,7 +16,7 @@ it costs more than a sprint to reverse.
 | OQ-6 | If a remote arrives, how do local and remote stay in containment? | **Answered** 2026-08-18 |
 | OQ-7 | What is the Windows equivalent of an owner-only store? | **Answered** 2026-08-18 |
 | OQ-8 | What can the launch surface actually launch? | **Answered** 2026-08-18 |
-| OQ-9 | Can RQ-14 stay read-only once launching exists? | **Open** — resolve by Phase 3 |
+| OQ-9 | Can the read-only guarantee stay read-only once launching exists? | **Answered** 2026-08-21 — ADR-15 |
 | OQ-10 | Is the interface document generated or hand-written? | **Answered** 2026-08-18 |
 
 ---
@@ -81,14 +81,15 @@ remote shell with a web interface, and no authentication layered on top
 recovers it. **The constraint binds before the surface exists**, which is the
 whole point of deciding it now.
 
-## OQ-9 · Open — RQ-14 stays as written
+## OQ-9 · Answered — the guarantee is scoped to a named read surface
 
-RQ-14 says every endpoint leaves stored data unchanged. A launch surface
-creates data. **Both cannot hold, and RQ-14 is deliberately left untouched for
-now.**
-
-The contradiction is real and recorded rather than resolved. It becomes
-blocking the day a launch surface is designed, not before. Revisit at Phase 3.
+The read-only guarantee ("every endpoint leaves stored data unchanged") and a
+future launch surface that creates data cannot both hold universally.
+**ADR-15 resolves this by scoping the guarantee to whatever the
+machine-readable interface document tags `read`** — not to "every endpoint"
+and not to "Phase 1" — so a launch surface is excluded by being tagged
+`write`, not by an exception nobody reviewed. See ADR-15 for the full
+reasoning and the alternatives it rejected.
 
 ## Note · Catalogue `last_seen_at` monotonicity is now UTC-normalized at the boundary
 

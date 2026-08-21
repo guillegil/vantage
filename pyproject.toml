@@ -104,9 +104,16 @@ ignore_notebooks = true
 # pip-audit) that are invoked via `uv run <tool>` and never imported as
 # Python modules, plus pytest-xdist and httpx2, which are exercised through
 # pytest's own plugin discovery and starlette's TestClient rather than a
-# direct `import` in this project's code.
+# direct `import` in this project's code. `measure_vcs_overhead` is the same
+# shape as the three test-support modules below, reached by
+# `measure_history_latency.py` through `sys.path`, not a package (task 7.7).
 [tool.deptry.per_rule_ignores]
-DEP001 = ["importwalk", "vantage_port_contract", "vantage_test_server"]
+DEP001 = [
+    "importwalk",
+    "measure_vcs_overhead",
+    "vantage_port_contract",
+    "vantage_test_server",
+]
 # `types-PyYAML` is a stub package mypy reads, never itself imported --
 # same category as the CLI-only tools below.
 DEP002 = ["ruff", "mypy", "deptry", "pip-audit", "httpx2", "pytest-xdist", "types-PyYAML"]

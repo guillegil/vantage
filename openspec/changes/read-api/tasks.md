@@ -448,40 +448,40 @@ paragraph), `docs/adr/0015-scope-the-read-only-guarantee-to-a-named-read-surface
 binding table's call list comes from `openapi/v1.yaml`, which does not exist
 until PR6 merges.**
 
-- [ ] 7.1 RED `test_read_only_surface.py::test_a_writing_endpoint_tagged_read_fails_the_harness`
+- [x] 7.1 RED `test_read_only_surface.py::test_a_writing_endpoint_tagged_read_fails_the_harness`
       — **the falsifier.** A test-local copy of the binding table with
       `POST /api/v1/runs` temporarily registered as if it were `read`;
       assert the digest-pair harness reports a mismatch rather than passing
       — proves the check is not vacuously green before it is trusted with
       the real document.
-- [ ] 7.2 RED `..._test_logical_content_digest_unchanged_after_every_read_path`
+- [x] 7.2 RED `..._test_logical_content_digest_unchanged_after_every_read_path`
       — a database holding at least one run and its results; every
       `read`-tagged path called in sequence; assert the logical content
       digest (tables enumerated from `sqlite_master`, `SELECT * FROM
       <table> ORDER BY rowid` per table, sha256) is identical before and
       after, and `count_executions()`/`count_results()` are unchanged.
       *(Read-only read surface → Reading leaves stored data unchanged)*
-- [ ] 7.3 RED `..._test_main_file_digest_stable_despite_wal_checkpointing` —
+- [x] 7.3 RED `..._test_main_file_digest_stable_despite_wal_checkpointing` —
       the fixture writer's store is closed before the read store opens (WAL
       already checkpointed and removed); the read store stays open across
       both digests, taken before and after the same read sequence; assert
       the main `.db` file's digest is identical — `-wal`/`-shm` are never
       digested. *(The main-file digest is stable despite WAL checkpointing)*
-- [ ] 7.4 RED `..._test_every_read_path_has_a_binding` — every `read`-tagged
+- [x] 7.4 RED `..._test_every_read_path_has_a_binding` — every `read`-tagged
       `(path, method)` in the document has an entry in the binding table;
       a path added without one fails this test rather than being silently
       skipped.
-- [ ] 7.5 GREEN `test_read_only_surface.py`: implement the binding table
+- [x] 7.5 GREEN `test_read_only_surface.py`: implement the binding table
       (one callable per `read`-tagged path, its own fixture database
       distinct from PR6's 2xx-check fixture, per D65) and the digest-pair
       harness satisfying 7.1–7.4.
-- [ ] 7.6 Inspection: record, in a comment beside the traceback/captured-
+- [x] 7.6 Inspection: record, in a comment beside the traceback/captured-
       output assertion this change does NOT add, that `Lean list
       projections`' traceback-exclusion half stays unfailable because
       `result.traceback` has no writer yet — state this honestly rather
       than manufacturing a green assertion. *(Lean list projections → List
       responses exclude traceback and captured output — Inspection)*
-- [ ] 7.7 Analysis: write `scripts/measure_history_latency.py`, following
+- [x] 7.7 Analysis: write `scripts/measure_history_latency.py`, following
       `scripts/measure_vcs_overhead.py`'s shape — a fixture of 500 runs ×
       200 results (100,000 results), ~200 distinct node ids, one target
       test present in all 500 runs and a second present in one run only,
@@ -491,24 +491,24 @@ until PR6 merges.**
       `time.perf_counter_ns`; nearest-rank p95, stated in the output; also
       reports the slowest single response; also re-runs
       `scripts/measure_vcs_overhead.py`'s 10 ms profile (D63).
-- [ ] 7.8 Analysis: run the harness by hand (never in CI); transcribe the
+- [x] 7.8 Analysis: run the harness by hand (never in CI); transcribe the
       p95, the max, and the re-run 10 ms-profile overhead numbers as a
       **Measurements** paragraph under `history-read-api` → *Test history
       latency* in `openspec/changes/read-api/specs/history-read-api/spec.md`,
       alongside D63's ≈55 ms headroom figure; state that a future change
       to the history query or its indexes MUST re-run the script. *(p95
       and max latency are measured and committed as numbers)*
-- [ ] 7.9 Demonstration: confirm, through the live `GET /api/v1/runs`
+- [x] 7.9 Demonstration: confirm, through the live `GET /api/v1/runs`
       endpoint, that a run recorded outside a git repository appears in the
       list alongside runs from repositories, all six VCS fields null, no
       positional distinction — the promotion `version-control-context` →
       *Absent repository* records from Inspection to Test.
-- [ ] 7.10 Write `docs/adr/0015-scope-the-read-only-guarantee-to-a-named-read-surface.md`:
+- [x] 7.10 Write `docs/adr/0015-scope-the-read-only-guarantee-to-a-named-read-surface.md`:
       flip `Status: Proposed` → `Status: Accepted` — do this at merge, not
       at PR-open time.
-- [ ] 7.11 Update `docs/open-questions.md`: OQ-9 → Answered, bound to
+- [x] 7.11 Update `docs/open-questions.md`: OQ-9 → Answered, bound to
       ADR-0015.
-- [ ] 7.12 Full gate: `uv run pytest packages/vantage/tests/test_read_only_surface.py`,
+- [x] 7.12 Full gate: `uv run pytest packages/vantage/tests/test_read_only_surface.py`,
       then the whole suite `uv run pytest`, `uv run mypy .`,
       `uv run deptry .`, `uv run ruff format . && uv run ruff check --fix .`;
       confirm `git diff` shows zero changes to `schema.sql` for the entire
