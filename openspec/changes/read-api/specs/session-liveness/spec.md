@@ -2,6 +2,19 @@
 
 ## Purpose
 
+> **Archive instruction — this section does not merge itself.** The delta
+> format auto-merges `ADDED` / `MODIFIED` / `REMOVED` / `RENAMED` requirement
+> blocks only; it has no slot for a capability's Purpose text, and every
+> archived delta in this repository that carries a `## Purpose` was an ADDED
+> capability, not a modification. So `sdd-archive` MUST replace
+> `openspec/specs/session-liveness/spec.md`'s Purpose section with the text
+> below **by hand**. Skipping it leaves that spec asserting that presenting
+> the derived state "waits for a read API that does not exist yet",
+> immediately above a requirement whose verification method is Demonstration
+> through the read API this change shipped — a spec contradicting itself on
+> the same page.
+
+
 Defines how the server knows a session is still alive while it runs, and how
 it derives a run's presentation — running, interrupted, or abandoned — from
 last contact and a configured grace period. This capability maintains the
@@ -20,7 +33,16 @@ pytest, database or web import.
 
 ## MODIFIED Requirements
 
-### Requirement: Abandoned run is observable
+### Requirement: Abandoned run is observable (RQ-44)
+
+> **Heading note.** This heading carries the merged capability spec's exact
+> text, trailing identifier included, because the archive merge matches a
+> `MODIFIED` block to its target **by heading text**. A heading that does not
+> match appends a duplicate requirement instead of replacing the existing one.
+> The identifier is a join key here, not vocabulary: this change writes none
+> of its own, and this suffix disappears when the merged spec is renumbered
+> in a change of its own.
+
 
 If a run entry has a start time and no end time and no report or heartbeat
 contact has arrived for it within a configured grace period, then the system

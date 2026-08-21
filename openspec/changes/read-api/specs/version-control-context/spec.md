@@ -2,7 +2,16 @@
 
 ## MODIFIED Requirements
 
-### Requirement: Absent repository
+### Requirement: Absent repository (RQ-23)
+
+> **Heading note.** This heading carries the merged capability spec's exact
+> text, trailing identifier included, because the archive merge matches a
+> `MODIFIED` block to its target **by heading text**. A heading that does not
+> match appends a duplicate requirement instead of replacing the existing one.
+> The identifier is a join key here, not vocabulary: this change writes none
+> of its own, and this suffix disappears when the merged spec is renumbered
+> in a change of its own.
+
 
 Where the project directory is not a git repository, the server MUST record
 the run with all six vcs fields null and MUST NOT emit any warning for that
