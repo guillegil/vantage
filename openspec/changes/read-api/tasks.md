@@ -525,14 +525,14 @@ until PR6 merges.**
 |---|----------|-----------|------|
 | 1 | Reading leaves stored data unchanged | history-read-api | 7.2 |
 | 2 | The main-file digest is stable despite WAL checkpointing | history-read-api | 7.3 |
-| 3 | Executions return newest first, with full VCS context | history-read-api | 3.1 (contract), 5.3 (route) |
+| 3 | Executions return newest first, with full VCS context | history-read-api | 3.1 (contract), 5.3 (route — ordering, exact key set, and all six enumerated values asserted *by value*; value fidelity added in verify round 1) |
 | 4 | An unknown test yields empty history, not an error | history-read-api | 3.2 (contract), 5.4 (route) |
 | 5 | A non-repository execution has a null VCS context, not an omitted entry | history-read-api | 3.3 |
 | 6 | `vcs_root` appears in no history entry | history-read-api | 5.5 |
 | 7 | List responses exclude traceback and captured output (Inspection) | history-read-api | 7.6 |
 | 8 | The commit subject is bounded in list responses | history-read-api | 2.6 |
-| 9 | The truncation flag never surfaces independently of its subject | history-read-api | 2.7, 2.8 |
-| 10 | `vcs_root` appears in no run list or run detail response | history-read-api | 1.4, 4.2, 4.6 |
+| 9 | The truncation flag never surfaces independently of its subject | history-read-api | 2.7, 2.8 (port), plus `test_routes_read.py::test_list_response_carries_the_truncation_flag_beside_its_subject` (response level, both halves of the D60 disjunction) and 5.3 — added in verify round 1; the scenario is written about responses and had no response-level check before |
+| 10 | `vcs_root` appears in no run list or run detail response | history-read-api | 1.4, 4.6 (Test — the falsifiable half), 4.2 (**Inspection**, not Test — structurally unfalsifiable) |
 | 11 | A list response never exceeds 200 items | history-read-api | 2.2 (contract), 4.4 (route) |
 | 12 | The more-items flag distinguishes truncation from exhaustion | history-read-api | 2.3 |
 | 13 | A caller-requested page size under the cap is honored | history-read-api | 2.4 |
@@ -557,6 +557,21 @@ so they trace to the already-shipped, unchanged tests plus this change's own
 full-suite regression gate, not a newly authored RED task. Scenario 7 is
 Inspection, not Test, and its task records that honestly rather than
 asserting something that cannot fail today.
+
+**Task 4.2 is Inspection too, corrected in verify round 1.** It was credited
+as Test on row 10 and its docstring claimed it was "the only test shape that
+catches an accidental `from_attributes` passthrough". Both were false, and
+verify proved it: reintroducing `root` on `RunVcsResponse` and populating it
+leaves 4.2 green. On the list path the exclusion is *structural* —
+`RunListEntry.vcs` is a `VcsProjection`, which has no `root` field at all
+(D59), and both adapters strip the context off the entry itself — so no code
+path could carry `_KNOWN_ROOT` into that body. **4.6 is the test that carries the
+scenario**: the detail path holds a full `VcsContext`, which does carry
+`root`, and only the field-by-field response model keeps it off the wire.
+The same reasoning already applied to 5.5, whose docstring was honest from
+the start (row 6). Neither unfalsifiable guard is deleted — an unfalsifiable
+regression guard is worth keeping; claiming it proves something is the
+defect.
 
 ## Architecture and process notes carried into every gate
 

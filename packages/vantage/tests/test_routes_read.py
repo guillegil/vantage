@@ -21,12 +21,21 @@ from typing import cast
 import pytest
 from fastapi.testclient import TestClient
 from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS
 from vantage.core.ports.storage import ExecutionStore, HistoryEntry, Page
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage_port_contract import _result
 
 _KNOWN_ROOT = "/home/example/very-unique-repo-root-xyz123"
+
+# Distinct, recognisable 40-hex commits, one per fixture that asserts VCS
+# values on the wire. Distinct so a swapped or nulled field fails loudly
+# instead of coincidentally matching a neighbour's value or a shared default.
+_LIST_COMMIT = "c0ffee01" * 5
+_HISTORY_NEWER_COMMIT = "beef0002" * 5
+_HISTORY_OLDER_COMMIT = "dead0003" * 5
+_TRUNCATION_COMMIT = "face0004" * 5
 
 
 def _run_id(seed: int) -> str:
@@ -107,15 +116,31 @@ class _SpyExecutionStore:
 def test_run_list_returns_items_and_has_more_envelope(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(history-read-api -> Bounded pagination, list envelope shape)*.
-    Each response field is asserted by exact key set -- the shape a
-    field-by-field response model produces, never `from_attributes`'s
-    incidental extras (inspected in `schemas.py`/`routes/read.py` at review
-    time, per task 4.1's own note)."""
+    """*(history-read-api -> Bounded pagination, list envelope shape; and
+    Test history -> full VCS context at the list layer)*.
+
+    **Shape and value are different properties and this test holds both.**
+    The exact key sets assert the shape a field-by-field response model
+    produces, never `from_attributes`'s incidental extras. The `item["vcs"]`
+    equality then asserts every one of the five projected values reaches the
+    wire intact: a key-set check alone stays green while `_vcs_response`
+    hardcodes `dirty=None` or `commit=None`, which is exactly how five
+    fields could be silently destroyed on the wire."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(1)
     store.record_session(
-        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=_vcs()),
+        _execution(
+            run_id,
+            started_at=now - timedelta(hours=1),
+            finished_at=now,
+            vcs=_vcs(
+                commit=_LIST_COMMIT,
+                branch="release/list-envelope",
+                commit_subject="bound the run list envelope",
+                commit_subject_truncated=False,
+                dirty=True,
+            ),
+        ),
         results=[],
         received_at=now - timedelta(hours=1),
     )
@@ -146,6 +171,13 @@ def test_run_list_returns_items_and_has_more_envelope(
         "commit_subject_truncated",
         "dirty",
     }
+    assert item["vcs"] == {
+        "commit": _LIST_COMMIT,
+        "branch": "release/list-envelope",
+        "commit_subject": "bound the run list envelope",
+        "commit_subject_truncated": False,
+        "dirty": True,
+    }
 
 
 # --- 4.2 --------------------------------------------------------------
@@ -155,9 +187,17 @@ def test_run_list_response_contains_no_vcs_root_anywhere(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
     """*(Lean list projections -> `vcs_root` appears in no run list or run
-    detail response)*. A substring assertion on the raw serialized body --
-    the only test shape that catches an accidental `from_attributes`
-    passthrough of `VcsContext.root`."""
+    detail response)*. A substring assertion on the raw serialized body.
+
+    **Structurally unfalsifiable, like 5.5.** On the list path the source
+    object is a `VcsProjection`, which has no `root` field at all (D59), and
+    both adapters additionally strip the context off the entry itself
+    (`replace(execution, vcs=None)`) -- `_KNOWN_ROOT` has no code path to
+    this body, so this assertion cannot currently fail. Reintroducing `root`
+    on `RunVcsResponse` leaves it green. Kept as a regression guard against
+    a future list entry that carries a full `VcsContext`, not because it
+    proves anything today. **4.6, on the detail path, is the test that
+    carries this scenario.**"""
     now = datetime.now(timezone.utc)
     run_id = _run_id(2)
     store.record_session(
@@ -250,10 +290,18 @@ def test_run_detail_returns_full_untruncated_subject(
 def test_run_detail_response_contains_no_vcs_root(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Same substring assertion as 4.2, on the detail response body --
-    detail carries the full `VcsContext`, which DOES carry `root`; only the
-    response model's explicit field-by-field construction keeps it off the
-    wire (Phase 4 prompt's own warning)."""
+    """*(Lean list projections -> `vcs_root` appears in no run list or run
+    detail response -- the falsifiable half.)*
+
+    **This is the test that carries the scenario.** Same substring shape as
+    4.2 and 5.5, but unlike either of them it can actually fail: the detail
+    path's source object is the full `VcsContext`, which *does* carry
+    `root`, so nothing structural excludes it. The only thing keeping it off
+    the wire is `RunVcsResponse` having no `root` field and `_vcs_response`
+    naming its five fields explicitly, never
+    `model_validate(..., from_attributes=True)`. Add `root` back to
+    `RunVcsResponse` and populate it, and this test goes red while 4.2 and
+    5.5 stay green."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(6)
     store.record_session(
@@ -435,14 +483,33 @@ def test_history_route_returns_newest_first_with_full_vcs(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
     """*(history-read-api -> Test history -> Executions return newest
-    first, with full VCS context -- route level)*."""
+    first, with full VCS context -- route level)*.
+
+    The scenario enumerates six things every entry carries: its commit,
+    branch, commit subject, truncation flag, dirty flag, and duration. All
+    six are asserted here *by value*, on both entries, with deliberately
+    distinct fixtures -- ordering and an exact key set alone leave
+    `_history_entry(duration=None)` and `_vcs_response(commit=None)`
+    undetectable. The two entries disagree on every field, so a swap between
+    them fails as loudly as a null."""
     now = datetime.now(timezone.utc)
     node_id = "tests/test_a.py::test_shared"
     older_run = _run_id(21)
     newer_run = _run_id(22)
     store.record_session(
-        _execution(older_run, started_at=now - timedelta(hours=2), finished_at=now, vcs=_vcs()),
-        results=[_result(node_id)],
+        _execution(
+            older_run,
+            started_at=now - timedelta(hours=2),
+            finished_at=now,
+            vcs=_vcs(
+                commit=_HISTORY_OLDER_COMMIT,
+                branch="main",
+                commit_subject="the older commit subject",
+                commit_subject_truncated=True,
+                dirty=False,
+            ),
+        ),
+        results=[_result(node_id, duration=1.5)],
         received_at=now - timedelta(hours=2),
     )
     store.record_session(
@@ -450,9 +517,15 @@ def test_history_route_returns_newest_first_with_full_vcs(
             newer_run,
             started_at=now - timedelta(hours=1),
             finished_at=now,
-            vcs=_vcs(branch="feature"),
+            vcs=_vcs(
+                commit=_HISTORY_NEWER_COMMIT,
+                branch="feature",
+                commit_subject="the newer commit subject",
+                commit_subject_truncated=False,
+                dirty=True,
+            ),
         ),
-        results=[_result(node_id)],
+        results=[_result(node_id, outcome="failed", duration=0.125)],
         received_at=now - timedelta(hours=1),
     )
 
@@ -470,7 +543,25 @@ def test_history_route_returns_newest_first_with_full_vcs(
             "commit_subject_truncated",
             "dirty",
         }
-    assert body["items"][0]["vcs"]["branch"] == "feature"
+    newer, older = body["items"]
+    assert newer["vcs"] == {
+        "commit": _HISTORY_NEWER_COMMIT,
+        "branch": "feature",
+        "commit_subject": "the newer commit subject",
+        "commit_subject_truncated": False,
+        "dirty": True,
+    }
+    assert newer["outcome"] == "failed"
+    assert newer["duration"] == 0.125
+    assert older["vcs"] == {
+        "commit": _HISTORY_OLDER_COMMIT,
+        "branch": "main",
+        "commit_subject": "the older commit subject",
+        "commit_subject_truncated": True,
+        "dirty": False,
+    }
+    assert older["outcome"] == "passed"
+    assert older["duration"] == 1.5
 
 
 # --- 5.4 --------------------------------------------------------------
@@ -611,3 +702,69 @@ def test_absent_repository_run_appears_in_list_undistinguished(
     assert set(items) == {repo_run_id, absent_run_id}
     assert items[absent_run_id]["vcs"] is None
     assert items[repo_run_id]["vcs"] is not None
+
+
+# --- verify round 1 -----------------------------------------------------
+
+
+def test_list_response_carries_the_truncation_flag_beside_its_subject(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(history-read-api -> Lean list projections -> The truncation flag
+    never surfaces independently of its subject -- response level.)*
+
+    The scenario is written about responses -- "in any response, list or
+    detail ... in that same response" -- and until this test the only checks
+    were at the port. The flag is a *disjunction* (design.md D60): true when
+    the capture itself was truncated OR when display bounding shortened the
+    subject here. Both halves are asserted on one real body, because a wire
+    that always answers `commit_subject_truncated: false` beside a subject
+    cut to 120 characters misrepresents git -- the exact dishonesty the flag
+    exists to prevent.
+    """
+    now = datetime.now(timezone.utc)
+    display_bounded_run = _run_id(30)
+    capture_truncated_run = _run_id(31)
+    short_subject = "short, but the capture itself was cut"
+    store.record_session(
+        _execution(
+            display_bounded_run,
+            started_at=now - timedelta(hours=2),
+            finished_at=now,
+            vcs=_vcs(
+                commit=_TRUNCATION_COMMIT,
+                commit_subject="L" * 200,
+                commit_subject_truncated=False,
+            ),
+        ),
+        results=[],
+        received_at=now - timedelta(hours=2),
+    )
+    store.record_session(
+        _execution(
+            capture_truncated_run,
+            started_at=now - timedelta(hours=1),
+            finished_at=now,
+            vcs=_vcs(commit_subject=short_subject, commit_subject_truncated=True),
+        ),
+        results=[],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get("/api/v1/runs")
+
+    assert response.status_code == 200
+    items = {item["id"]: item for item in response.json()["items"]}
+
+    # Half one: display bounding. The stored subject was not truncated at
+    # capture, so the flag is true only because this response shortened it.
+    display_bounded = items[display_bounded_run]["vcs"]
+    assert display_bounded["commit_subject"] == "L" * LIST_COMMIT_SUBJECT_CHARS
+    assert display_bounded["commit_subject_truncated"] is True
+
+    # Half two: capture truncation. Nothing was shortened here -- the
+    # subject is well under the display width -- so the flag must have
+    # travelled with the subject from the capture.
+    capture_truncated = items[capture_truncated_run]["vcs"]
+    assert capture_truncated["commit_subject"] == short_subject
+    assert capture_truncated["commit_subject_truncated"] is True
