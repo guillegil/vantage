@@ -38,7 +38,13 @@ from datetime import datetime
 from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.projection import project_vcs
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
-from vantage.core.ports.storage import MAX_PAGE_ITEMS, Page, RunDetail, RunListEntry
+from vantage.core.ports.storage import (
+    MAX_PAGE_ITEMS,
+    HistoryEntry,
+    Page,
+    RunDetail,
+    RunListEntry,
+)
 
 
 def _normalized_vcs(vcs: VcsContext | None) -> VcsContext | None:
@@ -209,6 +215,52 @@ class InMemoryExecutionStore:
             execution=execution,
             last_contact_at=self._last_contact.get(execution_id),
         )
+
+    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[Result]:
+        # Same clamp/`has_more` mechanism as `list_runs` (design.md D57,
+        # D61) -- the paginated sibling of `get_results`. Dict insertion
+        # order mirrors the SQLite adapter's `ORDER BY r.id`.
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        matching = [
+            result
+            for (run_id, _node_id, _attempt), result in self._results.items()
+            if run_id == execution_id
+        ]
+        window = matching[offset : offset + page_limit + 1]
+        has_more = len(window) > page_limit
+        return Page(items=tuple(window[:page_limit]), has_more=has_more)
+
+    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+        # Mirrors `list_runs`' total order -- `(started_at, run_id)`
+        # descending -- over every execution that has a result for this
+        # `node_id` (design.md D57, D61, D63). An unknown `node_id` matches
+        # nothing and yields an empty page, never an error.
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        matches = [
+            (run_id, result)
+            for (run_id, result_node_id, _attempt), result in self._results.items()
+            if result_node_id == node_id
+        ]
+        ordered = sorted(
+            matches,
+            key=lambda pair: (self._executions[pair[0]].started_at, pair[0]),
+            reverse=True,
+        )
+        window = ordered[offset : offset + page_limit + 1]
+        has_more = len(window) > page_limit
+        items = tuple(
+            HistoryEntry(
+                run_id=run_id,
+                started_at=self._executions[run_id].started_at,
+                finished_at=self._executions[run_id].finished_at,
+                last_contact_at=self._last_contact.get(run_id),
+                outcome=result.outcome,
+                duration=result.duration,
+                vcs=project_vcs(self._executions[run_id].vcs),
+            )
+            for run_id, result in window[:page_limit]
+        )
+        return Page(items=items, has_more=has_more)
 
     def close(self) -> None:
         self._executions.clear()

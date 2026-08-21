@@ -193,35 +193,35 @@ adapter is ever mid-slice out of structural conformance). **Depends on PR1.**
 
 Same three storage files. **Depends on PR2.**
 
-- [ ] 3.1 RED `vantage_port_contract.py::test_list_history_orders_newest_first_with_full_vcs`
+- [x] 3.1 RED `vantage_port_contract.py::test_list_history_orders_newest_first_with_full_vcs`
       — a node id that ran in multiple sessions, at least one from a
       repository with a named branch and a dirty tree; assert newest-first
       ordering and every entry carries commit, branch, commit subject,
       truncation flag, dirty flag, and duration. *(history-read-api → Test
       history → Executions return newest first, with full VCS context)*
-- [ ] 3.2 RED `..._test_list_history_unknown_node_id_is_empty_not_error` — a
+- [x] 3.2 RED `..._test_list_history_unknown_node_id_is_empty_not_error` — a
       node id with no recorded executions; assert an empty `Page`, not an
       error. *(Test history → An unknown test yields empty history, not an
       error)*
-- [ ] 3.3 RED `..._test_list_history_null_vcs_entry_present_not_omitted` — an
+- [x] 3.3 RED `..._test_list_history_null_vcs_entry_present_not_omitted` — an
       execution recorded outside a git repository, present among a node
       id's history; assert its entry has `vcs is None` and is present, not
       omitted. *(Test history → A non-repository execution has a null VCS
       context, not an omitted entry)*
-- [ ] 3.4 RED `..._test_list_history_caps_and_reports_more_like_list_runs` —
+- [x] 3.4 RED `..._test_list_history_caps_and_reports_more_like_list_runs` —
       the same 200/201 clamp and `has_more` transition as 2.2/2.3, applied
       to `list_history`. *(Bounded pagination, reused for the history
       endpoint)*
-- [ ] 3.5 RED `..._test_list_results_paginates_a_runs_results` —
+- [x] 3.5 RED `..._test_list_results_paginates_a_runs_results` —
       `list_results(execution_id, limit=..., offset=...)` respects
       limit/offset/has_more, the paginated sibling of `get_results` (D57).
-- [ ] 3.6 RED `..._test_list_results_empty_for_a_run_with_no_results` — an
+- [x] 3.6 RED `..._test_list_results_empty_for_a_run_with_no_results` — an
       execution with zero results; assert an empty `Page`.
-- [ ] 3.7 GREEN `storage.py`: add `list_results(execution_id, *, limit,
+- [x] 3.7 GREEN `storage.py`: add `list_results(execution_id, *, limit,
       offset) -> Page[Result]` and `list_history(*, node_id, limit, offset)
       -> Page[HistoryEntry]` to the `ExecutionStore` Protocol — all four
       read methods now declared.
-- [ ] 3.8 GREEN `sqlite_store.py`: implement `list_history` — node id →
+- [x] 3.8 GREEN `sqlite_store.py`: implement `list_history` — node id →
       `test_case` (unique index) → `result` (index) → `run` (primary key),
       the join D63 sizes at ~500 index-ranged rows over the benchmark
       fixture; `node_id` is always a bound parameter, never interpolated,
@@ -229,9 +229,9 @@ Same three storage files. **Depends on PR2.**
       substr/length projection and total order as `list_runs`. Implement
       `list_results` — `SELECT ... FROM result WHERE run_id = ?`, same
       clamp.
-- [ ] 3.9 GREEN `memory.py`: implement `list_history` and `list_results`
+- [x] 3.9 GREEN `memory.py`: implement `list_history` and `list_results`
       mirroring the SQL behavior in Python.
-- [ ] 3.10 Gate:
+- [x] 3.10 Gate:
       `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py`,
       `uv run mypy .` clean; confirm both adapters now satisfy all four new
       `ExecutionStore` methods (mypy's structural Protocol check, run against

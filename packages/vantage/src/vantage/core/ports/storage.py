@@ -2,11 +2,12 @@
 
 The read types below (`Page`, `RunListEntry`, `RunDetail`, `HistoryEntry`)
 and the pagination constants landed in Phase 1 of the read-api change
-(design.md D57, D58, D61). `list_runs` and `get_run_detail` land here in
-Phase 2, paired with both adapters implementing them in the same commit --
-adding a Protocol method without both adapters would break every call site's
-structural conformance under `mypy --strict` (tasks.md Phase 2). `list_results`
-and `list_history` follow in Phase 3.
+(design.md D57, D58, D61). `list_runs` and `get_run_detail` landed in Phase
+2, paired with both adapters implementing them in the same commit. Phase 3
+adds `list_results` and `list_history` the same way -- all four read methods
+are now declared, each paired with both adapters landing in this commit so
+no adapter is ever mid-slice out of structural conformance under
+`mypy --strict`.
 """
 
 from __future__ import annotations
@@ -147,6 +148,19 @@ class ExecutionStore(Protocol):
         unknown (design.md D57, D58, D59). The whole stored commit subject
         is reachable here -- the complement of `list_runs`' bounded
         projection."""
+        ...
+
+    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[Result]:
+        """Return a page of one run's results (design.md D57) -- the
+        paginated sibling of `get_results`, which is left unchanged. Same
+        clamp and `has_more` mechanism as `list_runs` (design.md D61)."""
+        ...
+
+    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+        """Return a page of one test's execution history, newest first
+        (design.md D57, D61, D63). An unknown `node_id` yields an empty
+        page, never an error. Each entry's VCS data is a lean
+        `VcsProjection` (design.md D59, D60), same as `list_runs`."""
         ...
 
     def close(self) -> None:

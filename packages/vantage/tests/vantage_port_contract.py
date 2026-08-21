@@ -831,3 +831,116 @@ class ExecutionStoreContract:
 
     def test_get_run_detail_returns_none_for_unknown_id(self, store: ExecutionStore) -> None:
         assert store.get_run_detail("f" * 32) is None
+
+    # -- list_results / list_history (read-api Phase 3, design.md D57-D63) --
+
+    def test_list_history_orders_newest_first_with_full_vcs(self, store: ExecutionStore) -> None:
+        """history-read-api -> Test history: executions return newest first,
+        and every entry carries its full VCS context -- commit, branch,
+        commit subject, truncation flag, dirty flag -- and its duration."""
+        node_id = "t.py::test_recurring"
+        older = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        newer = older + timedelta(hours=1)
+        store.record_session(
+            _execution("a" * 32, started=older, vcs=_vcs(branch="feature", dirty=True)),
+            results=(_result(node_id, duration=0.5),),
+            received_at=older,
+        )
+        store.record_session(
+            _execution("b" * 32, started=newer, vcs=_vcs(branch="main", dirty=False)),
+            results=(_result(node_id, duration=0.75),),
+            received_at=newer,
+        )
+
+        page = store.list_history(node_id=node_id, limit=10, offset=0)
+
+        assert [entry.run_id for entry in page.items] == ["b" * 32, "a" * 32]
+        newest, oldest = page.items
+        assert newest.vcs is not None
+        assert newest.vcs.commit == _vcs().commit
+        assert newest.vcs.branch == "main"
+        assert newest.vcs.commit_subject == _vcs().commit_subject
+        assert newest.vcs.commit_subject_truncated is True
+        assert newest.vcs.dirty is False
+        assert newest.duration == 0.75
+        assert oldest.vcs is not None
+        assert oldest.vcs.branch == "feature"
+        assert oldest.vcs.dirty is True
+        assert oldest.duration == 0.5
+
+    def test_list_history_unknown_node_id_is_empty_not_error(self, store: ExecutionStore) -> None:
+        """history-read-api -> Test history: an unknown test identity yields
+        an empty history, not an error."""
+        page = store.list_history(node_id="t.py::test_never_ran", limit=10, offset=0)
+
+        assert page.items == ()
+        assert page.has_more is False
+
+    def test_list_history_null_vcs_entry_present_not_omitted(self, store: ExecutionStore) -> None:
+        """history-read-api -> Test history: an execution recorded outside a
+        git repository is present in the history with a null VCS context,
+        not omitted."""
+        node_id = "t.py::test_no_repo"
+        store.record_session(
+            _execution("a" * 32, vcs=None),
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        page = store.list_history(node_id=node_id, limit=10, offset=0)
+
+        assert len(page.items) == 1
+        assert page.items[0].vcs is None
+
+    def test_list_history_caps_and_reports_more_like_list_runs(self, store: ExecutionStore) -> None:
+        """history-read-api -> Bounded pagination, reused for the history
+        endpoint: the same 200/201 clamp and `has_more` transition as
+        `list_runs`."""
+        node_id = "t.py::test_hot_path"
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        for i in range(MAX_PAGE_ITEMS):
+            identity = f"{i:032x}"
+            store.record_session(
+                _execution(identity, started=base + timedelta(seconds=i)),
+                results=(_result(node_id),),
+                received_at=base,
+            )
+
+        exhausted = store.list_history(node_id=node_id, limit=MAX_PAGE_ITEMS, offset=0)
+        assert len(exhausted.items) == MAX_PAGE_ITEMS
+        assert exhausted.has_more is False
+
+        store.record_session(
+            _execution(f"{MAX_PAGE_ITEMS:032x}", started=base + timedelta(seconds=MAX_PAGE_ITEMS)),
+            results=(_result(node_id),),
+            received_at=base,
+        )
+
+        truncated = store.list_history(node_id=node_id, limit=MAX_PAGE_ITEMS, offset=0)
+        assert len(truncated.items) == MAX_PAGE_ITEMS
+        assert truncated.has_more is True
+
+    def test_list_results_paginates_a_runs_results(self, store: ExecutionStore) -> None:
+        """design.md D57: `list_results` is the paginated sibling of
+        `get_results` -- respects `limit`/`offset`/`has_more` over one run's
+        results."""
+        execution = _execution("a" * 32)
+        results = tuple(_result(f"t.py::test_{i}") for i in range(5))
+        store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
+
+        page = store.list_results(execution.identity.value, limit=3, offset=0)
+        assert len(page.items) == 3
+        assert page.has_more is True
+
+        next_page = store.list_results(execution.identity.value, limit=3, offset=3)
+        assert len(next_page.items) == 2
+        assert next_page.has_more is False
+
+    def test_list_results_empty_for_a_run_with_no_results(self, store: ExecutionStore) -> None:
+        execution = _execution("a" * 32)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        page = store.list_results(execution.identity.value, limit=10, offset=0)
+
+        assert page.items == ()
+        assert page.has_more is False
