@@ -252,6 +252,39 @@ def test_run_list_caps_at_200_at_the_route(
     assert body["has_more"] is True
 
 
+def test_run_list_clamps_an_over_cap_limit_rather_than_rejecting_it(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Bounded pagination -> A list response never exceeds 200 items)*.
+    The existing cap test supplies no `limit` at all, so it exercises the
+    default and never the branch a caller reaches by asking for more.
+
+    A caller asking for 500 gets 200 and a 200 status, not a 422: someone
+    requesting a large page wants data, not a rejection. This is the
+    behaviour `openapi/v1.yaml` states, and it is why that parameter
+    declares no `maximum` -- a `maximum` would assert a constraint the
+    server does not enforce, and a strict generated client would refuse a
+    request this server answers."""
+    now = datetime.now(timezone.utc)
+    for seed in range(201):
+        store.record_session(
+            _execution(
+                _run_id(seed),
+                started_at=now - timedelta(seconds=201 - seed),
+                finished_at=now,
+            ),
+            results=[],
+            received_at=now,
+        )
+
+    response = client.get("/api/v1/runs", params={"limit": 500})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 200
+    assert body["has_more"] is True
+
+
 # --- 4.5 --------------------------------------------------------------
 
 

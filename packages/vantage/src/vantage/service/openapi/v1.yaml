@@ -94,7 +94,12 @@ paths:
 components:
   parameters:
     run_id: {name: run_id, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{32}$'}}
-    limit: {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200}}
+    # No `maximum`. A caller asking for more than 200 gets 200, not a
+    # rejection -- someone requesting a large page wants data, not an
+    # error. `maximum: 200` would assert a constraint the server does not
+    # enforce, and a strict generated client would refuse a request the
+    # server answers happily. The cap is stated as behaviour instead.
+    limit: {name: limit, in: query, required: false, description: "Page size. Values above 200 are clamped to 200; the response reports whether more items exist. A value below 1 is rejected with 422 -- it is not a page size.", schema: {type: integer, minimum: 1}}
     offset: {name: offset, in: query, required: false, schema: {type: integer, minimum: 0}}
   schemas:
     SessionReport:
