@@ -325,23 +325,23 @@ Modifies `packages/vantage/src/vantage/service/routes/read.py`,
 `packages/vantage/src/vantage/service/errors.py`,
 `packages/vantage/tests/test_routes_read.py`. **Depends on PR3, PR4.**
 
-- [ ] 5.1 RED `test_routes_read.py::test_results_route_returns_paginated_envelope`
+- [x] 5.1 RED `test_routes_read.py::test_results_route_returns_paginated_envelope`
       — `GET /api/v1/runs/{run_id}/results` returns `{"items": [...],
       "has_more": bool}`.
-- [ ] 5.2 RED `..._test_results_route_unknown_run_id_is_404` —
+- [x] 5.2 RED `..._test_results_route_unknown_run_id_is_404` —
       `GET /api/v1/runs/{unknown}/results` answers `404`, consistent with
       run detail's 404 behavior.
-- [ ] 5.3 RED `..._test_history_route_returns_newest_first_with_full_vcs` —
+- [x] 5.3 RED `..._test_history_route_returns_newest_first_with_full_vcs` —
       `GET /api/v1/tests/history?node_id=...` returns entries newest first,
       each with full VCS context. *(Test history → Executions return
       newest first, with full VCS context — route level)*
-- [ ] 5.4 RED `..._test_history_route_unknown_node_id_is_empty_not_error` —
+- [x] 5.4 RED `..._test_history_route_unknown_node_id_is_empty_not_error` —
       `?node_id=<unknown>` answers `200` with zero items. *(Test history →
       An unknown test yields empty history, not an error — route level)*
-- [ ] 5.5 RED `..._test_history_route_response_contains_no_vcs_root` — same
+- [x] 5.5 RED `..._test_history_route_response_contains_no_vcs_root` — same
       substring assertion as 4.2/4.6, on the history response body. *(Test
       history → `vcs_root` appears in no history entry)*
-- [ ] 5.6 RED `..._test_history_identity_survives_special_characters_intact`
+- [x] 5.6 RED `..._test_history_identity_survives_special_characters_intact`
       — **the load-bearing D54 test.** A node id containing `/`, `::`,
       `[`, `]` (e.g. `tests/test_a.py::TestSuite::test_x[case/1]`),
       percent-encoded as a query value; a fake/spy `ExecutionStore` wired
@@ -355,18 +355,18 @@ Modifies `packages/vantage/src/vantage/service/routes/read.py`,
       application, which this in-process test structurally cannot observe
       either way. Say so in the test's docstring; do not claim it proves
       more than it does.
-- [ ] 5.7 RED `..._test_history_route_missing_node_id_is_422` —
+- [x] 5.7 RED `..._test_history_route_missing_node_id_is_422` —
       `GET /api/v1/tests/history` with no `node_id` answers `422`.
-- [ ] 5.8 RED `..._test_history_route_overlong_identity_is_422_not_414` — a
+- [x] 5.8 RED `..._test_history_route_overlong_identity_is_422_not_414` — a
       `node_id` of 1,025 characters answers a shaped `422`, never a
       proxy-generated `414`. *(D54's 1,024-character bound)*
-- [ ] 5.9 GREEN `errors.py`: one rejection for a missing or over-long test
+- [x] 5.9 GREEN `errors.py`: one rejection for a missing or over-long test
       identity (e.g. `InvalidIdentityError`, `422`), the value routed
       through the existing `safe_segment` allow-list wherever it is echoed.
-- [ ] 5.10 GREEN `routes/read.py`: `GET /api/v1/runs/{run_id}/results`;
+- [x] 5.10 GREEN `routes/read.py`: `GET /api/v1/runs/{run_id}/results`;
       `GET /api/v1/tests/history` with `node_id: str = Query(...,
       max_length=MAX_IDENTITY_CHARS)`, calling `store.list_history`.
-- [ ] 5.11 Gate: `uv run pytest packages/vantage/tests/test_routes_read.py`,
+- [x] 5.11 Gate: `uv run pytest packages/vantage/tests/test_routes_read.py`,
       `uv run mypy .` clean.
 
 ## Phase 6: The interface document (PR6)

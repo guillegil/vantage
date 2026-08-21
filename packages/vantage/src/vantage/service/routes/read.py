@@ -1,4 +1,5 @@
-"""The run list and run detail routes (design.md D57, D59, D61, D62; Phase 4).
+"""The run list, run detail, results, and history routes (design.md D54,
+D57, D59, D61, D62; Phases 4-5).
 
 **Every response model is built field by field.** `RunVcsResponse`,
 `RunListItemResponse` and `RunDetailResponse` (`service/schemas.py`) are
@@ -16,6 +17,14 @@ standing between it and the response body.
 module calls it; it does not reimplement any part of the precedence it
 encodes. `app.state.grace_period` -- a named seam since D34, wired by
 `create_app` -- finally has a reader.
+
+**Phase 5** adds `GET /api/v1/runs/{run_id}/results` and
+`GET /api/v1/tests/history`. History resolves a test's identity through a
+*named query parameter on an identity-free path* (``?node_id=<value>``), not
+a path segment (design.md D54) -- the parameter name is the identity
+scheme, so a later `?stable_id=` arrives as an additive sibling. `node_id`
+is bounded at `MAX_IDENTITY_CHARS`; a missing or over-long value is shaped
+by `service/errors.py`'s `InvalidIdentityError`, never a proxy `414`.
 """
 
 from __future__ import annotations
@@ -27,9 +36,20 @@ from fastapi import APIRouter, Path, Query, Request
 from vantage.core.domain.execution import VcsContext
 from vantage.core.domain.liveness import derive_presentation
 from vantage.core.domain.projection import VcsProjection
-from vantage.core.ports.storage import MAX_PAGE_ITEMS, RunDetail, RunListEntry
+from vantage.core.domain.result import Result
+from vantage.core.ports.storage import (
+    MAX_IDENTITY_CHARS,
+    MAX_PAGE_ITEMS,
+    HistoryEntry,
+    RunDetail,
+    RunListEntry,
+)
 from vantage.service.errors import UnknownRunError
 from vantage.service.schemas import (
+    HistoryEntryResponse,
+    HistoryResponse,
+    ResultItemResponse,
+    ResultsResponse,
     RunDetailResponse,
     RunListItemResponse,
     RunListResponse,
@@ -88,6 +108,43 @@ def _run_detail_response(
     )
 
 
+def _result_item(result: Result) -> ResultItemResponse:
+    """Field by field -- `Result` has no traceback/captured-output field
+    yet, so that exclusion holds by construction (task 7.6)."""
+    identity = result.identity
+    return ResultItemResponse(
+        node_id=identity.node_id,
+        file_path=identity.file_path,
+        class_name=identity.class_name,
+        function_name=identity.function_name,
+        param_id=identity.param_id,
+        outcome=result.outcome,
+        duration=result.duration,
+        started_at=result.started_at,
+        finished_at=result.finished_at,
+        setup_outcome=result.setup_outcome,
+        call_outcome=result.call_outcome,
+        teardown_outcome=result.teardown_outcome,
+        setup_duration=result.setup_duration,
+        call_duration=result.call_duration,
+        teardown_duration=result.teardown_duration,
+        worker_id=result.worker_id,
+    )
+
+
+def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
+    """Field by field -- `entry.vcs` is a lean `VcsProjection` (D59, D60),
+    read through the same `_vcs_response` helper as the other routes."""
+    return HistoryEntryResponse(
+        run_id=entry.run_id,
+        started_at=entry.started_at,
+        finished_at=entry.finished_at,
+        outcome=entry.outcome,
+        duration=entry.duration,
+        vcs=_vcs_response(entry.vcs),
+    )
+
+
 @router.get("/runs")
 async def list_runs(
     request: Request,
@@ -124,6 +181,40 @@ async def get_run_detail(
     now = datetime.now(timezone.utc)
     grace = timedelta(seconds=request.app.state.grace_period)
     return _run_detail_response(detail, now=now, grace=grace)
+
+
+@router.get("/runs/{run_id}/results")
+async def list_results(
+    request: Request,
+    run_id: str = Path(pattern=_IDENTITY_PATTERN),
+    limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
+    offset: int = Query(default=0, ge=0),
+) -> ResultsResponse:
+    """`GET /api/v1/runs/{run_id}/results` (design.md D57, D61). An unknown
+    `run_id` is `404`, consistent with `get_run_detail` -- checked via the
+    cheaper `store.get_execution` rather than building a full detail."""
+    store = request.app.state.store
+    if store.get_execution(run_id) is None:
+        raise UnknownRunError()
+    page = store.list_results(run_id, limit=limit, offset=offset)
+    items = [_result_item(result) for result in page.items]
+    return ResultsResponse(items=items, has_more=page.has_more)
+
+
+@router.get("/tests/history")
+async def list_history(
+    request: Request,
+    node_id: str = Query(..., max_length=MAX_IDENTITY_CHARS),
+    limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
+    offset: int = Query(default=0, ge=0),
+) -> HistoryResponse:
+    """`GET /api/v1/tests/history?node_id=...` (design.md D54, D57, D61) --
+    see the module docstring for why `node_id` is a query value, not a path
+    segment. An unknown `node_id` yields an empty page, not an error."""
+    store = request.app.state.store
+    page = store.list_history(node_id=node_id, limit=limit, offset=offset)
+    items = [_history_entry(entry) for entry in page.items]
+    return HistoryResponse(items=items, has_more=page.has_more)
 
 
 __all__ = ["router"]

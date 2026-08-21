@@ -16,12 +16,15 @@ matching design.md D62's own claim that the demonstration needs none.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
 from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.ports.storage import ExecutionStore, HistoryEntry, Page
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
+from vantage_port_contract import _result
 
 _KNOWN_ROOT = "/home/example/very-unique-repo-root-xyz123"
 
@@ -83,6 +86,19 @@ def client(store: InMemoryExecutionStore) -> TestClient:
 
 def _client_with_grace(store: InMemoryExecutionStore, grace_period_seconds: float) -> TestClient:
     return TestClient(create_app(store, grace_period_seconds=grace_period_seconds))
+
+
+class _SpyExecutionStore:
+    """A spy exposing only `list_history`, `cast` to `ExecutionStore` at its
+    one call site -- task 5.6's route touches no other method, and this
+    test asserts nothing about the rest of the port."""
+
+    def __init__(self) -> None:
+        self.list_history_calls: list[str] = []
+
+    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+        self.list_history_calls.append(node_id)
+        return Page(items=(), has_more=False)
 
 
 # --- 4.1 --------------------------------------------------------------
@@ -363,3 +379,193 @@ def test_abandonment_invents_no_stored_field(store: InMemoryExecutionStore) -> N
     assert execution is not None
     assert execution.started_at == original_started_at
     assert execution.finished_at is None
+
+
+# --- 5.1 --------------------------------------------------------------
+
+
+def test_results_route_returns_paginated_envelope(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(history-read-api -> Bounded pagination, applied to
+    `GET /api/v1/runs/{run_id}/results`)*."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(20)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[_result("tests/test_a.py::test_one")],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/results")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body.keys()) == {"items", "has_more"}
+    assert body["has_more"] is False
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["node_id"] == "tests/test_a.py::test_one"
+    assert item["outcome"] == "passed"
+
+
+# --- 5.2 --------------------------------------------------------------
+
+
+def test_results_route_unknown_run_id_is_404(client: TestClient) -> None:
+    """*(consistent with run detail's 404 behavior, task 4.7)*."""
+    response = client.get(f"/api/v1/runs/{_run_id(999)}/results")
+
+    assert response.status_code == 404
+
+
+# --- 5.3 --------------------------------------------------------------
+
+
+def test_history_route_returns_newest_first_with_full_vcs(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(history-read-api -> Test history -> Executions return newest
+    first, with full VCS context -- route level)*."""
+    now = datetime.now(timezone.utc)
+    node_id = "tests/test_a.py::test_shared"
+    older_run = _run_id(21)
+    newer_run = _run_id(22)
+    store.record_session(
+        _execution(older_run, started_at=now - timedelta(hours=2), finished_at=now, vcs=_vcs()),
+        results=[_result(node_id)],
+        received_at=now - timedelta(hours=2),
+    )
+    store.record_session(
+        _execution(
+            newer_run,
+            started_at=now - timedelta(hours=1),
+            finished_at=now,
+            vcs=_vcs(branch="feature"),
+        ),
+        results=[_result(node_id)],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get("/api/v1/tests/history", params={"node_id": node_id})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["has_more"] is False
+    assert [item["run_id"] for item in body["items"]] == [newer_run, older_run]
+    for item in body["items"]:
+        assert set(item["vcs"].keys()) == {
+            "commit",
+            "branch",
+            "commit_subject",
+            "commit_subject_truncated",
+            "dirty",
+        }
+    assert body["items"][0]["vcs"]["branch"] == "feature"
+
+
+# --- 5.4 --------------------------------------------------------------
+
+
+def test_history_route_unknown_node_id_is_empty_not_error(client: TestClient) -> None:
+    """*(Test history -> An unknown test yields empty history, not an
+    error -- route level)*."""
+    response = client.get(
+        "/api/v1/tests/history", params={"node_id": "tests/test_never_ran.py::test_x"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["has_more"] is False
+
+
+# --- 5.5 --------------------------------------------------------------
+
+
+def test_history_route_response_contains_no_vcs_root(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Test history -> `vcs_root` appears in no history entry)*. Same
+    substring-on-raw-body shape as 4.2/4.6. **Structurally unfalsifiable,
+    like 4.2**: `HistoryEntry.vcs` is a `VcsProjection`, which has no
+    `root` field at all (D59) -- no code path could leak `_KNOWN_ROOT`
+    here. Kept as a regression guard, not because this can currently fail."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(23)
+    node_id = "tests/test_a.py::test_leak_guard"
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=_vcs()),
+        results=[_result(node_id)],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get("/api/v1/tests/history", params={"node_id": node_id})
+
+    assert _KNOWN_ROOT not in response.text
+
+
+# --- 5.6 --------------------------------------------------------------
+
+
+def test_history_identity_survives_special_characters_intact() -> None:
+    """*(history-read-api -> Test history, design.md D54 -- the
+    load-bearing wire-encoding test for this change.)*
+
+    **What this test proves**: a node id containing `/`, `::`, `[`, `]`
+    (`tests/test_a.py::TestSuite::test_x[case/1]`), sent percent-encoded as
+    a query value by the HTTP client, reaches `store.list_history` as the
+    identical, un-mangled string -- the query-parameter transport neither
+    corrupts nor re-splits the value before the route hands it to the
+    store.
+
+    **What this test does NOT prove**: that a query parameter is the
+    *correct* routing choice over a `/{identity:path}` path parameter.
+    Measured 2026-08-21 against a live uvicorn server (not this
+    `TestClient`, which runs over httpx's in-process ASGI transport, not
+    uvicorn), both a query parameter and a `/{identity:path}` path
+    parameter round-trip this exact value byte-identical under a bare ASGI
+    transport -- only a plain `/{identity}` path parameter fails, with
+    404. The real disqualifier for `:path` is proxy-dependent slash
+    normalization in front of the application (nginx merges/normalises
+    slashes by default; Apache 404s on `%2F` unless `AllowEncodedSlashes`
+    is on), which an in-process test -- this one included -- structurally
+    cannot observe either way. A `TestSuite` name inside this literal node
+    id is a string value, not a class definition; it does not trigger
+    pytest's `Test*` collection warning (CLAUDE.md).
+    """
+    store = _SpyExecutionStore()
+    client = TestClient(create_app(cast(ExecutionStore, store)))
+    node_id = "tests/test_a.py::TestSuite::test_x[case/1]"
+
+    response = client.get("/api/v1/tests/history", params={"node_id": node_id})
+
+    assert response.status_code == 200
+    assert store.list_history_calls == [node_id]
+
+
+# --- 5.7 --------------------------------------------------------------
+
+
+def test_history_route_missing_node_id_is_422(client: TestClient) -> None:
+    response = client.get("/api/v1/tests/history")
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "invalid_identity"
+
+
+# --- 5.8 --------------------------------------------------------------
+
+
+def test_history_route_overlong_identity_is_422_not_414(client: TestClient) -> None:
+    """*(D54's 1,024-character bound -- a shaped 422, never a
+    proxy-generated 414)*."""
+    overlong = "a" * 1025
+
+    response = client.get("/api/v1/tests/history", params={"node_id": overlong})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"] == "invalid_identity"
+    assert overlong not in response.text

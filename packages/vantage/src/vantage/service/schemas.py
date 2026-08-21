@@ -291,3 +291,56 @@ class RunDetailResponse(BaseModel):
     interrupt_reason: str | None
     presentation: str
     vcs: RunVcsResponse | None
+
+
+class ResultItemResponse(BaseModel):
+    """One entry of `ResultsResponse` (design.md D57). Traceback/captured
+    output are excluded, unfailable by construction -- `Result` has no such
+    field yet (task 7.6). Built field by field in `routes/read.py`."""
+
+    node_id: str
+    file_path: str
+    class_name: str | None
+    function_name: str
+    param_id: str | None
+    outcome: str
+    duration: float | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    setup_outcome: str | None
+    call_outcome: str | None
+    teardown_outcome: str | None
+    setup_duration: float | None
+    call_duration: float | None
+    teardown_duration: float | None
+    worker_id: str | None
+
+
+class ResultsResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/results` (design.md
+    D57, D61)."""
+
+    items: list[ResultItemResponse]
+    has_more: bool
+
+
+class HistoryEntryResponse(BaseModel):
+    """One entry of `HistoryResponse` (design.md D54, D57, D59, D60). `vcs`
+    is a lean `RunVcsResponse` built from `HistoryEntry.vcs` (a
+    `VcsProjection`, no `root` field -- same structural exclusion as the
+    run list, D59)."""
+
+    run_id: str
+    started_at: datetime
+    finished_at: datetime | None
+    outcome: str
+    duration: float | None
+    vcs: RunVcsResponse | None
+
+
+class HistoryResponse(BaseModel):
+    """The response body for `GET /api/v1/tests/history` (design.md D54,
+    D57, D61)."""
+
+    items: list[HistoryEntryResponse]
+    has_more: bool
