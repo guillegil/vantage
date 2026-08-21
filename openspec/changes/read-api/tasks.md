@@ -129,63 +129,63 @@ Modifies `packages/vantage/src/vantage/storage/sqlite_store.py`,
 methods, paired with both implementations landing in the same commit so no
 adapter is ever mid-slice out of structural conformance). **Depends on PR1.**
 
-- [ ] 2.1 RED `vantage_port_contract.py::test_list_runs_orders_newest_first_with_total_tiebreak`
+- [x] 2.1 RED `vantage_port_contract.py::test_list_runs_orders_newest_first_with_total_tiebreak`
       — two runs sharing one `started_at`; assert `id DESC` breaks the tie,
       inherited by both `test_sqlite_store.py` and `test_memory_store.py`.
       *(D61 total order)*
-- [ ] 2.2 RED `..._test_list_runs_caps_at_200_items` — 201 stored runs, a page
+- [x] 2.2 RED `..._test_list_runs_caps_at_200_items` — 201 stored runs, a page
       requested without an explicit smaller size; assert exactly 200 items
       and `has_more is True`. *(history-read-api → Bounded pagination → A
       list response never exceeds 200 items)*
-- [ ] 2.3 RED `..._test_list_runs_has_more_distinguishes_exhaustion_from_truncation`
+- [x] 2.3 RED `..._test_list_runs_has_more_distinguishes_exhaustion_from_truncation`
       — exactly 200 stored, a page covering all 200; assert `has_more is
       False`; store one more, repeat, assert `has_more is True`. *(Bounded
       pagination → The more-items flag distinguishes truncation from
       exhaustion)*
-- [ ] 2.4 RED `..._test_list_runs_honors_a_smaller_requested_page_size` —
+- [x] 2.4 RED `..._test_list_runs_honors_a_smaller_requested_page_size` —
       more runs stored than a requested page size under 200; assert exactly
       that many items and `has_more is True`. *(Bounded pagination → A
       caller-requested page size under the cap is honored)*
-- [ ] 2.5 RED `..._test_list_runs_includes_absent_repository_run_undistinguished`
+- [x] 2.5 RED `..._test_list_runs_includes_absent_repository_run_undistinguished`
       — a run recorded with `vcs=None` alongside runs from repositories;
       assert its entry has `vcs is None` and no positional distinction.
       *(version-control-context → Absent repository → Absent repository's
       run appears in the run list)*
-- [ ] 2.6 RED `..._test_list_runs_bounds_commit_subject_at_display_width` — a
+- [x] 2.6 RED `..._test_list_runs_bounds_commit_subject_at_display_width` — a
       run with a 200-character commit subject; assert the list entry's
       `vcs.commit_subject` is 120 characters and `commit_subject_truncated
       is True`, proving the SQL projection agrees with `project_vcs`.
       *(Lean list projections → The commit subject is bounded in list
       responses)*
-- [ ] 2.7 RED `..._test_list_runs_flags_capture_truncated_subject_even_when_short`
+- [x] 2.7 RED `..._test_list_runs_flags_capture_truncated_subject_even_when_short`
       — a run whose stored `vcs_commit_subject_truncated = 1` and a subject
       under 120 characters; assert the list entry still reports
       `commit_subject_truncated is True`. *(Lean list projections → The
       truncation flag never surfaces independently of its subject — the
       other input to the disjunction, at adapter level)*
-- [ ] 2.8 RED `..._test_list_runs_null_subject_flag_is_false_not_null` — a
+- [x] 2.8 RED `..._test_list_runs_null_subject_flag_is_false_not_null` — a
       run with `vcs_commit_subject IS NULL`; assert
       `commit_subject_truncated is False`, never `None` — the `COALESCE`
       edge case D60 names explicitly.
-- [ ] 2.9 RED `..._test_get_run_detail_returns_full_untruncated_subject` — a
+- [x] 2.9 RED `..._test_get_run_detail_returns_full_untruncated_subject` — a
       run with a 200-character commit subject; assert
       `get_run_detail(...).execution.vcs.commit_subject` is the whole 200
       characters and its `commit_subject_truncated` reflects only
       capture-time truncation (unchanged meaning). *(D58, D59; Lean list
       projections' complement — the full record stays reachable)*
-- [ ] 2.10 RED `..._test_get_run_detail_returns_none_for_unknown_id` —
+- [x] 2.10 RED `..._test_get_run_detail_returns_none_for_unknown_id` —
       `get_run_detail("unknown")` is `None` in both adapters.
-- [ ] 2.11 GREEN `storage.py`: add `list_runs(*, limit, offset) ->
+- [x] 2.11 GREEN `storage.py`: add `list_runs(*, limit, offset) ->
       Page[RunListEntry]` and `get_run_detail(execution_id) -> RunDetail |
       None` to the `ExecutionStore` Protocol.
-- [ ] 2.12 GREEN `sqlite_store.py`: implement `list_runs` —
+- [x] 2.12 GREEN `sqlite_store.py`: implement `list_runs` —
       `substr(vcs_commit_subject, 1, ?)`/`length(...)` projection (D60),
       `LIMIT min(limit, 200) + 1 OFFSET offset`, `ORDER BY started_at DESC,
       id DESC` (D61); implement `get_run_detail` reading the full row.
-- [ ] 2.13 GREEN `memory.py`: implement `list_runs` using `project_vcs` and
+- [x] 2.13 GREEN `memory.py`: implement `list_runs` using `project_vcs` and
       Python sort/slice with the identical clamp and tiebreak (D57's second
       mechanism); implement `get_run_detail`.
-- [ ] 2.14 Gate:
+- [x] 2.14 Gate:
       `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py`,
       `uv run mypy .` clean.
 

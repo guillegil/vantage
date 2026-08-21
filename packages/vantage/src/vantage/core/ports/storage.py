@@ -1,12 +1,12 @@
 """The storage port: what any `ExecutionStore` adapter must implement (RQ-30).
 
 The read types below (`Page`, `RunListEntry`, `RunDetail`, `HistoryEntry`)
-and the pagination constants land here in Phase 1 of the read-api change
-(design.md D57, D58, D61). `ExecutionStore` itself gains no method in this
-slice -- adding one without both adapters implementing it in the same commit
-would break every call site's structural conformance under `mypy --strict`
-(tasks.md Phase 1); the four read methods and the two adapters land together
-starting in Phase 2.
+and the pagination constants landed in Phase 1 of the read-api change
+(design.md D57, D58, D61). `list_runs` and `get_run_detail` land here in
+Phase 2, paired with both adapters implementing them in the same commit --
+adding a Protocol method without both adapters would break every call site's
+structural conformance under `mypy --strict` (tasks.md Phase 2). `list_results`
+and `list_history` follow in Phase 3.
 """
 
 from __future__ import annotations
@@ -128,6 +128,25 @@ class ExecutionStore(Protocol):
 
     def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         """Return the catalogue entry for `node_id`, or None if never observed (RQ-13)."""
+        ...
+
+    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+        """Return a page of runs, newest first (design.md D57, D61).
+
+        Ordered `started_at DESC, id DESC` -- the `id` tiebreak makes the
+        order total, so a page boundary is deterministic even when two runs
+        share a `started_at`. `limit` is clamped at `MAX_PAGE_ITEMS`, never
+        rejected; `has_more` is true when more rows exist beyond the
+        returned page. Each entry's VCS data is a lean `VcsProjection`
+        (design.md D59, D60) -- the entry's own `execution.vcs` is always
+        `None`."""
+        ...
+
+    def get_run_detail(self, execution_id: str) -> RunDetail | None:
+        """Return the full record for one run, or None if `execution_id` is
+        unknown (design.md D57, D58, D59). The whole stored commit subject
+        is reachable here -- the complement of `list_runs`' bounded
+        projection."""
         ...
 
     def close(self) -> None:

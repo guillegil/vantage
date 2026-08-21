@@ -36,7 +36,9 @@ from dataclasses import replace
 from datetime import datetime
 
 from vantage.core.domain.execution import Execution, VcsContext
+from vantage.core.domain.projection import project_vcs
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
+from vantage.core.ports.storage import MAX_PAGE_ITEMS, Page, RunDetail, RunListEntry
 
 
 def _normalized_vcs(vcs: VcsContext | None) -> VcsContext | None:
@@ -173,6 +175,40 @@ class InMemoryExecutionStore:
 
     def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         return self._catalogue.get(node_id)
+
+    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+        # Python sort/slice mirrors the SQLite adapter's `ORDER BY
+        # started_at DESC, id DESC` / `LIMIT min(limit, 200) + 1 OFFSET`
+        # exactly (design.md D57, D61): sorting descending on the same
+        # two-key tuple as the SQL `ORDER BY` gives the identical total
+        # order, and slicing `page_limit + 1` rows is the same
+        # truncation-vs-exhaustion signal without a second pass.
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        ordered = sorted(
+            self._executions.values(),
+            key=lambda execution: (execution.started_at, execution.identity.value),
+            reverse=True,
+        )
+        window = ordered[offset : offset + page_limit + 1]
+        has_more = len(window) > page_limit
+        items = tuple(
+            RunListEntry(
+                execution=replace(execution, vcs=None),
+                last_contact_at=self._last_contact.get(execution.identity.value),
+                vcs=project_vcs(execution.vcs),
+            )
+            for execution in window[:page_limit]
+        )
+        return Page(items=items, has_more=has_more)
+
+    def get_run_detail(self, execution_id: str) -> RunDetail | None:
+        execution = self._executions.get(execution_id)
+        if execution is None:
+            return None
+        return RunDetail(
+            execution=execution,
+            last_contact_at=self._last_contact.get(execution_id),
+        )
 
     def close(self) -> None:
         self._executions.clear()
