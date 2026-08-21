@@ -24,6 +24,7 @@ from vantage.core.config.resolution import DEFAULT_GRACE_PERIOD_SECONDS
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.errors import register_error_handlers
 from vantage.service.routes.capabilities import router as capabilities_router
+from vantage.service.routes.read import router as read_router
 from vantage.service.routes.runs import router as runs_router
 
 
@@ -42,6 +43,7 @@ def create_app(
     app.state.store = store
     app.state.grace_period = grace_period_seconds
     app.include_router(runs_router, prefix="/api/v1")
+    app.include_router(read_router, prefix="/api/v1")
     app.include_router(capabilities_router, prefix="/api/v1")
     register_error_handlers(app)
     return app

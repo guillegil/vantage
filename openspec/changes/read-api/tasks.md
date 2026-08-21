@@ -244,62 +244,80 @@ Creates `packages/vantage/src/vantage/service/routes/read.py`,
 `packages/vantage/src/vantage/service/schemas.py`,
 `packages/vantage/src/vantage/service/app.py`. **Depends on PR2.**
 
-- [ ] 4.1 RED `test_routes_read.py::test_run_list_returns_items_and_has_more_envelope`
+**Shipped as two chained PRs, `04a` and `04b`, not one.** The Phase 4 slice
+as fully implemented measured 557 code+test changed lines against the
+400-line per-slice review budget (design's own forecast for this slice was
+~390). Per the review workload guard, the fix is a smaller slice boundary,
+not thinner tests, so Phase 4 was split at the list/detail seam: `04a`
+(branch `ft/read-api-04a-list-route`) delivers `GET /api/v1/runs` alone,
+`04b` (branch `ft/read-api-04b-detail-liveness`, chained from `04a`)
+delivers `GET /api/v1/runs/{run_id}` and the liveness demonstration tests.
+The remaining phase numbering (Phase 5 onward, `ft/read-api-05-...`) is
+unchanged — `04b` is still the branch Phase 5 chains from.
+
+- [x] 4.1 RED `test_routes_read.py::test_run_list_returns_items_and_has_more_envelope`
       — `GET /api/v1/runs` returns 200, `{"items": [...], "has_more": bool}`,
       each item built field by field (assert the response schema, not
       `from_attributes` — inspection of `schemas.py` at review time, not a
-      test assertion on the mechanism).
-- [ ] 4.2 RED `..._test_run_list_response_contains_no_vcs_root_anywhere` — a
+      test assertion on the mechanism). *(04a)*
+- [x] 4.2 RED `..._test_run_list_response_contains_no_vcs_root_anywhere` — a
       run recorded with a known `vcs_root`; assert the raw response body
       (as text) does not contain that value. *(Lean list projections →
-      `vcs_root` appears in no run list or run detail response)*
-- [ ] 4.3 RED `..._test_run_list_rejects_non_positive_limit` —
+      `vcs_root` appears in no run list or run detail response)* *(04a)*
+- [x] 4.3 RED `..._test_run_list_rejects_non_positive_limit` —
       `GET /api/v1/runs?limit=0` and `?limit=-1` both answer `422`. *(D61 —
-      "not a page size")*
-- [ ] 4.4 RED `..._test_run_list_caps_at_200_at_the_route` — 201 runs stored;
+      "not a page size")* *(04a)*
+- [x] 4.4 RED `..._test_run_list_caps_at_200_at_the_route` — 201 runs stored;
       a request with no `limit`; assert ≤200 items and `has_more is true`
       at the HTTP layer, not only the port. *(Bounded pagination, route
-      level)*
+      level)* *(04a)*
 - [ ] 4.5 RED `..._test_run_detail_returns_full_untruncated_subject` —
       `GET /api/v1/runs/{run_id}` returns 200 with the whole stored commit
-      subject and the full `VcsContext`.
+      subject and the full `VcsContext`. *(04b)*
 - [ ] 4.6 RED `..._test_run_detail_response_contains_no_vcs_root` — same
-      substring assertion as 4.2, on the detail response body.
+      substring assertion as 4.2, on the detail response body. *(04b)*
 - [ ] 4.7 RED `..._test_run_detail_unknown_id_is_404` —
-      `GET /api/v1/runs/{unknown}` answers `404`.
+      `GET /api/v1/runs/{unknown}` answers `404`. *(04b)*
 - [ ] 4.8 RED `..._test_abandoned_run_reads_back_as_abandoned` — a run
       fixture with `last_contact_at` older than `create_app`'s configured
       `grace_period_seconds`, no clock control; assert
       `GET /api/v1/runs/{run_id}` reports `"presentation": "abandoned"`.
       *(session-liveness → Abandoned run is observable → A run past its
-      grace period reads back as abandoned, Demonstration)*
+      grace period reads back as abandoned, Demonstration)* *(04b)*
 - [ ] 4.9 RED `..._test_running_run_reads_back_as_running` — the same
       fixture shape with `last_contact_at` inside the grace period; assert
       `"presentation": "running"`. *(A run inside its grace period reads
-      back as running)*
+      back as running)* *(04b)*
 - [ ] 4.10 RED `..._test_interrupted_run_reads_back_as_interrupted` — a run
       reported interrupted via Ctrl-C; assert `"presentation":
       "interrupted"`, not `"abandoned"`, regardless of staleness. *(A
-      Ctrl-C interrupted run reads back as interrupted)*
+      Ctrl-C interrupted run reads back as interrupted)* *(04b)*
 - [ ] 4.11 RED `..._test_abandonment_invents_no_stored_field` — the
       abandoned-run fixture from 4.8; read the row back directly via
       `store.get_execution` and assert `started_at` is unchanged and no
       `finished_at` value was invented. *(Abandonment invents no stored
-      field)*
+      field)* *(04b)*
 - [ ] 4.12 GREEN `schemas.py`: add `RunListItemResponse` (nested VCS model
       with no `root` field), `RunListResponse`, `RunDetailResponse` (nested
       VCS model built field by field, `root` never assigned even though
       `VcsContext` carries it) — every model constructed explicitly, never
-      `model_validate(execution, from_attributes=True)`.
+      `model_validate(execution, from_attributes=True)`. `RunVcsResponse` and
+      the list-only models landed in `04a`; `RunDetailResponse` lands in
+      `04b`.
 - [ ] 4.13 GREEN `routes/read.py` (create): `GET /api/v1/runs` and
       `GET /api/v1/runs/{run_id}`; `limit`/`offset` query parameters,
       `422` for `limit <= 0`; `derive_presentation(execution,
       last_contact_at=entry.last_contact_at, now=datetime.now(timezone.utc),
       grace=timedelta(seconds=request.app.state.grace_period))` — its first
-      caller (D62).
-- [ ] 4.14 GREEN `app.py`: `app.include_router(read_router, prefix="/api/v1")`.
+      caller (D62). `GET /api/v1/runs` landed in `04a`; `GET
+      /api/v1/runs/{run_id}` lands in `04b`.
+- [x] 4.14 GREEN `app.py`: `app.include_router(read_router, prefix="/api/v1")`.
+      *(04a — the mount is shared; both routes register on the same
+      `router` object regardless of which commit adds them)*
 - [ ] 4.15 Gate: `uv run pytest packages/vantage/tests/test_routes_read.py`,
-      `uv run mypy .` clean.
+      `uv run mypy .` clean. Passed after `04a` (4 tests) and again after
+      `04b` (11 tests); marked complete once the full Phase 4 test file
+      exists in `04b`.
 
 ## Phase 5: Results route + history route + identity encoding (PR5)
 
