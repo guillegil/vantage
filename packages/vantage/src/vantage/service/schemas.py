@@ -275,3 +275,19 @@ class RunListResponse(BaseModel):
 
     items: list[RunListItemResponse]
     has_more: bool
+
+
+class RunDetailResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}` (design.md D57,
+    D59, D62). Carries `interrupt_reason`, which the lean list entry omits
+    -- the detail path keeps the full record reachable, matching
+    `RunDetail`'s own reason for existing."""
+
+    id: str
+    started_at: datetime
+    finished_at: datetime | None
+    exit_status: int | None
+    interrupted: bool
+    interrupt_reason: str | None
+    presentation: str
+    vcs: RunVcsResponse | None

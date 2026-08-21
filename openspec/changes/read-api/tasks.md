@@ -271,40 +271,40 @@ unchanged — `04b` is still the branch Phase 5 chains from.
       a request with no `limit`; assert ≤200 items and `has_more is true`
       at the HTTP layer, not only the port. *(Bounded pagination, route
       level)* *(04a)*
-- [ ] 4.5 RED `..._test_run_detail_returns_full_untruncated_subject` —
+- [x] 4.5 RED `..._test_run_detail_returns_full_untruncated_subject` —
       `GET /api/v1/runs/{run_id}` returns 200 with the whole stored commit
       subject and the full `VcsContext`. *(04b)*
-- [ ] 4.6 RED `..._test_run_detail_response_contains_no_vcs_root` — same
+- [x] 4.6 RED `..._test_run_detail_response_contains_no_vcs_root` — same
       substring assertion as 4.2, on the detail response body. *(04b)*
-- [ ] 4.7 RED `..._test_run_detail_unknown_id_is_404` —
+- [x] 4.7 RED `..._test_run_detail_unknown_id_is_404` —
       `GET /api/v1/runs/{unknown}` answers `404`. *(04b)*
-- [ ] 4.8 RED `..._test_abandoned_run_reads_back_as_abandoned` — a run
+- [x] 4.8 RED `..._test_abandoned_run_reads_back_as_abandoned` — a run
       fixture with `last_contact_at` older than `create_app`'s configured
       `grace_period_seconds`, no clock control; assert
       `GET /api/v1/runs/{run_id}` reports `"presentation": "abandoned"`.
       *(session-liveness → Abandoned run is observable → A run past its
       grace period reads back as abandoned, Demonstration)* *(04b)*
-- [ ] 4.9 RED `..._test_running_run_reads_back_as_running` — the same
+- [x] 4.9 RED `..._test_running_run_reads_back_as_running` — the same
       fixture shape with `last_contact_at` inside the grace period; assert
       `"presentation": "running"`. *(A run inside its grace period reads
       back as running)* *(04b)*
-- [ ] 4.10 RED `..._test_interrupted_run_reads_back_as_interrupted` — a run
+- [x] 4.10 RED `..._test_interrupted_run_reads_back_as_interrupted` — a run
       reported interrupted via Ctrl-C; assert `"presentation":
       "interrupted"`, not `"abandoned"`, regardless of staleness. *(A
       Ctrl-C interrupted run reads back as interrupted)* *(04b)*
-- [ ] 4.11 RED `..._test_abandonment_invents_no_stored_field` — the
+- [x] 4.11 RED `..._test_abandonment_invents_no_stored_field` — the
       abandoned-run fixture from 4.8; read the row back directly via
       `store.get_execution` and assert `started_at` is unchanged and no
       `finished_at` value was invented. *(Abandonment invents no stored
       field)* *(04b)*
-- [ ] 4.12 GREEN `schemas.py`: add `RunListItemResponse` (nested VCS model
+- [x] 4.12 GREEN `schemas.py`: add `RunListItemResponse` (nested VCS model
       with no `root` field), `RunListResponse`, `RunDetailResponse` (nested
       VCS model built field by field, `root` never assigned even though
       `VcsContext` carries it) — every model constructed explicitly, never
       `model_validate(execution, from_attributes=True)`. `RunVcsResponse` and
       the list-only models landed in `04a`; `RunDetailResponse` lands in
       `04b`.
-- [ ] 4.13 GREEN `routes/read.py` (create): `GET /api/v1/runs` and
+- [x] 4.13 GREEN `routes/read.py` (create): `GET /api/v1/runs` and
       `GET /api/v1/runs/{run_id}`; `limit`/`offset` query parameters,
       `422` for `limit <= 0`; `derive_presentation(execution,
       last_contact_at=entry.last_contact_at, now=datetime.now(timezone.utc),
@@ -314,7 +314,7 @@ unchanged — `04b` is still the branch Phase 5 chains from.
 - [x] 4.14 GREEN `app.py`: `app.include_router(read_router, prefix="/api/v1")`.
       *(04a — the mount is shared; both routes register on the same
       `router` object regardless of which commit adds them)*
-- [ ] 4.15 Gate: `uv run pytest packages/vantage/tests/test_routes_read.py`,
+- [x] 4.15 Gate: `uv run pytest packages/vantage/tests/test_routes_read.py`,
       `uv run mypy .` clean. Passed after `04a` (4 tests) and again after
       `04b` (11 tests); marked complete once the full Phase 4 test file
       exists in `04b`.
