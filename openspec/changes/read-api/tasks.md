@@ -424,10 +424,12 @@ root), `docs/api/v1-ingestion.md`. **Depends on PR4, PR5.**
       redoc_url=None)`.
 - [x] 6.11 GREEN `pyproject.toml` (workspace root): add `pyyaml` to the
       `dev` optional-dependencies group only — never a runtime dependency
-      of `vantage`. Run `uv run deptry .`; confirm it passes with no new
-      ignore entry needed, because `pyyaml` is a genuine `import yaml`
+      of `vantage`. Run `uv run deptry .`; confirm it passes: `pyyaml`
+      itself needs no ignore entry, because it is a genuine `import yaml`
       inside `test_interface_document.py`, unlike the CLI-only dev tools
-      `DEP002` already ignores.
+      `DEP002` already ignores; its mypy stub package `types-PyYAML` does
+      get a `DEP002` entry, since a stub is read by mypy and never
+      itself imported (corrected in verify round 1 — SUGGESTION-1).
 - [x] 6.12 Modify `docs/api/v1-ingestion.md`: remove the request-shape
       example and the response-status table (now stated by the document
       itself); add a header line naming `openapi/v1.yaml` as the contract
@@ -528,7 +530,7 @@ until PR6 merges.**
 | 3 | Executions return newest first, with full VCS context | history-read-api | 3.1 (contract), 5.3 (route — ordering, exact key set, and all six enumerated values asserted *by value*; value fidelity added in verify round 1) |
 | 4 | An unknown test yields empty history, not an error | history-read-api | 3.2 (contract), 5.4 (route) |
 | 5 | A non-repository execution has a null VCS context, not an omitted entry | history-read-api | 3.3 |
-| 6 | `vcs_root` appears in no history entry | history-read-api | 5.5 |
+| 6 | `vcs_root` appears in no history entry | history-read-api | 5.3 (Test — the exact key-set assertion in `test_history_route_returns_newest_first_with_full_vcs` excludes `root`; kills Tamper E), 5.5 (**Inspection**, not Test — structurally unfalsifiable, same reasoning as 4.2; credited in verify round 1) |
 | 7 | List responses exclude traceback and captured output (Inspection) | history-read-api | 7.6 |
 | 8 | The commit subject is bounded in list responses | history-read-api | 2.6 |
 | 9 | The truncation flag never surfaces independently of its subject | history-read-api | 2.7, 2.8 (port), plus `test_routes_read.py::test_list_response_carries_the_truncation_flag_beside_its_subject` (response level, both halves of the D60 disjunction) and 5.3 — added in verify round 1; the scenario is written about responses and had no response-level check before |

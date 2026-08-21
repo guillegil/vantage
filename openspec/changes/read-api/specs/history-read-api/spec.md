@@ -173,13 +173,26 @@ meaningful fraction of the budget.
 The same run also re-measured `measure_vcs_overhead.py`'s synthetic-
 repository 10 ms profile (D63): **OFF = 11.062 s, ON = 11.160 s, delta =
 97.7 ms (0.88 %)** against the 2 % budget of 221.2 ms, leaving **≈123.5 ms**
-of headroom — more than D63's previously recorded ≈55 ms figure, because
-that delta (97.7 ms) is itself lower than the 164.8 ms this run-to-run
-measurement recorded before. This is ordinary variance the paired,
-interleaved methodology already accounts for (medians, not means), not a
-correction to D63's number, which this benchmark does not overwrite. It does
-not contradict D63: headroom is unchanged in kind and, on this run, larger,
-not smaller.
+of headroom on this sitting's own arithmetic. That delta is 67 ms below the
+164.8 ms recorded on 2026-08-20 (`version-control-context` spec.md, OFF
+10.981 s / ON 11.146 s) — and this is **not** ordinary variance. A
+`sdd-verify` round 1 re-run of the same benchmark, on this same machine but
+a separate sitting, measured **OFF = 11.042 s, ON = 11.142 s, delta =
+100.7 ms (0.91 %)**: within 3 ms of this sitting's 97.7 ms and 64 ms away
+from the 2026-08-20 figure. Two independent sittings clustering that
+tightly, both far from the 2026-08-20 number, look **systematic** —
+different machine state, date, or kernel between sittings — rather than
+symmetric run-to-run noise; the paragraph's own evidence agrees: `OFF` alone
+moved 81 ms between the 2026-08-20 sitting and this one (10.981 s →
+11.062 s), a shift comparable in size to the 67 ms change in the delta. This
+does not overwrite D63's recorded 164.8 ms figure, and the conservative
+reading survives regardless of which number is used: even at the archived
+164.8 ms and its ≈55 ms headroom, the read path this change adds spends
+**zero** of that budget, because `schema.sql` carries a zero-line diff from
+before this change and no new index was added. A reader relying on this
+paragraph MUST NOT treat 97.7 ms as interchangeable with 164.8 ms — they
+come from different sittings, and the difference between them does not
+average out.
 
 A future change to the history query or its indexes MUST re-run
 `scripts/measure_history_latency.py` and update this paragraph.

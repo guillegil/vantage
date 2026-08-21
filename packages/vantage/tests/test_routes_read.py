@@ -713,7 +713,18 @@ def test_absent_repository_run_appears_in_list_undistinguished(
     """*(version-control-context -> Absent repository -> Absent repository's
     run appears in the run list)*. Promotes that scenario from Inspection to
     Test, through the live `GET /api/v1/runs` endpoint this change adds --
-    the criterion `history-read-api` was deferred to supply."""
+    the criterion `history-read-api` was deferred to supply.
+
+    Asserts the **ordered list**, not a set (verify round 1, SUGGESTION-2):
+    the scenario says the absent-repository run is "in no way distinguished
+    in position or omission," and a `set` comparison cannot observe a
+    positional difference by construction -- it would stay green even if an
+    adapter sorted absent-repository runs to one end regardless of recency.
+    `absent_run_id` is the newer of the two, so ordinary newest-first
+    ordering (design.md D61) already puts it first; this test's only job is
+    to prove that placement is not special-cased for the absent-repository
+    case, not to prove ordering exists (`test_list_runs_orders_newest_first_with_total_tiebreak`
+    already does that)."""
     now = datetime.now(timezone.utc)
     repo_run_id = _run_id(90)
     absent_run_id = _run_id(91)
@@ -731,10 +742,11 @@ def test_absent_repository_run_appears_in_list_undistinguished(
     response = client.get("/api/v1/runs")
 
     assert response.status_code == 200
-    items = {item["id"]: item for item in response.json()["items"]}
-    assert set(items) == {repo_run_id, absent_run_id}
-    assert items[absent_run_id]["vcs"] is None
-    assert items[repo_run_id]["vcs"] is not None
+    items = response.json()["items"]
+    assert [item["id"] for item in items] == [absent_run_id, repo_run_id]
+    by_id = {item["id"]: item for item in items}
+    assert by_id[absent_run_id]["vcs"] is None
+    assert by_id[repo_run_id]["vcs"] is not None
 
 
 # --- verify round 1 -----------------------------------------------------

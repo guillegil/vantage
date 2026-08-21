@@ -508,12 +508,29 @@ harness uses only `read`-tagged paths and its own fixture database. Two tests,
 two path sets, two fixtures — stated here because sharing a fixture would make
 the read-only proof fail for a reason that has nothing to do with reading.
 
-### D66 — The drift check compares the document against `app.routes`
+### D66 — The drift check compares the document against `app.openapi()`
+
+**Implemented differently from what this decision originally said, and
+recorded here rather than silently rewritten (verify round 1, WARNING-4).**
+`app.routes` was the first thing tried. It stopped working: the installed
+FastAPI version resolves an included `APIRouter`'s routes lazily behind a
+private `_IncludedRouter` wrapper, so walking `app.routes` by hand no longer
+yields the flat `APIRoute` instances earlier versions exposed, and the
+mounted side of the comparison came back empty regardless of what was
+actually served. `app.openapi()` — FastAPI's own computed schema of what is
+mounted — is the public, version-stable replacement; it walks the same
+lazily-resolved routers internally and returns their operations as plain
+data, which this drift check reads for the *mounted* side only. It still
+never replaces `v1.yaml`, and it is not the forbidden derivation Q5 rejects:
+that objection is about the *document* being generated from the route
+table, not about how the code establishes what the running application
+actually serves.
 
 ```
 declared  = {(path, method) for the document's paths × their operations}
-mounted   = {(route.path, method) for route in app.routes, excluding the
-             framework's own default routes}
+mounted   = {(path, method) for path, methods in app.openapi()["paths"].items()
+             for method in methods, excluding the framework's own default
+             routes}
 ```
 
 - `mounted - declared` → **served but undocumented**, the criterion that must be
@@ -531,9 +548,19 @@ hand-written document should have to declare. A test requests all three and
 asserts each answers `404`, and that `GET /api/v1/openapi.yaml` answers the
 hand-written bytes instead.
 
-`request.app.routes` includes Starlette's own `/openapi.json`-style entries only
-when those URLs are configured; with all three set to `None` the exclusion list
-is empty, and the test asserts that too rather than assuming it.
+**This looks contradictory and is not.** `openapi_url=None` disables only
+the *HTTP endpoint* FastAPI would otherwise mount at that path — Starlette
+never registers the route. It does not disable the `app.openapi()` *Python
+method*, which stays callable and keeps computing the schema in-process
+regardless of whether anything serves it over HTTP. The drift check calls
+that method directly, in-process, the same way the test client calls any
+other route handler; it never goes over the wire and never touches the
+disabled endpoint.
+
+`request.app.routes` (and, transitively, `app.openapi()`'s own route walk)
+includes Starlette's own `/openapi.json`-style entries only when those URLs
+are configured; with all three set to `None` the exclusion list is empty,
+and the test asserts that too rather than assuming it.
 
 ### D67 — Exactly one decision here earns an ADR
 

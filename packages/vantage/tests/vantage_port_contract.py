@@ -615,16 +615,17 @@ class ExecutionStoreContract:
         assert stored_all_null.vcs is None
 
     @pytest.mark.req(id="RQ-23")
-    def test_absent_repository_run_is_retrievable_in_storage_pending_a_run_list(
-        self, store: ExecutionStore
-    ) -> None:
-        """design.md D48, task 4.9. **Inspection, awaiting `read-api`**: this
-        stands in for "the run appears in a run list" only -- there is no run
-        list yet. It is NOT claimed as met for RQ-23.2 until `read-api`
-        exposes an actual list; verified here only at the storage level via
-        `count_executions` and `get_execution`. *(Scenario: Absent
-        repository's run is retrievable in storage, pending a run list,
-        RQ-23.2)*"""
+    def test_absent_repository_run_is_retrievable_in_storage(self, store: ExecutionStore) -> None:
+        """design.md D48, task 4.9. Storage-level regression guard, kept
+        alongside the route-level demonstration `read-api` now provides
+        (`test_list_runs_includes_absent_repository_run_undistinguished`,
+        `test_absent_repository_run_appears_in_list_undistinguished`): a
+        deferral this docstring used to name -- "awaiting `read-api`", "not
+        claimed as met until a run list exists" -- is retired, because a run
+        list exists now. Verified here at the storage level via
+        `count_executions` and `get_execution`; renamed in verify round 1
+        (SUGGESTION-3) after its "pending a run list" name outlived the
+        deferral it described."""
         identity = "2" + "6" * 31
         execution = _execution(identity, vcs=None)
 

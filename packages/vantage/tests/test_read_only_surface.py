@@ -124,12 +124,13 @@ def _run_read_only_proof(
     store: SqliteExecutionStore,
     db_path: Path,
     ops: set[tuple[str, str]],
-    bindings: Mapping[tuple[str, str], _Call],
+    bindings: Mapping[tuple[str, str], tuple[_Call, ...]],
 ) -> _ReadOnlyProof:
     conn = store._conn  # noqa: SLF001 -- the one pinned connection D65 requires
     before = _snapshot(conn, db_path, store)
     for op in sorted(ops):
-        bindings[op]()
+        for call in bindings[op]:
+            call()
     return _ReadOnlyProof(before=before, after=_snapshot(conn, db_path, store))
 
 
@@ -145,18 +146,41 @@ def _seed_database(db_path: Path) -> None:
     writer.close()
 
 
-def _read_bindings(client: TestClient) -> dict[tuple[str, str], _Call]:
-    """One callable per `read`-tagged path."""
+_UNKNOWN_RUN_ID = "0" * 32
+
+
+def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...]]:
+    """One or more callables per `read`-tagged path.
+
+    **Verify round 1, SUGGESTION-4**: the proof used to call each read path
+    exactly once, with valid input -- a read path that wrote only on its
+    `404` or `422` branch (an audit-log-on-miss, say) would have sailed
+    through undetected. Every route with an error branch now gets one call
+    per branch (happy path, plus its `404` and/or `422` variants); a route
+    with no such branch (`/capabilities`, `/openapi.yaml`) keeps its single
+    happy-path call. `_run_read_only_proof` runs every call in the tuple."""
     run = f"/api/v1/runs/{_RUN_ID}"
+    unknown_run = f"/api/v1/runs/{_UNKNOWN_RUN_ID}"
     return {
-        ("GET", "/runs"): lambda: client.get("/api/v1/runs"),
-        ("GET", "/runs/{run_id}"): lambda: client.get(run),
-        ("GET", "/runs/{run_id}/results"): lambda: client.get(f"{run}/results"),
-        ("GET", "/tests/history"): lambda: client.get(
-            "/api/v1/tests/history", params={"node_id": _NODE_ID}
+        ("GET", "/runs"): (
+            lambda: client.get("/api/v1/runs"),
+            lambda: client.get("/api/v1/runs", params={"limit": 0}),  # 422 (D61)
         ),
-        ("GET", "/capabilities"): lambda: client.get("/api/v1/capabilities"),
-        ("GET", "/openapi.yaml"): lambda: client.get("/api/v1/openapi.yaml"),
+        ("GET", "/runs/{run_id}"): (
+            lambda: client.get(run),
+            lambda: client.get(unknown_run),  # 404 (UnknownRunError)
+        ),
+        ("GET", "/runs/{run_id}/results"): (
+            lambda: client.get(f"{run}/results"),
+            lambda: client.get(f"{unknown_run}/results"),  # 404 (UnknownRunError)
+            lambda: client.get(f"{run}/results", params={"limit": 0}),  # 422 (D61)
+        ),
+        ("GET", "/tests/history"): (
+            lambda: client.get("/api/v1/tests/history", params={"node_id": _NODE_ID}),
+            lambda: client.get("/api/v1/tests/history"),  # 422 (InvalidIdentityError, D54)
+        ),
+        ("GET", "/capabilities"): (lambda: client.get("/api/v1/capabilities"),),
+        ("GET", "/openapi.yaml"): (lambda: client.get("/api/v1/openapi.yaml"),),
     }
 
 
@@ -176,20 +200,22 @@ def test_a_writing_endpoint_tagged_read_fails_the_harness(tmp_path: Path) -> Non
     try:
         client = TestClient(create_app(store))
         tampered_ops = _read_operations(_document()) | {("POST", "/runs")}
-        tampered_bindings: dict[tuple[str, str], _Call] = {
+        tampered_bindings: dict[tuple[str, str], tuple[_Call, ...]] = {
             **_read_bindings(client),
-            ("POST", "/runs"): lambda: client.post(
-                "/api/v1/runs",
-                json={
-                    "run": {
-                        "id": "8" * 32,
-                        "started_at": "2026-08-15T09:14:02+00:00",
-                        "finished_at": "2026-08-15T09:14:47+00:00",
-                        "exit_status": 0,
-                        "interrupted": False,
-                        "interrupt_reason": None,
-                    }
-                },
+            ("POST", "/runs"): (
+                lambda: client.post(
+                    "/api/v1/runs",
+                    json={
+                        "run": {
+                            "id": "8" * 32,
+                            "started_at": "2026-08-15T09:14:02+00:00",
+                            "finished_at": "2026-08-15T09:14:47+00:00",
+                            "exit_status": 0,
+                            "interrupted": False,
+                            "interrupt_reason": None,
+                        }
+                    },
+                ),
             ),
         }
 
