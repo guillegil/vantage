@@ -230,3 +230,117 @@ class HeartbeatAcknowledgement(BaseModel):
 
     run_id: str
     status: str
+
+
+class RunVcsResponse(BaseModel):
+    """The VCS section of a run response, list or detail alike (design.md
+    D59).
+
+    **No `root` field, on purpose.** `routes/read.py` builds this model
+    field by field from either a lean `VcsProjection` (list path) or a full
+    `VcsContext` (detail path) -- both carry `commit`, `branch`,
+    `commit_subject`, `commit_subject_truncated` and `dirty` under the same
+    names, so one response model serves both callers. Neither caller ever
+    reads `root` off its source object to populate this model; the field
+    simply does not exist here to be populated. That is what keeps
+    `VcsContext.root` off the wire on the detail path, where nothing else
+    would stop it (design.md D59's own point -- the exclusion is a response-
+    model choice, not a structural one, precisely because `VcsContext` is
+    the type in hand there).
+    """
+
+    commit: str | None
+    branch: str | None
+    commit_subject: str | None
+    commit_subject_truncated: bool
+    dirty: bool | None
+
+
+class RunListItemResponse(BaseModel):
+    """One entry of `RunListResponse` (design.md D57, D59, D62). Matches the
+    design's own wire-shape example field for field."""
+
+    id: str
+    started_at: datetime
+    finished_at: datetime | None
+    exit_status: int | None
+    interrupted: bool
+    presentation: str
+    vcs: RunVcsResponse | None
+
+
+class RunListResponse(BaseModel):
+    """The response body for `GET /api/v1/runs` (design.md D58 -- no
+    `total`)."""
+
+    items: list[RunListItemResponse]
+    has_more: bool
+
+
+class RunDetailResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}` (design.md D57,
+    D59, D62). Carries `interrupt_reason`, which the lean list entry omits
+    -- the detail path keeps the full record reachable, matching
+    `RunDetail`'s own reason for existing."""
+
+    id: str
+    started_at: datetime
+    finished_at: datetime | None
+    exit_status: int | None
+    interrupted: bool
+    interrupt_reason: str | None
+    presentation: str
+    vcs: RunVcsResponse | None
+
+
+class ResultItemResponse(BaseModel):
+    """One entry of `ResultsResponse` (design.md D57). Traceback/captured
+    output are excluded, unfailable by construction -- `Result` has no such
+    field yet (task 7.6). Built field by field in `routes/read.py`."""
+
+    node_id: str
+    file_path: str
+    class_name: str | None
+    function_name: str
+    param_id: str | None
+    outcome: str
+    duration: float | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    setup_outcome: str | None
+    call_outcome: str | None
+    teardown_outcome: str | None
+    setup_duration: float | None
+    call_duration: float | None
+    teardown_duration: float | None
+    worker_id: str | None
+
+
+class ResultsResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/results` (design.md
+    D57, D61)."""
+
+    items: list[ResultItemResponse]
+    has_more: bool
+
+
+class HistoryEntryResponse(BaseModel):
+    """One entry of `HistoryResponse` (design.md D54, D57, D59, D60). `vcs`
+    is a lean `RunVcsResponse` built from `HistoryEntry.vcs` (a
+    `VcsProjection`, no `root` field -- same structural exclusion as the
+    run list, D59)."""
+
+    run_id: str
+    started_at: datetime
+    finished_at: datetime | None
+    outcome: str
+    duration: float | None
+    vcs: RunVcsResponse | None
+
+
+class HistoryResponse(BaseModel):
+    """The response body for `GET /api/v1/tests/history` (design.md D54,
+    D57, D61)."""
+
+    items: list[HistoryEntryResponse]
+    has_more: bool

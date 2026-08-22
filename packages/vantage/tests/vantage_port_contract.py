@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.result import CaseIdentity, Result
-from vantage.core.ports.storage import ExecutionStore
+from vantage.core.ports.storage import MAX_PAGE_ITEMS, ExecutionStore
 
 
 def _execution(
@@ -615,16 +615,17 @@ class ExecutionStoreContract:
         assert stored_all_null.vcs is None
 
     @pytest.mark.req(id="RQ-23")
-    def test_absent_repository_run_is_retrievable_in_storage_pending_a_run_list(
-        self, store: ExecutionStore
-    ) -> None:
-        """design.md D48, task 4.9. **Inspection, awaiting `read-api`**: this
-        stands in for "the run appears in a run list" only -- there is no run
-        list yet. It is NOT claimed as met for RQ-23.2 until `read-api`
-        exposes an actual list; verified here only at the storage level via
-        `count_executions` and `get_execution`. *(Scenario: Absent
-        repository's run is retrievable in storage, pending a run list,
-        RQ-23.2)*"""
+    def test_absent_repository_run_is_retrievable_in_storage(self, store: ExecutionStore) -> None:
+        """design.md D48, task 4.9. Storage-level regression guard, kept
+        alongside the route-level demonstration `read-api` now provides
+        (`test_list_runs_includes_absent_repository_run_undistinguished`,
+        `test_absent_repository_run_appears_in_list_undistinguished`): a
+        deferral this docstring used to name -- "awaiting `read-api`", "not
+        claimed as met until a run list exists" -- is retired, because a run
+        list exists now. Verified here at the storage level via
+        `count_executions` and `get_execution`; renamed in verify round 1
+        (SUGGESTION-3) after its "pending a run list" name outlived the
+        deferral it described."""
         identity = "2" + "6" * 31
         execution = _execution(identity, vcs=None)
 
@@ -634,3 +635,313 @@ class ExecutionStoreContract:
         found = store.get_execution(identity)
         assert found is not None
         assert found.vcs is None
+
+    # -- list_runs / get_run_detail (read-api Phase 2, design.md D57-D61) --
+
+    def test_list_runs_orders_newest_first_with_total_tiebreak(self, store: ExecutionStore) -> None:
+        """design.md D61: two runs sharing one `started_at`; `id DESC`
+        breaks the tie so the order is total, not merely partial -- a page
+        boundary can never fall inside the tie group."""
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        store.record_session(_execution("a" * 32, started=started), results=(), received_at=started)
+        store.record_session(_execution("b" * 32, started=started), results=(), received_at=started)
+
+        page = store.list_runs(limit=10, offset=0)
+
+        assert [entry.execution.identity.value for entry in page.items] == [
+            "b" * 32,
+            "a" * 32,
+        ]
+
+    def test_list_runs_caps_at_200_items(self, store: ExecutionStore) -> None:
+        """history-read-api -> Bounded pagination: a list response never
+        exceeds 200 items, even when the caller asks for more."""
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        for i in range(MAX_PAGE_ITEMS + 1):
+            identity = f"{i:032x}"
+            store.record_session(
+                _execution(identity, started=base + timedelta(seconds=i)),
+                results=(),
+                received_at=base,
+            )
+
+        page = store.list_runs(limit=MAX_PAGE_ITEMS * 5, offset=0)
+
+        assert len(page.items) == MAX_PAGE_ITEMS
+        assert page.has_more is True
+
+    def test_list_runs_has_more_distinguishes_exhaustion_from_truncation(
+        self, store: ExecutionStore
+    ) -> None:
+        """history-read-api -> Bounded pagination: the more-items flag
+        distinguishes exhaustion (exactly 200 stored) from truncation (201
+        stored) -- both drawn from the same fetch, never a second query."""
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        for i in range(MAX_PAGE_ITEMS):
+            identity = f"{i:032x}"
+            store.record_session(
+                _execution(identity, started=base + timedelta(seconds=i)),
+                results=(),
+                received_at=base,
+            )
+
+        exhausted = store.list_runs(limit=MAX_PAGE_ITEMS, offset=0)
+        assert exhausted.has_more is False
+
+        store.record_session(
+            _execution(f"{MAX_PAGE_ITEMS:032x}", started=base + timedelta(seconds=MAX_PAGE_ITEMS)),
+            results=(),
+            received_at=base,
+        )
+
+        truncated = store.list_runs(limit=MAX_PAGE_ITEMS, offset=0)
+        assert truncated.has_more is True
+
+    def test_list_runs_honors_a_smaller_requested_page_size(self, store: ExecutionStore) -> None:
+        """history-read-api -> Bounded pagination: a caller-requested page
+        size under the cap is honored, not silently rounded up to 200."""
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        for i in range(10):
+            identity = f"{i:032x}"
+            store.record_session(
+                _execution(identity, started=base + timedelta(seconds=i)),
+                results=(),
+                received_at=base,
+            )
+
+        page = store.list_runs(limit=3, offset=0)
+
+        assert len(page.items) == 3
+        assert page.has_more is True
+
+    def test_list_runs_includes_absent_repository_run_undistinguished(
+        self, store: ExecutionStore
+    ) -> None:
+        """version-control-context -> Absent repository: a run recorded
+        outside a repository appears in the run list at its ordinary
+        chronological position, `vcs is None`, no positional distinction
+        from a run recorded inside one -- the criterion `version-control-
+        context` deferred to this change by name."""
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        store.record_session(
+            _execution("a" * 32, started=base, vcs=_vcs()),
+            results=(),
+            received_at=base,
+        )
+        store.record_session(
+            _execution("b" * 32, started=base + timedelta(seconds=1), vcs=None),
+            results=(),
+            received_at=base,
+        )
+        store.record_session(
+            _execution("c" * 32, started=base + timedelta(seconds=2), vcs=_vcs()),
+            results=(),
+            received_at=base,
+        )
+
+        page = store.list_runs(limit=10, offset=0)
+
+        assert [entry.execution.identity.value for entry in page.items] == [
+            "c" * 32,
+            "b" * 32,
+            "a" * 32,
+        ]
+        by_id = {entry.execution.identity.value: entry for entry in page.items}
+        assert by_id["b" * 32].vcs is None
+
+    def test_list_runs_bounds_commit_subject_at_display_width(self, store: ExecutionStore) -> None:
+        """history-read-api -> Lean list projections: the commit subject is
+        bounded in list responses -- proves the SQL projection agrees with
+        `project_vcs` (design.md D57, D60)."""
+        subject = "x" * 200
+        store.record_session(
+            _execution(
+                "a" * 32,
+                vcs=_vcs(commit_subject=subject, commit_subject_truncated=False),
+            ),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        page = store.list_runs(limit=10, offset=0)
+
+        entry = page.items[0]
+        assert entry.vcs is not None
+        assert entry.vcs.commit_subject == subject[:120]
+        assert entry.vcs.commit_subject_truncated is True
+
+    def test_list_runs_flags_capture_truncated_subject_even_when_short(
+        self, store: ExecutionStore
+    ) -> None:
+        """history-read-api -> Lean list projections: the truncation flag
+        never surfaces independently of its subject -- the other input to
+        the disjunction, at adapter level (design.md D60)."""
+        store.record_session(
+            _execution(
+                "a" * 32,
+                vcs=_vcs(commit_subject="short", commit_subject_truncated=True),
+            ),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        page = store.list_runs(limit=10, offset=0)
+
+        entry = page.items[0]
+        assert entry.vcs is not None
+        assert entry.vcs.commit_subject == "short"
+        assert entry.vcs.commit_subject_truncated is True
+
+    def test_list_runs_null_subject_flag_is_false_not_null(self, store: ExecutionStore) -> None:
+        """design.md D60's `COALESCE` edge case: a run with
+        `vcs_commit_subject IS NULL` reports `commit_subject_truncated is
+        False`, never `None`."""
+        store.record_session(
+            _execution(
+                "a" * 32,
+                vcs=_vcs(commit_subject=None, commit_subject_truncated=False),
+            ),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        page = store.list_runs(limit=10, offset=0)
+
+        entry = page.items[0]
+        assert entry.vcs is not None
+        assert entry.vcs.commit_subject is None
+        assert entry.vcs.commit_subject_truncated is False
+
+    def test_get_run_detail_returns_full_untruncated_subject(self, store: ExecutionStore) -> None:
+        """design.md D58, D59: `get_run_detail` is the lean-list rule's
+        complement -- the full record stays reachable at the whole stored
+        subject, with `commit_subject_truncated` reflecting only
+        capture-time truncation, unchanged meaning."""
+        subject = "y" * 200
+        execution = _execution(
+            "a" * 32, vcs=_vcs(commit_subject=subject, commit_subject_truncated=False)
+        )
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        detail = store.get_run_detail("a" * 32)
+
+        assert detail is not None
+        assert detail.execution.vcs is not None
+        assert detail.execution.vcs.commit_subject == subject
+        assert detail.execution.vcs.commit_subject_truncated is False
+
+    def test_get_run_detail_returns_none_for_unknown_id(self, store: ExecutionStore) -> None:
+        assert store.get_run_detail("f" * 32) is None
+
+    # -- list_results / list_history (read-api Phase 3, design.md D57-D63) --
+
+    def test_list_history_orders_newest_first_with_full_vcs(self, store: ExecutionStore) -> None:
+        """history-read-api -> Test history: executions return newest first,
+        and every entry carries its full VCS context -- commit, branch,
+        commit subject, truncation flag, dirty flag -- and its duration."""
+        node_id = "t.py::test_recurring"
+        older = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        newer = older + timedelta(hours=1)
+        store.record_session(
+            _execution("a" * 32, started=older, vcs=_vcs(branch="feature", dirty=True)),
+            results=(_result(node_id, duration=0.5),),
+            received_at=older,
+        )
+        store.record_session(
+            _execution("b" * 32, started=newer, vcs=_vcs(branch="main", dirty=False)),
+            results=(_result(node_id, duration=0.75),),
+            received_at=newer,
+        )
+
+        page = store.list_history(node_id=node_id, limit=10, offset=0)
+
+        assert [entry.run_id for entry in page.items] == ["b" * 32, "a" * 32]
+        newest, oldest = page.items
+        assert newest.vcs is not None
+        assert newest.vcs.commit == _vcs().commit
+        assert newest.vcs.branch == "main"
+        assert newest.vcs.commit_subject == _vcs().commit_subject
+        assert newest.vcs.commit_subject_truncated is True
+        assert newest.vcs.dirty is False
+        assert newest.duration == 0.75
+        assert oldest.vcs is not None
+        assert oldest.vcs.branch == "feature"
+        assert oldest.vcs.dirty is True
+        assert oldest.duration == 0.5
+
+    def test_list_history_unknown_node_id_is_empty_not_error(self, store: ExecutionStore) -> None:
+        """history-read-api -> Test history: an unknown test identity yields
+        an empty history, not an error."""
+        page = store.list_history(node_id="t.py::test_never_ran", limit=10, offset=0)
+
+        assert page.items == ()
+        assert page.has_more is False
+
+    def test_list_history_null_vcs_entry_present_not_omitted(self, store: ExecutionStore) -> None:
+        """history-read-api -> Test history: an execution recorded outside a
+        git repository is present in the history with a null VCS context,
+        not omitted."""
+        node_id = "t.py::test_no_repo"
+        store.record_session(
+            _execution("a" * 32, vcs=None),
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        page = store.list_history(node_id=node_id, limit=10, offset=0)
+
+        assert len(page.items) == 1
+        assert page.items[0].vcs is None
+
+    def test_list_history_caps_and_reports_more_like_list_runs(self, store: ExecutionStore) -> None:
+        """history-read-api -> Bounded pagination, reused for the history
+        endpoint: the same 200/201 clamp and `has_more` transition as
+        `list_runs`."""
+        node_id = "t.py::test_hot_path"
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        for i in range(MAX_PAGE_ITEMS):
+            identity = f"{i:032x}"
+            store.record_session(
+                _execution(identity, started=base + timedelta(seconds=i)),
+                results=(_result(node_id),),
+                received_at=base,
+            )
+
+        exhausted = store.list_history(node_id=node_id, limit=MAX_PAGE_ITEMS, offset=0)
+        assert len(exhausted.items) == MAX_PAGE_ITEMS
+        assert exhausted.has_more is False
+
+        store.record_session(
+            _execution(f"{MAX_PAGE_ITEMS:032x}", started=base + timedelta(seconds=MAX_PAGE_ITEMS)),
+            results=(_result(node_id),),
+            received_at=base,
+        )
+
+        truncated = store.list_history(node_id=node_id, limit=MAX_PAGE_ITEMS, offset=0)
+        assert len(truncated.items) == MAX_PAGE_ITEMS
+        assert truncated.has_more is True
+
+    def test_list_results_paginates_a_runs_results(self, store: ExecutionStore) -> None:
+        """design.md D57: `list_results` is the paginated sibling of
+        `get_results` -- respects `limit`/`offset`/`has_more` over one run's
+        results."""
+        execution = _execution("a" * 32)
+        results = tuple(_result(f"t.py::test_{i}") for i in range(5))
+        store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
+
+        page = store.list_results(execution.identity.value, limit=3, offset=0)
+        assert len(page.items) == 3
+        assert page.has_more is True
+
+        next_page = store.list_results(execution.identity.value, limit=3, offset=3)
+        assert len(next_page.items) == 2
+        assert next_page.has_more is False
+
+    def test_list_results_empty_for_a_run_with_no_results(self, store: ExecutionStore) -> None:
+        execution = _execution("a" * 32)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        page = store.list_results(execution.identity.value, limit=10, offset=0)
+
+        assert page.items == ()
+        assert page.has_more is False

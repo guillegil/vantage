@@ -1,0 +1,191 @@
+# Hand-written by design (design.md Q5, D53) -- never generated from
+# `app.routes`. A generated document would be the code in another format
+# and could never fail the drift check `test_interface_document.py` runs
+# against it; this one is authored independently, so an undocumented route
+# is a check that can actually fail.
+openapi: 3.1.0
+info:
+  title: Vantage API
+  version: "1"
+  description: read-tagged paths are the surface history-read-api's read-only guarantee covers; write-tagged paths ingest or advance a run and are excluded from that guarantee by name (session-ingestion).
+servers:
+  - url: /api/v1
+tags:
+  - {name: read, description: Leaves stored data unchanged.}
+  - {name: write, description: Ingests or advances a run.}
+paths:
+  /runs:
+    post:
+      operationId: create_run
+      tags: [write]
+      summary: Report a session's run and its results.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReport'}}}}
+      responses:
+        "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
+        "200": {description: "Retried; already stored (idempotent replay).", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
+    get:
+      operationId: list_runs
+      tags: [read]
+      summary: Page through recorded runs, newest first.
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
+        "422": {description: limit below 1 or offset below 0 -- not a page.}
+  /runs/{run_id}:
+    get:
+      operationId: get_run_detail
+      tags: [read]
+      summary: The full record for one run, with its untruncated commit subject.
+      parameters:
+        - $ref: '#/components/parameters/run_id'
+      responses:
+        "200": {description: The run., content: {application/json: {schema: {$ref: '#/components/schemas/RunDetailResponse'}}}}
+        "404": {description: No run with that id has been recorded.}
+  /runs/{run_id}/heartbeat:
+    post:
+      operationId: heartbeat
+      tags: [write]
+      summary: Advance a run's last-contact timestamp.
+      parameters:
+        - $ref: '#/components/parameters/run_id'
+      responses:
+        "200": {description: Acknowledged., content: {application/json: {schema: {$ref: '#/components/schemas/HeartbeatAcknowledgement'}}}}
+        "404": {description: No run with that id has been recorded.}
+  /runs/{run_id}/results:
+    get:
+      operationId: list_results
+      tags: [read]
+      summary: Page through one run's results.
+      parameters:
+        - $ref: '#/components/parameters/run_id'
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        "200": {description: A page of results., content: {application/json: {schema: {$ref: '#/components/schemas/ResultsResponse'}}}}
+        "404": {description: No run with that id has been recorded.}
+        "422": {description: limit below 1 or offset below 0 -- not a page.}
+  /tests/history:
+    get:
+      operationId: list_history
+      tags: [read]
+      summary: A test's execution history, newest first, by its node id.
+      description: node_id is a named query parameter on an identity-free path, not a path segment (design.md D54) -- the parameter name is the identity scheme, so a later stable_id sibling arrives purely additive.
+      parameters:
+        - {name: node_id, in: query, required: true, schema: {type: string, maxLength: 1024}}
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        "200": {description: "A page of history entries; empty, not an error, for an unknown node_id.", content: {application/json: {schema: {$ref: '#/components/schemas/HistoryResponse'}}}}
+        "422": {description: node_id missing or over 1024 characters.}
+  /capabilities:
+    get:
+      operationId: capabilities
+      tags: [read]
+      summary: The compatibility advertisement (plugin-server-compatibility).
+      responses:
+        "200": {description: The single advertised capability.}
+  /openapi.yaml:
+    get:
+      operationId: get_openapi_document
+      tags: [read]
+      summary: This document, served as raw bytes.
+      responses:
+        "200": {description: The hand-written OpenAPI 3.1 YAML; media type application/yaml.}
+components:
+  parameters:
+    run_id: {name: run_id, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{32}$'}}
+    # No `maximum`. A caller asking for more than 200 gets 200, not a
+    # rejection -- someone requesting a large page wants data, not an
+    # error. `maximum: 200` would assert a constraint the server does not
+    # enforce, and a strict generated client would refuse a request the
+    # server answers happily. The cap is stated as behaviour instead.
+    limit: {name: limit, in: query, required: false, description: "Page size. Values above 200 are clamped to 200; the response reports whether more items exist. A value below 1 is rejected with 422 -- it is not a page size.", schema: {type: integer, minimum: 1}}
+    offset: {name: offset, in: query, required: false, schema: {type: integer, minimum: 0}}
+  schemas:
+    SessionReport:
+      type: object
+      required: [run]
+      properties: {run: {$ref: '#/components/schemas/RunReport'}, results: {type: [array, "null"], items: {type: object}}, vcs: {type: [object, "null"]}}
+    RunReport:
+      type: object
+      required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}}
+    # Response bodies are stated in full, the same as request bodies --
+    # this document is the contract for what the read surface returns, and
+    # a `type: object` stub would leave every read response opaque to a
+    # generated client.
+    #
+    # The duplication D56 warns about is bounded by the schema checks at the
+    # end of `test_interface_document.py`. They parse this file and read
+    # `service/schemas.py`'s `model_fields` independently -- neither side is
+    # generated from the other -- and compare, in both directions:
+    #
+    #   * which schemas are declared, against the models bound to them;
+    #   * each schema's property names, against its model's field names;
+    #   * each schema's `required` list (what the client must send on a
+    #     request, what it can rely on receiving in a response);
+    #   * whether each property admits `null`, against whether the field's
+    #     annotation admits `None`;
+    #   * every declared `enum`, against `OUTCOMES` / `PRESENTATIONS` -- the
+    #     domain frozensets that decide what the server can emit.
+    #
+    # Stated narrowly on purpose (verify round 2): the earlier version of
+    # this comment claimed `test_routes_read.py`'s key-set assertions bounded
+    # the drift, and they do not -- they compare a response against a literal
+    # written in that test file and never open this document. Three tampers
+    # here alone left the whole suite green. What is still unchecked, and is
+    # named rather than implied: the JSON `type` and `format` keywords, and
+    # the `pattern` / `maxLength` constraints. A `string` declared where the
+    # model holds an `int` would drift silently.
+    Acknowledgement:
+      type: object
+      required: [run_id, status, ignored]
+      properties: {run_id: {type: string}, status: {type: string}, ignored: {type: array, items: {type: string}}}
+    HeartbeatAcknowledgement:
+      type: object
+      required: [run_id, status]
+      properties: {run_id: {type: string}, status: {type: string}}
+    # No `root`. `VcsContext` carries one; this model has no field to
+    # populate, which is what keeps a reporter's absolute path off the wire
+    # on the detail path where no type stops it (design.md D59).
+    RunVcs:
+      type: object
+      required: [commit, branch, commit_subject, commit_subject_truncated, dirty]
+      properties: {commit: {type: [string, "null"]}, branch: {type: [string, "null"]}, commit_subject: {type: [string, "null"]}, commit_subject_truncated: {type: boolean}, dirty: {type: [boolean, "null"]}}
+    RunListItem:
+      type: object
+      required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
+    RunListResponse:
+      type: object
+      required: [items, has_more]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}}
+    # Carries `interrupt_reason` and an untruncated `commit_subject`, which
+    # the lean list entry omits -- the detail path keeps the full record
+    # reachable (design.md D57).
+    RunDetailResponse:
+      type: object
+      required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
+    # No traceback or captured output. Those columns have no writer yet, so
+    # their exclusion is unfailable by construction rather than enforced --
+    # recorded honestly here and beside the assertion this change does not
+    # add (history-read-api -> Lean list projections, Inspection).
+    ResultItem:
+      type: object
+      required: [node_id, file_path, class_name, function_name, param_id, outcome, duration, started_at, finished_at, setup_outcome, call_outcome, teardown_outcome, setup_duration, call_duration, teardown_duration, worker_id]
+      properties: {node_id: {type: string}, file_path: {type: string}, class_name: {type: [string, "null"]}, function_name: {type: string}, param_id: {type: [string, "null"]}, outcome: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}, duration: {type: [number, "null"]}, started_at: {type: [string, "null"], format: date-time}, finished_at: {type: [string, "null"], format: date-time}, setup_outcome: {type: [string, "null"]}, call_outcome: {type: [string, "null"]}, teardown_outcome: {type: [string, "null"]}, setup_duration: {type: [number, "null"]}, call_duration: {type: [number, "null"]}, teardown_duration: {type: [number, "null"]}, worker_id: {type: [string, "null"]}}
+    ResultsResponse:
+      type: object
+      required: [items, has_more]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/ResultItem'}}, has_more: {type: boolean}}
+    HistoryEntry:
+      type: object
+      required: [run_id, started_at, finished_at, outcome, duration, vcs]
+      properties: {run_id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, outcome: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}, duration: {type: [number, "null"]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
+    HistoryResponse:
+      type: object
+      required: [items, has_more]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/HistoryEntry'}}, has_more: {type: boolean}}

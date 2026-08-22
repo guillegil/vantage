@@ -4,17 +4,19 @@
 
 Defines how the server knows a session is still alive while it runs, and how
 it derives a run's presentation — running, interrupted, or abandoned — from
-last contact and a configured grace period. **Write side only**: this
-capability maintains the data (`last_contact_at`, the derivation helper) and
-the heartbeat wire contract; presenting the derived state waits for a read
-API that does not exist yet, so RQ-44's read-back criteria are Analysis
-against the derivation helper here, not Demonstration through a live read
-path.
+last contact and a configured grace period. This capability maintains the
+data (`last_contact_at`, the derivation helper) and the heartbeat wire
+contract. The derived state is now presented: `history-read-api` supplies a
+live read path, so the *Abandoned run is observable* read-back criteria are
+Demonstration through that path rather than Analysis against the derivation
+helper in isolation.
 
 **Component:** across the boundary — `pytest-vantage` sends heartbeats,
 activity-driven off `pytest_runtest_logreport`; `vantage.service` exposes the
-endpoint; `vantage.storage` maintains `last_contact_at`; `vantage.core` hosts
-the stdlib-only abandonment-derivation helper (RQ-26).
+endpoint and the read path; `vantage.storage` maintains `last_contact_at`;
+`vantage.core` hosts the stdlib-only abandonment-derivation helper, which
+`architecture-boundaries` → *Core isolation* requires stay free of any
+pytest, database or web import.
 
 ## Requirements
 
@@ -73,26 +75,33 @@ patch over.
 If a run entry has a start time and no end time and no report or heartbeat
 contact has arrived for it within a configured grace period, then the system
 MUST derive that run's presentation as abandoned rather than as still
-running.
+running. This presentation MUST be observable by reading the run back
+through the read API `history-read-api` supplies, not only by invoking the
+derivation helper directly.
+(Previously: read-back criteria were Analysis, verified by invoking the
+abandonment-derivation helper directly; no live read path existed to
+demonstrate through.)
 
-#### Scenario: A run past its grace period derives as abandoned (RQ-44.1)
+**Verification: Demonstration**, through the live read path.
+
+#### Scenario: A run past its grace period reads back as abandoned
 - GIVEN a run entry with a start time, no end time, and no contact recorded for longer than the configured grace period
-- WHEN the abandonment-derivation helper is invoked against it
-- THEN it derives that run as abandoned
+- WHEN that run is read back through the read API
+- THEN its presented state is abandoned
 
-#### Scenario: A run inside its grace period derives as running (RQ-44.2)
+#### Scenario: A run inside its grace period reads back as running
 - GIVEN a run entry with a start time, no end time, and its last contact inside the configured grace period
-- WHEN the abandonment-derivation helper is invoked against it
-- THEN it derives that run as running, not abandoned
+- WHEN that run is read back through the read API
+- THEN its presented state is running, not abandoned
 
-#### Scenario: A Ctrl-C interrupted run derives as interrupted (RQ-44.3)
+#### Scenario: A Ctrl-C interrupted run reads back as interrupted
 - GIVEN a run entry reported as interrupted with Ctrl-C
-- WHEN the abandonment-derivation helper is invoked against it
-- THEN it derives that run as interrupted, not abandoned, because a report did arrive for it
+- WHEN that run is read back through the read API
+- THEN its presented state is interrupted, not abandoned, because a report did arrive for it
 
-#### Scenario: Abandonment invents no stored field (RQ-44.4)
-- GIVEN a run derived as abandoned
-- WHEN its stored record is inspected
+#### Scenario: Abandonment invents no stored field
+- GIVEN a run whose presented state, read back through the read API, is abandoned
+- WHEN its stored record is inspected directly
 - THEN the start time it was recorded with is unchanged, and no column represents an end that never happened
 
 ### Requirement: Grace period is server-side, configurable, and measured from last contact

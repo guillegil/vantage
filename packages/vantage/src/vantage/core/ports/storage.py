@@ -1,13 +1,94 @@
-"""The storage port: what any `ExecutionStore` adapter must implement (RQ-30)."""
+"""The storage port: what any `ExecutionStore` adapter must implement (RQ-30).
+
+The read types below (`Page`, `RunListEntry`, `RunDetail`, `HistoryEntry`)
+and the pagination constants landed in Phase 1 of the read-api change
+(design.md D57, D58, D61). `list_runs` and `get_run_detail` landed in Phase
+2, paired with both adapters implementing them in the same commit. Phase 3
+adds `list_results` and `list_history` the same way -- all four read methods
+are now declared, each paired with both adapters landing in this commit so
+no adapter is ever mid-slice out of structural conformance under
+`mypy --strict`.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.execution import Execution
+from vantage.core.domain.projection import VcsProjection
 from vantage.core.domain.result import CatalogueEntry, Result
+
+MAX_PAGE_ITEMS = 200
+"""The hard cap on items in one page (design.md D61) -- clamped in the
+adapter, never rejected; a request for more is satisfied up to this many."""
+
+MAX_IDENTITY_CHARS = 1024
+"""The bound on a client-chosen test identity value (design.md D54) -- a
+1,024-character identity percent-encodes to at most ~3 KiB, comfortably
+inside the common 8 KiB request-line buffer."""
+
+T = TypeVar("T")
+
+
+@dataclass(frozen=True)
+class Page(Generic[T]):
+    """A bounded page of items (design.md D58). No `total` -- no scenario
+    asks for one, and a total would need a `COUNT(*)` on every page.
+
+    No `slots=True`: dataclass slot-recreation combined with `Generic` is a
+    hazard on this project's Python 3.10 floor, and this envelope gains
+    nothing from slots.
+    """
+
+    items: tuple[T, ...]
+    has_more: bool
+
+
+@dataclass(frozen=True, slots=True)
+class RunListEntry:
+    """One row of `list_runs` (design.md D57, D58, D59).
+
+    `execution.vcs` is always `None` here -- the lean VCS data rides beside
+    it in `vcs`, a `VcsProjection`, so there is exactly one place a list
+    entry's VCS data can be read from. A list entry carrying both a
+    populated `execution.vcs` and this field would be two answers to one
+    question.
+    """
+
+    execution: Execution
+    last_contact_at: datetime | None
+    vcs: VcsProjection | None
+
+
+@dataclass(frozen=True, slots=True)
+class RunDetail:
+    """The full-record return of `get_run_detail` (design.md D57, D58, D59).
+
+    `execution.vcs` is the whole, unbounded `VcsContext` -- the detail path
+    keeps the full record reachable, which is the other half of the
+    lean-list rule.
+    """
+
+    execution: Execution
+    last_contact_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryEntry:
+    """One row of `list_history` -- a test's execution in one run
+    (design.md D57, D58, D59, D60). `vcs` is a lean `VcsProjection`, the
+    same read-display bound `RunListEntry` applies."""
+
+    run_id: str
+    started_at: datetime
+    finished_at: datetime | None
+    last_contact_at: datetime | None
+    outcome: str
+    duration: float | None
+    vcs: VcsProjection | None
 
 
 class ExecutionStore(Protocol):
@@ -48,6 +129,38 @@ class ExecutionStore(Protocol):
 
     def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         """Return the catalogue entry for `node_id`, or None if never observed (RQ-13)."""
+        ...
+
+    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+        """Return a page of runs, newest first (design.md D57, D61).
+
+        Ordered `started_at DESC, id DESC` -- the `id` tiebreak makes the
+        order total, so a page boundary is deterministic even when two runs
+        share a `started_at`. `limit` is clamped at `MAX_PAGE_ITEMS`, never
+        rejected; `has_more` is true when more rows exist beyond the
+        returned page. Each entry's VCS data is a lean `VcsProjection`
+        (design.md D59, D60) -- the entry's own `execution.vcs` is always
+        `None`."""
+        ...
+
+    def get_run_detail(self, execution_id: str) -> RunDetail | None:
+        """Return the full record for one run, or None if `execution_id` is
+        unknown (design.md D57, D58, D59). The whole stored commit subject
+        is reachable here -- the complement of `list_runs`' bounded
+        projection."""
+        ...
+
+    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[Result]:
+        """Return a page of one run's results (design.md D57) -- the
+        paginated sibling of `get_results`, which is left unchanged. Same
+        clamp and `has_more` mechanism as `list_runs` (design.md D61)."""
+        ...
+
+    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+        """Return a page of one test's execution history, newest first
+        (design.md D57, D61, D63). An unknown `node_id` yields an empty
+        page, never an error. Each entry's VCS data is a lean
+        `VcsProjection` (design.md D59, D60), same as `list_runs`."""
         ...
 
     def close(self) -> None:

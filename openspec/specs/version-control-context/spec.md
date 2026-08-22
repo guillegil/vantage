@@ -48,31 +48,33 @@ uncommitted changes to a tracked file.
 Where the project directory is not a git repository, the server MUST record
 the run with all six vcs fields null and MUST NOT emit any warning for that
 absence — complaining about something optional being missing trains people
-to ignore warnings, including the ones that matter (RQ-21).
+to ignore warnings, including the ones that matter. A run recorded this way
+MUST appear in the run list alongside runs from repositories, with all six
+VCS fields null rather than the run being omitted.
+(Previously: the run-list criterion was verified only by Inspection at the
+storage level, standing in with the scenario "Absent repository's run is
+retrievable in storage, pending a run list," and explicitly not claimed as
+met, deferred until `read-api` supplied a run list. That stand-in scenario
+and its deferral paragraph are retired now that `history-read-api` exists.)
 
-**RQ-23 criterion 2** — that the run appears in a run list alongside runs
-from repositories — **cannot be demonstrated by this change**: there is no
-run list, because `read-api` has not landed. It is verified here only by
-**Inspection** at the storage level, and is **not claimed as met**: the run
-is present and retrievable via `count_executions`/`get_execution` with all
-six vcs fields null, indistinguishable in storage from any other run.
-Promote to Test/Demonstration once `read-api` exposes a run list.
+**Verification: Test**, for every scenario including the run-list criterion,
+now that `history-read-api` supplies a real run list to demonstrate it
+through.
 
-#### Scenario: Not a git repository records nulls (RQ-23.1)
+#### Scenario: Not a git repository records nulls
 - GIVEN a directory that is not a git repository
 - WHEN a session is recorded
 - THEN the run is stored and its commit hash, branch, commit subject and dirty flag are all null
 
-#### Scenario: Absent repository emits no warning (RQ-23.1)
+#### Scenario: Absent repository emits no warning
 - GIVEN a directory that is not a git repository
 - WHEN a session is recorded
 - THEN no warning is emitted
 
-#### Scenario: Absent repository's run is retrievable in storage, pending a run list (RQ-23.2 — Inspection, awaiting `read-api`)
-- GIVEN a run recorded from a directory that is not a git repository
-- WHEN that run is retrieved directly via `count_executions` and `get_execution`
-- THEN the run is present with all six vcs fields null
-- AND this stands in for "appears in the run list" only until `read-api` can demonstrate the criterion through an actual list; it is not claimed as met by this change
+#### Scenario: Absent repository's run appears in the run list
+- GIVEN a run recorded from a directory that is not a git repository, alongside runs recorded from repositories
+- WHEN the run list is requested
+- THEN the absent-repository run is present in the list with all six VCS fields null, in no way distinguished in position or omission from any other run
 
 ### Requirement: Unreadable repository (RQ-39)
 

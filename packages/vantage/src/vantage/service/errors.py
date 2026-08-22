@@ -164,6 +164,28 @@ class UnsupportedMediaTypeError(RejectionError):
         super().__init__(f"Content-Type must be application/json, got {media_type!r}.")
 
 
+class InvalidIdentityError(RejectionError):
+    """A `node_id` query value is missing or exceeds `MAX_IDENTITY_CHARS`
+    (design.md D54, `routes/read.py`'s `GET /api/v1/tests/history`).
+
+    A distinct rejection kind from `InvalidReportError` -- routed here by
+    `_handle_request_validation_error` only when every failing field is
+    `node_id`, so an unrelated failure (e.g. a malformed `limit`) still
+    gets the generic shape. `fields` is built through
+    `_fields_from_errors`/`safe_segment`, same as `InvalidReportError`, so
+    the identity value itself is never echoed."""
+
+    status_code = 422
+    error = "invalid_identity"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidIdentityError:
+        return cls(
+            "The node_id query parameter is missing or exceeds the maximum identity length.",
+            _fields_from_errors(errors),
+        )
+
+
 class UnknownRunError(RejectionError):
     """No run matches the id used in a heartbeat (design.md D33).
 
@@ -196,6 +218,11 @@ def register_error_handlers(app: FastAPI) -> None:
     and is handled here too, as a safety net for anything still validated
     through automatic parameter binding -- neither handler ever forwards a
     pydantic error dict as-is.
+
+    `RequestValidationError` is further split in two: a failure confined to
+    the `node_id` query parameter (`GET /api/v1/tests/history`, design.md
+    D54) is shaped as `InvalidIdentityError`; every other automatic-binding
+    failure keeps the pre-existing `InvalidReportError` shape.
     """
 
     @app.exception_handler(RejectionError)
@@ -208,12 +235,19 @@ def register_error_handlers(app: FastAPI) -> None:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         del request
-        return _rejection_response(InvalidReportError.from_errors(exc.errors()))
+        errors = exc.errors()
+        if errors and all(
+            len(error["loc"]) >= 2 and error["loc"][0] == "query" and error["loc"][1] == "node_id"
+            for error in errors
+        ):
+            return _rejection_response(InvalidIdentityError.from_errors(errors))
+        return _rejection_response(InvalidReportError.from_errors(errors))
 
 
 __all__ = [
     "MAX_REPORT_BYTES",
     "IncompleteBodyError",
+    "InvalidIdentityError",
     "InvalidJsonError",
     "InvalidReportError",
     "PayloadTooLargeError",

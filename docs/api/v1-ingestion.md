@@ -1,5 +1,9 @@
 # Session ingestion API (v1)
 
+**Contract:** `packages/vantage/src/vantage/service/openapi/v1.yaml`
+(`api-interface-document`) states request shape and response status codes
+now; this file is the reasoning behind two choices the document can't carry.
+
 The plugin-to-server contract `pytest-vantage` is written against. Published
 per ADR-4 (two independently released distributions), served per ADR-11
 (FastAPI on uvicorn).
@@ -11,12 +15,6 @@ per ADR-4 (two independently released distributions), served per ADR-11
 - **Size cap:** `1 MiB` (`MAX_REPORT_BYTES`), enforced while streaming, not
   after buffering.
 
-### Request shape
-
-```json
-{"run": {"id": "32 lowercase hex chars", "started_at": "2026-08-15T09:14:02.481930+00:00", "finished_at": "2026-08-15T09:14:47.002118+00:00", "exit_status": 0, "interrupted": false, "interrupt_reason": null}}
-```
-
 **`extra=` is asymmetric between `run` and the envelope, deliberately.** `run`
 is `extra="forbid"`: an unrecognised field there is a client/server
 disagreement about what a run *is* — a bug, rejected loudly. The envelope is
@@ -26,18 +24,6 @@ disagreement about what a run *is* — a bug, rejected loudly. The envelope is
 This asymmetry IS the version-skew contract between the two independently
 released distributions (ADR-4); either direction of "fixing" it into
 symmetry breaks one of the two skew cases it exists to handle.
-
-### Responses
-
-| Status | Meaning | Body |
-| --- | --- | --- |
-| `201` | Stored, new run | `{"run_id", "status": "created", "ignored": []}` |
-| `200` | Retried, already stored | `{"run_id", "status": "duplicate", "ignored": []}` |
-| `400 invalid_json` | Body is not valid JSON | rejection body |
-| `400 incomplete_body` | Client disconnected before the whole body arrived | rejection body |
-| `413 payload_too_large` | Body exceeds the 1 MiB cap | rejection body |
-| `415 unsupported_media_type` | `Content-Type` missing or not `application/json` | rejection body |
-| `422 invalid_report` | Valid JSON, `run` fails validation | rejection body |
 
 Every rejection shares one body shape, `{"error", "detail", "fields"}`, e.g.
 `{"error": "invalid_report", "detail": "...", "fields": ["run.started_at"]}`.

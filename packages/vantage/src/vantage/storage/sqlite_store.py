@@ -64,7 +64,9 @@ from pathlib import Path
 from typing import cast
 
 from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, VcsProjection
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
+from vantage.core.ports.storage import MAX_PAGE_ITEMS, HistoryEntry, Page, RunDetail, RunListEntry
 from vantage.storage.connection import open_database
 
 # SQLITE_MAX_VARIABLE_NUMBER is 999 on older SQLite builds; 500 leaves
@@ -131,6 +133,39 @@ _SELECT_RUN = """
     FROM run WHERE id = ?
 """
 
+# `get_run_detail`'s SELECT -- `_SELECT_RUN`'s columns plus `last_contact_at`
+# appended last, so the first twelve values still unpack straight into
+# `_row_to_execution` unchanged (design.md D57, D58).
+_SELECT_RUN_DETAIL = """
+    SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
+           vcs_commit, vcs_branch, vcs_commit_subject, vcs_commit_subject_truncated,
+           vcs_dirty, vcs_root, last_contact_at
+    FROM run WHERE id = ?
+"""
+
+# `list_runs`' SELECT -- the lean-list projection happens here, in SQL, not
+# in Python after the fact (design.md D57): `substr`/`length` bound the
+# commit subject to `LIST_COMMIT_SUBJECT_CHARS` *before* it leaves SQLite,
+# so a 64 KiB subject is never pulled into memory only to be sliced down.
+# `vcs_root` is selected only to feed the null-projection check below -- it
+# never appears in `RunListEntry`'s `VcsProjection` (design.md D59). The
+# `COALESCE` in the `CASE` is load-bearing: `length(NULL) > ?` is SQL
+# `NULL`, not `0`, and a null subject must produce a `0` (false) flag, never
+# a null one (design.md D60).
+_LIST_RUNS = """
+    SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
+           last_contact_at,
+           vcs_commit, vcs_branch,
+           substr(vcs_commit_subject, 1, ?)                             AS commit_subject,
+           CASE WHEN vcs_commit_subject_truncated = 1
+                  OR COALESCE(length(vcs_commit_subject) > ?, 0) = 1
+                THEN 1 ELSE 0 END                                       AS commit_subject_truncated,
+           vcs_dirty, vcs_root
+    FROM run
+    ORDER BY started_at DESC, id DESC
+    LIMIT ? OFFSET ?
+"""
+
 # Conflict target is `node_id` -- the Phase 1 identity key (schema.sql
 # comment). `stable_id` carries the identical string in Phase 1, so its own
 # UNIQUE index cannot be violated by the row this statement updates.
@@ -167,6 +202,44 @@ _SELECT_RESULTS_FOR_RUN = """
     JOIN test_case tc ON tc.id = r.test_case_id
     WHERE r.run_id = ?
     ORDER BY r.id
+"""
+
+# `list_results`' SELECT -- the paginated sibling of `_SELECT_RESULTS_FOR_RUN`
+# (design.md D57). Same shape, same `r.id` order, `LIMIT`/`OFFSET` added.
+_LIST_RESULTS = """
+    SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
+           r.outcome, r.duration, r.started_at, r.finished_at,
+           r.setup_outcome, r.call_outcome, r.teardown_outcome,
+           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id
+    FROM result r
+    JOIN test_case tc ON tc.id = r.test_case_id
+    WHERE r.run_id = ?
+    ORDER BY r.id
+    LIMIT ? OFFSET ?
+"""
+
+# `list_history`' SELECT -- the join design.md D63 sizes: `node_id` (a bound
+# parameter, never interpolated, matching `_resolve_test_case_ids`'s existing
+# discipline) resolves through `idx_test_case_node_id` (unique) to one
+# `test_case.id`, then `idx_result_test_case_id` for that test's results,
+# then `run` by primary key. Same `substr`/`length` projection and the same
+# total order as `_LIST_RUNS` (design.md D60, D61) -- both list a run,
+# ordered the same way.
+_LIST_HISTORY = """
+    SELECT r.run_id, run.started_at, run.finished_at, run.last_contact_at,
+           r.outcome, r.duration,
+           run.vcs_commit, run.vcs_branch,
+           substr(run.vcs_commit_subject, 1, ?)                     AS commit_subject,
+           CASE WHEN run.vcs_commit_subject_truncated = 1
+                  OR COALESCE(length(run.vcs_commit_subject) > ?, 0) = 1
+                THEN 1 ELSE 0 END                                   AS commit_subject_truncated,
+           run.vcs_dirty, run.vcs_root
+    FROM test_case tc
+    JOIN result r ON r.test_case_id = tc.id
+    JOIN run ON run.id = r.run_id
+    WHERE tc.node_id = ?
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT ? OFFSET ?
 """
 
 _SELECT_TEST_CASE = """
@@ -259,6 +332,102 @@ def _row_to_execution(row: tuple[object, ...]) -> Execution:
         interrupted=bool(interrupted),
         interrupt_reason=interrupt_reason if isinstance(interrupt_reason, str) else None,
         vcs=_row_to_vcs_context(tuple(vcs_row)),
+    )
+
+
+def _row_to_vcs_projection(
+    commit: object,
+    branch: object,
+    commit_subject: object,
+    commit_subject_truncated: object,
+    dirty: object,
+    root: object,
+) -> VcsProjection | None:
+    """The same all-null normalisation rule as `_row_to_vcs_context`
+    (design.md D48), applied to the `_LIST_RUNS` projection columns.
+    `root` is one of the five inputs to the null check even though
+    `VcsProjection` itself carries no `root` field (design.md D59) -- a run
+    whose only known field is `root` must not be misread as absent."""
+    if (
+        commit is None
+        and branch is None
+        and commit_subject is None
+        and dirty is None
+        and root is None
+    ):
+        return None
+    return VcsProjection(
+        commit=cast("str | None", commit),
+        branch=cast("str | None", branch),
+        commit_subject=cast("str | None", commit_subject),
+        commit_subject_truncated=bool(commit_subject_truncated),
+        dirty=None if dirty is None else bool(dirty),
+    )
+
+
+def _row_to_run_list_entry(row: tuple[object, ...]) -> RunListEntry:
+    (
+        identity_value,
+        started_at,
+        finished_at,
+        exit_status,
+        interrupted,
+        interrupt_reason,
+        last_contact_at,
+        commit,
+        branch,
+        commit_subject,
+        commit_subject_truncated,
+        dirty,
+        root,
+    ) = row
+    execution = Execution(
+        identity=Identity(cast(str, identity_value)),
+        started_at=datetime.fromisoformat(cast(str, started_at)),
+        finished_at=datetime.fromisoformat(finished_at) if isinstance(finished_at, str) else None,
+        exit_status=exit_status if isinstance(exit_status, int) else None,
+        interrupted=bool(interrupted),
+        interrupt_reason=interrupt_reason if isinstance(interrupt_reason, str) else None,
+        vcs=None,  # the lean projection rides beside it in `vcs`, not here (design.md D57)
+    )
+    return RunListEntry(
+        execution=execution,
+        last_contact_at=(
+            datetime.fromisoformat(last_contact_at) if isinstance(last_contact_at, str) else None
+        ),
+        vcs=_row_to_vcs_projection(
+            commit, branch, commit_subject, commit_subject_truncated, dirty, root
+        ),
+    )
+
+
+def _row_to_history_entry(row: tuple[object, ...]) -> HistoryEntry:
+    (
+        run_id,
+        started_at,
+        finished_at,
+        last_contact_at,
+        outcome,
+        duration,
+        commit,
+        branch,
+        commit_subject,
+        commit_subject_truncated,
+        dirty,
+        root,
+    ) = row
+    return HistoryEntry(
+        run_id=cast(str, run_id),
+        started_at=datetime.fromisoformat(cast(str, started_at)),
+        finished_at=datetime.fromisoformat(finished_at) if isinstance(finished_at, str) else None,
+        last_contact_at=(
+            datetime.fromisoformat(last_contact_at) if isinstance(last_contact_at, str) else None
+        ),
+        outcome=cast(str, outcome),
+        duration=cast("float | None", duration),
+        vcs=_row_to_vcs_projection(
+            commit, branch, commit_subject, commit_subject_truncated, dirty, root
+        ),
     )
 
 
@@ -489,6 +658,65 @@ class SqliteExecutionStore:
         if row is None:
             return None
         return _row_to_catalogue_entry(row)
+
+    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+        # Fetch `min(limit, 200) + 1` rows (design.md D61): the extra row is
+        # what distinguishes a truncated page from an exhausted one without
+        # a second `COUNT` query that could race the first.
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        rows = self._conn.execute(
+            _LIST_RUNS,
+            (
+                LIST_COMMIT_SUBJECT_CHARS,
+                LIST_COMMIT_SUBJECT_CHARS,
+                page_limit + 1,
+                offset,
+            ),
+        ).fetchall()
+        has_more = len(rows) > page_limit
+        items = tuple(_row_to_run_list_entry(row) for row in rows[:page_limit])
+        return Page(items=items, has_more=has_more)
+
+    def get_run_detail(self, execution_id: str) -> RunDetail | None:
+        row = self._conn.execute(_SELECT_RUN_DETAIL, (execution_id,)).fetchone()
+        if row is None:
+            return None
+        *execution_row, last_contact_at = row
+        return RunDetail(
+            execution=_row_to_execution(tuple(execution_row)),
+            last_contact_at=(
+                datetime.fromisoformat(last_contact_at)
+                if isinstance(last_contact_at, str)
+                else None
+            ),
+        )
+
+    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[Result]:
+        # The paginated sibling of `get_results` (design.md D57): same
+        # `min(limit, 200) + 1` clamp/`has_more` mechanism as `list_runs`.
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        rows = self._conn.execute(_LIST_RESULTS, (execution_id, page_limit + 1, offset)).fetchall()
+        has_more = len(rows) > page_limit
+        items = tuple(_row_to_result(row) for row in rows[:page_limit])
+        return Page(items=items, has_more=has_more)
+
+    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+        # `node_id` is always a bound parameter, never interpolated into SQL
+        # (design.md D63; matches `_resolve_test_case_ids`'s discipline).
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        rows = self._conn.execute(
+            _LIST_HISTORY,
+            (
+                LIST_COMMIT_SUBJECT_CHARS,
+                LIST_COMMIT_SUBJECT_CHARS,
+                node_id,
+                page_limit + 1,
+                offset,
+            ),
+        ).fetchall()
+        has_more = len(rows) > page_limit
+        items = tuple(_row_to_history_entry(row) for row in rows[:page_limit])
+        return Page(items=items, has_more=has_more)
 
     def close(self) -> None:
         self._conn.close()
