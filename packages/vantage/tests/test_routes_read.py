@@ -1,8 +1,20 @@
 """Run list + run detail routes (design.md D57, D59, D61, D62; Phase 4).
 
-Runs the app factory (`vantage.service.app.create_app`) against an injected
-`InMemoryExecutionStore`, matching `test_ingestion.py`'s pattern -- the port
-(ADR-3) is a real seam, and these tests never wire `SqliteExecutionStore`.
+Runs the app factory (`vantage.service.app.create_app`) against **both**
+`ExecutionStore` implementations: the `store` fixture is parametrised, so
+every test below executes twice -- once against `InMemoryExecutionStore` and
+once against `SqliteExecutionStore`, the adapter that actually ships.
+
+**Why both, and not the double alone** (verify round 3, WARNING -- closed):
+these tests were written against the in-memory double only, so the SQLite
+row-to-domain mappers (`_row_to_run_list_entry`, `_row_to_history_entry`,
+`_row_to_vcs_projection`) had no route-level value coverage at all. Mutating
+`_row_to_run_list_entry` to return `finished_at=None` unconditionally left
+the whole package suite green at 284 passed, while a real caller on the real
+adapter would read `finished_at: null` for every run. The port contract
+(`vantage_port_contract.py`) already forces the two adapters to agree beneath
+the port; this fixture extends that discipline to the wire, where the values
+are actually serialised.
 
 Every fixture in this file constructs `Execution`/`VcsContext` directly and
 seeds the store through `record_session`, never through the ingestion route:
@@ -15,7 +27,9 @@ matching design.md D62's own claim that the demonstration needs none.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -26,6 +40,7 @@ from vantage.core.domain.result import CaseIdentity, Result
 from vantage.core.ports.storage import ExecutionStore, HistoryEntry, Page
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
+from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _result
 
 _KNOWN_ROOT = "/home/example/very-unique-repo-root-xyz123"
@@ -37,6 +52,7 @@ _LIST_COMMIT = "c0ffee01" * 5
 _HISTORY_NEWER_COMMIT = "beef0002" * 5
 _HISTORY_OLDER_COMMIT = "dead0003" * 5
 _TRUNCATION_COMMIT = "face0004" * 5
+_DETAIL_COMMIT = "abad0005" * 5
 
 
 def _run_id(seed: int) -> str:
@@ -96,17 +112,30 @@ def _vcs(
     )
 
 
-@pytest.fixture
-def store() -> InMemoryExecutionStore:
-    return InMemoryExecutionStore()
+@pytest.fixture(params=["memory", "sqlite"])
+def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[ExecutionStore]:
+    """Both `ExecutionStore` implementations, one test run each.
+
+    The id of each parametrisation appears in the test id (`[memory]` /
+    `[sqlite]`), so a failure names the adapter that produced it without any
+    further digging. The SQLite adapter gets a fresh database under
+    `tmp_path` per test and is closed afterwards, matching
+    `test_sqlite_store.py`'s own fixture -- these tests share no state and
+    the file never outlives the test that made it."""
+    if request.param == "memory":
+        yield InMemoryExecutionStore()
+        return
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    yield adapter
+    adapter.close()
 
 
 @pytest.fixture
-def client(store: InMemoryExecutionStore) -> TestClient:
+def client(store: ExecutionStore) -> TestClient:
     return TestClient(create_app(store))
 
 
-def _client_with_grace(store: InMemoryExecutionStore, grace_period_seconds: float) -> TestClient:
+def _client_with_grace(store: ExecutionStore, grace_period_seconds: float) -> TestClient:
     return TestClient(create_app(store, grace_period_seconds=grace_period_seconds))
 
 
@@ -127,7 +156,7 @@ class _SpyExecutionStore:
 
 
 def test_run_list_returns_items_and_has_more_envelope(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(history-read-api -> Bounded pagination, list envelope shape; and
     Test history -> full VCS context at the list layer)*.
@@ -209,7 +238,7 @@ def test_run_list_returns_items_and_has_more_envelope(
 
 
 def test_run_list_presentation_and_interruption_are_per_run(
-    store: InMemoryExecutionStore,
+    store: ExecutionStore,
 ) -> None:
     """*(session-liveness -> Abandoned run is observable, at the list layer;
     design.md D62 -- `derive_presentation` gets its first caller.)*
@@ -294,7 +323,7 @@ def test_run_list_presentation_and_interruption_are_per_run(
 
 
 def test_run_list_response_contains_no_vcs_root_anywhere(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(Lean list projections -> `vcs_root` appears in no run list or run
     detail response)*. A substring assertion on the raw serialized body.
@@ -336,9 +365,7 @@ def test_run_list_rejects_non_positive_limit(client: TestClient) -> None:
 # --- 4.4 --------------------------------------------------------------
 
 
-def test_run_list_caps_at_200_at_the_route(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
+def test_run_list_caps_at_200_at_the_route(client: TestClient, store: ExecutionStore) -> None:
     """*(Bounded pagination, route level)*. 201 stored runs, no `limit`
     supplied -- the cap must hold through the HTTP layer, not only the
     port (task 4.4's own note)."""
@@ -363,7 +390,7 @@ def test_run_list_caps_at_200_at_the_route(
 
 
 def test_run_list_clamps_an_over_cap_limit_rather_than_rejecting_it(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(Bounded pagination -> A list response never exceeds 200 items)*.
     The existing cap test supplies no `limit` at all, so it exercises the
@@ -399,7 +426,7 @@ def test_run_list_clamps_an_over_cap_limit_rather_than_rejecting_it(
 
 
 def test_run_detail_returns_full_untruncated_subject(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(D58, D59 -- the full record stays reachable via run detail)*. A
     200-character stored subject, well past the 120-character list display
@@ -431,7 +458,7 @@ def test_run_detail_returns_full_untruncated_subject(
 
 
 def test_run_detail_response_contains_no_vcs_root(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(Lean list projections -> `vcs_root` appears in no run list or run
     detail response -- the falsifiable half.)*
@@ -459,7 +486,7 @@ def test_run_detail_response_contains_no_vcs_root(
 
 
 def test_run_detail_carries_every_stored_field_by_value(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(history-read-api -> Test history -> the full record stays reachable
     via run detail; design.md D57.)*
@@ -488,7 +515,13 @@ def test_run_detail_carries_every_stored_field_by_value(
             started_at=orderly_started_at,
             finished_at=orderly_finished_at,
             exit_status=3,
-            vcs=_vcs(),
+            vcs=_vcs(
+                commit=_DETAIL_COMMIT,
+                branch="release/detail-fidelity",
+                commit_subject="carry the whole record to the detail wire",
+                commit_subject_truncated=True,
+                dirty=True,
+            ),
         ),
         results=[],
         received_at=orderly_started_at,
@@ -527,7 +560,21 @@ def test_run_detail_carries_every_stored_field_by_value(
     assert orderly["interrupted"] is False
     assert orderly["interrupt_reason"] is None
     assert orderly["presentation"] == "finished"
-    assert orderly["vcs"] is not None
+    # The detail path's five VCS fields, by value. `orderly["vcs"] is not
+    # None` alone left `_row_to_vcs_context` free to null `commit`, `branch`
+    # and `dirty` with the whole suite green (mutation sweep, 2026-08-22):
+    # detail is the only route that reads a full `VcsContext` rather than a
+    # `VcsProjection`, so nothing else on the wire covers this mapper.
+    # `commit_subject_truncated` is `True` here beside an unshortened
+    # subject, which only capture-time truncation can produce -- the detail
+    # path never applies display bounding (design.md D58).
+    assert orderly["vcs"] == {
+        "commit": _DETAIL_COMMIT,
+        "branch": "release/detail-fidelity",
+        "commit_subject": "carry the whole record to the detail wire",
+        "commit_subject_truncated": True,
+        "dirty": True,
+    }
 
     assert ctrl_c["id"] == ctrl_c_run
     assert _instant(ctrl_c["started_at"]) == ctrl_c_started_at
@@ -551,7 +598,7 @@ def test_run_detail_unknown_id_is_404(client: TestClient) -> None:
 # --- 4.8 --------------------------------------------------------------
 
 
-def test_abandoned_run_reads_back_as_abandoned(store: InMemoryExecutionStore) -> None:
+def test_abandoned_run_reads_back_as_abandoned(store: ExecutionStore) -> None:
     """*(session-liveness -> Abandoned run is observable -> A run past its
     grace period reads back as abandoned, Demonstration)*. No clock
     control: `last_contact_at` is stamped old relative to a `now` this test
@@ -575,7 +622,7 @@ def test_abandoned_run_reads_back_as_abandoned(store: InMemoryExecutionStore) ->
 # --- 4.9 --------------------------------------------------------------
 
 
-def test_running_run_reads_back_as_running(store: InMemoryExecutionStore) -> None:
+def test_running_run_reads_back_as_running(store: ExecutionStore) -> None:
     """*(session-liveness -> A run inside its grace period reads back as
     running)*."""
     now = datetime.now(timezone.utc)
@@ -597,7 +644,7 @@ def test_running_run_reads_back_as_running(store: InMemoryExecutionStore) -> Non
 # --- 4.10 -------------------------------------------------------------
 
 
-def test_interrupted_run_reads_back_as_interrupted(store: InMemoryExecutionStore) -> None:
+def test_interrupted_run_reads_back_as_interrupted(store: ExecutionStore) -> None:
     """*(session-liveness -> A Ctrl-C interrupted run reads back as
     interrupted, not abandoned)*. `last_contact_at` is stamped just as
     stale as the abandoned fixture, and the grace period just as short --
@@ -629,7 +676,7 @@ def test_interrupted_run_reads_back_as_interrupted(store: InMemoryExecutionStore
 # --- 4.11 -------------------------------------------------------------
 
 
-def test_abandonment_invents_no_stored_field(store: InMemoryExecutionStore) -> None:
+def test_abandonment_invents_no_stored_field(store: ExecutionStore) -> None:
     """*(session-liveness -> Abandonment invents no stored field)*. Reads
     the row back directly via `store.get_execution`, not through the
     response body -- a derived presentation must not mutate what was
@@ -657,7 +704,7 @@ def test_abandonment_invents_no_stored_field(store: InMemoryExecutionStore) -> N
 
 
 def test_results_route_returns_paginated_envelope(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(history-read-api -> Bounded pagination, applied to
     `GET /api/v1/runs/{run_id}/results`)*."""
@@ -691,7 +738,7 @@ def test_results_route_returns_paginated_envelope(
 
 
 def test_result_item_carries_every_stored_column_by_value(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(history-read-api -> Bounded pagination -> the results envelope's
     item shape; design.md D57 -- `_result_item` is built field by field.)*
@@ -781,7 +828,7 @@ def test_results_route_unknown_run_id_is_404(client: TestClient) -> None:
 
 
 def test_history_route_returns_newest_first_with_full_vcs(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(history-read-api -> Test history -> Executions return newest
     first, with full VCS context -- route level)*.
@@ -898,7 +945,7 @@ def test_history_route_unknown_node_id_is_empty_not_error(client: TestClient) ->
 
 
 def test_history_route_response_contains_no_vcs_root(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(Test history -> `vcs_root` appears in no history entry)*. Same
     substring-on-raw-body shape as 4.2/4.6. **Structurally unfalsifiable,
@@ -920,7 +967,7 @@ def test_history_route_response_contains_no_vcs_root(
 
 
 def test_history_entry_for_a_non_repository_run_carries_a_null_vcs_key(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(version-control-context -> A non-repository execution has a null VCS
     context, not an omitted entry -- route level.)*
@@ -1021,7 +1068,7 @@ def test_history_route_overlong_identity_is_422_not_414(client: TestClient) -> N
 
 
 def test_absent_repository_run_appears_in_list_undistinguished(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(version-control-context -> Absent repository -> Absent repository's
     run appears in the run list)*. Promotes that scenario from Inspection to
@@ -1066,7 +1113,7 @@ def test_absent_repository_run_appears_in_list_undistinguished(
 
 
 def test_list_response_carries_the_truncation_flag_beside_its_subject(
-    client: TestClient, store: InMemoryExecutionStore
+    client: TestClient, store: ExecutionStore
 ) -> None:
     """*(history-read-api -> Lean list projections -> The truncation flag
     never surfaces independently of its subject -- response level.)*
