@@ -405,6 +405,80 @@ def test_recorded_location_is_the_raising_helper_not_the_test_function(
     assert path.endswith("test_helper_location.py")
 
 
+def test_skipped_test_records_skip_reason_not_failure_fields(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Failure location, type and message -> A skipped
+    test does not crash the recorder (design.md D70, row 3): `skip_reason`
+    is recorded verbatim, including pytest's own prefix; the failure
+    fields and traceback are absent, and recording itself does not raise.
+    """
+    pytester.makepyfile(
+        test_skip="""
+        import pytest
+
+
+        @pytest.mark.skip(reason="synthetic skip reason for evidence capture")
+        def test_it_is_skipped():
+            pass
+        """
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    setup_evidence = evidence["test_skip.py::test_it_is_skipped::setup"]
+    assert setup_evidence is not None
+    assert setup_evidence["skip_reason"] == ("Skipped: synthetic skip reason for evidence capture")
+    assert "failure_type" not in setup_evidence
+    assert "traceback" not in setup_evidence
+
+
+def test_bare_xfail_records_empty_reason_not_none(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Failure location, type and message (design.md
+    D70): `@pytest.mark.xfail` with no `reason=` records `xfail_reason ==
+    ""`, never absent -- the `hasattr` check, never truthiness.
+    """
+    pytester.makepyfile(
+        test_bare_xfail="""
+        import pytest
+
+
+        @pytest.mark.xfail
+        def test_it_is_expected_to_fail():
+            raise AssertionError("synthetic xfail")
+        """
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["test_bare_xfail.py::test_it_is_expected_to_fail::call"]
+    assert call_evidence is not None
+    assert call_evidence["xfail_reason"] == ""
+
+
+def test_xfail_precedes_skip_when_both_shapes_are_present(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Failure location, type and message (design.md
+    D70): a failing `@pytest.mark.xfail(reason=...)` arrives with
+    `report.outcome == "skipped"` AND `wasxfail` both present -- row 2
+    (`xfail_reason`) must win over row 3 (`skip_reason`).
+    """
+    pytester.makepyfile(
+        test_xfail_and_skip_shape="""
+        import pytest
+
+
+        @pytest.mark.xfail(reason="synthetic xfail reason for precedence test")
+        def test_it_fails_as_expected():
+            raise AssertionError("synthetic expected failure")
+        """
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["test_xfail_and_skip_shape.py::test_it_fails_as_expected::call"]
+    assert call_evidence is not None
+    assert call_evidence["xfail_reason"] == "synthetic xfail reason for precedence test"
+    assert "skip_reason" not in call_evidence
+
+
 def test_a_repr_that_raises_costs_only_that_field(pytester: pytest.Pytester) -> None:
     """failure-evidence -> Failure location, type and message (design.md
     D69): an exception whose `__repr__` raises costs only `failure_repr`

@@ -51,6 +51,28 @@ class EvidenceCollector:
             _warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
 
 
+def _skip_reason(
+    report: pytest.TestReport, excinfo: pytest.ExceptionInfo[BaseException]
+) -> str | None:
+    """`report.longrepr` is a `(path, lineno, reason)` tuple for a skip, not
+    an exception repr (design.md D70) -- `longrepr[2]` behind a shape guard
+    is the reason, stored VERBATIM, including pytest's own `"Skipped: "`
+    prefix where present; stripping it would be a second parser of pytest's
+    own display text. `str(excinfo.value)` is the guarded fallback for a
+    shape this guard does not recognise.
+    """
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:
+        try:
+            return str(longrepr[2])
+        except Exception:  # deliberately broad -- one hostile value, one None field
+            return None
+    try:
+        return str(excinfo.value)
+    except Exception:  # deliberately broad, same reason
+        return None
+
+
 def _failure_fields(
     item: pytest.Item, excinfo: pytest.ExceptionInfo[BaseException]
 ) -> dict[str, object]:
@@ -108,17 +130,30 @@ def _failure_fields(
 def _extract(
     item: pytest.Item,
     call: pytest.CallInfo[None],
-    report: pytest.TestReport,  # noqa: ARG001 -- read in the next work unit (design.md D70)
+    report: pytest.TestReport,
     capture_disabled: bool,  # noqa: ARG001 -- wired in Phase 4 (design.md D71)
 ) -> dict[str, object]:
-    """The field-extraction entry point (design.md D69). `report`'s
-    non-exception shapes -- a skip's tuple `longrepr`, `wasxfail` -- are
-    design.md D70, the next work unit; this one covers only "no exception at
-    all" and the ordinary failure case.
+    """The field-extraction entry point: design.md D70's fixed four-row
+    branch, driven by the report and `excinfo` -- NEVER by `.reprcrash`,
+    which a skip's tuple `longrepr` does not have (that is exactly the
+    `AttributeError` the *A skipped test does not crash the recorder*
+    scenario falsifies).
+
+    Row order matters: `hasattr(report, "wasxfail")` is checked BEFORE
+    `report.outcome == "skipped"`, because a failing
+    `@pytest.mark.xfail(reason=...)` arrives with BOTH `wasxfail` present
+    and `outcome == "skipped"`, and `xfail_reason`/`skip_reason` are
+    different columns. `hasattr`, never truthiness -- pytest sets the
+    reason to `""` for a bare `@pytest.mark.xfail`, and `report.wasxfail or
+    None` would erase that genuine empty string.
     """
     excinfo = call.excinfo
     if excinfo is None:
         return {}
+    if hasattr(report, "wasxfail"):
+        return {"xfail_reason": report.wasxfail}
+    if report.outcome == "skipped":
+        return {"skip_reason": _skip_reason(report, excinfo)}
     return _failure_fields(item, excinfo)
 
 
