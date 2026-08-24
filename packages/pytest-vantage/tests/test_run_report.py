@@ -13,6 +13,7 @@ lists only this one new test file for D2a.
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -24,6 +25,7 @@ from pathlib import Path
 import pytest
 from pytest_vantage import vcs
 from vantage.core.domain.execution import Execution
+from vantage.service.errors import MAX_REPORT_BYTES
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
@@ -701,3 +703,50 @@ def test_xdist_run_leaves_exactly_one_run_entry(
 
     result.assert_outcomes(passed=8)
     assert len(vantage_server.executions()) == 1
+
+
+# --- The per-report budget (design.md D73, D74, task 5.11) ------------------
+
+
+def test_a_session_of_many_large_failures_stays_within_the_report_size_cap(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """failure-evidence -> Per-report failure-text budget -> A session of
+    many large failures stays within the report size cap: ten tests each
+    raising an 80,000-character message would, unbudgeted, carry roughly
+    2.4 MB of failure text alone -- the same message independently
+    re-rendered into `failure_message`, `failure_repr` and `traceback`
+    (design.md D69) -- comfortably over the server's 1 MiB
+    `MAX_REPORT_BYTES` and rejected outright. `recorder.py` calling
+    `spend_failure_text_budget` between assembly and send (design.md D74) is
+    what keeps the finish-write's encoded body within budget.
+
+    `send` is patched to capture the exact report dict rather than actually
+    perform the request, the same technique
+    `test_session_start_sends_a_report_with_no_results_matching_the_finish_writes_started_at`
+    above already uses -- the preflight itself still runs for real against
+    `vantage_server`, proving activation, and the captured dict is encoded
+    with the identical `json.dumps(...).encode("utf-8")` call
+    `transport.send` itself would have made, so the byte count asserted here
+    is exactly what would have gone on the wire.
+    """
+    sent: list[dict[str, object]] = []
+
+    def _capture(address: str, report: dict[str, object], *, timeout: float) -> None:
+        sent.append(report)
+
+    monkeypatch.setattr("pytest_vantage.recorder.send", _capture)
+    body = "\n".join(
+        f"def test_{i}():\n    raise AssertionError('X' * 80_000)\n" for i in range(10)
+    )
+    pytester.makepyfile(test_many_large_failures=body)
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(failed=10)
+    assert len(sent) == 2  # the start-write, then the finish-write
+    _, finish_report = sent
+    finish_body = json.dumps(finish_report).encode("utf-8")
+    assert len(finish_body) <= MAX_REPORT_BYTES
