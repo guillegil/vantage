@@ -174,19 +174,19 @@ Creates `packages/pytest-vantage/src/pytest_vantage/budget.py`,
 `packages/pytest-vantage/tests/test_report_budget.py`. Modifies
 `recorder.py`.
 
-- [ ] 5.1 RED `test_report_budget.py::test_the_mirrored_cap_matches_the_server` — `_REPORT_BYTES_CAP == MAX_REPORT_BYTES` (test-only cross-package import) and `MAX_FAILURE_TEXT_BYTES * 2 == MAX_REPORT_BYTES`. *(D73 — the pinning test)*
-- [ ] 5.2 GREEN `budget.py` (create): `_REPORT_BYTES_CAP = 1024 * 1024`; `MAX_FAILURE_TEXT_BYTES = _REPORT_BYTES_CAP // 2`.
-- [ ] 5.3 RED `..._test_spend_budget_charges_encoded_json_bytes_not_raw_len` — a quote/newline-heavy traceback; cost equals `len(json.dumps(value, ensure_ascii=False).encode())`.
-- [ ] 5.4 RED `..._test_spend_budget_is_execution_order_first_come` — three over-budget results; the first in execution order stays whole, a later one drops.
-- [ ] 5.5 RED `..._test_spend_budget_field_priority_within_a_result` — `failure_message` fits, `traceback` doesn't, at the boundary; message survives, traceback drops.
-- [ ] 5.6 RED `..._test_short_fields_are_never_charged_or_dropped` — `failure_type`/`failure_path`/`failure_lineno`/`skip_reason`/`xfail_reason` excluded from the charged set even when exhausted.
-- [ ] 5.7 RED `..._test_a_dropped_field_is_null_with_its_truncated_flag_set` — dropped field serializes `{"traceback": null, "traceback_truncated": true}`. *(A field dropped for budget is flagged, not missing)*
-- [ ] 5.8 RED `..._test_a_session_within_budget_sets_no_exhaustion_flags` — under-budget session sets no `*_truncated` flag from the budget pass. *(A session within budget carries no exhaustion flags)*
-- [ ] 5.9 RED `..._test_a_field_is_dropped_whole_never_cut` — a traceback larger than the remaining budget but under 64 KiB drops entirely, never sliced.
-- [ ] 5.10 GREEN `budget.py`: `spend_failure_text_budget(entries)` — one pass, execution order, field priority `(failure_message, failure_repr, traceback, captured_stdout, captured_stderr)`, encoded-cost measurement, drop-whole semantics.
-- [ ] 5.11 RED `test_run_report.py::test_a_session_of_many_large_failures_stays_within_the_report_size_cap` — several richly-failing tests via `pytester`/`vantage_test_server`; the actual HTTP body stays within `MAX_REPORT_BYTES`. *(A session of many large failures stays within the report size cap)*
-- [ ] 5.12 GREEN `recorder.py`: call `spend_failure_text_budget(entries)` between `assemble_results(...)` and `send(...)`.
-- [ ] 5.13 Gate: `uv run pytest packages/pytest-vantage/tests/test_report_budget.py packages/pytest-vantage/tests/test_run_report.py`; `uv run mypy .` clean; confirm `budget.py` imports only `json` and stdlib.
+- [x] 5.1 RED `test_report_budget.py::test_the_mirrored_cap_matches_the_server` — `_REPORT_BYTES_CAP == MAX_REPORT_BYTES` (test-only cross-package import) and `MAX_FAILURE_TEXT_BYTES * 2 == MAX_REPORT_BYTES`. *(D73 — the pinning test)*
+- [x] 5.2 GREEN `budget.py` (create): `_REPORT_BYTES_CAP = 1024 * 1024`; `MAX_FAILURE_TEXT_BYTES = _REPORT_BYTES_CAP // 2`.
+- [x] 5.3 RED `..._test_spend_budget_charges_encoded_json_bytes_not_raw_len` — a quote/newline-heavy traceback; cost equals `len(json.dumps(value, ensure_ascii=False).encode())`.
+- [x] 5.4 RED `..._test_spend_budget_is_execution_order_first_come` — three over-budget results; the first in execution order stays whole, a later one drops.
+- [x] 5.5 RED `..._test_spend_budget_field_priority_within_a_result` — `failure_message` fits, `traceback` doesn't, at the boundary; message survives, traceback drops.
+- [x] 5.6 RED `..._test_short_fields_are_never_charged_or_dropped` — `failure_type`/`failure_path`/`failure_lineno`/`skip_reason`/`xfail_reason` excluded from the charged set even when exhausted.
+- [x] 5.7 RED `..._test_a_dropped_field_is_null_with_its_truncated_flag_set` — dropped field serializes `{"traceback": null, "traceback_truncated": true}`. *(A field dropped for budget is flagged, not missing)*
+- [x] 5.8 RED `..._test_a_session_within_budget_sets_no_exhaustion_flags` — under-budget session sets no `*_truncated` flag from the budget pass. *(A session within budget carries no exhaustion flags)*
+- [x] 5.9 RED `..._test_a_field_is_dropped_whole_never_cut` — a traceback larger than the remaining budget but under 64 KiB drops entirely, never sliced.
+- [x] 5.10 GREEN `budget.py`: `spend_failure_text_budget(entries)` — one pass, execution order, field priority `(failure_message, failure_repr, traceback, captured_stdout, captured_stderr)`, encoded-cost measurement, drop-whole semantics.
+- [x] 5.11 RED `test_run_report.py::test_a_session_of_many_large_failures_stays_within_the_report_size_cap` — several richly-failing tests via `pytester`/`vantage_test_server`; the actual HTTP body stays within `MAX_REPORT_BYTES`. *(A session of many large failures stays within the report size cap)*
+- [x] 5.12 GREEN `recorder.py`: call `spend_failure_text_budget(entries)` between `assemble_results(...)` and `send(...)`.
+- [x] 5.13 Gate: `uv run pytest packages/pytest-vantage/tests/test_report_budget.py packages/pytest-vantage/tests/test_run_report.py`; `uv run mypy .` clean; confirm `budget.py` imports only `json` and stdlib. — full workspace gate also run: 491 passed, mypy clean (80 files), deptry clean, ruff clean; `budget.py` imports only `json` (plus `from __future__ import annotations`).
 
 ## Phase 6: Ingestion — the flag disjunction (PR6)
 
