@@ -127,17 +127,61 @@ def _failure_fields(
     return fields
 
 
+def _captured_fields(report: pytest.TestReport, capture_disabled: bool) -> dict[str, object]:
+    """`captured_stdout`/`captured_stderr` for THIS phase report alone
+    (design.md D71). `capture_disabled` is one session-constant flag, read
+    once at `EvidenceCollector.__init__` and passed down unchanged -- when
+    set, BOTH fields are `None` throughout the session: capture mode is the
+    only thing that can distinguish "empty" from "never observed"
+    (`report.capstdout`/`.capstderr` return `""` in both cases, and
+    `report.sections` does not separate them either, since pytest only adds
+    a section `if out:`). When capture is enabled, `report.capstdout` /
+    `.capstderr` are used directly -- `""` when this phase printed nothing,
+    never coerced through `text or None`, which would erase that genuine
+    empty string (RQ-5.2, RQ-9.3's forbidden idiom, applied to this field
+    family).
+
+    Each field keeps its own `try/except`, the same per-field isolation
+    `_failure_fields` uses -- a hostile capture buffer costs one field, not
+    the whole phase.
+
+    **One honest limit, recorded, not hidden**: a test that consumes its own
+    buffer via the `capsys`/`capfd` fixture's `readouterr()` leaves nothing
+    in `report.sections` for this phase, so `capstdout`/`capstderr` read
+    back as `""` here too -- observationally identical to a genuinely silent
+    phase. Nothing in pytest's public surface distinguishes the two.
+    """
+    if capture_disabled:
+        return {"captured_stdout": None, "captured_stderr": None}
+    fields: dict[str, object] = {}
+    try:
+        fields["captured_stdout"] = report.capstdout
+    except Exception:  # deliberately broad -- one field lost, not the rest
+        fields["captured_stdout"] = None
+    try:
+        fields["captured_stderr"] = report.capstderr
+    except Exception:  # deliberately broad, same reason
+        fields["captured_stderr"] = None
+    return fields
+
+
 def _extract(
     item: pytest.Item,
     call: pytest.CallInfo[None],
     report: pytest.TestReport,
-    capture_disabled: bool,  # noqa: ARG001 -- wired in Phase 4 (design.md D71)
+    capture_disabled: bool,
 ) -> dict[str, object]:
     """The field-extraction entry point: design.md D70's fixed four-row
     branch, driven by the report and `excinfo` -- NEVER by `.reprcrash`,
     which a skip's tuple `longrepr` does not have (that is exactly the
     `AttributeError` the *A skipped test does not crash the recorder*
-    scenario falsifies).
+    scenario falsifies) -- PLUS `captured_stdout`/`captured_stderr`
+    (design.md D71), added to every branch's dict alike: captured output is
+    a record of what ran, not of what went wrong, so it is never gated by
+    the failure-evidence branch that produced the rest of this dict.
+    `capture.py::_captured_output` is what concatenates this per-phase
+    value across setup/call/teardown -- this function only extracts THIS
+    phase's contribution.
 
     Row order matters: `hasattr(report, "wasxfail")` is checked BEFORE
     `report.outcome == "skipped"`, because a failing
@@ -149,12 +193,15 @@ def _extract(
     """
     excinfo = call.excinfo
     if excinfo is None:
-        return {}
-    if hasattr(report, "wasxfail"):
-        return {"xfail_reason": report.wasxfail}
-    if report.outcome == "skipped":
-        return {"skip_reason": _skip_reason(report, excinfo)}
-    return _failure_fields(item, excinfo)
+        fields: dict[str, object] = {}
+    elif hasattr(report, "wasxfail"):
+        fields = {"xfail_reason": report.wasxfail}
+    elif report.outcome == "skipped":
+        fields = {"skip_reason": _skip_reason(report, excinfo)}
+    else:
+        fields = _failure_fields(item, excinfo)
+    fields.update(_captured_fields(report, capture_disabled))
+    return fields
 
 
 __all__ = ["EvidenceCollector"]

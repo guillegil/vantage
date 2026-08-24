@@ -232,6 +232,53 @@ def _select_evidence_phase(
     return None  # xpassed, passed -- design.md D69
 
 
+def _captured_output(
+    setup: pytest.TestReport,
+    call: pytest.TestReport | None,
+    teardown: pytest.TestReport,
+) -> dict[str, object]:
+    """`captured_stdout`/`captured_stderr`, concatenated across every phase
+    that ran, in setup->call->teardown order, with NO delimiter (design.md
+    D71) -- independent of `_select_evidence_phase`'s D69 failure-evidence
+    precedence, because captured output is a record of what ran, not of
+    what went wrong: even a passing test's output is included.
+
+    Absent entirely from the returned dict (never a dict of nulls) when
+    `EvidenceCollector` never ran on ANY phase of this test -- e.g. the
+    opt-out (D72) -- the same convention `build_result`'s failure-evidence
+    merge already follows below.
+
+    `capture_disabled` is one session-constant flag every phase's `_extract`
+    call receives identically (`evidence.py::_captured_fields`), so a phase
+    reporting `None` for a field means the WHOLE session had capture
+    disabled -- never a genuine per-phase mix of `None` and text. The first
+    `None` encountered therefore settles the field for the whole result.
+    """
+    evidences = [
+        evidence
+        for report in (setup, call, teardown)
+        if report is not None
+        for evidence in (getattr(report, "vantage_evidence", None),)
+    ]
+    if not any(isinstance(evidence, dict) for evidence in evidences):
+        return {}
+
+    fields: dict[str, object] = {}
+    for field in ("captured_stdout", "captured_stderr"):
+        parts: list[str] = []
+        disabled = False
+        for evidence in evidences:
+            if not isinstance(evidence, dict):
+                continue
+            value = evidence.get(field)
+            if value is None:
+                disabled = True
+                break
+            parts.append(str(value))
+        fields[field] = None if disabled else "".join(parts)
+    return fields
+
+
 def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
     """Build one wire-shape `results[]` entry from an accumulated `_Pending`
     (design.md D16-D18). Returns `None` -- dropped, never invented -- when
@@ -283,6 +330,12 @@ def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
     evidence = getattr(evidence_report, "vantage_evidence", None)
     if isinstance(evidence, dict):
         result.update(evidence)
+
+    # design.md D71: captured output is concatenated across ALL phases,
+    # never just the one D69's failure-evidence precedence selected above --
+    # applied AFTER the evidence merge so it overrides any single-phase
+    # captured_stdout/captured_stderr that merge may have carried in.
+    result.update(_captured_output(setup, call, teardown))
 
     return result
 

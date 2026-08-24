@@ -510,6 +510,53 @@ def test_a_repr_that_raises_costs_only_that_field(pytester: pytest.Pytester) -> 
     assert call_evidence["traceback"] is not None
 
 
+# --- Phase 4: captured output, empty distinct from absent (design.md D71) --
+
+
+def test_silent_test_has_empty_captured_output_not_absent(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Captured output, empty distinct from absent ->
+    A silent test has empty captured output, not absent (design.md D71): a
+    test that prints nothing, run under the default (enabled) capture,
+    records `captured_stdout == ""` -- captured AND empty, never absent.
+    """
+    pytester.makepyfile(
+        test_silent="""
+        def test_it_prints_nothing():
+            pass
+        """
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["test_silent.py::test_it_prints_nothing::call"]
+    assert call_evidence is not None
+    assert call_evidence["captured_stdout"] == ""
+    assert call_evidence["captured_stderr"] == ""
+
+
+def test_capture_disabled_leaves_output_absent(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Captured output, empty distinct from absent ->
+    Capture disabled leaves output absent, not empty (design.md D71): a
+    session run with `-s` / `--capture=no` never observes output at all, so
+    `captured_stdout`/`captured_stderr` are `None`, not `""` -- the
+    distinguisher is the session's capture mode, never `text or None`
+    (RQ-5.2, RQ-9.3's forbidden idiom, applied to this field family).
+    """
+    pytester.makepyfile(
+        test_capture_off="""
+        def test_it_prints_something():
+            print("this line is never observed with capture disabled")
+        """
+    )
+
+    evidence = _capture_evidence(pytester, "-s")
+
+    call_evidence = evidence["test_capture_off.py::test_it_prints_something::call"]
+    assert call_evidence is not None
+    assert call_evidence["captured_stdout"] is None
+    assert call_evidence["captured_stderr"] is None
+
+
 @pytest.mark.req(id="RQ-24")
 def test_the_private_rendering_method_this_change_depends_on_still_exists() -> None:
     """`_failure_fields` renders the traceback through

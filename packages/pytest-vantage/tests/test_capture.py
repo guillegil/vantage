@@ -467,6 +467,46 @@ def test_evidence_phase_selection_matches_the_derived_outcome_table(
     assert selected is expected_report
 
 
+# --- Phase 4: captured output concatenation, no marker (design.md D71) ------
+
+
+def test_captured_output_concatenates_phases_in_order_no_marker() -> None:
+    """failure-evidence -> Captured output, empty distinct from absent
+    (design.md D71): `captured_stdout`/`captured_stderr` are the
+    concatenation of every phase that ran, in setup->call->teardown order,
+    with NO delimiter -- in-band phase headers are forgeable by a test that
+    prints that exact line (design.md D71's rejected option), and this
+    selection is independent of D69's failure-evidence phase precedence:
+    every phase contributes, not just the one `_select_evidence_phase`
+    would pick for a failure.
+    """
+    setup = _report("setup", "passed")
+    setup.vantage_evidence = {  # type: ignore[attr-defined]
+        "captured_stdout": "SETUP_OUT",
+        "captured_stderr": "SETUP_ERR",
+    }
+    call = _report("call", "passed")
+    call.vantage_evidence = {  # type: ignore[attr-defined]
+        "captured_stdout": "CALL_OUT",
+        "captured_stderr": "CALL_ERR",
+    }
+    teardown = _report("teardown", "passed")
+    teardown.vantage_evidence = {  # type: ignore[attr-defined]
+        "captured_stdout": "TEARDOWN_OUT",
+        "captured_stderr": "TEARDOWN_ERR",
+    }
+    pending = _Pending()
+    pending.setup = setup
+    pending.call = call
+    pending.teardown = teardown
+
+    result = build_result("test_nid.py::test_it", pending)
+
+    assert result is not None
+    assert result["captured_stdout"] == "SETUP_OUTCALL_OUTTEARDOWN_OUT"
+    assert result["captured_stderr"] == "SETUP_ERRCALL_ERRTEARDOWN_ERR"
+
+
 def test_recorder_sends_the_assembled_results_in_the_one_session_post(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
