@@ -161,12 +161,12 @@ table).
 Modifies `evidence.py`, `capture.py`. Extends `test_evidence.py`,
 `test_capture.py`.
 
-- [ ] 4.1 RED `test_evidence.py::test_silent_test_has_empty_captured_output_not_absent` — a test printing nothing, default capture; `captured_stdout == ""`.
-- [ ] 4.2 RED `..._test_capture_disabled_leaves_output_absent` — `-s` session; `captured_stdout is None` and `captured_stderr is None`.
-- [ ] 4.3 RED `test_capture.py::test_captured_output_concatenates_phases_in_order_no_marker` — distinct sentinels per phase; joined text carries all three in order with no delimiter. *(D71)*
-- [ ] 4.4 GREEN `evidence.py`: read `report.capstdout`/`capstderr` per phase when not `_capture_disabled`, else `None` for both.
-- [ ] 4.5 GREEN `capture.py`: concatenate `captured_stdout`/`captured_stderr` across setup→call→teardown, independent of the D69 failure-phase selection.
-- [ ] 4.6 Gate: `uv run pytest packages/pytest-vantage/tests/test_evidence.py packages/pytest-vantage/tests/test_capture.py`; `uv run mypy .` clean; document the `capsys`/`capfd`-consumed-output gap in `evidence.py`'s docstring.
+- [x] 4.1 RED `test_evidence.py::test_silent_test_has_empty_captured_output_not_absent` — a test printing nothing, default capture; `captured_stdout == ""`.
+- [x] 4.2 RED `..._test_capture_disabled_leaves_output_absent` — `-s` session; `captured_stdout is None` and `captured_stderr is None`.
+- [x] 4.3 RED `test_capture.py::test_captured_output_concatenates_phases_in_order_no_marker` — distinct sentinels per phase; joined text carries all three in order with no delimiter. *(D71)*
+- [x] 4.4 GREEN `evidence.py`: read `report.capstdout`/`capstderr` per phase when not `_capture_disabled`, else `None` for both.
+- [x] 4.5 GREEN `capture.py`: concatenate `captured_stdout`/`captured_stderr` across setup→call→teardown, independent of the D69 failure-phase selection.
+- [x] 4.6 Gate: `uv run pytest packages/pytest-vantage/tests/test_evidence.py packages/pytest-vantage/tests/test_capture.py`; `uv run mypy .` clean; document the `capsys`/`capfd`-consumed-output gap in `evidence.py`'s docstring.
 
 ## Phase 5: The per-report budget (PR5)
 
