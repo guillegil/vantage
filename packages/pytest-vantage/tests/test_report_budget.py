@@ -20,6 +20,7 @@ import pytest_vantage.budget as budget_module
 from pytest_vantage.budget import (
     _REPORT_BYTES_CAP,
     MAX_FAILURE_TEXT_BYTES,
+    _encoded_cost,
     spend_failure_text_budget,
 )
 from vantage.service.errors import MAX_REPORT_BYTES
@@ -203,3 +204,32 @@ def test_a_field_is_dropped_whole_never_cut(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert entries[0]["traceback"] is None
     assert entries[0]["traceback_truncated"] is True
+
+
+@pytest.mark.req(id="RQ-24")
+def test_the_budget_charges_exactly_what_transport_will_put_on_the_wire() -> None:
+    """`_encoded_cost` exists to measure the wire, so it must encode the way
+    `transport.send` encodes -- `json.dumps(report)` at line 50, with NO
+    `ensure_ascii` argument, which means the default `True`.
+
+    Measuring with `ensure_ascii=False` instead understates every codepoint
+    above 0x7F, because the wire spends `\\uXXXX` (six bytes per unit, twelve
+    for an astral pair) where UTF-8 spends two to four. Measured: 1.30x for
+    Spanish accents, 1.84x for Japanese, 1.65x for emoji. A suite whose
+    assertion messages are not English would then pass the budget and still
+    breach `MAX_REPORT_BYTES` on the wire -- the whole session discarded,
+    run included, which is the exact failure this budget exists to prevent.
+
+    An ASCII value is asserted alongside so the test cannot pass vacuously:
+    the two encodings agree there, and only the non-ASCII case separates a
+    correct implementation from the understating one.
+    """
+    ascii_value = "assertion failed: expected 3, got 4"
+    assert _encoded_cost(ascii_value) == len(json.dumps(ascii_value).encode("utf-8"))
+
+    # Synthetic, deliberately spanning the three widening cases: two-byte
+    # accents, three-byte CJK, and an astral pair encoded as two escapes.
+    non_ascii_value = "aserción fallida: año 2026 -- 期待値 3 -- boom 🔥"
+    wire_cost = len(json.dumps(non_ascii_value).encode("utf-8"))
+    assert _encoded_cost(non_ascii_value) == wire_cost
+    assert wire_cost > len(json.dumps(non_ascii_value, ensure_ascii=False).encode("utf-8"))

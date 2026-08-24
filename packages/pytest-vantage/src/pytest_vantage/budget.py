@@ -58,8 +58,19 @@ def _encoded_cost(value: object) -> int:
     carry for this field, escapes and quotes included (design.md D74). A
     traceback is newline- and quote-heavy, so a raw `len(str)` understates
     it by a third or more; this measures the actual encoded bytes instead.
+
+    **No `ensure_ascii` argument, deliberately**: `transport.send` calls
+    `json.dumps(report)` bare, so the wire spends a six-byte escape per
+    unit -- twelve for an astral pair -- wherever UTF-8 would spend two to
+    four. Charging `ensure_ascii=False` here, which design.md D74's own
+    pseudocode specifies and which is wrong, understates every codepoint
+    above 0x7F: measured 1.30x for Spanish accents, 1.84x for Japanese,
+    1.65x for emoji. A suite whose assertion messages are not English
+    would then pass the budget and still breach `MAX_REPORT_BYTES`, losing
+    the whole session, run included -- the exact failure this budget
+    exists to prevent. The wire is what decides.
     """
-    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    return len(json.dumps(value).encode("utf-8"))
 
 
 def spend_failure_text_budget(entries: list[dict[str, object]]) -> None:
