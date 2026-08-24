@@ -200,6 +200,38 @@ def _worker_id(report: pytest.TestReport) -> str | None:
     return str(gateway_id) if gateway_id is not None else None
 
 
+def _select_evidence_phase(
+    setup: pytest.TestReport,
+    call: pytest.TestReport | None,
+    teardown: pytest.TestReport,
+    outcome: str,
+) -> pytest.TestReport | None:
+    """Which phase report's `vantage_evidence` (design.md D68) belongs in
+    the recorded result -- design.md D69's phase-precedence table, keyed
+    off the DERIVED outcome, never restated as an independent condition:
+
+    | Derived outcome    | Evidence taken from                          |
+    | ------------------- | --------------------------------------------- |
+    | `error`             | setup if setup failed, else teardown          |
+    | `failed`, `xfailed` | call                                          |
+    | `skipped`           | setup if setup skipped, else call             |
+    | `xpassed`, `passed` | none                                          |
+
+    `call` is `None` only when `setup.outcome` is not `"passed"`
+    (`derive_outcome`'s own precondition) -- exactly the cases this
+    function never needs `call` for (`error`/`skipped` with a skipped
+    setup), so the `pytest.TestReport | None` signature never needs a
+    runtime `None` check.
+    """
+    if outcome == "error":
+        return setup if setup.outcome == "failed" else teardown
+    if outcome in ("failed", "xfailed"):
+        return call
+    if outcome == "skipped":
+        return setup if setup.outcome == "skipped" else call
+    return None  # xpassed, passed -- design.md D69
+
+
 def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
     """Build one wire-shape `results[]` entry from an accumulated `_Pending`
     (design.md D16-D18). Returns `None` -- dropped, never invented -- when
@@ -224,7 +256,7 @@ def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
     durations = [d for d in (setup_duration, call_duration, teardown_duration) if d is not None]
     duration = sum(durations) if durations else None
 
-    return {
+    result: dict[str, object] = {
         "node_id": identity.node_id,
         "file_path": identity.file_path,
         "class_name": identity.class_name,
@@ -242,6 +274,17 @@ def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
         "teardown_duration": teardown_duration,
         "worker_id": _worker_id(setup),
     }
+
+    # design.md D69: the evidence `EvidenceCollector` attached to whichever
+    # phase report D69's precedence table selects, merged in -- absent
+    # entirely (never a dict of nulls) when that phase carries none, e.g. a
+    # session with `EvidenceCollector` never registered (the opt-out, D72).
+    evidence_report = _select_evidence_phase(setup, call, teardown, outcome)
+    evidence = getattr(evidence_report, "vantage_evidence", None)
+    if isinstance(evidence, dict):
+        result.update(evidence)
+
+    return result
 
 
 def assemble_results(pending: dict[str, _Pending]) -> list[dict[str, object]]:

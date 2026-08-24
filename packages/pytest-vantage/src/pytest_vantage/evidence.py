@@ -51,20 +51,75 @@ class EvidenceCollector:
             _warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
 
 
+def _failure_fields(
+    item: pytest.Item, excinfo: pytest.ExceptionInfo[BaseException]
+) -> dict[str, object]:
+    """The full D69 set. Every value is extracted in its OWN `try/except
+    Exception`, so a single hostile object (a `__repr__` that raises, an
+    unreadable source file) costs the one field it broke, never the rest
+    (design.md D69) -- `EvidenceCollector`'s outer latch is the net for
+    what escapes here, not the first one.
+
+    `traceback`/`failure_path`/`failure_lineno` are rendered together via
+    one call to `item._repr_failure_py(excinfo, style="long")` -- design.md's
+    own snippet, `item.repr_failure(excinfo, style="long")`, no longer
+    exists against the installed pytest (9.1.1): `Function.repr_failure`
+    dropped the `style` keyword and instead reads `config.getoption
+    ("tbstyle")` internally, which would silently reintroduce the exact
+    `--tb` dependence Q1 exists to remove. `_repr_failure_py` is what BOTH
+    `Node.repr_failure` (still accepts `style`) and `Function.repr_failure`
+    (the override actually used for a test item) delegate to, and `Function`
+    does not override it -- calling it directly is a private-underscore
+    METHOD on a public class, not an import of a private MODULE, so "no
+    private module is imported anywhere in this change" still holds.
+    """
+    fields: dict[str, object] = {}
+    try:
+        fields["failure_type"] = excinfo.typename
+    except Exception:  # deliberately broad -- one field lost, not the rest
+        fields["failure_type"] = None
+    try:
+        fields["failure_message"] = excinfo.exconly()
+    except Exception:  # deliberately broad, same reason
+        fields["failure_message"] = None
+    try:
+        fields["failure_repr"] = repr(excinfo.value)
+    except Exception:  # deliberately broad -- the hostile-__repr__ case (D69)
+        fields["failure_repr"] = None
+
+    try:
+        repr_obj: object = item._repr_failure_py(excinfo, style="long")  # noqa: SLF001
+    except Exception:  # deliberately broad, same reason
+        repr_obj = None
+    try:
+        fields["traceback"] = str(repr_obj) if repr_obj is not None else None
+    except Exception:  # deliberately broad, same reason
+        fields["traceback"] = None
+    try:
+        reprcrash = getattr(repr_obj, "reprcrash", None)
+        fields["failure_path"] = reprcrash.path if reprcrash is not None else None
+        fields["failure_lineno"] = reprcrash.lineno if reprcrash is not None else None
+    except Exception:  # deliberately broad, same reason
+        fields["failure_path"] = None
+        fields["failure_lineno"] = None
+    return fields
+
+
 def _extract(
     item: pytest.Item,
     call: pytest.CallInfo[None],
-    report: pytest.TestReport,
+    report: pytest.TestReport,  # noqa: ARG001 -- read in the next work unit (design.md D70)
     capture_disabled: bool,  # noqa: ARG001 -- wired in Phase 4 (design.md D71)
 ) -> dict[str, object]:
-    """The field-extraction entry point (design.md D69, D70).
-
-    Stubbed to an empty dict in this phase -- Phase 3 replaces this body
-    with the real branch table and field-by-field rendering. Registration
-    and the xdist wire are what this phase proves; rendering is proven
-    next.
+    """The field-extraction entry point (design.md D69). `report`'s
+    non-exception shapes -- a skip's tuple `longrepr`, `wasxfail` -- are
+    design.md D70, the next work unit; this one covers only "no exception at
+    all" and the ordinary failure case.
     """
-    return {}
+    excinfo = call.excinfo
+    if excinfo is None:
+        return {}
+    return _failure_fields(item, excinfo)
 
 
 __all__ = ["EvidenceCollector"]

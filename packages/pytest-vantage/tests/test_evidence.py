@@ -222,3 +222,214 @@ def test_evidencecollector_registers_on_the_controller_when_activated() -> None:
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
     assert any(isinstance(plugin, EvidenceCollector) for plugin in config.pluginmanager.registered)
+
+
+# --- Phase 3: rendering and field extraction (design.md D69, D70) -----------
+
+
+def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[str, object] | None]:
+    """Runs one `--vantage` session in-process and returns every
+    `report.vantage_evidence` dict `EvidenceCollector` attached, keyed by
+    ``f"{nodeid}::{when}"`` -- the same marker-file mechanism
+    `test_report_vantage_evidence_attribute_survives_the_xdist_wire` above
+    already uses, generalised to every phase report rather than one.
+
+    An unreachable `--vantage-server` is given deliberately: `EvidenceCollector`
+    registers and runs regardless of reachability (`plugin.py::pytest_configure`
+    registers it BEFORE the preflight, design.md D68), so no live server is
+    needed to observe what it extracted.
+    """
+    pytester.makeconftest(
+        """
+        import json
+
+        _captured = {}
+
+
+        def pytest_runtest_logreport(report):
+            _captured[f"{report.nodeid}::{report.when}"] = getattr(
+                report, "vantage_evidence", None
+            )
+
+
+        def pytest_sessionfinish(session):
+            with open("evidence_capture.json", "w") as fh:
+                json.dump(_captured, fh)
+        """
+    )
+    pytester.runpytest_inprocess("--vantage", "--vantage-server=http://127.0.0.1:9", *args)
+    captured: dict[str, dict[str, object] | None] = json.loads(
+        (pytester.path / "evidence_capture.json").read_text()
+    )
+    return captured
+
+
+def test_traceback_is_complete_under_tb_no(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Traceback capture invariant to display flags ->
+    The traceback is complete under `--tb=no` (design.md D69, Q1): the
+    stored traceback is rendered independently of the session's display
+    flag, so it still names every frame even when nothing was shown on the
+    terminal.
+    """
+    pytester.makepyfile(
+        test_tb_no="""
+        def level_three():
+            raise AssertionError("synthetic failure at the bottom of three frames")
+
+
+        def level_two():
+            level_three()
+
+
+        def test_three_frames():
+            level_two()
+        """
+    )
+
+    evidence = _capture_evidence(pytester, "--tb=no")
+
+    call_evidence = evidence["test_tb_no.py::test_three_frames::call"]
+    assert call_evidence is not None
+    traceback = call_evidence["traceback"]
+    assert isinstance(traceback, str)
+    assert "level_three" in traceback
+    assert "level_two" in traceback
+    assert "test_three_frames" in traceback
+
+
+def test_traceback_is_complete_under_tb_line(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Traceback capture invariant to display flags ->
+    The traceback is complete under `--tb=line` (design.md D69): identical
+    obligation to the `--tb=no` case above, under the other display flag
+    that also renders nothing close to a full traceback for the terminal.
+    """
+    pytester.makepyfile(
+        test_tb_line="""
+        def level_three():
+            raise AssertionError("synthetic failure at the bottom of three frames")
+
+
+        def level_two():
+            level_three()
+
+
+        def test_three_frames():
+            level_two()
+        """
+    )
+
+    evidence = _capture_evidence(pytester, "--tb=line")
+
+    call_evidence = evidence["test_tb_line.py::test_three_frames::call"]
+    assert call_evidence is not None
+    traceback = call_evidence["traceback"]
+    assert isinstance(traceback, str)
+    assert "level_three" in traceback
+    assert "level_two" in traceback
+    assert "test_three_frames" in traceback
+
+
+def test_failure_type_message_repr_come_from_excinfo(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Failure location, type and message (design.md
+    D69): `failure_type` is `excinfo.typename`, `failure_message` is
+    `excinfo.exconly()`, `failure_repr` is `repr(excinfo.value)` -- three
+    genuinely different granularities, none derived from another.
+    """
+    pytester.makepyfile(
+        test_fields="""
+        def test_it_fails():
+            raise ValueError("synthetic value error for field extraction")
+        """
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["test_fields.py::test_it_fails::call"]
+    assert call_evidence is not None
+    assert call_evidence["failure_type"] == "ValueError"
+    assert call_evidence["failure_message"] == (
+        "ValueError: synthetic value error for field extraction"
+    )
+    assert call_evidence["failure_repr"] == (
+        "ValueError('synthetic value error for field extraction')"
+    )
+
+
+def test_twenty_tests_failing_at_one_line_group_as_one(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Failure location, type and message -> Twenty
+    tests failing at one source line group as one (design.md D69): the
+    recorded `(failure_path, failure_lineno)` pair is the same for every
+    test that raises from the identical helper line.
+    """
+    lines = ["def _raise():", '    raise AssertionError("synthetic shared failure")', ""]
+    for index in range(20):
+        lines.append(f"def test_case_{index}():")
+        lines.append("    _raise()")
+    pytester.makepyfile(test_shared_line="\n".join(lines))
+
+    evidence = _capture_evidence(pytester)
+
+    locations = set()
+    for index in range(20):
+        call_evidence = evidence[f"test_shared_line.py::test_case_{index}::call"]
+        assert call_evidence is not None
+        locations.add((call_evidence["failure_path"], call_evidence["failure_lineno"]))
+    assert len(locations) == 1
+
+
+def test_recorded_location_is_the_raising_helper_not_the_test_function(
+    pytester: pytest.Pytester,
+) -> None:
+    """failure-evidence -> Failure location, type and message -> The
+    recorded location is the raising site (design.md D69): the helper's
+    raising line, never the test function's first line.
+    """
+    pytester.makepyfile(
+        test_helper_location="""
+        def helper():
+            raise AssertionError("synthetic failure inside the helper")
+
+
+        def test_calls_helper():
+            helper()
+        """
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["test_helper_location.py::test_calls_helper::call"]
+    assert call_evidence is not None
+    assert call_evidence["failure_lineno"] == 2  # the `raise` line inside `helper`, not test line 6
+    path = call_evidence["failure_path"]
+    assert isinstance(path, str)
+    assert path.endswith("test_helper_location.py")
+
+
+def test_a_repr_that_raises_costs_only_that_field(pytester: pytest.Pytester) -> None:
+    """failure-evidence -> Failure location, type and message (design.md
+    D69): an exception whose `__repr__` raises costs only `failure_repr`
+    -- type, message, and traceback (all built from `str`, never `repr`)
+    are still recorded.
+    """
+    pytester.makepyfile(
+        test_bad_repr="""
+        class _HostileError(Exception):
+            def __repr__(self):
+                raise RuntimeError("synthetic hostile __repr__")
+
+
+        def test_it_raises_a_hostile_exception():
+            raise _HostileError("synthetic message")
+        """
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["test_bad_repr.py::test_it_raises_a_hostile_exception::call"]
+    assert call_evidence is not None
+    assert call_evidence["failure_repr"] is None
+    assert call_evidence["failure_type"] == "_HostileError"
+    failure_message = call_evidence["failure_message"]
+    assert isinstance(failure_message, str)
+    assert "synthetic message" in failure_message
+    assert call_evidence["traceback"] is not None

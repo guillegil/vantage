@@ -15,6 +15,7 @@ import pytest
 from pytest_vantage import vcs
 from pytest_vantage.capture import (
     _Pending,
+    _select_evidence_phase,
     accumulate,
     assemble_results,
     build_result,
@@ -414,6 +415,56 @@ def test_build_result_worker_id(
 
 
 # --- Phase 7, task 7.7: exactly one HTTP request per session ----------------
+
+
+# --- Phase 3, task 3.12: evidence-phase selection matches D69's table ------
+
+# Which phase's report `_select_evidence_phase` must return for each of
+# `derive_outcome`'s nine D17 rows above, per design.md D69's precedence
+# table (error: setup-if-failed else teardown; failed/xfailed: call;
+# skipped: setup-if-skipped else call; xpassed/passed: none).
+_EXPECTED_EVIDENCE_PHASE = [
+    "setup",  # row 1: error, setup failed
+    "setup",  # row 2: skipped, setup skipped
+    "call",  # row 3: xfailed
+    "call",  # row 4: skipped, call skipped (bare skip after passed setup)
+    "call",  # row 5: xfailed
+    "call",  # row 6: failed
+    None,  # row 7: xpassed
+    "teardown",  # row 8: error, teardown failed after a passed call
+    None,  # row 9: passed
+]
+
+
+@pytest.mark.req(id="RQ-4")
+@pytest.mark.parametrize(
+    ("setup_outcome", "call_spec", "teardown_outcome", "expected_outcome", "expected_phase"),
+    [(*row, phase) for row, phase in zip(_D17_ROWS, _EXPECTED_EVIDENCE_PHASE, strict=True)],
+    ids=[f"row-{n}" for n in range(1, 10)],
+)
+def test_evidence_phase_selection_matches_the_derived_outcome_table(
+    setup_outcome: _ReportOutcome,
+    call_spec: tuple[_ReportOutcome, str | None] | None,
+    teardown_outcome: _ReportOutcome,
+    expected_outcome: str,
+    expected_phase: _Phase | None,
+) -> None:
+    """design.md D69's phase-precedence table, evaluated against every one
+    of `derive_outcome`'s nine D17 rows -- the selection is keyed off the
+    DERIVED outcome, never restated as its own condition."""
+    setup = _report("setup", setup_outcome)
+    call = _report("call", call_spec[0], wasxfail=call_spec[1]) if call_spec else None
+    teardown = _report("teardown", teardown_outcome)
+
+    outcome = derive_outcome(setup, call, teardown)
+    assert outcome == expected_outcome  # the table above is keyed off this value
+
+    selected = _select_evidence_phase(setup, call, teardown, outcome)
+
+    expected_report = {"setup": setup, "call": call, "teardown": teardown, None: None}[
+        expected_phase
+    ]
+    assert selected is expected_report
 
 
 def test_recorder_sends_the_assembled_results_in_the_one_session_post(
