@@ -15,6 +15,7 @@ the report, because nothing yet registers on the worker), before
 
 from __future__ import annotations
 
+import inspect
 import json
 from typing import Any
 
@@ -507,3 +508,38 @@ def test_a_repr_that_raises_costs_only_that_field(pytester: pytest.Pytester) -> 
     assert isinstance(failure_message, str)
     assert "synthetic message" in failure_message
     assert call_evidence["traceback"] is not None
+
+
+@pytest.mark.req(id="RQ-24")
+def test_the_private_rendering_method_this_change_depends_on_still_exists() -> None:
+    """`_failure_fields` renders the traceback through
+    `item._repr_failure_py(excinfo, style="long")`, a private-by-underscore
+    method, because the public `Function.repr_failure` dropped its `style`
+    keyword and now derives the style from `--tb` -- the exact dependence
+    decision Q1 exists to eliminate. `Node._repr_failure_py` is the shared
+    implementation both public overloads delegate to, and `Function` does
+    not override it.
+
+    Without this test a pytest release that renames or removes that method
+    degrades **silently**: the `AttributeError` lands in `_failure_fields`'
+    deliberately broad per-field `except`, `traceback`, `failure_path` and
+    `failure_lineno` all become `None`, the session still records, and the
+    database looks healthy while holding no failure evidence at all. That is
+    Q1's failure mode arriving through a different door, and a per-field
+    guard that swallows it is exactly why the dependency has to be asserted
+    somewhere that goes red instead.
+
+    Asserted against the public `pytest.Item`, never by importing
+    `_pytest.nodes`: RQ-24's constraint is that no private *module* is
+    imported, and this keeps that true.
+    """
+    method = getattr(pytest.Item, "_repr_failure_py", None)
+    assert method is not None, (
+        "pytest.Item._repr_failure_py is gone; evidence.py renders the traceback"
+        " through it and the loss would be silent -- see this test's docstring"
+    )
+    parameters = inspect.signature(method).parameters
+    assert "style" in parameters, (
+        "pytest.Item._repr_failure_py no longer accepts `style`; without it the"
+        " stored traceback follows the user's --tb flag, which decision Q1 forbids"
+    )
