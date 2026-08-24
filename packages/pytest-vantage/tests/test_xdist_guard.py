@@ -11,16 +11,20 @@ D68), and the change is deliberate, not a relaxation.** Before D68, nothing
 at all ran on a worker: `pytest_configure` returned before reading a single
 option. `EvidenceCollector` needs to run `pytest_runtest_makereport` on the
 worker -- that is the only process with `item`/`excinfo` -- so the worker
-branch now reads exactly two things: `getoption("vantage")` to decide
-whether to register at all, and, through `EvidenceCollector.__init__` itself,
-`getoption("capture")` once (design.md D71, the empty-vs-absent rule for
-captured output). **What survives unchanged is narrower and still
-absolute**: a worker never resolves a server address, never reads a
-timeout, never preflights a socket, never asks the server's capability
-endpoint anything, and never constructs a `Recorder`. `_WorkerConfigDouble`
-therefore answers exactly those option reads and raises for anything else --
-the strongest available proof that the worker path reads exactly those
-things and touches nothing past them.
+branch now reads exactly three things: `getoption("vantage")` to decide
+whether to register at all; `getoption("vantage_no_failure_text")` and
+`getini("vantage_no_failure_text")`, both branches gated through the same
+`resolve_failure_text_capture` the controller uses (design.md D72, task
+2.12 -- the opt-out is session-wide, not controller-only); and
+`EvidenceCollector.__init__` itself reads `getoption("capture")` once
+(design.md D71, the empty-vs-absent rule for captured output). **What
+survives unchanged is narrower and still absolute**: a worker never
+resolves a server address, never reads a timeout, never preflights a
+socket, never asks the server's capability endpoint anything, and never
+constructs a `Recorder`. `_WorkerConfigDouble` therefore answers exactly
+those option/ini reads and raises for anything else -- the strongest
+available proof that the worker path reads exactly those things and
+touches nothing past them.
 
 Pure unit test: a config double stands in for a real ``pytest.Config``, no
 subprocess or real xdist session needed.
@@ -52,18 +56,18 @@ class _RegisterCallDouble:
 class _WorkerConfigDouble:
     """A ``pytest.Config`` stand-in carrying xdist's ``workerinput`` marker.
 
-    ``getoption`` answers only the option names D68/D71 require a worker to
-    read -- `"vantage"` and `"capture"` -- and raises for anything else: if
+    ``getoption``/``getini`` answer only the option/ini names D68/D71/D72
+    require a worker to read -- `"vantage"`, `"vantage_no_failure_text"`
+    (both forms) and `"capture"` -- and raise for anything else: if
     ``pytest_configure`` or `EvidenceCollector` ever reach for a server
     address, a timeout, or anything else on a worker, this is where that
-    would be caught. ``getini`` raises unconditionally, since a worker reads
-    no ini value at all at this point. ``pluginmanager`` is a
-    ``_RegisterCallDouble``, so a worker that ever constructed a `Recorder`
-    (never permitted, D68) is caught there too.
+    would be caught. ``pluginmanager`` is a ``_RegisterCallDouble``, so a
+    worker that ever constructed a `Recorder` (never permitted, D68) is
+    caught there too.
     """
 
     workerinput: dict[str, Any] = {}
-    _ALLOWED_OPTIONS = frozenset({"vantage", "capture"})
+    _ALLOWED_OPTIONS = frozenset({"vantage", "capture", "vantage_no_failure_text"})
 
     def __init__(self) -> None:
         self.pluginmanager = _RegisterCallDouble()
@@ -73,15 +77,19 @@ class _WorkerConfigDouble:
             return True
         if name == "capture":
             return "fd"
+        if name == "vantage_no_failure_text":
+            return False
         raise AssertionError(
             f"pytest_configure must not read option {name!r} on an xdist worker "
-            f"(design.md D68/D71 -- only {sorted(self._ALLOWED_OPTIONS)!r} may be read there)"
+            f"(design.md D68/D71/D72 -- only {sorted(self._ALLOWED_OPTIONS)!r} may be read there)"
         )
 
     def getini(self, name: str) -> object:
+        if name == "vantage_no_failure_text":
+            return False
         raise AssertionError(
             f"pytest_configure must not read ini value {name!r} on an xdist worker "
-            "(design.md D68 -- no ini value may be read there)"
+            "(design.md D72 -- only 'vantage_no_failure_text' may be read there)"
         )
 
 

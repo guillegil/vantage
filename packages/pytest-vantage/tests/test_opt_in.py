@@ -83,6 +83,42 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
 
 
 @pytest.mark.req(id="RQ-2")
+def test_failure_text_opt_out_ini_alone_cannot_enable_capture(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """failure-evidence -> Capture opt-out under the opt-in rule -> A
+    committed configuration file cannot enable capture on its own.
+
+    RQ-2's own established differential (above), applied to the
+    failure-text opt-out ini value specifically: with no invocation flag on
+    either run -- neither `--vantage` nor `--vantage-no-failure-text` -- a
+    committed `vantage_no_failure_text = true` ini value changes nothing.
+    `Unknown config option` is asserted absent from the run that carries it,
+    which is currently a genuine RED: the ini value is not yet a registered
+    option (task 2.12 registers it), so pytest currently warns about it.
+    Once registered, the project tree -- excluding the ini file itself,
+    which is the one deliberate difference between the two runs -- must
+    still be byte-identical.
+    """
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+
+    with_ini_root = tmp_path_factory.mktemp("vantage-failtext-with-ini")
+    without_ini_root = tmp_path_factory.mktemp("vantage-failtext-without-ini")
+    (with_ini_root / "test_sample.py").write_text(_SAMPLE_TEST)
+    (without_ini_root / "test_sample.py").write_text(_SAMPLE_TEST)
+    (with_ini_root / "pytest.ini").write_text("[pytest]\nvantage_no_failure_text = true\n")
+
+    with_ini = _run_pytest(with_ini_root)
+    without_ini = _run_pytest(without_ini_root)
+
+    assert with_ini.returncode == 0, with_ini.stdout + with_ini.stderr
+    assert without_ini.returncode == 0, without_ini.stdout + without_ini.stderr
+    assert "Unknown config option" not in with_ini.stdout + with_ini.stderr
+    with_snapshot = {k: v for k, v in _tree_snapshot(with_ini_root).items() if k != "pytest.ini"}
+    assert with_snapshot == _tree_snapshot(without_ini_root)
+
+
+@pytest.mark.req(id="RQ-2")
 def test_no_connection_is_attempted_with_no_recording_option(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:

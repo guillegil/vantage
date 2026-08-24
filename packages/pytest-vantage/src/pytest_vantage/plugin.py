@@ -27,6 +27,7 @@ import pytest
 
 from pytest_vantage.boundary import _warn
 from pytest_vantage.config import (
+    resolve_failure_text_capture,
     resolve_liveness_timeout,
     resolve_report_timeout,
     resolve_server_address,
@@ -70,6 +71,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="SECONDS",
         help="Bound, in seconds, on the reporting request. Configures WHERE/HOW, never activates.",
     )
+    group.addoption(
+        "--vantage-no-failure-text",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable failure-text capture (traceback, failure fields, captured output) "
+            "for this session. Can only narrow an already-activated session -- never "
+            "activates recording on its own (design.md D72)."
+        ),
+    )
     parser.addini(
         "vantage_server",
         help="Same as --vantage-server. Configures WHERE; never activates recording (RQ-2).",
@@ -79,6 +90,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         "vantage_timeout",
         help="Same as --vantage-timeout. Configures WHERE/HOW; never activates recording (RQ-2).",
         default=None,
+    )
+    parser.addini(
+        "vantage_no_failure_text",
+        help=(
+            "Same as --vantage-no-failure-text. Can only narrow an already-activated "
+            "session; never activates recording or disables it on its own (design.md D72)."
+        ),
+        type="bool",
+        default=False,
     )
 
 
@@ -121,6 +141,27 @@ def _activation_requested(config: pytest.Config) -> bool:
     never silently enable recording for everyone who checks the project out.
     """
     return bool(config.getoption("vantage"))
+
+
+def _failure_text_capture_requested(config: pytest.Config) -> bool:
+    """Whether `EvidenceCollector` should be registered for this session
+    (design.md D72). Composes `_activation_requested` with both opt-out
+    surfaces through `resolve_failure_text_capture` -- the single monotone
+    conjunction that can only narrow an activated session, never enable one.
+    Called identically on both the worker and controller branches of
+    `pytest_configure`: the opt-out is session-wide, not controller-only.
+
+    Short-circuits before reading either opt-out surface when the session
+    was never activated at all (RQ-2): an unactivated worker or controller
+    reads `"vantage"` alone, exactly as it did before this decision existed.
+    """
+    if not _activation_requested(config):
+        return False
+    return resolve_failure_text_capture(
+        activated=True,
+        cli_opt_out=bool(config.getoption("vantage_no_failure_text")),
+        ini_opt_out=bool(config.getini("vantage_no_failure_text")),
+    )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -173,12 +214,13 @@ def pytest_configure(config: pytest.Config) -> None:
     preflight.
     """
     if hasattr(config, "workerinput"):
-        if _activation_requested(config):
+        if _failure_text_capture_requested(config):
             config.pluginmanager.register(EvidenceCollector(config))
         return
     if not _activation_requested(config):
         return
-    config.pluginmanager.register(EvidenceCollector(config))
+    if _failure_text_capture_requested(config):
+        config.pluginmanager.register(EvidenceCollector(config))
     address = resolve_server_address(
         cli_url=config.getoption("vantage_server"),
         env_url=os.environ.get("VANTAGE_SERVER"),

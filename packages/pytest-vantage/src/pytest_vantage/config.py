@@ -83,6 +83,19 @@ def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | None
     return _DEFAULT_REPORT_TIMEOUT
 
 
+def resolve_failure_text_capture(*, activated: bool, cli_opt_out: bool, ini_opt_out: bool) -> bool:
+    """Whether `EvidenceCollector` should be registered for this session
+    (design.md D72). A single monotone conjunction, never a case list:
+    `resolve(...) <= activated` for every one of the eight input
+    combinations -- no source can turn a `False` into a `True`. Both
+    `cli_opt_out` and `ini_opt_out` can only narrow an already-activated
+    session; neither, nor any combination, can activate one on its own. No
+    environment variable is defined for the opt-out (design.md D72) -- this
+    signature carries no parameter for one.
+    """
+    return activated and not cli_opt_out and not ini_opt_out
+
+
 def resolve_liveness_timeout(report_timeout: float) -> float:
     """The bound on a liveness request (start-write, heartbeat): `min(2.0,
     report_timeout)` (design.md D31).
@@ -100,6 +113,7 @@ def resolve_liveness_timeout(report_timeout: float) -> float:
 __all__ = [
     "VantageConfigError",
     "resolve_and_validate_address",
+    "resolve_failure_text_capture",
     "resolve_liveness_timeout",
     "resolve_report_timeout",
     "resolve_server_address",

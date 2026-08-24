@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from pytest_vantage.plugin import pytest_configure
+from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 
 class _RegisterCallDouble:
@@ -127,6 +128,87 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
     marker = json.loads(marker_path.read_text())
     assert marker["has_attr"] is True
     assert isinstance(marker["evidence"], dict)
+
+
+def test_opt_out_flag_means_evidencecollector_is_never_registered(
+    pytester: pytest.Pytester,
+) -> None:
+    """failure-evidence -> Capture opt-out under the opt-in rule -> The
+    opt-out suppresses failure-text capture (design.md D72): with
+    `--vantage-no-failure-text` given alongside `--vantage`, no
+    `EvidenceCollector` is registered anywhere -- an opted-out session pays
+    zero of the second-rendering cost, because the hookwrapper does not
+    exist, not because a flag is checked per test.
+
+    Currently a genuine RED: `--vantage-no-failure-text` is not yet a
+    registered CLI option (task 2.12 registers it), so this subprocess
+    invocation fails argument parsing before `pytest_configure` ever runs
+    and `registered.json` is never written.
+    """
+    pytester.makeconftest(
+        """
+        import json
+
+
+        def pytest_sessionstart(session):
+            from pytest_vantage.evidence import EvidenceCollector
+
+            registered = [
+                type(plugin).__name__
+                for plugin in session.config.pluginmanager.get_plugins()
+                if isinstance(plugin, EvidenceCollector)
+            ]
+            with open("registered.json", "w") as fh:
+                json.dump(registered, fh)
+        """
+    )
+    pytester.makepyfile(
+        test_sample="""
+        def test_it_fails():
+            raise AssertionError("synthetic failure for the opt-out test")
+        """
+    )
+
+    pytester.runpytest_subprocess("--vantage", "--vantage-no-failure-text")
+
+    registered = json.loads((pytester.path / "registered.json").read_text())
+    assert registered == []
+
+
+def test_opt_out_does_not_suppress_outcome_timings_or_identity(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """failure-evidence -> Capture opt-out under the opt-in rule -> The
+    opt-out does not suppress the rest of the result (design.md D72):
+    `Recorder` never consulted `EvidenceCollector` for outcome, timings or
+    identity, so a session invoked with `--vantage-no-failure-text` still
+    records those in full against a real, live server.
+
+    Currently a genuine RED: `--vantage-no-failure-text` is not yet a
+    registered CLI option (task 2.12 registers it), so this subprocess
+    invocation fails argument parsing before anything is recorded and
+    `vantage_server.results()` stays empty.
+    """
+    pytester.makepyfile(
+        test_sample="""
+        def test_it_fails():
+            raise AssertionError("synthetic failure for the opt-out test")
+        """
+    )
+
+    pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-no-failure-text"
+    )
+
+    results = vantage_server.results()
+    assert len(results) == 1
+    (result,) = results
+    assert result.outcome == "failed"
+    assert result.identity.function_name == "test_it_fails"
+    assert result.duration is not None
+    assert result.started_at is not None
+    assert result.finished_at is not None
 
 
 def test_evidencecollector_registers_on_the_controller_when_activated() -> None:
