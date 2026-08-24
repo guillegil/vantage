@@ -98,14 +98,14 @@ Modifies `packages/vantage/src/vantage/core/domain/result.py`,
 `packages/vantage/tests/test_result.py`, `test_projection.py`. Stdlib only
 (RQ-26) — the existing architecture test still applies.
 
-- [ ] 1.1 RED `test_projection.py::test_project_failure_bounds_message_to_200_chars_and_flags` — a `FailureEvidence` with a 300-char `failure_message`, `failure_message_truncated=False`; `project_failure` returns a `FailureProjection` bounded to `LIST_FAILURE_MESSAGE_CHARS` with the flag set. *(D76)*
-- [ ] 1.2 RED `..._test_project_failure_flag_survives_a_short_capture_truncated_message` — a short message with `failure_message_truncated=True` on the input; assert the projection flag stays `True` — the disjunction at the domain layer. *(history-read-api → Lean list projections → truncation flag never surfaces independently)*
-- [ ] 1.3 RED `..._test_failure_projection_excludes_the_heavy_fields_structurally` — `{f.name for f in dataclasses.fields(FailureProjection)}` has no `traceback`, `failure_repr` or any captured-output field. *(D76)*
-- [ ] 1.4 RED `..._test_project_failure_of_none_is_none` — `project_failure(None) is None`.
-- [ ] 1.5 GREEN `projection.py`: `LIST_FAILURE_MESSAGE_CHARS = 200`; `FailureProjection` (frozen, slots); `project_failure`.
-- [ ] 1.6 RED `test_result.py::test_result_gains_failure_and_captured_fields` — `dataclasses.fields(Result)` includes `failure: FailureEvidence | None` and `captured: CapturedOutput`; `FailureEvidence` carries its 13 named fields, `CapturedOutput` its 4. *(D77)*
-- [ ] 1.7 GREEN `result.py`: `FailureEvidence`, `CapturedOutput` dataclasses; `Result` gains `failure`/`captured`.
-- [ ] 1.8 Gate: `uv run pytest packages/vantage/tests/test_projection.py packages/vantage/tests/test_result.py packages/vantage/tests/test_architecture.py`; `uv run mypy .` clean; confirm both files import only `dataclasses`/`__future__`.
+- [x] 1.1 RED `test_projection.py::test_project_failure_bounds_message_to_200_chars_and_flags` — a `FailureEvidence` with a 300-char `failure_message`, `failure_message_truncated=False`; `project_failure` returns a `FailureProjection` bounded to `LIST_FAILURE_MESSAGE_CHARS` with the flag set. *(D76)*
+- [x] 1.2 RED `..._test_project_failure_flag_survives_a_short_capture_truncated_message` — a short message with `failure_message_truncated=True` on the input; assert the projection flag stays `True` — the disjunction at the domain layer. *(history-read-api → Lean list projections → truncation flag never surfaces independently)*
+- [x] 1.3 RED `..._test_failure_projection_excludes_the_heavy_fields_structurally` — `{f.name for f in dataclasses.fields(FailureProjection)}` has no `traceback`, `failure_repr` or any captured-output field. *(D76)*
+- [x] 1.4 RED `..._test_project_failure_of_none_is_none` — `project_failure(None) is None`.
+- [x] 1.5 GREEN `projection.py`: `LIST_FAILURE_MESSAGE_CHARS = 200`; `FailureProjection` (frozen, slots); `project_failure`.
+- [x] 1.6 RED `test_result.py::test_result_gains_failure_and_captured_fields` — `dataclasses.fields(Result)` includes `failure: FailureEvidence | None` and `captured: CapturedOutput`; `FailureEvidence` carries its 13 named fields, `CapturedOutput` its 4. *(D77)*
+- [x] 1.7 GREEN `result.py`: `FailureEvidence`, `CapturedOutput` dataclasses; `Result` gains `failure`/`captured`.
+- [x] 1.8 Gate: `uv run pytest packages/vantage/tests/test_projection.py packages/vantage/tests/test_result.py packages/vantage/tests/test_architecture.py`; `uv run mypy .` clean; confirm both files import only `dataclasses`/`__future__`.
 
 ## Phase 2: `EvidenceCollector` registration and the opt-out (PR2)
 

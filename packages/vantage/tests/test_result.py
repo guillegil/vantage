@@ -9,11 +9,19 @@ them wrong at the dataclass hop gets them wrong everywhere downstream.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 
 import pytest
-from vantage.core.domain.result import OUTCOMES, CaseIdentity, CatalogueEntry, Result
+from vantage.core.domain.result import (
+    OUTCOMES,
+    CapturedOutput,
+    CaseIdentity,
+    CatalogueEntry,
+    FailureEvidence,
+    Result,
+)
 
 _IDENTITY = CaseIdentity(
     node_id="packages/vantage/tests/test_result.py::test_example",
@@ -147,6 +155,61 @@ def test_result_is_frozen() -> None:
 
     with pytest.raises(FrozenInstanceError):
         result.outcome = "failed"  # type: ignore[misc]
+
+
+# --- 1.6: Result gains failure and captured fields (design.md D77) ---------
+
+
+def test_result_gains_failure_and_captured_fields() -> None:
+    """design.md D77: `Result` carries `failure: FailureEvidence | None` and
+    `captured: CapturedOutput`; `FailureEvidence` carries its 13 named
+    fields, `CapturedOutput` its 4."""
+    result_field_names = {f.name for f in dataclasses.fields(Result)}
+    assert "failure" in result_field_names
+    assert "captured" in result_field_names
+
+    failure_field_names = {f.name for f in dataclasses.fields(FailureEvidence)}
+    assert failure_field_names == {
+        "failure_type",
+        "failure_message",
+        "failure_message_truncated",
+        "failure_path",
+        "failure_lineno",
+        "failure_repr",
+        "failure_repr_truncated",
+        "traceback",
+        "traceback_truncated",
+        "skip_reason",
+        "skip_reason_truncated",
+        "xfail_reason",
+        "xfail_reason_truncated",
+    }
+
+    captured_field_names = {f.name for f in dataclasses.fields(CapturedOutput)}
+    assert captured_field_names == {"stdout", "stdout_truncated", "stderr", "stderr_truncated"}
+
+    failure = FailureEvidence(
+        failure_type="AssertionError",
+        failure_message="AssertionError: assert 1200 == 1320",
+        failure_message_truncated=False,
+        failure_path="tests/helpers/pricing.py",
+        failure_lineno=47,
+        failure_repr="AssertionError('assert 1200 == 1320')",
+        failure_repr_truncated=False,
+        traceback="tests/test_orders.py:19: in test_total_includes_tax\n    ...",
+        traceback_truncated=False,
+        skip_reason=None,
+        skip_reason_truncated=False,
+        xfail_reason=None,
+        xfail_reason_truncated=False,
+    )
+    captured = CapturedOutput(
+        stdout="", stdout_truncated=False, stderr=None, stderr_truncated=False
+    )
+    result = _result(failure=failure, captured=captured)
+
+    assert result.failure is failure
+    assert result.captured is captured
 
 
 def test_catalogue_entry_holds_identity_and_the_two_timestamps() -> None:
