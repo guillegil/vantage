@@ -135,19 +135,26 @@ Creates `packages/pytest-vantage/src/pytest_vantage/evidence.py`,
 Modifies `evidence.py`, `capture.py`. Extends `test_evidence.py`,
 `test_capture.py`.
 
-- [ ] 3.1 RED `test_evidence.py::test_traceback_is_complete_under_tb_no` — a 3-frame failure run with `--tb=no`; stored traceback names all 3 frames. *(Traceback capture invariant to display flags → --tb=no)*
-- [ ] 3.2 RED `..._test_traceback_is_complete_under_tb_line` — same, `--tb=line`.
-- [ ] 3.3 RED `..._test_failure_type_message_repr_come_from_excinfo` — `failure_type == excinfo.typename`, `failure_message == excinfo.exconly()`, `failure_repr == repr(excinfo.value)`.
-- [ ] 3.4 RED `..._test_twenty_tests_failing_at_one_line_group_as_one` — twenty tests raising from the identical helper line share one `(failure_path, failure_lineno)`.
-- [ ] 3.5 RED `..._test_recorded_location_is_the_raising_helper_not_the_test_function` — the helper's raising line, not the test's first line.
-- [ ] 3.6 RED `..._test_skipped_test_records_skip_reason_not_failure_fields` — `skip_reason` recorded verbatim (pytest's own prefix included); failure fields absent; recording does not raise. *(A skipped test does not crash the recorder)*
-- [ ] 3.7 RED `..._test_bare_xfail_records_empty_reason_not_none` — `@pytest.mark.xfail` with no `reason=`; `xfail_reason == ""`, never absent — `hasattr`, never truthiness. *(D70)*
-- [ ] 3.8 RED `..._test_xfail_precedes_skip_when_both_shapes_are_present` — `xfail_reason` set, `skip_reason` not — row 2 before row 3.
-- [ ] 3.9 RED `..._test_a_repr_that_raises_costs_only_that_field` — an exception whose `__repr__` raises; `failure_repr is None` while type/message/traceback are still recorded.
-- [ ] 3.10 GREEN `evidence.py`: the real `_extract(item, call, report, capture_disabled)` — the D70 branch table (`excinfo is None` → nothing; `hasattr(report,"wasxfail")` → `xfail_reason`; `report.outcome=="skipped"` → `skip_reason` from `longrepr[2]` behind the tuple/len-3 guard, `str(excinfo.value)` fallback; otherwise the full D69 set), each field in its own `try/except Exception → None`.
-- [ ] 3.11 GREEN `capture.py`: `_select_evidence_phase(setup, call, teardown, outcome)` implementing D69's phase-precedence table (error: setup-if-failed else teardown; failed/xfailed: call; skipped: setup-if-skipped else call; xpassed/passed: none).
-- [ ] 3.12 RED `test_capture.py::test_evidence_phase_selection_matches_the_derived_outcome_table` — parametrised over `derive_outcome`'s nine rows.
-- [ ] 3.13 Gate: `uv run pytest packages/pytest-vantage/tests/test_evidence.py packages/pytest-vantage/tests/test_capture.py`; `uv run mypy .` clean.
+**Split at apply time** (measured combined diff was 485 changed lines against
+the ~390 estimate and the 400 budget): `ft/failure-capture-03a-rendering` off
+PR2 carries 3.1–3.5, 3.9–3.12 (378 changed lines); `ft/failure-capture-03b-non-exception-shapes`
+off 03a carries 3.6–3.8 and the gate, 3.13 (119 changed lines) — the exact
+fallback seam this phase's own forecast named (D69 extraction vs D70 branch
+table).
+
+- [x] 3.1 RED `test_evidence.py::test_traceback_is_complete_under_tb_no` — a 3-frame failure run with `--tb=no`; stored traceback names all 3 frames. *(Traceback capture invariant to display flags → --tb=no)* — 03a
+- [x] 3.2 RED `..._test_traceback_is_complete_under_tb_line` — same, `--tb=line`. — 03a
+- [x] 3.3 RED `..._test_failure_type_message_repr_come_from_excinfo` — `failure_type == excinfo.typename`, `failure_message == excinfo.exconly()`, `failure_repr == repr(excinfo.value)`. — 03a
+- [x] 3.4 RED `..._test_twenty_tests_failing_at_one_line_group_as_one` — twenty tests raising from the identical helper line share one `(failure_path, failure_lineno)`. — 03a
+- [x] 3.5 RED `..._test_recorded_location_is_the_raising_helper_not_the_test_function` — the helper's raising line, not the test's first line. — 03a
+- [x] 3.6 RED `..._test_skipped_test_records_skip_reason_not_failure_fields` — `skip_reason` recorded verbatim (pytest's own prefix included); failure fields absent; recording does not raise. *(A skipped test does not crash the recorder)* — 03b
+- [x] 3.7 RED `..._test_bare_xfail_records_empty_reason_not_none` — `@pytest.mark.xfail` with no `reason=`; `xfail_reason == ""`, never absent — `hasattr`, never truthiness. *(D70)* — 03b
+- [x] 3.8 RED `..._test_xfail_precedes_skip_when_both_shapes_are_present` — `xfail_reason` set, `skip_reason` not — row 2 before row 3. — 03b
+- [x] 3.9 RED `..._test_a_repr_that_raises_costs_only_that_field` — an exception whose `__repr__` raises; `failure_repr is None` while type/message/traceback are still recorded. — 03a
+- [x] 3.10 GREEN `evidence.py`: the real `_extract(item, call, report, capture_disabled)` — the D70 branch table (`excinfo is None` → nothing; `hasattr(report,"wasxfail")` → `xfail_reason`; `report.outcome=="skipped"` → `skip_reason` from `longrepr[2]` behind the tuple/len-3 guard, `str(excinfo.value)` fallback; otherwise the full D69 set), each field in its own `try/except Exception → None`. — split: the `excinfo is None`/full-D69 rows landed in 03a, the `wasxfail`/`skipped` rows in 03b, on the same function
+- [x] 3.11 GREEN `capture.py`: `_select_evidence_phase(setup, call, teardown, outcome)` implementing D69's phase-precedence table (error: setup-if-failed else teardown; failed/xfailed: call; skipped: setup-if-skipped else call; xpassed/passed: none). — 03a
+- [x] 3.12 RED `test_capture.py::test_evidence_phase_selection_matches_the_derived_outcome_table` — parametrised over `derive_outcome`'s nine rows. — 03a
+- [x] 3.13 Gate: `uv run pytest packages/pytest-vantage/tests/test_evidence.py packages/pytest-vantage/tests/test_capture.py`; `uv run mypy .` clean. — 03b, plus the full workspace suite (478 passed) and `mypy .` clean (78 files)
 
 ## Phase 4: Captured output (PR4)
 
