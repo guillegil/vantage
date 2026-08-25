@@ -16,13 +16,15 @@ Follows ``scripts/measure_vcs_overhead.py``'s own harness shape --
 with three changes design.md D79 specifies:
 
 - **Baseline (A) is current `main` with recording ON**: recording and VCS
-  capture on, failure-text capture opted out via `--vantage-no-failure-text`.
-  Not recording-off -- `version-control-context`'s own table already spent
-  part of RQ-25's budget on the git read, and measuring against
-  recording-off would re-measure that cost and hide this change's own.
-- **Treatment (B) is the identical session with failure capture on** (no
-  opt-out) -- the only difference between A and B is this change's second
-  rendering, budget spend and captured-output plumbing.
+  capture on, failure-text capture absent -- the default, no invocation flag
+  given (design.md D72, revised after this very measurement to flip the
+  polarity from opt-out to opt-in). Not recording-off --
+  `version-control-context`'s own table already spent part of RQ-25's budget
+  on the git read, and measuring against recording-off would re-measure that
+  cost and hide this change's own.
+- **Treatment (B) is the identical session with failure capture opted in**
+  via `--vantage-failure-text` -- the only difference between A and B is
+  this change's second rendering, budget spend and captured-output plumbing.
 - **Two new axes, crossed**: failure density (1%, 10%, 100% of 1,000 tests
   at ~10 ms) and the display flag (`--tb=auto`, `--tb=no`) -- six cells.
   `--tb=no` is measured separately because D79 forecasts it as the more
@@ -162,7 +164,7 @@ def _run_pytest_session(
     *,
     vantage_address: str | None,
     tb_flag: str,
-    no_failure_text: bool,
+    failure_text: bool,
 ) -> float:
     argv = [
         sys.executable,
@@ -177,8 +179,8 @@ def _run_pytest_session(
     ]
     if vantage_address:
         argv += ["--vantage", "--vantage-server", vantage_address]
-        if no_failure_text:
-            argv.append("--vantage-no-failure-text")
+        if failure_text:
+            argv.append("--vantage-failure-text")
     else:
         argv += ["-p", "no:vantage"]
     start = time.perf_counter()
@@ -203,17 +205,15 @@ def _measure_cell(
     server: _LiveServer, fail_fraction: float, tb_flag: str
 ) -> tuple[float, float, float, int]:
     """One (density, --tb) cell: `_PAIRS` interleaved A/B pairs (A =
-    failure capture opted out, B = failure capture on), plus `_OFF_REPEATS`
-    recording-off context samples. Returns
+    failure capture absent, the default; B = failure capture opted in),
+    plus `_OFF_REPEATS` recording-off context samples. Returns
     `(off_median, a_median, b_median, fail_count)`."""
     test_dir = REPO_ROOT / "_vantage_bench_suite"
     fail_count = round(_TEST_COUNT * fail_fraction)
     _write_synthetic_suite(test_dir, _TEST_COUNT, _PER_TEST_SLEEP, fail_fraction)
     try:
         off_samples = [
-            _run_pytest_session(
-                test_dir, vantage_address=None, tb_flag=tb_flag, no_failure_text=False
-            )
+            _run_pytest_session(test_dir, vantage_address=None, tb_flag=tb_flag, failure_text=False)
             for _ in range(_OFF_REPEATS)
         ]
         a_samples: list[float] = []
@@ -221,12 +221,12 @@ def _measure_cell(
         for _ in range(_PAIRS):
             a_samples.append(
                 _run_pytest_session(
-                    test_dir, vantage_address=server.address, tb_flag=tb_flag, no_failure_text=True
+                    test_dir, vantage_address=server.address, tb_flag=tb_flag, failure_text=False
                 )
             )
             b_samples.append(
                 _run_pytest_session(
-                    test_dir, vantage_address=server.address, tb_flag=tb_flag, no_failure_text=False
+                    test_dir, vantage_address=server.address, tb_flag=tb_flag, failure_text=True
                 )
             )
     finally:
@@ -246,13 +246,13 @@ def main() -> None:
     print(f"pre-measurement forecast: {_FORECAST}")
     print()
     print(
-        f"== {_PAIRS} interleaved A/B pairs per cell (A=opted-out, B=failure-capture on), "
+        f"== {_PAIRS} interleaved A/B pairs per cell (A=default/absent, B=opted-in), "
         f"{_OFF_REPEATS} recording-off context samples per cell =="
     )
     print()
 
     header = (
-        f"{'density':>8} {'--tb':>6} {'OFF':>9} {'A (opt-out)':>13} {'B (on)':>9} "
+        f"{'density':>8} {'--tb':>6} {'OFF':>9} {'A (default)':>13} {'B (opt-in)':>10} "
         f"{'A->B delta':>11} {'% of A':>8} {'per-failure':>12} {'fails':>6}"
     )
     print(header)

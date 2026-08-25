@@ -80,11 +80,16 @@ are not separable.**
    may contain credentials. Redaction is deferred, not refused forever; until it
    arrives, the honest position is written down where a user reads it.
 
-4. **Refusable.** A session-level opt-out disables failure-text capture, by
-   invocation flag. Consistent with RQ-2, a committed configuration file may
-   **narrow** what an already-activated session records and may never **enable**
-   capture or clear the opt-out — there is no configuration syntax that turns
-   this on.
+4. **Opt-in, absent by default.** *Revised 2026-08-25, after RQ-25's own
+   overhead measurement found failure-text capture breaches its 2% budget at
+   every failure density tested, not only a pathological all-failing session
+   — see `failure-evidence`'s Measurements paragraph and `design.md` D72.*
+   A session-level opt-in enables failure-text capture, by invocation flag
+   (`--vantage-failure-text`); capture is absent unless a session asks for
+   it. Consistent with RQ-2, a committed configuration file may **widen**
+   what an already-activated session records and may never be the means by
+   which capture, or recording itself, is enabled — there is no
+   configuration syntax that activates recording on its own.
 
 This authorises storing text the *test process* produced. It does not authorise
 storing the host environment, the values on the recorded command line, log
@@ -107,16 +112,25 @@ four conditions rather than a pre-granted answer.
   recording every failing run accumulates up to ~320 KiB per failed test,
   indefinitely. Retention, pruning and vacuum are named as a separate future
   change; no policy is invented in this one.
-- Recording now costs a second rendering per failed test, charged against
-  RQ-25's overhead budget. `version-control-context` has already spent part of
-  that budget, so the number is measured against current figures across a
-  failure-density axis, and recorded whether or not the 2% holds.
-- **The opt-out is a lever people will pull for the wrong reason and never push
-  back**, which is precisely the argument ADR-0014 used to refuse a flag for VCS
-  capture. The difference is what refusal costs: there, a project silently loses
-  its commit history to save 6 ms. Here, the alternative to a lever is that
-  someone who cannot accept unredacted storage must stop using the plugin
-  entirely, which makes the disclosure an announcement rather than a choice.
+- Opting in costs a second rendering per failed test, charged against RQ-25's
+  overhead budget. `version-control-context` has already spent part of that
+  budget, so the number was measured against current figures across a
+  failure-density axis. **The measurement found a breach at every density
+  tested, not only the pathological one** — ten failing tests out of a
+  thousand already cost 3.45% of a recording-off baseline. Condition 4's
+  polarity flip from opt-out to opt-in is the direct consequence: the
+  default session pays none of this cost, and only a session that
+  deliberately opts in accepts it.
+- **The opt-in makes the disclosure a condition of use, not a footnote.**
+  Capture is absent unless a session's invocation asks for it, so the
+  alternative to a lever someone has to remember to pull is a lever someone
+  has to deliberately pull to get the cost and the disclosure at all — the
+  same argument ADR-0014 used to refuse a flag for VCS capture, reaching the
+  opposite conclusion because what is being refused differs. There, a
+  project could silently lose its commit history to save 6 ms by pulling a
+  lever. Here, someone who cannot accept unredacted storage pays nothing by
+  doing nothing, and someone who wants the evidence reads the disclosure at
+  the exact moment they ask for it.
 - **`schema.sql` is byte-unchanged and no existing database is refused.** This is
   the payoff RQ-29 and ADR-5 were written to buy, collected for the first time,
   and this change owes a test that proves it rather than a paragraph that
@@ -167,15 +181,22 @@ default. The failure mode is silent, and it is the worst kind — the database
 looks healthy and is empty of evidence. Condition 1 exists to make the record
 independent of how the run happened to be displayed.
 
-**Capture unconditionally, with no opt-out** — the answer ADR-0014 reached for
-version-control capture, and consistency argues for repeating it. Rejected
-because the two flags refuse different things. There, the flag would let someone
-trade a project's commit history for 6 ms on a day they were in a hurry, and the
-loss would be discovered months later by someone who did not set it. Here, the
-flag is the only alternative to storing values a person may be contractually or
-legally unable to store, and its cost when set is that failures stop carrying
-their evidence — visible immediately, to the person who set it, in the first
-failure they open.
+**Capture unconditionally, with no flag at all** — the answer ADR-0014 reached
+for version-control capture, and consistency argues for repeating it. Rejected
+because the two flags refuse different things, and because RQ-25's own
+measurement (added 2026-08-25, after this alternative was first written)
+independently rejects unconditional capture on cost alone: it breaches the
+2% overhead budget at every failure density tested, not only a pathological
+one, so it could not ship unconditionally even before the privacy argument
+below is considered. On privacy: there, ADR-0014's flag would let someone
+trade a project's commit history for 6 ms on a day they were in a hurry, and
+the loss would be discovered months later by someone who did not set it.
+Here, the flag is the only alternative to storing values a person may be
+contractually or legally unable to store, and its cost when set is that
+failures carry their evidence — visible immediately, to the person who set
+it, in the first failure they open. Condition 4 answers *which polarity* the
+flag takes (opt-in, absent by default) separately from *whether* one exists
+at all, which is what this alternative rejects.
 
 Bound to: ADR-5 (schema created complete at first use), ADR-8 (the web interface
 owns output encoding), ADR-9 (record over HTTP and let the server own every

@@ -80,7 +80,7 @@ sequenced for reviewability only.
 | Unit | Goal | PR (base) | Est. lines | Focused test command | Runtime harness | Rollback boundary |
 |---|---|---|---|---|---|---|
 | 1 | Domain types: `FailureEvidence`, `CapturedOutput`, `FailureProjection`, `project_failure` (D76, D77) | PR1 (tracker) | ~300 | `uv run pytest packages/vantage/tests/test_projection.py packages/vantage/tests/test_result.py` | N/A — nothing calls these types yet | Delete the new dataclasses/functions and their tests; nothing references them |
-| 2 | `EvidenceCollector` on controller+workers; the opt-out and its monotonicity (D68, D72) | PR2 (PR1) | ~340 | `uv run pytest packages/pytest-vantage/tests/test_xdist_guard.py packages/pytest-vantage/tests/test_evidence.py packages/pytest-vantage/tests/test_config.py` | `pytester.runpytest_subprocess(..., "-n", "2")` — the xdist proof for D68 | Revert `evidence.py`, the `plugin.py` worker branch and the two option registrations; `Recorder` unaffected |
+| 2 | `EvidenceCollector` on controller+workers; the opt-in and its monotonicity (D68, D72) | PR2 (PR1) | ~340 | `uv run pytest packages/pytest-vantage/tests/test_xdist_guard.py packages/pytest-vantage/tests/test_evidence.py packages/pytest-vantage/tests/test_config.py` | `pytester.runpytest_subprocess(..., "-n", "2")` — the xdist proof for D68 | Revert `evidence.py`, the `plugin.py` worker branch and the two option registrations; `Recorder` unaffected |
 | 3 | Rendering + D70 branch table + phase selection (D69, D70) | PR3 (PR2) | ~390 | `uv run pytest packages/pytest-vantage/tests/test_evidence.py packages/pytest-vantage/tests/test_capture.py` | `pytester`, parametrised over `--tb=no`/`--tb=line` | Revert `_extract`'s real body back to the PR2 stub; registration (PR2) stays working |
 | 4 | Captured output, empty≠absent, phase concatenation (D71) | PR4 (PR3) | ~290 | `uv run pytest packages/pytest-vantage/tests/test_evidence.py packages/pytest-vantage/tests/test_capture.py` | `pytester`, `-s` vs default capture | Revert the capture-read lines; failure fields (PR3) keep working |
 | 5 | Budget: constants, pinning test, one-pass spend, drop semantics (D73, D74) | PR5 (PR4) | ~370 | `uv run pytest packages/pytest-vantage/tests/test_report_budget.py` | `pytester` + `vantage_test_server` — a many-large-failures session, asserting body stays under the cap | Revert the `spend_failure_text_budget` call in `recorder.py`; fields ship untruncated by budget again |
@@ -314,6 +314,37 @@ land comfortably under budget on their own.
 - [x] 9.8 Write `README.md`: the disclosure sentence and `--vantage-no-failure-text` documentation, beside `--vantage`/`--vantage-server`. — added a new Usage section, since neither `--vantage` nor `--vantage-server` had prior README documentation to sit beside.
 - [x] 9.9 Inspection (recorded in the PR description, not an assertion): confirm the merged `failure-evidence` spec and `README.md` both state the disclosure plainly. *(Unredacted storage is disclosed → The disclosure is present in the capability spec and the README)* — confirmed; see the PR description for the inspection finding.
 - [x] 9.10 Full gate: `uv run pytest`, `uv run mypy .`, `uv run deptry .`, `uv run ruff format . && uv run ruff check --fix .`; confirm `git diff` shows zero `schema.sql` changes across the whole change; state which CI-matrix legs, the networking-disabled job, and the clean-environment install check ran locally versus are left to CI. — 534 passed, mypy clean (81 files), deptry clean, ruff clean; `schema.sql` byte-unchanged since 51996b4~1; CI-matrix legs, RQ-28's networking-disabled job and RQ-24's clean-environment install check were not run locally, left to CI.
+
+## Phase 10: Capture flag polarity inversion — opt-in, absent by default (PR10)
+
+**A user product decision, not a design revision** (openspec/config.yaml's
+own distinction) — made after Phase 9's own RQ-25 measurement found failure-
+text capture breaches the 2% overhead budget at every failure density
+tested, not only the pathological all-failing case (ten failing tests out of
+a thousand already cost 3.45% of a recording-off baseline). The opt-out
+column (A) that measurement recorded cost 0.15–0.64%, noise level — so
+absent-by-default makes the compliant path the one nobody has to think
+about. A failure-count cap was considered and rejected: the arithmetic
+admits roughly four failures per session before the budget is spent, which
+is not a failure-capture feature. `design.md` D72 is revised in place, not
+renumbered, to record this; `docs/open-questions.md` OQ-11's failure-count-
+cap sub-question is resolved as rejected. Modifies
+`openspec/changes/failure-capture/specs/failure-evidence/spec.md` (the
+requirement rewrite and the Measurements paragraph's relabelling — no
+measured number altered), `openspec/changes/failure-capture/design.md`
+(D72), `packages/pytest-vantage/src/pytest_vantage/{config,plugin,capture}.py`,
+four test files, `scripts/measure_failure_capture_overhead.py`,
+`docs/adr/0016-...md` (condition 4 and two Consequences bullets, `Status`
+left `Proposed`), `docs/open-questions.md`, `README.md`.
+
+- [x] 10.1 RED `test_config.py`: rewrite the monotonicity property test for the new `resolve_failure_text_capture(*, activated, cli_opt_in, ini_opt_in)` signature; add a monotone-*increasing*-in-`cli_opt_in` property test (the mirror of the old monotone-decreasing one) and a concrete "absent by default" case. Tampered the plausible-wrong version (renamed params, kept the AND-of-negations body) and confirmed the monotone-increasing test fails with `assert 0 >= 1` before restoring the correct `activated and (cli_opt_in or ini_opt_in)` body. *(design.md D72, revised)*
+- [x] 10.2 GREEN `pytest_vantage/config.py`: `resolve_failure_text_capture` inverted from `activated and not cli_opt_out and not ini_opt_out` to `activated and (cli_opt_in or ini_opt_in)`.
+- [x] 10.3 GREEN `pytest_vantage/plugin.py`: `--vantage-no-failure-text` renamed `--vantage-failure-text` (and its ini key), default `False` unchanged in shape but now meaning absent-by-capture rather than absent-by-refusal; `_failure_text_capture_requested` keeps its name and short-circuit, only its call into `resolve_failure_text_capture` inverts.
+- [x] 10.4 RED/GREEN `test_evidence.py`: renamed and inverted `test_opt_out_flag_means_evidencecollector_is_never_registered` → `test_absent_flag_means_evidencecollector_is_never_registered`; added `test_opt_in_flag_means_evidencecollector_is_registered` as the tamper-proof counterpart; renamed `test_opt_out_does_not_suppress_outcome_timings_or_identity` → `test_absent_flag_does_not_suppress_outcome_timings_or_identity`. Tampered `--vantage-failure-text`'s CLI default to `True` and confirmed the absent-flag test fails with `assert ['EvidenceCollector'] == []` before restoring `default=False`.
+- [x] 10.5 GREEN `test_xdist_guard.py`: `_ALLOWED_OPTIONS` and `_WorkerConfigDouble` renamed to `vantage_failure_text`, opted in (`True`) so the worker-registration mechanism test (D68) still exercises registration under the new default-absent polarity.
+- [x] 10.6 GREEN `test_opt_in.py`: `test_failure_text_opt_out_ini_alone_cannot_enable_capture` renamed `test_failure_text_opt_in_ini_alone_cannot_enable_capture`, ini key renamed `vantage_failure_text`. Tampered the ini registration out (`parser.addini("vantage_failure_text_TAMPERED_OUT", ...)`) and confirmed the test fails on `PytestConfigWarning: Unknown config option: vantage_failure_text` before restoring the registration — RQ-2's invariant still governs a committed configuration file. *(failure-evidence → Capture is opt-in, absent by default → A committed configuration file cannot enable capture on its own)*
+- [x] 10.7 Docs: `design.md` D72 rewritten in place (same number, noted revised after Phase 9's measurement), preserving the monotonicity argument (opt-out was monotone-decreasing by only ever removing; opt-in is monotone-increasing by only ever adding) and recording the rejected failure-count cap; D79's own "opt-out is the lever" line and the Measurements-baseline table row updated to match. `failure-evidence/spec.md`'s Measurements paragraph relabelled (A = default/absent, B = opt-in) with an explicit sentence that the default path is now RQ-25-compliant — no measured number changed. `docs/open-questions.md` OQ-11's failure-count-cap sub-question resolved as rejected with the arithmetic; the redactor sub-question stays open. `docs/adr/0016-...md` condition 4 and two Consequences bullets revised for the new polarity; `Status` left `Proposed`. `README.md`'s Usage section rewritten around the new flag, disclosure sentence kept beside it. `scripts/measure_failure_capture_overhead.py`'s baseline/treatment docstring, parameter name (`no_failure_text` → `failure_text`) and print labels updated to match — script not re-run, no number altered.
+- [x] 10.8 Full gate: `uv run pytest` (546 passed, one unrelated flaky retry confirmed isolated-pass), `uv run mypy .` (81 source files, clean), `uv run deptry .` (clean), `uv run ruff format . && uv run ruff check --fix .` (clean, one file reformatted).
 
 ---
 
