@@ -138,6 +138,60 @@ rather than silently omitted.
 - WHEN the session report is assembled
 - THEN no field's truncation flag is set as a result of the budget
 
+**Measurements (RQ-25):** Measured 2026-08-25 on
+`Linux-6.18.33.2-microsoft-standard-WSL2-x86_64` (WSL2), Python 3.10.21, via
+`scripts/measure_failure_capture_overhead.py` — five interleaved A/B/A/B…
+pairs per cell (A = recording on, failure capture opted out via
+`--vantage-no-failure-text`; B = the identical session with failure capture
+on), plus three recording-off context samples per cell, all against this
+repository's own working tree (not the synthetic 20,000-file repository
+`version-control-context` also measures against). 1,000 tests at ~10 ms,
+crossed with failure density and `--tb`:
+
+| Density | `--tb` | OFF | A (opt-out) | B (on) | Whole-session overhead (B vs OFF) | Per-failed-test cost (B vs A) | Fails |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1% | auto | 11.263s | 11.335s | 11.652s | 3.45% | 31.72 ms | 10 |
+| 1% | no | 10.961s | 10.997s | 11.368s | 3.71% | 37.10 ms | 10 |
+| 10% | auto | 14.430s | 14.495s | 17.955s | 24.43% | 34.60 ms | 100 |
+| 10% | no | 11.072s | 11.058s | 14.561s | 31.52% | 35.03 ms | 100 |
+| 100% | auto | 60.394s | 60.483s | 108.850s | 80.23% | 48.37 ms | 1000 |
+| 100% | no | 11.342s | 11.367s | 59.987s | 428.94% | 48.62 ms | 1000 |
+
+**Pre-measurement forecast** (design.md D79, recorded so the result can
+visibly disagree with it): ~55 ms of RQ-25 headroom remains after
+`version-control-context`'s own spend; the 1% profile (10 failures) expected
+to fit, the 10% profile marginal, and the 100% profile expected to exceed
+the 2% budget; `--tb=no` expected to be markedly more expensive (cold
+rendering, nothing pre-rendered for the terminal).
+
+**Every measured density breaches RQ-25's 2% budget, not only the 100%
+profile — recorded as measured, never adjusted, no failure-count cap
+invented.** The A-column confirms the opt-out itself costs nothing
+(0.15%–0.64% of OFF, noise-level, in every row except one within-noise
+negative). But even the **1% profile — ten failing tests out of a thousand —
+already costs 3.45%–3.71% of OFF**, not the "expected to fit" the forecast
+predicted: ten failures at ~32–37 ms each is 317–371 ms, and
+`version-control-context`'s own spend already leaves only ~55 ms of this
+repository's ≈220 ms budget (2% of an ~11 s OFF suite) once its own git-read
+cost is paid. Per-failed-test cost is not the constant the ~55 ms/N forecast
+assumed either: it rises with density (31.7→34.6→48.4 ms under `--tb=auto`),
+consistent with a growing in-process results list and a larger per-report
+JSON body dominating at scale rather than the rendering call itself.
+`--tb=no` is confirmed the more expensive branch in every row, as
+forecast — but by a much smaller margin (0–17%) than "markedly", not the
+large gap the cold-rendering argument implied; at 100% density the two are
+within 0.5% of each other, most likely because all synthetic failures share
+one raising site, so the linecache warms on the first render regardless of
+which branch pays it.
+
+**No failure-count cap is invented here.** D79's own text anticipated this
+outcome for the 100% profile and named the opt-out (`--vantage-no-failure-text`)
+as the lever already shipped for it; this measurement extends the same
+finding to every density tested, including the ordinary case of a handful of
+failures in an otherwise-passing suite. Whether a cap, a lower per-report
+budget, or another mechanism is the right response is deferred to a future
+change with this number behind it — see `docs/open-questions.md` OQ-11.
+
 ### Requirement: Capture opt-out under the opt-in rule
 
 The system MUST provide a session-level opt-out that disables failure-text
