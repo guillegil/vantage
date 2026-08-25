@@ -18,6 +18,7 @@ it costs more than a sprint to reverse.
 | OQ-8 | What can the launch surface actually launch? | **Answered** 2026-08-18 |
 | OQ-9 | Can the read-only guarantee stay read-only once launching exists? | **Answered** 2026-08-21 — ADR-15 |
 | OQ-10 | Is the interface document generated or hand-written? | **Answered** 2026-08-18 |
+| OQ-11 | Unredacted failure-text storage: is a redactor or a failure-count cap ever needed? | **Open** |
 
 ---
 
@@ -111,3 +112,38 @@ serves, and compares them.
 RQ-36's criterion 3 — *an endpoint present in the service and absent from the
 document is reported* — could never fail. A green check that cannot fail is the
 failure mode RQ-26 already guards against with its second, anti-vacuous test.
+
+## OQ-11 · Unredacted failure-text storage: is a redactor or a failure-count cap ever needed?
+
+ADR-0016 decides the storage question — Vantage stores pytest's rendered
+failure evidence and captured output verbatim and unredacted, disclosed
+rather than claimed safe, refusable by `--vantage-no-failure-text`. It
+leaves two things open rather than deciding them, both named in its own
+Consequences and Alternatives-rejected sections:
+
+**A redactor.** Content-scanning free-form text for secrets is an unbounded
+problem and a redactor that misses once is more dangerous than none, so
+ADR-0016 defers it rather than refusing it forever. Nothing changes this
+until one is designed and its false-negative rate is itself measured and
+disclosed — a redactor nobody has evaluated is not a safer default than the
+disclosed absence of one.
+
+**A failure-count cap.** `failure-evidence`'s own Measurements paragraph
+(RQ-25) found that **every measured failure density breaches RQ-25's 2%
+overhead budget, not only a pathological all-failing session** — ten
+failing tests out of a thousand already cost 3.45%–3.71% of a
+recording-off baseline, because `version-control-context`'s own git-read
+overhead already spends most of the budget before a single failure is
+rendered. `--vantage-no-failure-text` is the lever that exists today, and
+it is a session-wide, all-or-nothing one: a suite with a handful of
+failures cannot keep their evidence while capping the rest. Whether a
+narrower mechanism — a cap on how many failures within one session get full
+evidence, a cheaper rendering path, or something else — is worth building is
+not decided here. Design.md D79 named this possibility explicitly and
+declined to invent one without a number behind it; that number now exists
+and the decision is still open, for a future change to make deliberately
+rather than as a side effect of a budget or a schema.
+
+**Not open:** whether to store unredacted text at all (ADR-0016 decided
+that) or whether an opt-out must exist (it does, and must stay
+invocation-flag-only under RQ-2's own invariant).

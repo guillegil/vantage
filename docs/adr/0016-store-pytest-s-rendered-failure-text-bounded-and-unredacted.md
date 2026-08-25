@@ -59,9 +59,9 @@ stderr — verbatim and unredacted, under four conditions that hold together and
 are not separable.**
 
 1. **Rendered independently of display flags.** The stored traceback is produced
-   by the plugin's own `item.repr_failure(excinfo, style="long")`, not by reading
-   back whatever pytest happened to render for the terminal. A record whose
-   completeness depends on a `--tb` display flag is not a record: `--tb=no`
+   by the plugin's own `item._repr_failure_py(excinfo, style="long")`, not by
+   reading back whatever pytest happened to render for the terminal. A record
+   whose completeness depends on a `--tb` display flag is not a record: `--tb=no`
    would store nothing, the database would look healthy, and nobody would find
    out until the day they needed it.
 
