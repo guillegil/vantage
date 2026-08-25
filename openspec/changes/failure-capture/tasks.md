@@ -294,10 +294,20 @@ Creates `scripts/measure_failure_capture_overhead.py`. Modifies
 `docs/open-questions.md`, `docs/schema-manifest.md`, `README.md`.
 **Depends on PR8.**
 
-- [ ] 9.1 Analysis: write `scripts/measure_failure_capture_overhead.py` following `scripts/measure_vcs_overhead.py`'s shape — five interleaved A/B/A/B paired runs per cell, medians; baseline A = recording+VCS on, failure capture opted out via `--vantage-no-failure-text`; treatment B = failure capture on; axes: 1,000 tests at ~10 ms with 1%/10%/100% failing, crossed with `--tb=auto`/`--tb=no`; report per-failed-test rendering cost and whole-session overhead; also report the recording-off comparison. *(D79)*
-- [ ] 9.2 Analysis: run the script by hand (never in CI); transcribe the six-cell table into `.../failure-evidence/spec.md` as a **Measurements** paragraph beside the ≈55 ms headroom figure; state plainly whether the 100%-failing profile breaches RQ-25's 2% budget — recorded as measured, never adjusted, **no failure-count cap invented**. *(RQ-25's overhead obligation, Analysis)*
-- [ ] 9.3 Confirm (regression, no new code): 7.9's row-count assertions still pass unmodified in shape at 27 columns — the batch-insert strategy did not split. *(D80 re-run premise for RQ-3's Analysis argument)*
-- [ ] 9.4 Analysis: re-run the `tracemalloc`-based 500-result finish-write measurement test; transcribe the re-measured no-failure body size/peak memory into `.../run-recording/spec.md`'s Measurements paragraph, replacing the pre-`failure-evidence` figures (252,511 bytes / ≈2,021,039 bytes); separately measure the all-failing 500-result body size against the `776,799`-byte bound (D73); justify any material increase. *(Measurements are re-run for the failure-evidence column set)*
+**Self-split (review budget guard): PR9a (this branch) covers 9.1-9.4 --
+the overhead script and the two Measurements-paragraph re-runs it and the
+storage widening feed. PR9b, chained off PR9a, covers 9.5-9.10 -- the ADR,
+OQ-11, schema-manifest and README documentation, plus the three stale
+design.md snippets (D69, D74, D80) and the tasks.md task-text drift (7.9,
+7.10, 8.13) that every prior apply phase deferred here.** Unlike PR7a, this
+split has no shared irreducible core: the measurement work and the
+documentation corrections have no dependency on each other, so both halves
+land comfortably under budget on their own.
+
+- [x] 9.1 Analysis: write `scripts/measure_failure_capture_overhead.py` following `scripts/measure_vcs_overhead.py`'s shape — five interleaved A/B/A/B paired runs per cell, medians; baseline A = recording+VCS on, failure capture opted out via `--vantage-no-failure-text`; treatment B = failure capture on; axes: 1,000 tests at ~10 ms with 1%/10%/100% failing, crossed with `--tb=auto`/`--tb=no`; report per-failed-test rendering cost and whole-session overhead; also report the recording-off comparison. *(D79)*
+- [x] 9.2 Analysis: run the script by hand (never in CI); transcribe the six-cell table into `.../failure-evidence/spec.md` as a **Measurements** paragraph beside the ≈55 ms headroom figure; state plainly whether the 100%-failing profile breaches RQ-25's 2% budget — recorded as measured, never adjusted, **no failure-count cap invented**. *(RQ-25's overhead obligation, Analysis)* — every measured density breaches the 2% budget, not only 100%; see the Measurements paragraph.
+- [x] 9.3 Confirm (regression, no new code): 7.9's row-count assertions still pass unmodified in shape at 31 columns (this task's own text still says "27"; corrected alongside design.md's D80 fix in the next PR in this chain) — the batch-insert strategy did not split. *(D80 re-run premise for RQ-3's Analysis argument)* — reconfirmed via `test_finish_report_reaches_storage_in_one_commit`, part of the 534-pass full-suite gate.
+- [x] 9.4 Analysis: re-run the `tracemalloc`-based 500-result finish-write measurement test; transcribe the re-measured no-failure body size/peak memory into `.../run-recording/spec.md`'s Measurements paragraph, replacing the pre-`failure-evidence` figures (252,511 bytes / ≈2,021,039 bytes); separately measure the all-failing 500-result body size against the `776,799`-byte bound (D73); justify any material increase. *(Measurements are re-run for the failure-evidence column set)*
 - [ ] 9.5 Write `docs/adr/0016-...md`: flip `Status: Proposed` → `Status: Accepted` at merge, not at PR-open time. *(D81)*
 - [ ] 9.6 Write `docs/open-questions.md`: open OQ-11 (unredacted storage, credentials risk); note the failure-count-cap possibility as unresolved pending 9.2's measurement.
 - [ ] 9.7 Write `docs/schema-manifest.md`: mark the twelve `result` failure/captured-output columns and index 5 as populated, citing this change.
