@@ -293,49 +293,82 @@ reaches a report section and Vantage stores `""`. Nothing in pytest's public
 surface lets an observer see consumed output. Documented in the capability spec
 as a known gap.
 
-### D72 — The opt-out: `--vantage-no-failure-text`, monotone by construction
+### D72 — The opt-in: `--vantage-failure-text`, absent by default, monotone by construction
+
+**Revised 2026-08-25, after Phase 9's own RQ-25 measurement.** This decision
+originally shipped as an opt-out (`--vantage-no-failure-text`, capture on by
+default). The measurement that decision itself called for (D79) found
+failure-text capture breaches RQ-25's 2% overhead budget **at every failure
+density tested, not only the pathological all-failing case** — ten failing
+tests out of a thousand already cost 3.45% of a recording-off baseline (see
+`failure-evidence` → Measurements). An opt-out cannot fix that: the default
+path is the one everybody runs, and the default path was the expensive one.
+The decision is superseded in place, not renumbered: it is still D72, the
+surface it touches is still `pytest_vantage/config.py` and `plugin.py`'s two
+option registrations, and the reasoning below replaces the opt-out's, rather
+than sitting beside it as a second history.
+
+**Capture is now opt-in and absent unless the invocation asks for it.**
 
 | Surface | Value | Can it enable? |
 | --- | --- | --- |
 | `--vantage` | `store_true` | **This and only this activates recording** (RQ-2, unchanged) |
-| `--vantage-no-failure-text` | `store_true`, default `False` | No — it can only suppress |
-| ini `vantage_no_failure_text` | bool, default `false` | No — the only value that does anything is the one that narrows |
+| `--vantage-failure-text` | `store_true`, default `False` | Yes — but only capture, never recording itself |
+| ini `vantage_failure_text` | bool, default `false` | Yes, identically — either source alone is enough |
 | environment variable | **none defined** | — |
 
-**Composition** is a single monotone conjunction:
+**Composition** is a single monotone disjunction:
 
 ```python
-def resolve_failure_text_capture(*, activated: bool, cli_opt_out: bool, ini_opt_out: bool) -> bool:
-    return activated and not cli_opt_out and not ini_opt_out
+def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool, ini_opt_in: bool) -> bool:
+    return activated and (cli_opt_in or ini_opt_in)
 ```
 
 Three properties, each deliberate:
 
-1. **No source can turn a `False` into a `True`.** The function is
-   monotone-decreasing in every argument, which is a *property test*, not a case
-   list: for every one of the eight input combinations,
-   `resolve(...) <= activated`. That is the mechanical form of the spec's "a
-   configuration value MAY narrow, but no committed configuration file MAY be
-   the means by which capture is enabled".
-2. **Both names contain a negation.** There is no syntactic form — no
-   `vantage_failure_text = true` — that a reader could mistake for an enable.
-   `-p no:vantage` is pytest's own precedent for a one-way name.
-3. **No environment variable.** RQ-2's rationale is that an environment variable
-   is invisible in the command line RQ-11 records. For an opt-out that means a
-   run whose stored evidence is missing with nothing in its own history to
-   explain why. `resolve_report_timeout` already defines none, for a weaker
-   reason than this one.
+1. **No source can turn recording's own `False` into a `True`.** The function
+   remains monotone in every argument — the property test carried forward
+   unchanged, `resolve(...) <= activated` for every one of the eight input
+   combinations — but where the opt-out was monotone-*decreasing* in its two
+   narrowing sources, the opt-in is monotone-*increasing* in `cli_opt_in` and
+   `ini_opt_in`: each can only ever ADD capture to an already-activated
+   session, never remove it, and neither can activate recording on its own.
+   **The opt-in is monotone too, precisely because it only ever adds** — the
+   same shape of guarantee the opt-out gave by only ever removing, mirrored
+   rather than lost.
+2. **Both names now carry the plain capability, not a negation.** There is no
+   syntactic form that reads as a refusal by accident, because there is
+   nothing left to refuse by default — capture already defaults to absent.
+3. **No environment variable.** RQ-2's rationale is unchanged by the flip: an
+   environment variable is invisible in the command line RQ-11 records. For an
+   opt-in that means a run whose stored evidence is *present* with nothing in
+   its own history to explain why it was requested — the same blind spot the
+   opt-out's version of this argument named, mirrored onto the other polarity.
+   `resolve_report_timeout` already defines none, for a weaker reason than
+   this one.
 
-**What the opt-out actually does: `EvidenceCollector` is never registered.** Not
-a flag checked per test — the hookwrapper does not exist. Consequence worth
-stating: an opted-out session pays **zero** of D69's second-rendering cost, so
-the flag doubles as the lever for anyone whose RQ-25 budget the measurement
-(D79) turns out to strain. Outcome, timings and identity are untouched, because
-`Recorder` never consulted the collector for them.
+**A failure-count cap was considered and rejected instead of the polarity
+flip.** The arithmetic: RQ-25 leaves roughly 55 ms of headroom per session
+after `version-control-context`'s own spend, and a single rendered failure
+costs 32–48 ms depending on density — the budget admits **roughly four
+failures per session** before it is spent. A cap that low is not a
+failure-capture feature; it is a feature that fails on the fifth test in an
+otherwise-healthy suite. Absent-by-default has no such ceiling, because the
+common case pays nothing at all rather than a small, arbitrary amount.
 
-**RQ-2's differential test is the guard**, in its established form: run the suite
-once with the ini value present and once absent, with no flag on either
-invocation, and assert failure-text capture behaves identically.
+**What the opt-in actually does: `EvidenceCollector` is registered only when
+requested.** Not a flag checked per test — the hookwrapper does not exist
+until then. Consequence worth stating: the *default* session now pays
+**zero** of D69's second-rendering cost, so the absent-by-default posture is
+itself the RQ-25 lever, not a flag someone has to remember to pass. Outcome,
+timings and identity are untouched either way, because `Recorder` never
+consulted the collector for them.
+
+**RQ-2's differential test is the guard**, in its established form, carried
+forward unchanged in shape: run the suite once with the ini value present and
+once absent, with no flag on either invocation, and assert failure-text
+capture behaves identically — a committed configuration file still cannot be
+the means by which capture, or recording itself, turns on.
 
 ### D73 — `MAX_FAILURE_TEXT_BYTES = 512 * 1024`, mirrored in the plugin, pinned by a test
 
@@ -706,8 +739,8 @@ medians reported, never means — with three changes:
 
 | Aspect | Decision |
 | --- | --- |
-| Baseline (A) | current `main`: recording **on**, VCS capture **on**, failure capture opted out via `--vantage-no-failure-text` |
-| Treatment (B) | the identical session with failure capture on |
+| Baseline (A) | current `main`: recording **on**, VCS capture **on**, failure capture absent — the default, no invocation flag given |
+| Treatment (B) | the identical session with failure capture opted in via `--vantage-failure-text` |
 | Why that baseline | it isolates *this* change's cost. `version-control-context`'s numbers already spent part of the budget; measuring against recording-off would re-measure their cost and hide this one |
 | Also reported | the recording-off comparison, so the number stays commensurable with `version-control-context`'s existing table |
 | **New axis: failure density** | 1,000 tests at ~10 ms with **1%**, **10%** and **100%** failing |
@@ -740,10 +773,14 @@ it** (D52's precedent, which is the reason that discipline exists):
 **What happens if the forecast holds.** RQ-25's own text requires the number to
 be recorded whether or not the 2% budget holds, and it is recorded as measured,
 never adjusted to match the forecast. A session in which every test fails is
-pathological, the opt-out (D72) is the lever, and **no failure-count cap is
-invented here** — if the measurement says one is needed it arrives then, with a
-number behind it instead of a guess. That is ADR-0014's own rule about flags,
-applied to a cap.
+pathological, and **no failure-count cap is invented here** — if the
+measurement says one is needed it arrives then, with a number behind it
+instead of a guess. That is ADR-0014's own rule about flags, applied to a cap.
+**What the measurement actually found, after this section was written: every
+density breaches the budget, not only the pathological one — see
+`failure-evidence`'s Measurements paragraph — which is why D72 was revised
+from an opt-out to an opt-in absent by default, rather than a failure-count
+cap being invented after all.**
 
 ### D80 — `run-recording`'s Measurements re-run: what changes and what does not
 
@@ -817,7 +854,7 @@ sprint to reverse.
 | Worker-side collector (D68) | One module and one branch in `pytest_configure` | design note |
 | `repr(excinfo.value)` as `failure_repr` (D69) | One extraction function; the column already exists | design note |
 | Dropping phase attribution (D71) | Recovering it needs `result_log`, already a separate future change | design note |
-| The opt-out's name and shape (D72) | Two option registrations and a pure function | design note |
+| The opt-in's name and shape, revised from opt-out (D72) | Two option registrations and a pure function | design note |
 | `MAX_FAILURE_TEXT_BYTES` and the mirror (D73) | One constant and one pinning test | design note |
 | First-come budget spending (D74) | One loop | design note |
 | Flag disjunction (D75) | One `or` and one optional wire field | design note |
@@ -918,7 +955,7 @@ ADR-0014 (the plugin's execution boundary and its no-flag argument) and ADR-0015
 | `scripts/measure_failure_capture_overhead.py` | **Create** | the failure-density benchmark (D79) |
 | `docs/adr/0016-store-pytest-s-rendered-failure-text-bounded-and-unredacted.md` | **Create** | the one decision past the filter (D81) |
 | `openspec/specs/history-read-api/spec.md` | Modify | exclusion promoted to Test; *Single result detail* added |
-| `docs/open-questions.md`, `docs/schema-manifest.md`, `README.md` | Modify | OQ-11; columns now populated; the disclosure and the opt-out |
+| `docs/open-questions.md`, `docs/schema-manifest.md`, `README.md` | Modify | OQ-11; columns now populated; the disclosure and the opt-in |
 
 ## Interfaces / Contracts
 
@@ -1051,7 +1088,7 @@ work the proposal did not price.
 | # | Slice | Est. | Depends on |
 | --- | --- | --- | --- |
 | 1 | Domain types: `FailureEvidence`, `CapturedOutput`, `FailureProjection`, `project_failure` + unit tests (D77, D76) | ~300 | — |
-| 2 | `EvidenceCollector` registration on controller and workers; the opt-out and its monotonicity test; no rendering yet (D68, D72) | ~340 | — |
+| 2 | `EvidenceCollector` registration on controller and workers; the opt-in and its monotonicity test; no rendering yet (D68, D72) | ~340 | — |
 | 3 | Rendering and field extraction; the D70 branch table; evidence-phase selection (D69, D70) | ~390 | 2 |
 | 4 | Captured output, empty≠absent, phase concatenation (D71) | ~290 | 3 |
 | 5 | The budget: constants, pinning test, one-pass spend, drop semantics (D73, D74) | ~370 | 4 |

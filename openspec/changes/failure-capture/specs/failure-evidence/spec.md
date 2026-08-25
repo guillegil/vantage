@@ -8,8 +8,9 @@ message and location as separately queryable values, plus its full
 representation; the captured stdout and stderr, with empty distinguished
 from absent; the 64 KiB per-field bound and its out-of-band truncation flag;
 the per-report encoded-byte budget spent before a session report is
-assembled; the opt-out that disables this capture under `session-ingestion`'s
-opt-in rule; and the disclosure that stored failure text is unredacted. New
+assembled; the opt-in that enables this capture at all, absent by default
+under `session-ingestion`'s opt-in rule; and the disclosure that stored
+failure text is unredacted. New
 capability. `result-capture` defines what every result records regardless of
 outcome; this capability defines what a failed one adds. List responses
 exclude the fields defined here — `history-read-api` → *Lean list
@@ -141,14 +142,17 @@ rather than silently omitted.
 **Measurements (RQ-25):** Measured 2026-08-25 on
 `Linux-6.18.33.2-microsoft-standard-WSL2-x86_64` (WSL2), Python 3.10.21, via
 `scripts/measure_failure_capture_overhead.py` — five interleaved A/B/A/B…
-pairs per cell (A = recording on, failure capture opted out via
-`--vantage-no-failure-text`; B = the identical session with failure capture
-on), plus three recording-off context samples per cell, all against this
-repository's own working tree (not the synthetic 20,000-file repository
-`version-control-context` also measures against). 1,000 tests at ~10 ms,
-crossed with failure density and `--tb`:
+pairs per cell (A = recording on, failure capture absent — the default, no
+invocation flag given; B = the identical session with failure capture
+opted in via `--vantage-failure-text`), plus three recording-off context
+samples per cell, all against this repository's own working tree (not the
+synthetic 20,000-file repository `version-control-context` also measures
+against). 1,000 tests at ~10 ms, crossed with failure density and `--tb`.
+**The columns are labelled by what they mean today, after D72's revision —
+the underlying sessions measured are unchanged from what was actually run,
+and no number below was altered:**
 
-| Density | `--tb` | OFF | A (opt-out) | B (on) | Whole-session overhead (B vs OFF) | Per-failed-test cost (B vs A) | Fails |
+| Density | `--tb` | OFF | A (default, absent) | B (opt-in) | Whole-session overhead (B vs OFF) | Per-failed-test cost (B vs A) | Fails |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1% | auto | 11.263s | 11.335s | 11.652s | 3.45% | 31.72 ms | 10 |
 | 1% | no | 10.961s | 10.997s | 11.368s | 3.71% | 37.10 ms | 10 |
@@ -166,56 +170,79 @@ rendering, nothing pre-rendered for the terminal).
 
 **Every measured density breaches RQ-25's 2% budget, not only the 100%
 profile — recorded as measured, never adjusted, no failure-count cap
-invented.** The A-column confirms the opt-out itself costs nothing
-(0.15%–0.64% of OFF, noise-level, in every row except one within-noise
-negative). But even the **1% profile — ten failing tests out of a thousand —
-already costs 3.45%–3.71% of OFF**, not the "expected to fit" the forecast
-predicted: ten failures at ~32–37 ms each is 317–371 ms, and
-`version-control-context`'s own spend already leaves only ~55 ms of this
-repository's ≈220 ms budget (2% of an ~11 s OFF suite) once its own git-read
-cost is paid. Per-failed-test cost is not the constant the ~55 ms/N forecast
-assumed either: it rises with density (31.7→34.6→48.4 ms under `--tb=auto`),
-consistent with a growing in-process results list and a larger per-report
-JSON body dominating at scale rather than the rendering call itself.
-`--tb=no` is confirmed the more expensive branch in every row, as
-forecast — but by a much smaller margin (0–17%) than "markedly", not the
-large gap the cold-rendering argument implied; at 100% density the two are
-within 0.5% of each other, most likely because all synthetic failures share
-one raising site, so the linecache warms on the first render regardless of
-which branch pays it.
+invented.** The A-column confirms the default (capture-absent) path itself
+costs nothing (0.15%–0.64% of OFF, noise-level, in every row except one
+within-noise negative) — **this is why capture is now opt-in: the default
+path this measurement calls "A" is the path every session takes unless it
+asks otherwise, and it is RQ-25-compliant.** But even the **1% profile — ten
+failing tests out of a thousand — already costs 3.45%–3.71% of OFF** once a
+session opts in, not the "expected to fit" the forecast predicted: ten
+failures at ~32–37 ms each is 317–371 ms, and `version-control-context`'s own
+spend already leaves only ~55 ms of this repository's ≈220 ms budget (2% of
+an ~11 s OFF suite) once its own git-read cost is paid. Per-failed-test cost
+is not the constant the ~55 ms/N forecast assumed either: it rises with
+density (31.7→34.6→48.4 ms under `--tb=auto`), consistent with a growing
+in-process results list and a larger per-report JSON body dominating at
+scale rather than the rendering call itself. `--tb=no` is confirmed the more
+expensive branch in every row, as forecast — but by a much smaller margin
+(0–17%) than "markedly", not the large gap the cold-rendering argument
+implied; at 100% density the two are within 0.5% of each other, most likely
+because all synthetic failures share one raising site, so the linecache
+warms on the first render regardless of which branch pays it.
 
 **No failure-count cap is invented here.** D79's own text anticipated this
-outcome for the 100% profile and named the opt-out (`--vantage-no-failure-text`)
-as the lever already shipped for it; this measurement extends the same
-finding to every density tested, including the ordinary case of a handful of
-failures in an otherwise-passing suite. Whether a cap, a lower per-report
-budget, or another mechanism is the right response is deferred to a future
-change with this number behind it — see `docs/open-questions.md` OQ-11.
+outcome for the 100% profile; this measurement extends the same finding to
+every density tested, including the ordinary case of a handful of failures
+in an otherwise-passing suite — which is exactly why the response was a
+polarity flip rather than a narrower mechanism: absent-by-default costs
+nothing for the common case, where a count cap would still cost something
+for every session under it. A cap was considered and rejected on its own
+arithmetic (see the requirement below and design.md's revised D72): the
+~55 ms of remaining headroom admits roughly four rendered failures before
+it is spent, which is not a failure-capture feature. Whether a lower
+per-report budget or another mechanism is worth building for a session that
+does opt in remains open — see `docs/open-questions.md` OQ-11.
 
-### Requirement: Capture opt-out under the opt-in rule
+### Requirement: Capture is opt-in, absent by default
 
-The system MUST provide a session-level opt-out that disables failure-text
-capture. The opt-out's activation MUST be available as an invocation flag. A
-configuration value MAY narrow what an already-activated session records,
-but no committed configuration file MAY be the means by which capture is
-enabled or the opt-out disabled — the same invariant RQ-2 already holds for
-recording itself.
+The system MUST NOT capture failure text unless the session's invocation asks
+for it. The opt-in's activation MUST be available as an invocation flag. A
+configuration value MAY narrow what an already-activated session records, but
+no committed configuration file MAY be the means by which capture is enabled —
+the same invariant RQ-2 already holds for recording itself, and for the same
+reason: a file one person commits would otherwise silently enable capture for
+everyone who checks the repository out.
+
+**This polarity is required by RQ-25, not chosen for taste.** Measurement (see
+Measurements below) puts failure-text capture at 3.45% of session wall time at
+1% failure density, against RQ-25's 2% budget — a breach at every density
+measured, not only the pathological one. With capture absent by default the
+default path costs 0.15–0.64%, noise level, and RQ-25 holds; a session that
+asks for capture has accepted the cost knowingly. Capping the number of
+failures captured was considered and rejected: the arithmetic admits roughly
+four failures per session before the budget is spent, which is not a
+failure-capture feature.
 
 **Verification: Test**, differential — the same form RQ-2's own opt-in test
 uses.
 
-#### Scenario: The opt-out suppresses failure-text capture
-- GIVEN a session invoked with the failure-capture opt-out
+#### Scenario: Absent the opt-in, no failure text is captured
+- GIVEN a recording session invoked without the failure-capture opt-in
 - WHEN a test in that session fails
 - THEN its result is recorded without a traceback, failure fields or captured output
+
+#### Scenario: The opt-in enables failure-text capture
+- GIVEN a recording session invoked with the failure-capture opt-in
+- WHEN a test in that session fails
+- THEN its traceback, failure fields and captured output are recorded
 
 #### Scenario: A committed configuration file cannot enable capture on its own
 - GIVEN a project whose committed configuration file sets no invocation flag
 - WHEN the suite is run once with that file present and once with it absent
 - THEN failure-text capture behaves identically in both runs
 
-#### Scenario: The opt-out does not suppress the rest of the result
-- GIVEN a session invoked with the failure-capture opt-out
+#### Scenario: Capture being absent does not suppress the rest of the result
+- GIVEN a recording session invoked without the failure-capture opt-in
 - WHEN a test in that session fails
 - THEN its outcome, timings and identity are still recorded in full
 
