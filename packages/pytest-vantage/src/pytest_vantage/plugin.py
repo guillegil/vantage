@@ -72,13 +72,16 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Bound, in seconds, on the reporting request. Configures WHERE/HOW, never activates.",
     )
     group.addoption(
-        "--vantage-no-failure-text",
+        "--vantage-failure-text",
         action="store_true",
         default=False,
         help=(
-            "Disable failure-text capture (traceback, failure fields, captured output) "
-            "for this session. Can only narrow an already-activated session -- never "
-            "activates recording on its own (design.md D72)."
+            "Enable failure-text capture (traceback, failure fields, captured output) "
+            "for this session. Absent by default (RQ-25) -- capture never happens "
+            "unless this or the ini equivalent is given, and neither can activate "
+            "recording on its own (design.md D72). Stored failure text is unredacted "
+            "and may contain any value a test printed or asserted, including "
+            "credentials."
         ),
     )
     parser.addini(
@@ -92,10 +95,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=None,
     )
     parser.addini(
-        "vantage_no_failure_text",
+        "vantage_failure_text",
         help=(
-            "Same as --vantage-no-failure-text. Can only narrow an already-activated "
-            "session; never activates recording or disables it on its own (design.md D72)."
+            "Same as --vantage-failure-text. Can only widen an already-activated "
+            "session's capture from absent to present; never activates recording "
+            "on its own (design.md D72)."
         ),
         type="bool",
         default=False,
@@ -145,13 +149,15 @@ def _activation_requested(config: pytest.Config) -> bool:
 
 def _failure_text_capture_requested(config: pytest.Config) -> bool:
     """Whether `EvidenceCollector` should be registered for this session
-    (design.md D72). Composes `_activation_requested` with both opt-out
-    surfaces through `resolve_failure_text_capture` -- the single monotone
-    conjunction that can only narrow an activated session, never enable one.
-    Called identically on both the worker and controller branches of
-    `pytest_configure`: the opt-out is session-wide, not controller-only.
+    (design.md D72, revised after Phase 9's RQ-25 measurement: capture is
+    opt-in, absent by default). Composes `_activation_requested` with both
+    opt-in surfaces through `resolve_failure_text_capture` -- the single
+    monotone disjunction that can only widen an activated session's capture
+    from absent to present, never enable recording itself. Called
+    identically on both the worker and controller branches of
+    `pytest_configure`: the opt-in is session-wide, not controller-only.
 
-    Short-circuits before reading either opt-out surface when the session
+    Short-circuits before reading either opt-in surface when the session
     was never activated at all (RQ-2): an unactivated worker or controller
     reads `"vantage"` alone, exactly as it did before this decision existed.
     """
@@ -159,8 +165,8 @@ def _failure_text_capture_requested(config: pytest.Config) -> bool:
         return False
     return resolve_failure_text_capture(
         activated=True,
-        cli_opt_out=bool(config.getoption("vantage_no_failure_text")),
-        ini_opt_out=bool(config.getini("vantage_no_failure_text")),
+        cli_opt_in=bool(config.getoption("vantage_failure_text")),
+        ini_opt_in=bool(config.getini("vantage_failure_text")),
     )
 
 

@@ -83,22 +83,22 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
 
 
 @pytest.mark.req(id="RQ-2")
-def test_failure_text_opt_out_ini_alone_cannot_enable_capture(
+def test_failure_text_opt_in_ini_alone_cannot_enable_capture(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """failure-evidence -> Capture opt-out under the opt-in rule -> A
+    """failure-evidence -> Capture is opt-in, absent by default -> A
     committed configuration file cannot enable capture on its own.
 
     RQ-2's own established differential (above), applied to the
-    failure-text opt-out ini value specifically: with no invocation flag on
-    either run -- neither `--vantage` nor `--vantage-no-failure-text` -- a
-    committed `vantage_no_failure_text = true` ini value changes nothing.
-    `Unknown config option` is asserted absent from the run that carries it,
-    which is currently a genuine RED: the ini value is not yet a registered
-    option (task 2.12 registers it), so pytest currently warns about it.
-    Once registered, the project tree -- excluding the ini file itself,
-    which is the one deliberate difference between the two runs -- must
-    still be byte-identical.
+    failure-text opt-in ini value specifically (design.md D72, revised
+    after Phase 9's RQ-25 measurement): with no invocation flag on either
+    run -- neither `--vantage` nor `--vantage-failure-text` -- a committed
+    `vantage_failure_text = true` ini value changes nothing.
+    `Unknown config option` is asserted absent from the run that carries it
+    -- the ini value must be a registered option for that to hold. Once
+    registered, the project tree -- excluding the ini file itself, which is
+    the one deliberate difference between the two runs -- must still be
+    byte-identical.
     """
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
 
@@ -106,7 +106,7 @@ def test_failure_text_opt_out_ini_alone_cannot_enable_capture(
     without_ini_root = tmp_path_factory.mktemp("vantage-failtext-without-ini")
     (with_ini_root / "test_sample.py").write_text(_SAMPLE_TEST)
     (without_ini_root / "test_sample.py").write_text(_SAMPLE_TEST)
-    (with_ini_root / "pytest.ini").write_text("[pytest]\nvantage_no_failure_text = true\n")
+    (with_ini_root / "pytest.ini").write_text("[pytest]\nvantage_failure_text = true\n")
 
     with_ini = _run_pytest(with_ini_root)
     without_ini = _run_pytest(without_ini_root)

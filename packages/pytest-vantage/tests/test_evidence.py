@@ -51,6 +51,7 @@ class _ControllerConfigDouble:
             "vantage": True,
             "vantage_server": "http://127.0.0.1:9",
             "vantage_timeout": 0.1,
+            "vantage_failure_text": True,
         }
 
     def getoption(self, name: str, default: object = None) -> object:
@@ -74,7 +75,9 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
 
     No live server is needed: a worker's `EvidenceCollector` never
     preflights or opens a socket (design.md D68), so nothing here depends on
-    one being reachable, only on `--vantage` activating registration.
+    one being reachable, only on `--vantage` activating recording and
+    `--vantage-failure-text` opting into capture (design.md D72, revised
+    for RQ-25).
 
     The conftest hook below distinguishes controller from worker via
     `hasattr(config, "workerinput")` and writes the marker file ONLY from
@@ -120,7 +123,7 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
         """
     )
 
-    pytester.runpytest_subprocess("--vantage", "-n", "2")
+    pytester.runpytest_subprocess("--vantage", "--vantage-failure-text", "-n", "2")
 
     marker_path = pytester.path / "evidence_marker.json"
     assert marker_path.exists(), (
@@ -131,20 +134,15 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
     assert isinstance(marker["evidence"], dict)
 
 
-def test_opt_out_flag_means_evidencecollector_is_never_registered(
+def test_absent_flag_means_evidencecollector_is_never_registered(
     pytester: pytest.Pytester,
 ) -> None:
-    """failure-evidence -> Capture opt-out under the opt-in rule -> The
-    opt-out suppresses failure-text capture (design.md D72): with
-    `--vantage-no-failure-text` given alongside `--vantage`, no
-    `EvidenceCollector` is registered anywhere -- an opted-out session pays
-    zero of the second-rendering cost, because the hookwrapper does not
-    exist, not because a flag is checked per test.
-
-    Currently a genuine RED: `--vantage-no-failure-text` is not yet a
-    registered CLI option (task 2.12 registers it), so this subprocess
-    invocation fails argument parsing before `pytest_configure` ever runs
-    and `registered.json` is never written.
+    """failure-evidence -> Capture is opt-in, absent by default (design.md
+    D72, revised after Phase 9's RQ-25 measurement): with `--vantage` alone
+    and no `--vantage-failure-text`, no `EvidenceCollector` is registered
+    anywhere -- a default session pays zero of the second-rendering cost,
+    because the hookwrapper does not exist, not because a flag is checked
+    per test.
     """
     pytester.makeconftest(
         """
@@ -166,41 +164,76 @@ def test_opt_out_flag_means_evidencecollector_is_never_registered(
     pytester.makepyfile(
         test_sample="""
         def test_it_fails():
-            raise AssertionError("synthetic failure for the opt-out test")
+            raise AssertionError("synthetic failure for the absent-flag default test")
         """
     )
 
-    pytester.runpytest_subprocess("--vantage", "--vantage-no-failure-text")
+    pytester.runpytest_subprocess("--vantage")
 
     registered = json.loads((pytester.path / "registered.json").read_text())
     assert registered == []
 
 
-def test_opt_out_does_not_suppress_outcome_timings_or_identity(
+def test_opt_in_flag_means_evidencecollector_is_registered(
+    pytester: pytest.Pytester,
+) -> None:
+    """failure-evidence -> Capture is opt-in, absent by default -> The
+    opt-in enables failure-text capture (design.md D72): with
+    `--vantage-failure-text` given alongside `--vantage`, exactly one
+    `EvidenceCollector` is registered.
+
+    This is the tamper-proof counterpart to the absent-flag test above --
+    together they prove the flag actually flips the outcome rather than
+    both branches accidentally landing on the same registration state.
+    """
+    pytester.makeconftest(
+        """
+        import json
+
+
+        def pytest_sessionstart(session):
+            from pytest_vantage.evidence import EvidenceCollector
+
+            registered = [
+                type(plugin).__name__
+                for plugin in session.config.pluginmanager.get_plugins()
+                if isinstance(plugin, EvidenceCollector)
+            ]
+            with open("registered.json", "w") as fh:
+                json.dump(registered, fh)
+        """
+    )
+    pytester.makepyfile(
+        test_sample="""
+        def test_it_fails():
+            raise AssertionError("synthetic failure for the opt-in test")
+        """
+    )
+
+    pytester.runpytest_subprocess("--vantage", "--vantage-failure-text")
+
+    registered = json.loads((pytester.path / "registered.json").read_text())
+    assert registered == ["EvidenceCollector"]
+
+
+def test_absent_flag_does_not_suppress_outcome_timings_or_identity(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """failure-evidence -> Capture opt-out under the opt-in rule -> The
-    opt-out does not suppress the rest of the result (design.md D72):
+    """failure-evidence -> Capture is opt-in, absent by default -> Capture
+    being absent does not suppress the rest of the result (design.md D72):
     `Recorder` never consulted `EvidenceCollector` for outcome, timings or
-    identity, so a session invoked with `--vantage-no-failure-text` still
+    identity, so a session invoked without the failure-capture opt-in still
     records those in full against a real, live server.
-
-    Currently a genuine RED: `--vantage-no-failure-text` is not yet a
-    registered CLI option (task 2.12 registers it), so this subprocess
-    invocation fails argument parsing before anything is recorded and
-    `vantage_server.results()` stays empty.
     """
     pytester.makepyfile(
         test_sample="""
         def test_it_fails():
-            raise AssertionError("synthetic failure for the opt-out test")
+            raise AssertionError("synthetic failure for the absent-flag default test")
         """
     )
 
-    pytester.runpytest_subprocess(
-        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-no-failure-text"
-    )
+    pytester.runpytest_subprocess("--vantage", f"--vantage-server={vantage_server.address}")
 
     results = vantage_server.results()
     assert len(results) == 1
@@ -238,7 +271,9 @@ def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[s
     An unreachable `--vantage-server` is given deliberately: `EvidenceCollector`
     registers and runs regardless of reachability (`plugin.py::pytest_configure`
     registers it BEFORE the preflight, design.md D68), so no live server is
-    needed to observe what it extracted.
+    needed to observe what it extracted. `--vantage-failure-text` is given
+    unconditionally -- these tests exercise rendering and field extraction,
+    which (design.md D72, revised for RQ-25) now require the opt-in.
     """
     pytester.makeconftest(
         """
@@ -258,7 +293,9 @@ def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[s
                 json.dump(_captured, fh)
         """
     )
-    pytester.runpytest_inprocess("--vantage", "--vantage-server=http://127.0.0.1:9", *args)
+    pytester.runpytest_inprocess(
+        "--vantage", "--vantage-server=http://127.0.0.1:9", "--vantage-failure-text", *args
+    )
     captured: dict[str, dict[str, object] | None] = json.loads(
         (pytester.path / "evidence_capture.json").read_text()
     )

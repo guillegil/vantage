@@ -245,8 +245,9 @@ def _captured_output(
 
     Absent entirely from the returned dict (never a dict of nulls) when
     `EvidenceCollector` never ran on ANY phase of this test -- e.g. the
-    opt-out (D72) -- the same convention `build_result`'s failure-evidence
-    merge already follows below.
+    opt-in absent (D72, revised for RQ-25: capture defaults off) -- the same
+    convention `build_result`'s failure-evidence merge already follows
+    below.
 
     `capture_disabled` is one session-constant flag every phase's `_extract`
     call receives identically (`evidence.py::_captured_fields`), so a phase
@@ -325,7 +326,8 @@ def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
     # design.md D69: the evidence `EvidenceCollector` attached to whichever
     # phase report D69's precedence table selects, merged in -- absent
     # entirely (never a dict of nulls) when that phase carries none, e.g. a
-    # session with `EvidenceCollector` never registered (the opt-out, D72).
+    # session with `EvidenceCollector` never registered (the opt-in absent,
+    # D72, revised for RQ-25).
     evidence_report = _select_evidence_phase(setup, call, teardown, outcome)
     evidence = getattr(evidence_report, "vantage_evidence", None)
     if isinstance(evidence, dict):
