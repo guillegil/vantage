@@ -183,17 +183,36 @@ splitting its history in two.
 | `setup_duration` | REAL NULL | RQ-5 | M2 |
 | `call_duration` | REAL NULL | RQ-5 | M2 |
 | `teardown_duration` | REAL NULL | RQ-5 | M2 |
-| `failure_type` | TEXT NULL | RQ-8 | M2 |
-| `failure_message` † | TEXT NULL | RQ-8 | M2 |
-| `failure_path` | TEXT NULL | RQ-8 | M2 |
-| `failure_lineno` | INTEGER NULL | RQ-8 | M2 |
-| `failure_repr` † | TEXT NULL | RQ-8 | M2 |
-| `traceback` † | TEXT NULL | RQ-8 | M2 |
-| `skip_reason` † | TEXT NULL | RQ-4 | M2 |
-| `xfail_reason` † | TEXT NULL | RQ-4 | M2 |
+| `failure_type` | TEXT NULL | RQ-8 | **M2** |
+| `failure_message` † | TEXT NULL | RQ-8 | **M2** |
+| `failure_path` | TEXT NULL | RQ-8 | **M2** |
+| `failure_lineno` | INTEGER NULL | RQ-8 | **M2** |
+| `failure_repr` † | TEXT NULL | RQ-8 | **M2** |
+| `traceback` † | TEXT NULL | RQ-8 | **M2** |
+| `skip_reason` † | TEXT NULL | RQ-4 | **M2** |
+| `xfail_reason` † | TEXT NULL | RQ-4 | **M2** |
 | `worker_id` | TEXT NULL | RQ-12 | M3 |
-| `captured_stdout` † | TEXT NULL | Phase 2 | Phase 2 |
-| `captured_stderr` † | TEXT NULL | Phase 2 | Phase 2 |
+| `captured_stdout` † | TEXT NULL | Phase 2 | **Phase 2** |
+| `captured_stderr` † | TEXT NULL | Phase 2 | **Phase 2** |
+
+**Ten of the rows above moved from a forecast (plain `M2`/`Phase 2`,
+unpopulated) to a landed writer (bold, populated) via `failure-capture`,
+RQ-8** — the same shape the five `vcs_*` rows above record for
+`vcs-capture`. `schema.sql` gained no column: `failure_type` through
+`xfail_reason` have been declared since the RQ-29 manifest commit
+(`0e94e5d`); `captured_stdout`/`captured_stderr`, originally forecast for a
+later "Phase 2", were pulled forward and populated by this same change.
+`idx_result_failure_path_lineno` (index 5, below) is exercised by a writer
+for the first time here too — `GROUP BY failure_path, failure_lineno` now
+returns real groups rather than an empty result set. Counted as **physical**
+columns rather than manifest rows, seventeen changed populated-state: the
+ten rows above, plus the seven `_truncated` sibling columns the †
+convention folds into their subject's row instead of listing separately
+(`failure_message`, `failure_repr`, `traceback`, `skip_reason`,
+`xfail_reason`, `captured_stdout`, `captured_stderr` each carry one). The
+task that scoped this update said "twelve"; neither the ten-row nor the
+seventeen-column count matches that figure, and this note records the
+actual counts rather than reconciling them to it.
 
 **`outcome` is composite, and that is the whole of RQ-4:**
 
