@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-from vantage.service.schemas import SessionReport, VcsReport
+from vantage.service.schemas import ResultReport, SessionReport, VcsReport
 
 
 def _well_formed_vcs(**overrides: object) -> dict[str, object]:
@@ -105,3 +105,54 @@ def test_session_report_carries_a_well_formed_vcs_section() -> None:
 
     assert report.vcs is not None
     assert report.vcs.commit == "a" * 40
+
+
+def _minimal_result_entry(**overrides: object) -> dict[str, object]:
+    """The pre-`failure-capture` wire shape: no failure-evidence keys at
+    all, the exact shape an older plugin still sends (design.md D75)."""
+    payload: dict[str, object] = {
+        "node_id": "packages/vantage/tests/test_x.py::test_case",
+        "file_path": "packages/vantage/tests/test_x.py",
+        "class_name": None,
+        "function_name": "test_case",
+        "param_id": None,
+        "outcome": "passed",
+        "duration": 0.0031,
+        "started_at": None,
+        "finished_at": None,
+        "setup_outcome": "passed",
+        "call_outcome": "passed",
+        "teardown_outcome": "passed",
+        "setup_duration": 0.0008,
+        "call_duration": 0.0019,
+        "teardown_duration": 0.0004,
+        "worker_id": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_result_report_failure_evidence_fields_all_default_to_absent() -> None:
+    """design.md D75: every new failure-evidence field on `ResultReport` is
+    optional and defaults to the absent shape, so an older plugin's report
+    -- carrying none of these keys -- still validates. *(session-ingestion →
+    Optional failure-evidence fields)*"""
+    report = ResultReport.model_validate(_minimal_result_entry())
+
+    assert report.failure_type is None
+    assert report.failure_message is None
+    assert report.failure_message_truncated is False
+    assert report.failure_path is None
+    assert report.failure_lineno is None
+    assert report.failure_repr is None
+    assert report.failure_repr_truncated is False
+    assert report.traceback is None
+    assert report.traceback_truncated is False
+    assert report.skip_reason is None
+    assert report.skip_reason_truncated is False
+    assert report.xfail_reason is None
+    assert report.xfail_reason_truncated is False
+    assert report.captured_stdout is None
+    assert report.captured_stdout_truncated is False
+    assert report.captured_stderr is None
+    assert report.captured_stderr_truncated is False

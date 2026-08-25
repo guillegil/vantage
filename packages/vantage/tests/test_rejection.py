@@ -173,6 +173,31 @@ def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore
     assert store.count_executions() == 0
 
 
+def test_a_report_exceeding_the_size_cap_with_failure_evidence_stores_nothing(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """session-ingestion → A report exceeding the size cap stores nothing
+    (task 6.13): the encoded body -- failure evidence included -- exceeds
+    `MAX_REPORT_BYTES`; the run table stays empty. Whole-report rejection,
+    unchanged by `failure-capture` -- the same `413` `_read_bounded_body`
+    already raises for any oversized field."""
+    oversized_report = _well_formed_report()
+    oversized_report["results"] = [
+        _result_entry(
+            "packages/vantage/tests/test_f.py::test_one",
+            outcome="failed",
+            traceback="x" * (MAX_REPORT_BYTES + 1),
+        )
+    ]
+
+    response = client.post("/api/v1/runs", json=oversized_report)
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"] == "payload_too_large"
+    assert store.count_executions() == 0
+
+
 @pytest.mark.req(id="RQ-42")
 def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
     import json

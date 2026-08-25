@@ -75,6 +75,31 @@ def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
     return entry
 
 
+def _failing_result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
+    """A `results[]` entry carrying failure evidence -- the wire shape
+    design.md's "Interfaces / Contracts" example gives (D75), for the
+    newer-plugin ingestion scenarios."""
+    entry = _result_entry(node_id, outcome="failed", **overrides)
+    entry.setdefault("failure_type", "AssertionError")
+    entry.setdefault("failure_message", "AssertionError: assert 1200 == 1320")
+    entry.setdefault("failure_message_truncated", False)
+    entry.setdefault("failure_path", "tests/helpers/pricing.py")
+    entry.setdefault("failure_lineno", 47)
+    entry.setdefault("failure_repr", "AssertionError('assert 1200 == 1320')")
+    entry.setdefault("failure_repr_truncated", False)
+    entry.setdefault("traceback", "tests/test_orders.py:19: in test_total_includes_tax\n    ...")
+    entry.setdefault("traceback_truncated", False)
+    entry.setdefault("skip_reason", None)
+    entry.setdefault("skip_reason_truncated", False)
+    entry.setdefault("xfail_reason", None)
+    entry.setdefault("xfail_reason_truncated", False)
+    entry.setdefault("captured_stdout", "")
+    entry.setdefault("captured_stdout_truncated", False)
+    entry.setdefault("captured_stderr", None)
+    entry.setdefault("captured_stderr_truncated", False)
+    return entry
+
+
 @pytest.fixture
 def store() -> InMemoryExecutionStore:
     return InMemoryExecutionStore()
@@ -297,6 +322,92 @@ def test_unknown_result_key_is_tolerated_and_named_deduplicated_in_ignored(
     body = response.json()
     assert body["ignored"] == ["results[].tags"]
     assert store.count_results() == 2
+
+
+def test_an_older_plugin_omitting_failure_fields_still_stores_run_and_results(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """session-ingestion → An older plugin omitting the fields still stores
+    its run and results (task 6.10): a report shaped exactly like every
+    pre-`failure-capture` report -- no failure-evidence keys at all -- still
+    stores one run and its results, every failure field absent."""
+    report = _well_formed_report("5" + "0" * 31)
+    report["results"] = [_result_entry("packages/vantage/tests/test_d.py::test_one")]
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert store.count_executions() == 1
+    assert store.count_results() == 1
+    [result] = store.get_results("5" + "0" * 31)
+    assert result.failure is None
+    assert result.captured.stdout is None
+    assert result.captured.stderr is None
+
+
+def test_a_newer_plugins_failure_evidence_fields_are_persisted(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """session-ingestion → A newer plugin's failure-evidence fields are
+    persisted (task 6.11): a report carrying the new fields round-trips
+    through storage."""
+    report = _well_formed_report("5" + "2" * 31)
+    report["results"] = [_failing_result_entry("packages/vantage/tests/test_g.py::test_one")]
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    [result] = store.get_results("5" + "2" * 31)
+    assert result.failure is not None
+    assert result.failure.failure_type == "AssertionError"
+    assert result.failure.failure_message == "AssertionError: assert 1200 == 1320"
+    assert (
+        result.failure.traceback == "tests/test_orders.py:19: in test_total_includes_tax\n    ..."
+    )
+    assert result.captured.stdout == ""
+    assert result.captured.stderr is None
+
+
+def test_an_older_server_tolerates_unrecognized_failure_evidence_keys(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """session-ingestion → An older server tolerates a newer plugin's
+    failure-evidence fields (task 6.12): an unrecognized key under
+    `ResultReport`'s existing `extra="allow"` tolerance is accepted and its
+    name surfaces, deduplicated, in `Acknowledgement.ignored`."""
+    report = _well_formed_report("5" + "1" * 31)
+    report["results"] = [
+        _result_entry(
+            "packages/vantage/tests/test_e.py::test_one",
+            outcome="failed",
+            failure_context_extra="unexpected-future-field",
+        )
+    ]
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["ignored"] == ["results[].failure_context_extra"]
+    assert store.count_results() == 1
+
+
+def test_a_report_carrying_failure_evidence_within_the_cap_is_accepted_normally(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """session-ingestion → A report carrying failure evidence within the cap
+    is accepted normally (task 6.14): one run row, results stored with their
+    fields, response acknowledges."""
+    report = _well_formed_report("5" + "3" * 31)
+    report["results"] = [_failing_result_entry("packages/vantage/tests/test_h.py::test_one")]
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["status"] == "created"
+    assert store.count_executions() == 1
+    assert store.count_results() == 1
 
 
 @pytest.mark.req(id="RQ-9")

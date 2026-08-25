@@ -110,6 +110,13 @@ class ResultReport(BaseModel):
     corresponding phase may never have run (RQ-5.2) or the identity
     component may genuinely be absent (RQ-9.2/9.3).
 
+    **The failure-evidence fields below are the one exception to "every
+    known field is required with no default."** An older plugin's report
+    predates every one of them, so each defaults to the absent shape
+    (`None`/`False`) rather than rejecting (design.md D75).
+    `routes/runs.py`'s `_to_failure_evidence`/`_to_captured_output` OR each
+    `*_truncated` flag with the server's own bound, never assign it.
+
     `class_name` and `param_id` are plain `str | None`, never a
     length-constrained string: `param_id=""` (RQ-9's extension scenario)
     must arrive intact. **No `min_length=1`, no validator that coerces a
@@ -138,6 +145,23 @@ class ResultReport(BaseModel):
     call_duration: float | None
     teardown_duration: float | None
     worker_id: str | None
+    failure_type: str | None = None
+    failure_message: str | None = None
+    failure_message_truncated: bool = False
+    failure_path: str | None = None
+    failure_lineno: int | None = None
+    failure_repr: str | None = None
+    failure_repr_truncated: bool = False
+    traceback: str | None = None
+    traceback_truncated: bool = False
+    skip_reason: str | None = None
+    skip_reason_truncated: bool = False
+    xfail_reason: str | None = None
+    xfail_reason_truncated: bool = False
+    captured_stdout: str | None = None
+    captured_stdout_truncated: bool = False
+    captured_stderr: str | None = None
+    captured_stderr_truncated: bool = False
 
 
 class VcsReport(BaseModel):
