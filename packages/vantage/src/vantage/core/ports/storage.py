@@ -184,7 +184,14 @@ class ExecutionStore(Protocol):
         Same clamp and `has_more` mechanism as `list_runs` (design.md D61).
         Each entry's failure data is a lean `FailureProjection`, mirroring
         `list_runs`' `VcsProjection` treatment of VCS data (design.md D59,
-        D76). `get_result` reaches the full unbounded record (Phase 7, PR2)."""
+        D76) -- the full record is reachable via `get_result`."""
+        ...
+
+    def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
+        """Return the full record for one result, or None if no result with
+        that `node_id` is stored for `execution_id` (design.md D77, D78) --
+        the complement of `list_results`' bounded projection. `failure` and
+        `captured` are populated in full, unbounded."""
         ...
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:

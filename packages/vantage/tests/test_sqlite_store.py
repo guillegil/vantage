@@ -13,9 +13,23 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from vantage.core.domain.result import CapturedOutput
 from vantage.core.ports.storage import ExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import ExecutionStoreContract, _execution, _start_only_execution
+
+# The pre-`failure-capture` `_INSERT_RESULT` shape (14 bound columns, no
+# failure/captured-output columns at all) -- kept here as a fixture-building
+# constant, never imported from `sqlite_store.py`, so a future edit to the
+# CURRENT `_INSERT_RESULT` cannot accidentally rewrite history under this
+# test's feet.
+_OLD_INSERT_RESULT = """
+    INSERT INTO result (
+        run_id, test_case_id, node_id, outcome, duration, started_at, finished_at,
+        setup_outcome, call_outcome, teardown_outcome,
+        setup_duration, call_duration, teardown_duration, worker_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
 
 
 class TestSqliteExecutionStore(ExecutionStoreContract):
@@ -145,3 +159,83 @@ def test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository(
         assert truncated_type == "integer"
     finally:
         store.close()
+
+
+def test_an_existing_pre_change_database_opens_unrefused_and_reads_back_its_rows(
+    tmp_path: Path,
+) -> None:
+    """ADR-0013's non-firing, proven not assumed (design.md D80): a
+    database written by the pre-`failure-capture` 14-column
+    `_INSERT_RESULT` (`schema_version` stays `2`, unchanged by this whole
+    change -- `git diff schema.sql` is empty, RQ-29) opens unrefused under
+    the widened adapter, and its pre-existing row reads back with `NULL` in
+    every new failure/captured-output column."""
+    db_path = tmp_path / "store" / "pre_change.db"
+
+    # Phase 1: write the fixture with the OLD 14-column result insert,
+    # directly against a freshly-opened connection -- a database this
+    # change's widened `_INSERT_RESULT` never wrote a row into. The run row
+    # and catalogue entry go through the ordinary (unaffected) API.
+    writer = SqliteExecutionStore(db_path)
+    try:
+        execution = _execution("9" * 32)
+        writer.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        conn = writer._conn  # noqa: SLF001
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "INSERT INTO test_case (stable_id, node_id, file_path, class_name, function_name,"
+            " param_id, first_seen_at, last_seen_at, last_seen_run_id)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "t.py::test_old",
+                "t.py::test_old",
+                "t.py",
+                None,
+                "test_old",
+                None,
+                execution.started_at.isoformat(),
+                execution.started_at.isoformat(),
+                "9" * 32,
+            ),
+        )
+        test_case_id = conn.execute(
+            "SELECT id FROM test_case WHERE node_id = ?", ("t.py::test_old",)
+        ).fetchone()[0]
+        conn.execute(
+            _OLD_INSERT_RESULT,
+            (
+                "9" * 32,
+                test_case_id,
+                "t.py::test_old",
+                "passed",
+                0.01,
+                execution.started_at.isoformat(),
+                execution.started_at.isoformat(),
+                "passed",
+                "passed",
+                "passed",
+                0.001,
+                0.001,
+                0.001,
+                None,
+            ),
+        )
+        conn.execute("COMMIT")
+    finally:
+        writer.close()
+
+    # Phase 2: open the SAME file as a brand-new adapter instance -- the
+    # assertion under test. Constructing `SqliteExecutionStore` re-runs
+    # `open_database`'s schema-version check; it must not raise.
+    reader = SqliteExecutionStore(db_path)
+    try:
+        assert reader.get_execution("9" * 32) is not None
+
+        result = reader.get_result("9" * 32, node_id="t.py::test_old")
+        assert result is not None
+        assert result.failure is None
+        assert result.captured == CapturedOutput(
+            stdout=None, stdout_truncated=False, stderr=None, stderr_truncated=False
+        )
+    finally:
+        reader.close()

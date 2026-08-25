@@ -251,6 +251,9 @@ class InMemoryExecutionStore:
         )
         return Page(items=items, has_more=has_more)
 
+    def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
+        return self._results.get((execution_id, node_id, _ATTEMPT))
+
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
         # Mirrors `list_runs`' total order -- `(started_at, run_id)`
         # descending -- over every execution that has a result for this

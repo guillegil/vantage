@@ -1053,3 +1053,73 @@ class ExecutionStoreContract:
         assert "traceback" not in field_names
         assert "failure_repr" not in field_names
         assert "captured" not in field_names
+
+    def test_get_result_returns_the_full_record_hit(self, store: ExecutionStore) -> None:
+        """history-read-api -> Single result detail -> The full record is
+        reachable (port half, design.md D77, D78): `get_result` returns the
+        whole stored `Result`, `failure`/`captured` populated in full,
+        unbounded."""
+        execution = _execution("a" * 32)
+        failure = _failure()
+        captured = _captured(stdout="captured output", stderr="")
+        store.record_session(
+            execution,
+            results=(
+                _result("t.py::test_x", outcome="failed", failure=failure, captured=captured),
+            ),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+
+        assert found is not None
+        assert found.identity.node_id == "t.py::test_x"
+        assert found.failure == failure
+        assert found.captured == captured
+
+    def test_get_result_returns_none_for_unknown_node_id_miss(self, store: ExecutionStore) -> None:
+        execution = _execution("a" * 32)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        assert store.get_result(execution.identity.value, node_id="t.py::test_never_ran") is None
+
+    def test_get_result_truncation_flag_travels_with_the_field(self, store: ExecutionStore) -> None:
+        """A bounded field's truncation flag travels with it -- port half
+        (design.md D77): `get_result`'s `traceback_truncated` is exactly
+        what was stored, never dropped or defaulted."""
+        execution = _execution("a" * 32)
+        failure = _failure(traceback="a truncated traceback", traceback_truncated=True)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+
+        assert found is not None
+        assert found.failure is not None
+        assert found.failure.traceback == "a truncated traceback"
+        assert found.failure.traceback_truncated is True
+
+    def test_captured_output_empty_versus_absent_round_trips_through_storage(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D77's asymmetry: `""` (captured, empty) and `None`
+        (never captured) round-trip distinctly through storage, both
+        adapters -- collapsing `""` to `None` (a truthy check on the
+        string) would make the two indistinguishable."""
+        execution = _execution("a" * 32)
+        empty_captured = _captured(stdout="", stderr=None)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x", captured=empty_captured),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+
+        assert found is not None
+        assert found.captured.stdout == ""
+        assert found.captured.stdout_truncated is False
+        assert found.captured.stderr is None

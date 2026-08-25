@@ -461,25 +461,13 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
         assert stored.finished_at == execution.finished_at
         assert stored.exit_status == execution.exit_status
 
-        # `get_result` lands in PR2 of this two-PR slice; the widened
-        # insert is verified here by reading the raw stored columns
-        # directly, the same pattern
-        # `test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository`
-        # already uses.
-        row = counting._real.execute(  # noqa: SLF001
-            "SELECT failure_type, failure_message, captured_stdout, captured_stderr"
-            " FROM result WHERE run_id = ? AND node_id = ?",
-            (
-                execution.identity.value,
-                "packages/vantage/tests/test_bulk.py::test_0",
-            ),
-        ).fetchone()
-        assert row == (
-            failure.failure_type,
-            failure.failure_message,
-            captured.stdout,
-            captured.stderr,
+        found = adapter.get_result(
+            execution.identity.value,
+            node_id="packages/vantage/tests/test_bulk.py::test_0",
         )
+        assert found is not None
+        assert found.failure == failure
+        assert found.captured == captured
     finally:
         adapter.close()
 

@@ -228,15 +228,46 @@ _INSERT_RESULT = """
     ON CONFLICT(run_id, node_id, attempt) DO NOTHING
 """
 
+# Widened from 16 to 33 columns (design.md D80) -- the full, unbounded
+# record `get_results`/`get_result` return; every failure/captured-output
+# column is selected here, unlike the lean `_LIST_RESULTS` below.
 _SELECT_RESULTS_FOR_RUN = """
     SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
            r.outcome, r.duration, r.started_at, r.finished_at,
            r.setup_outcome, r.call_outcome, r.teardown_outcome,
-           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id
+           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id,
+           r.failure_type, r.failure_message, r.failure_message_truncated,
+           r.failure_path, r.failure_lineno,
+           r.failure_repr, r.failure_repr_truncated,
+           r.traceback, r.traceback_truncated,
+           r.skip_reason, r.skip_reason_truncated,
+           r.xfail_reason, r.xfail_reason_truncated,
+           r.captured_stdout, r.captured_stdout_truncated,
+           r.captured_stderr, r.captured_stderr_truncated
     FROM result r
     JOIN test_case tc ON tc.id = r.test_case_id
     WHERE r.run_id = ?
     ORDER BY r.id
+"""
+
+# `get_result`'s SELECT -- the same full-record column set as
+# `_SELECT_RESULTS_FOR_RUN`, narrowed to one `node_id` (design.md D77, D78).
+_SELECT_RESULT = """
+    SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
+           r.outcome, r.duration, r.started_at, r.finished_at,
+           r.setup_outcome, r.call_outcome, r.teardown_outcome,
+           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id,
+           r.failure_type, r.failure_message, r.failure_message_truncated,
+           r.failure_path, r.failure_lineno,
+           r.failure_repr, r.failure_repr_truncated,
+           r.traceback, r.traceback_truncated,
+           r.skip_reason, r.skip_reason_truncated,
+           r.xfail_reason, r.xfail_reason_truncated,
+           r.captured_stdout, r.captured_stdout_truncated,
+           r.captured_stderr, r.captured_stderr_truncated
+    FROM result r
+    JOIN test_case tc ON tc.id = r.test_case_id
+    WHERE r.run_id = ? AND r.node_id = ?
 """
 
 # `list_results`' SELECT -- the paginated, LEAN sibling of
@@ -476,6 +507,73 @@ def _row_to_history_entry(row: tuple[object, ...]) -> HistoryEntry:
     )
 
 
+def _row_to_failure_evidence(row: tuple[object, ...]) -> FailureEvidence | None:
+    """The all-null-or-false normalisation rule (design.md D48, D77),
+    applied to all thirteen stored `FailureEvidence` columns -- mirrors
+    `_row_to_vcs_context`'s rule, widened from five value columns to
+    thirteen: a result with no failure evidence at all reads back as
+    `None`, never as a `FailureEvidence` full of nulls."""
+    (
+        failure_type,
+        failure_message,
+        failure_message_truncated,
+        failure_path,
+        failure_lineno,
+        failure_repr,
+        failure_repr_truncated,
+        traceback,
+        traceback_truncated,
+        skip_reason,
+        skip_reason_truncated,
+        xfail_reason,
+        xfail_reason_truncated,
+    ) = row
+    if (
+        failure_type is None
+        and failure_message is None
+        and not failure_message_truncated
+        and failure_path is None
+        and failure_lineno is None
+        and failure_repr is None
+        and not failure_repr_truncated
+        and traceback is None
+        and not traceback_truncated
+        and skip_reason is None
+        and not skip_reason_truncated
+        and xfail_reason is None
+        and not xfail_reason_truncated
+    ):
+        return None
+    return FailureEvidence(
+        failure_type=cast("str | None", failure_type),
+        failure_message=cast("str | None", failure_message),
+        failure_message_truncated=bool(failure_message_truncated),
+        failure_path=cast("str | None", failure_path),
+        failure_lineno=cast("int | None", failure_lineno),
+        failure_repr=cast("str | None", failure_repr),
+        failure_repr_truncated=bool(failure_repr_truncated),
+        traceback=cast("str | None", traceback),
+        traceback_truncated=bool(traceback_truncated),
+        skip_reason=cast("str | None", skip_reason),
+        skip_reason_truncated=bool(skip_reason_truncated),
+        xfail_reason=cast("str | None", xfail_reason),
+        xfail_reason_truncated=bool(xfail_reason_truncated),
+    )
+
+
+def _row_to_captured_output(row: tuple[object, ...]) -> CapturedOutput:
+    """Never `None` (design.md D77's asymmetry) -- reads the four columns
+    straight through, so a stored `''` reads back as `''`, never coerced to
+    `None`."""
+    stdout, stdout_truncated, stderr, stderr_truncated = row
+    return CapturedOutput(
+        stdout=cast("str | None", stdout),
+        stdout_truncated=bool(stdout_truncated),
+        stderr=cast("str | None", stderr),
+        stderr_truncated=bool(stderr_truncated),
+    )
+
+
 def _row_to_failure_projection(
     failure_type: object,
     failure_message: object,
@@ -526,6 +624,7 @@ def _row_to_result(row: tuple[object, ...]) -> Result:
         call_duration,
         teardown_duration,
         worker_id,
+        *failure_and_captured,
     ) = row
     return Result(
         identity=CaseIdentity(
@@ -546,6 +645,8 @@ def _row_to_result(row: tuple[object, ...]) -> Result:
         call_duration=cast("float | None", call_duration),
         teardown_duration=cast("float | None", teardown_duration),
         worker_id=cast("str | None", worker_id),
+        failure=_row_to_failure_evidence(tuple(failure_and_captured[:13])),
+        captured=_row_to_captured_output(tuple(failure_and_captured[13:])),
     )
 
 
@@ -884,6 +985,12 @@ class SqliteExecutionStore:
         has_more = len(rows) > page_limit
         items = tuple(_row_to_result_list_entry(row) for row in rows[:page_limit])
         return Page(items=items, has_more=has_more)
+
+    def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
+        row = self._conn.execute(_SELECT_RESULT, (execution_id, node_id)).fetchone()
+        if row is None:
+            return None
+        return _row_to_result(row)
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
         # `node_id` is always a bound parameter, never interpolated into SQL
