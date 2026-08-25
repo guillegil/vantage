@@ -169,18 +169,21 @@ components:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs]
       properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
-    # No traceback or captured output. Those columns have no writer yet, so
-    # their exclusion is unfailable by construction rather than enforced --
-    # recorded honestly here and beside the assertion this change does not
-    # add (history-read-api -> Lean list projections, Inspection).
-    ResultItem:
+    # No traceback, failure_repr or captured output at any depth -- the
+    # exclusion is structural now that `failure-evidence` populates them
+    # (history-read-api -> Lean list projections, Test, design.md D76).
+    FailureProjection:
       type: object
-      required: [node_id, file_path, class_name, function_name, param_id, outcome, duration, started_at, finished_at, setup_outcome, call_outcome, teardown_outcome, setup_duration, call_duration, teardown_duration, worker_id]
-      properties: {node_id: {type: string}, file_path: {type: string}, class_name: {type: [string, "null"]}, function_name: {type: string}, param_id: {type: [string, "null"]}, outcome: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}, duration: {type: [number, "null"]}, started_at: {type: [string, "null"], format: date-time}, finished_at: {type: [string, "null"], format: date-time}, setup_outcome: {type: [string, "null"]}, call_outcome: {type: [string, "null"]}, teardown_outcome: {type: [string, "null"]}, setup_duration: {type: [number, "null"]}, call_duration: {type: [number, "null"]}, teardown_duration: {type: [number, "null"]}, worker_id: {type: [string, "null"]}}
+      required: [failure_type, failure_message, failure_message_truncated, failure_path, failure_lineno, skip_reason, xfail_reason]
+      properties: {failure_type: {type: [string, "null"]}, failure_message: {type: [string, "null"]}, failure_message_truncated: {type: boolean}, failure_path: {type: [string, "null"]}, failure_lineno: {type: [integer, "null"]}, skip_reason: {type: [string, "null"]}, xfail_reason: {type: [string, "null"]}}
+    ResultListItem:
+      type: object
+      required: [node_id, file_path, class_name, function_name, param_id, outcome, duration, started_at, finished_at, setup_outcome, call_outcome, teardown_outcome, setup_duration, call_duration, teardown_duration, worker_id, failure]
+      properties: {node_id: {type: string}, file_path: {type: string}, class_name: {type: [string, "null"]}, function_name: {type: string}, param_id: {type: [string, "null"]}, outcome: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}, duration: {type: [number, "null"]}, started_at: {type: [string, "null"], format: date-time}, finished_at: {type: [string, "null"], format: date-time}, setup_outcome: {type: [string, "null"]}, call_outcome: {type: [string, "null"]}, teardown_outcome: {type: [string, "null"]}, setup_duration: {type: [number, "null"]}, call_duration: {type: [number, "null"]}, teardown_duration: {type: [number, "null"]}, worker_id: {type: [string, "null"]}, failure: {oneOf: [{$ref: '#/components/schemas/FailureProjection'}, {type: "null"}]}}
     ResultsResponse:
       type: object
       required: [items, has_more]
-      properties: {items: {type: array, items: {$ref: '#/components/schemas/ResultItem'}}, has_more: {type: boolean}}
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/ResultListItem'}}, has_more: {type: boolean}}
     HistoryEntry:
       type: object
       required: [run_id, started_at, finished_at, outcome, duration, vcs]

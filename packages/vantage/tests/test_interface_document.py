@@ -48,10 +48,11 @@ from vantage.core.domain.result import OUTCOMES
 from vantage.service.app import create_app
 from vantage.service.schemas import (
     Acknowledgement,
+    FailureProjectionResponse,
     HeartbeatAcknowledgement,
     HistoryEntryResponse,
     HistoryResponse,
-    ResultItemResponse,
+    ResultListItemResponse,
     ResultsResponse,
     RunDetailResponse,
     RunListItemResponse,
@@ -286,7 +287,8 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "RunListItem": RunListItemResponse,
     "RunListResponse": RunListResponse,
     "RunDetailResponse": RunDetailResponse,
-    "ResultItem": ResultItemResponse,
+    "FailureProjection": FailureProjectionResponse,
+    "ResultListItem": ResultListItemResponse,
     "ResultsResponse": ResultsResponse,
     "HistoryEntry": HistoryEntryResponse,
     "HistoryResponse": HistoryResponse,
@@ -302,7 +304,7 @@ _BOUND_MODELS: dict[str, type[BaseModel]] = {**_REQUEST_SCHEMAS, **_RESPONSE_SCH
 _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
     ("RunListItem", "presentation"): PRESENTATIONS,
     ("RunDetailResponse", "presentation"): PRESENTATIONS,
-    ("ResultItem", "outcome"): OUTCOMES,
+    ("ResultListItem", "outcome"): OUTCOMES,
     ("HistoryEntry", "outcome"): OUTCOMES,
 }
 

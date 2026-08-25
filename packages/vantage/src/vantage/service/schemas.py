@@ -317,10 +317,29 @@ class RunDetailResponse(BaseModel):
     vcs: RunVcsResponse | None
 
 
-class ResultItemResponse(BaseModel):
-    """One entry of `ResultsResponse` (design.md D57). Traceback/captured
-    output are excluded, unfailable by construction -- `Result` has no such
-    field yet (task 7.6). Built field by field in `routes/read.py`."""
+class FailureProjectionResponse(BaseModel):
+    """The lean failure projection nested on `ResultListItemResponse`
+    (design.md D76). No `traceback`, `failure_repr` or captured-output
+    field at all -- the exclusion is structural, the same defence
+    `RunVcsResponse` gives `vcs_root` (D59): a results list has nothing to
+    leak because this model never carries those fields in the first
+    place."""
+
+    failure_type: str | None
+    failure_message: str | None
+    failure_message_truncated: bool
+    failure_path: str | None
+    failure_lineno: int | None
+    skip_reason: str | None
+    xfail_reason: str | None
+
+
+class ResultListItemResponse(BaseModel):
+    """One entry of `ResultsResponse` (design.md D57, D76). `failure` is a
+    lean `FailureProjectionResponse`, never the full failure evidence --
+    the full record is reachable via `ResultDetailResponse`, the
+    single-result endpoint's response model. Built field by field in
+    `routes/read.py`, never `model_validate(..., from_attributes=True)`."""
 
     node_id: str
     file_path: str
@@ -338,13 +357,14 @@ class ResultItemResponse(BaseModel):
     call_duration: float | None
     teardown_duration: float | None
     worker_id: str | None
+    failure: FailureProjectionResponse | None
 
 
 class ResultsResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}/results` (design.md
     D57, D61)."""
 
-    items: list[ResultItemResponse]
+    items: list[ResultListItemResponse]
     has_more: bool
 
 

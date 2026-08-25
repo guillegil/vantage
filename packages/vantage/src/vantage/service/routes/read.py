@@ -25,6 +25,12 @@ a path segment (design.md D54) -- the parameter name is the identity
 scheme, so a later `?stable_id=` arrives as an additive sibling. `node_id`
 is bounded at `MAX_IDENTITY_CHARS`; a missing or over-long value is shaped
 by `service/errors.py`'s `InvalidIdentityError`, never a proxy `414`.
+
+**Phase 8** leans `list_results`' projection (design.md D76, D77):
+`list_results` now reads a page of `ResultListEntry` -- identity, outcome,
+timings and a lean `FailureProjection`, never the full `FailureEvidence` or
+captured output. The single-result complement that reaches the full record
+is a later slice of this phase.
 """
 
 from __future__ import annotations
@@ -36,20 +42,21 @@ from fastapi import APIRouter, Path, Query, Request, Response
 
 from vantage.core.domain.execution import VcsContext
 from vantage.core.domain.liveness import derive_presentation
-from vantage.core.domain.projection import VcsProjection
-from vantage.core.domain.result import Result
+from vantage.core.domain.projection import FailureProjection, VcsProjection
 from vantage.core.ports.storage import (
     MAX_IDENTITY_CHARS,
     MAX_PAGE_ITEMS,
     HistoryEntry,
+    ResultListEntry,
     RunDetail,
     RunListEntry,
 )
 from vantage.service.errors import UnknownRunError
 from vantage.service.schemas import (
+    FailureProjectionResponse,
     HistoryEntryResponse,
     HistoryResponse,
-    ResultItemResponse,
+    ResultListItemResponse,
     ResultsResponse,
     RunDetailResponse,
     RunListItemResponse,
@@ -117,27 +124,49 @@ def _run_detail_response(
     )
 
 
-def _result_item(result: Result) -> ResultItemResponse:
-    """Field by field -- `Result` has no traceback/captured-output field
-    yet, so that exclusion holds by construction (task 7.6)."""
-    identity = result.identity
-    return ResultItemResponse(
+def _failure_projection_response(
+    failure: FailureProjection | None,
+) -> FailureProjectionResponse | None:
+    """Field by field, from the lean `FailureProjection` a list entry
+    carries -- never the full `FailureEvidence` (design.md D76)."""
+    if failure is None:
+        return None
+    return FailureProjectionResponse(
+        failure_type=failure.failure_type,
+        failure_message=failure.failure_message,
+        failure_message_truncated=failure.failure_message_truncated,
+        failure_path=failure.failure_path,
+        failure_lineno=failure.failure_lineno,
+        skip_reason=failure.skip_reason,
+        xfail_reason=failure.xfail_reason,
+    )
+
+
+def _result_item(entry: ResultListEntry) -> ResultListItemResponse:
+    """Field by field -- `entry` is the lean `ResultListEntry`
+    `list_results` returns (design.md D76, D77), never the full `Result`;
+    `failure` is `entry.failure`'s own `FailureProjection`, which has no
+    field to carry `traceback`, `failure_repr` or captured output at all
+    (task 8.1)."""
+    identity = entry.identity
+    return ResultListItemResponse(
         node_id=identity.node_id,
         file_path=identity.file_path,
         class_name=identity.class_name,
         function_name=identity.function_name,
         param_id=identity.param_id,
-        outcome=result.outcome,
-        duration=result.duration,
-        started_at=result.started_at,
-        finished_at=result.finished_at,
-        setup_outcome=result.setup_outcome,
-        call_outcome=result.call_outcome,
-        teardown_outcome=result.teardown_outcome,
-        setup_duration=result.setup_duration,
-        call_duration=result.call_duration,
-        teardown_duration=result.teardown_duration,
-        worker_id=result.worker_id,
+        outcome=entry.outcome,
+        duration=entry.duration,
+        started_at=entry.started_at,
+        finished_at=entry.finished_at,
+        setup_outcome=entry.setup_outcome,
+        call_outcome=entry.call_outcome,
+        teardown_outcome=entry.teardown_outcome,
+        setup_duration=entry.setup_duration,
+        call_duration=entry.call_duration,
+        teardown_duration=entry.teardown_duration,
+        worker_id=entry.worker_id,
+        failure=_failure_projection_response(entry.failure),
     )
 
 
@@ -206,7 +235,7 @@ async def list_results(
     if store.get_execution(run_id) is None:
         raise UnknownRunError()
     page = store.list_results(run_id, limit=limit, offset=offset)
-    items = [_result_item(result) for result in page.items]
+    items = [_result_item(entry) for entry in page.items]
     return ResultsResponse(items=items, has_more=page.has_more)
 
 

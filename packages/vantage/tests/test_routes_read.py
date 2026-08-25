@@ -35,13 +35,13 @@ from typing import cast
 import pytest
 from fastapi.testclient import TestClient
 from vantage.core.domain.execution import Execution, Identity, VcsContext
-from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS
+from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, LIST_FAILURE_MESSAGE_CHARS
 from vantage.core.domain.result import CaseIdentity, Result
 from vantage.core.ports.storage import ExecutionStore, HistoryEntry, Page
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _result
+from vantage_port_contract import _captured, _failure, _result
 
 _KNOWN_ROOT = "/home/example/very-unique-repo-root-xyz123"
 
@@ -726,15 +726,64 @@ def test_results_route_returns_paginated_envelope(
     item = body["items"][0]
     assert item["node_id"] == "tests/test_a.py::test_one"
     assert item["outcome"] == "passed"
-    # No `assert "traceback" not in item` here (task 7.6, history-read-api ->
-    # Lean list projections -> Inspection). `Result` has no traceback or
-    # captured-output field yet -- nothing this route could serve even if it
-    # tried -- so an exclusion assertion on this body would pass whether the
-    # exclusion is real or the field simply does not exist, which is not a
-    # test, only the appearance of one. This stays Inspection, honestly,
-    # until failure capture lands a `traceback` field on `Result`; only then
-    # does `ResultItemResponse` omitting it become a claim this test can
-    # falsify.
+
+
+# --- 8.1 ----------------------------------------------------------------
+
+_SENTINEL_TRACEBACK = "SENTINEL-TRACEBACK-8f6c1a"
+
+
+def test_results_route_response_excludes_traceback_and_captured_output_sentinel(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(history-read-api -> Lean list projections -> List responses
+    exclude traceback and captured output, now Test)*. A distinctive
+    sentinel planted in the stored traceback, failure repr and captured
+    stdout must be absent from the raw list response body -- asserted
+    against the raw text, not a parsed model, because a parsed model can
+    only show fields someone thought to check for."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(70)
+    failure = _failure(traceback=_SENTINEL_TRACEBACK, failure_repr=_SENTINEL_TRACEBACK)
+    captured = _captured(stdout=_SENTINEL_TRACEBACK)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[_result("t.py::test_x", outcome="failed", failure=failure, captured=captured)],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/results")
+
+    assert response.status_code == 200
+    assert _SENTINEL_TRACEBACK not in response.text
+
+
+# --- 8.2 ----------------------------------------------------------------
+
+
+def test_results_route_includes_bounded_failure_message_and_disjunction_flag(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(history-read-api -> Lean list projections; design.md D76)*. A
+    stored message over `LIST_FAILURE_MESSAGE_CHARS` arrives in the list
+    entry bounded to the first 200 characters, with the disjunction flag
+    set."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(71)
+    long_message = "E" * (LIST_FAILURE_MESSAGE_CHARS + 51)
+    failure = _failure(failure_message=long_message, failure_message_truncated=False)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[_result("t.py::test_x", outcome="failed", failure=failure)],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/results")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["failure"]["failure_message"] == long_message[:LIST_FAILURE_MESSAGE_CHARS]
+    assert item["failure"]["failure_message_truncated"] is True
 
 
 def test_result_item_carries_every_stored_column_by_value(
@@ -811,6 +860,7 @@ def test_result_item_carries_every_stored_column_by_value(
         "call_duration": 4.0,
         "teardown_duration": 0.0625,
         "worker_id": "gw7",
+        "failure": None,
     }
 
 
