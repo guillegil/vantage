@@ -220,18 +220,36 @@ Modifies `packages/vantage/src/vantage/core/ports/storage.py`,
 `test_storage_types.py`, `test_sqlite_store.py`, `test_memory_store.py`,
 `test_ingestion.py`. **Port method and both adapters land together.**
 
-- [ ] 7.1 RED `test_storage_types.py::test_result_list_entry_carries_identity_outcome_timings_worker_and_failure_projection` — `ResultListEntry` has exactly identity/outcome/timings/`worker_id`/`failure: FailureProjection | None`, no `traceback`/`captured`. *(D77)*
-- [ ] 7.2 GREEN `storage.py`: `ResultListEntry` dataclass.
-- [ ] 7.3 RED `vantage_port_contract.py::test_list_results_projects_failure_evidence_via_failure_projection` — a stored result with a >200-char message; `list_results` entries agree with `project_failure`'s bounding and disjunction. *(D76, two-mechanism agreement)*
-- [ ] 7.4 RED `..._test_list_results_excludes_the_heavy_fields_structurally` — `ResultListEntry` has no field to carry traceback/repr/captured output.
+**Self-split (review budget, 400-line guard):** the whole-phase diff measured
+~800 changed lines against the design's own ~390 estimate — the real
+`FailureEvidence`+`CapturedOutput` field count is 17, not the 13 D80 assumed,
+so the write-side widening alone runs wider than forecast. Split into two
+`feature-branch-chain` PRs at the seam that keeps each half's own RED+GREEN
+pair self-contained: **PR7a (7.1–7.4)** — `ResultListEntry` + the lean
+`list_results` projection, both adapters, including the write-side widening
+(`_INSERT_RESULT`, `_failure_columns`/`_captured_columns`) since 7.3's test
+needs failure data actually persisted to prove the projection. **PR7b
+(7.5–7.14)** — `get_result` + the full-record `SELECT` widening, both
+adapters, plus 7.9's extension and 7.10's pre-change-database test (both
+depend on `get_result`, deferred here). `get_results()` (unbounded, `Sequence
+[Result]`) keeps returning `failure=None`/default `captured` for the
+duration of PR7a alone — the Phase-1 default, unchanged by PR7a — until PR7b
+widens the SELECT that feeds it; nothing calls `get_results()` expecting
+failure data before Phase 8, so this is a real but harmless transient gap
+between the two PRs, not a regression.
+
+- [x] 7.1 RED `test_storage_types.py::test_result_list_entry_carries_identity_outcome_timings_worker_and_failure_projection` — `ResultListEntry` has exactly identity/outcome/timings/`worker_id`/`failure: FailureProjection | None`, no `traceback`/`captured`. *(D77)*
+- [x] 7.2 GREEN `storage.py`: `ResultListEntry` dataclass.
+- [x] 7.3 RED `vantage_port_contract.py::test_list_results_projects_failure_evidence_via_failure_projection` — a stored result with a >200-char message; `list_results` entries agree with `project_failure`'s bounding and disjunction. *(D76, two-mechanism agreement)*
+- [x] 7.4 RED `..._test_list_results_excludes_the_heavy_fields_structurally` — `ResultListEntry` has no field to carry traceback/repr/captured output.
 - [ ] 7.5 RED `..._test_get_result_returns_the_full_record_hit` — `get_result(execution_id, node_id=...)` returns `Result` with `failure`/`captured` populated in full, unbounded. *(history-read-api → Single result detail → The full record is reachable — port half)*
 - [ ] 7.6 RED `..._test_get_result_returns_none_for_unknown_node_id_miss`.
 - [ ] 7.7 RED `..._test_get_result_truncation_flag_travels_with_the_field` — a capture-truncated traceback; `get_result(...).failure.traceback_truncated is True`. *(A bounded field's truncation flag travels with it — port half)*
 - [ ] 7.8 RED `..._test_captured_output_empty_versus_absent_round_trips_through_storage` — `""` vs `None` round-trip distinctly, both adapters.
-- [ ] 7.9 RED `test_ingestion.py::test_finish_report_reaches_storage_in_one_commit` — extend the existing row-count assertions to the wider 27-column insert; still one `BEGIN IMMEDIATE`…`COMMIT`. *(run-recording → Run atomicity — the D80 batch-insert-strategy premise)*
+- [ ] 7.9 RED `test_ingestion.py::test_finish_report_reaches_storage_in_one_commit` — extend the existing row-count assertions to the wider 27-column insert; still one `BEGIN IMMEDIATE`…`COMMIT`. *(run-recording → Run atomicity — the D80 batch-insert-strategy premise)* — the test actually lives in `test_rejection.py`, not `test_ingestion.py` (extended in place; not renamed/moved).
 - [ ] 7.10 RED `test_sqlite_store.py::test_an_existing_pre_change_database_opens_unrefused_and_reads_back_its_rows` — a fixture DB written by the pre-change 14-column insert path opens unrefused under the 27-column adapter; pre-existing rows read back with `NULL` in the new columns. *(ADR-0013's non-firing, proven not assumed)*
 - [ ] 7.11 GREEN `storage.py`: `get_result(execution_id, *, node_id) -> Result | None` on `ExecutionStore`; `list_results` return type becomes `Page[ResultListEntry]`.
-- [ ] 7.12 GREEN `sqlite_store.py`: widen `_INSERT_RESULT` to 27 columns, `_SELECT_RESULTS_FOR_RUN` to 29; implement `get_result`; rewrite `list_results`' `SELECT` to project via `substr`/`COALESCE` (D76, mirroring `_LIST_RUNS`'s commit-subject shape) — no traceback/repr/captured columns selected.
+- [ ] 7.12 GREEN `sqlite_store.py`: widen `_INSERT_RESULT` to 31 columns, `_SELECT_RESULTS_FOR_RUN` to 33 (design.md D80 said 27/29; the actual `FailureEvidence`+`CapturedOutput` field count is 17, not 13 — probed against the real dataclasses and schema.sql, not assumed); implement `get_result`; rewrite `list_results`' `SELECT` to project via `substr`/`COALESCE` (D76, mirroring `_LIST_RUNS`'s commit-subject shape) — no traceback/repr/captured columns selected.
 - [ ] 7.13 GREEN `memory.py`: mirror the same insert/select width, `get_result`, and `list_results` → `ResultListEntry` via `project_failure`.
 - [ ] 7.14 Gate: `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py packages/vantage/tests/test_ingestion.py`; `uv run mypy .` clean — confirms both adapters satisfy the widened Protocol structurally.
 
