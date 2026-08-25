@@ -137,8 +137,23 @@ applies to exactly one thing.
 | `failure_type` | `call.excinfo.typename` | free |
 | `failure_message` | `call.excinfo.exconly()` | free |
 | `failure_repr` | `repr(call.excinfo.value)` | free |
-| `traceback` | `str(item.repr_failure(call.excinfo, style="long"))` | **the second rendering** |
+| `traceback` | `str(item._repr_failure_py(excinfo, style="long"))` | **the second rendering** |
 | `failure_path` / `failure_lineno` | the rendered repr's `reprcrash.path` / `.lineno` | free, given the rendering |
+
+**Corrected against the installed pytest (9.1.1), Phase 3.** This table
+originally read `item.repr_failure(excinfo, style="long")`. That signature no
+longer exists: `Function.repr_failure` (the override actually used for a test
+item) dropped the `style` keyword and reads `config.getoption("tbstyle")`
+internally instead, which would reintroduce the exact `--tb` dependence this
+capability exists to remove, and calling it with `style=` raises `TypeError`.
+The shipped code (`evidence.py::_failure_fields`) calls
+`item._repr_failure_py(excinfo, style="long")` — the method both
+`Node.repr_failure` (still accepts `style`) and `Function.repr_failure`
+delegate to, and `Function` does not override it — inside its own deliberately broad
+`try/except Exception`, per D69's own guarded-extraction rule below. This is
+the first of three places in this document that stated an existing artifact's
+shape from memory rather than probing it; see the note at the end of D80 for
+the other two and the process fix.
 
 **Two divergences from the proposal, both spec-neutral** (no scenario names a
 source):
@@ -391,7 +406,7 @@ alone.
 for entry in results (execution order — the order tests ran):
     for field in (failure_message, failure_repr, traceback,
                   captured_stdout, captured_stderr):
-        cost = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+        cost = len(json.dumps(value).encode("utf-8"))
         if cost <= remaining:  remaining -= cost
         else:                  value = None; <field>_truncated = True
 ```
@@ -399,8 +414,21 @@ for entry in results (execution order — the order tests ran):
 **Encoded bytes, measured, not `len(str)`.** `json.dumps` of the value itself is
 what the wire will carry for that field, escapes and quotes included — a
 traceback is newline- and quote-heavy, so a raw byte count understates it by a
-third or more. `ensure_ascii=False` matches `transport.send`'s `json.dumps`
-default, so the measurement and the encoding agree.
+third or more.
+
+**Corrected in Phase 5 (fix `cf008f7`): no `ensure_ascii` argument, not
+`ensure_ascii=False`.** This snippet originally specified `ensure_ascii=False`
+on the grounds that it "matches `transport.send`'s `json.dumps` default" — that
+claim was checked against nothing; `transport.send` calls `json.dumps(report)`
+bare, whose default is `ensure_ascii=True`. Charging `False` here understated
+every codepoint above `0x7F`, measured 1.30x for Spanish accents, 1.84x for
+Japanese, 1.65x for emoji: a suite whose assertion messages are not English
+would pass this budget and still breach `MAX_REPORT_BYTES` on the wire,
+losing the whole session, run included — the exact failure this budget exists
+to prevent. `budget.py::_encoded_cost` charges the bare-`json.dumps` cost, no
+argument, so the measurement and the encoding agree for real. The second of
+three places this document stated an existing artifact's shape from memory;
+see the note at the end of D80 for the third and the process fix.
 
 **Allocation policy: first-come, in execution order.**
 
@@ -720,25 +748,63 @@ applied to a cap.
 ### D80 — `run-recording`'s Measurements re-run: what changes and what does not
 
 The paragraph obliges its own re-run for "any change to the result schema or the
-batch-insert strategy", and `_INSERT_RESULT` goes from 14 bound columns to 27.
+batch-insert strategy", and `_INSERT_RESULT` goes from 14 bound columns to 31.
 
-| Quantity | Expected direction |
+**Corrected in Phase 7 (implemented, then Phase 9 documented it here): the
+column counts below, and everything derived from them.** This section
+originally said `_INSERT_RESULT` widens 14 → 27 and `_SELECT_RESULTS_FOR_RUN`
+16 → 29 — an undercount of 13/13 columns against the real 17-field
+`FailureEvidence` (13 fields) + `CapturedOutput` (4 fields) set, which was
+never re-counted against the actual dataclasses before this table was
+written. It also drove this phase's own ~390-line size forecast for Phase 7;
+the real single-commit implementation measured 796, forcing the unplanned
+PR7a/PR7b split, and PR7a still landed 32% over the 400-line review budget
+because the write-path widening could not be deferred out of it.
+
+| Quantity | Value |
 | --- | --- |
-| `_INSERT_RESULT` / `_SELECT_RESULTS_FOR_RUN` column count | 14 → 27, 16 → 29 |
+| `_INSERT_RESULT` / `_SELECT_RESULTS_FOR_RUN` column count | **31**, **33** (14 → 31, 16 → 33) |
 | Transactions per report | **unchanged — one.** `executemany` inside the same `BEGIN IMMEDIATE`…`COMMIT`; nothing splits |
-| Body size, 500 results **with no failures** | ~unchanged; the new keys are `null` |
-| Body size, 500 results **all failing** | bounded above by `252,511 + MAX_FAILURE_TEXT_BYTES` = **776,799 bytes**, by construction of D73 |
-| Server peak memory | re-measured; the existing `tracemalloc`-at-request-time test is the instrument, unchanged |
+| Body size, 500 results **with no failures** | **unchanged, 252,511 bytes** — stronger than "the new keys are `null`": for a result with no failure evidence the seventeen new keys are absent from the wire entirely, never emitted as `null`, so they cost nothing |
+| Body size, 500 results **all failing** | measured **794,291 bytes** — see below |
+| Server peak memory, one 500-result finish-write request | re-measured **2,880,085 bytes**, up from 2,021,039 (+42.5%) — see `run-recording/spec.md`'s Measurements paragraph for the justification |
 
-**The all-failing figure is a bound, not a prediction**, and that is the point:
-the budget makes the worst case computable in advance rather than discovered as
-a 413. The re-measurement records the actual number for both cases and justifies
-any material increase, as the paragraph requires.
+**The all-failing bound formula, as originally stated here
+(`252,511 + MAX_FAILURE_TEXT_BYTES` = 776,799 bytes), understates the real
+number — measured 794,291, 17,492 bytes (2.25%) over.** The formula was
+right that the budget bounds the *charged* bytes, and wrong to treat that as
+the whole body: `spend_failure_text_budget` charges only the five budgeted
+fields' own JSON-encoded **values**, never their key names and punctuation,
+and never the twelve non-budgeted columns present on every failing result
+(`failure_type`, `failure_path`, `failure_lineno`, `skip_reason`,
+`xfail_reason`, and the seven `_truncated` flags) — each short by
+construction (D74's own reason for not charging them), but not zero. The
+corrected bound is `252,511 + MAX_FAILURE_TEXT_BYTES + (per-key JSON
+overhead across 500 results × 17 fields)`, which this document does not
+re-derive symbolically; the measured number stands in its place, and it
+still leaves 254,285 bytes (24.2%) of headroom under `MAX_REPORT_BYTES`
+(1,048,576), so RQ-3's whole-report cap is not at risk from the undercount.
+**The re-measurement records the actual number for both cases and justifies
+any material increase, as the paragraph requires** — that discipline is what
+caught this, rather than the forecast quietly standing in for it.
 
 `test_finish_report_reaches_storage_in_one_commit` also stays the premise of
 RQ-3's Analysis argument, so its row-count assertions must still pass with the
 wider insert — that is what would catch a batch-insert strategy accidentally
 split by the extra columns.
+
+**Process note, covering all three corrections in this document (D69, D74,
+this section).** Each stated an existing artifact's shape — a method
+signature, a `json.dumps` default, a column count — confidently and from
+memory, never probed against the installed pytest, the shipped
+`transport.py`, or `schema.sql`/the real dataclasses. All three landed where
+the consequence was hidden: a broad `except`, silent arithmetic, or a size
+forecast nobody re-derives before implementing against it. The fix is not
+these three edits; it is that `sdd-design` must probe every API signature,
+column count and dataclass width it names against the installed code, and
+cite what it probed, rather than asserting from what the proposal or a
+mental model implied. Probing costs minutes at design time; not probing cost
+this change an unplanned branch split and an over-budget PR.
 
 ### D81 — Exactly one decision earns an ADR
 
