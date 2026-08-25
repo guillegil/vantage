@@ -13,12 +13,14 @@ import dataclasses
 from datetime import datetime, timezone
 
 from vantage.core.domain.execution import Execution, Identity
-from vantage.core.domain.projection import VcsProjection
+from vantage.core.domain.projection import FailureProjection, VcsProjection
+from vantage.core.domain.result import CaseIdentity
 from vantage.core.ports.storage import (
     MAX_IDENTITY_CHARS,
     MAX_PAGE_ITEMS,
     HistoryEntry,
     Page,
+    ResultListEntry,
     RunDetail,
     RunListEntry,
 )
@@ -85,6 +87,61 @@ def test_run_detail_carries_execution_and_last_contact_at_only() -> None:
     assert detail.execution.identity.value == "a" * 32
     assert detail.last_contact_at == _STARTED
     assert "vcs" not in {f.name for f in dataclasses.fields(RunDetail)}
+
+
+def test_result_list_entry_carries_identity_outcome_timings_worker_and_failure_projection() -> None:
+    """D77: `ResultListEntry` is the lean-list type for `list_results` --
+    identity, outcome, every phase timing `_result_item` already reads off
+    the pre-existing `/runs/{id}/results` wire contract, `worker_id`, and a
+    `FailureProjection | None` -- no field to carry `traceback`,
+    `failure_repr` or captured output (design.md D76)."""
+    identity = CaseIdentity(
+        node_id="t.py::test_x",
+        file_path="t.py",
+        class_name=None,
+        function_name="test_x",
+        param_id=None,
+    )
+    projection = FailureProjection(
+        failure_type="AssertionError",
+        failure_message="boom",
+        failure_message_truncated=False,
+        failure_path="t.py",
+        failure_lineno=10,
+        skip_reason=None,
+        xfail_reason=None,
+    )
+
+    entry = ResultListEntry(
+        identity=identity,
+        outcome="failed",
+        duration=0.01,
+        started_at=_STARTED,
+        finished_at=_STARTED,
+        setup_outcome="passed",
+        call_outcome="failed",
+        teardown_outcome="passed",
+        setup_duration=0.001,
+        call_duration=0.008,
+        teardown_duration=0.001,
+        worker_id="gw0",
+        failure=projection,
+    )
+
+    assert entry.identity is identity
+    assert entry.outcome == "failed"
+    assert entry.duration == 0.01
+    assert entry.started_at == _STARTED
+    assert entry.finished_at == _STARTED
+    assert entry.setup_outcome == "passed"
+    assert entry.call_outcome == "failed"
+    assert entry.teardown_outcome == "passed"
+    assert entry.worker_id == "gw0"
+    assert entry.failure is projection
+    field_names = {f.name for f in dataclasses.fields(ResultListEntry)}
+    assert "traceback" not in field_names
+    assert "failure_repr" not in field_names
+    assert "captured" not in field_names
 
 
 def test_history_entry_carries_run_shape_fields_and_vcs_projection() -> None:

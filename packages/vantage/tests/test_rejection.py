@@ -30,7 +30,7 @@ from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
 from vantage.service.schemas import _Outcome
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _execution, _result, _start_only_execution
+from vantage_port_contract import _captured, _execution, _failure, _result, _start_only_execution
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -418,6 +418,13 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
     resource planning for deployments. Future changes to the result schema or
     the batch-insert strategy MUST re-run this test via `tracemalloc` at
     request time and justify any material increase.
+
+    **failure-capture Phase 7 (design.md D80):** `_INSERT_RESULT` widened
+    from 14 to 31 bound columns, one per result row; a handful of the 500
+    carry failure evidence and captured output. The premise this test
+    exists to guard -- one commit for the whole batch -- must still hold at
+    the wider width, and a failing result's evidence must still round-trip,
+    or the batch-insert strategy silently split under the extra columns.
     """
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     counting = _CommitCountingConnection(adapter._conn)
@@ -425,7 +432,17 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
 
     try:
         execution = _execution("f" + "0" * 31)
-        results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
+        failure = _failure()
+        captured = _captured(stdout="some output", stderr="")
+        results = [
+            _result(
+                f"packages/vantage/tests/test_bulk.py::test_{i}",
+                outcome="failed" if i < 5 else "passed",
+                failure=failure if i < 5 else None,
+                captured=captured if i < 5 else None,
+            )
+            for i in range(500)
+        ]
 
         created = adapter.record_session(
             execution, results=results, received_at=datetime.now(timezone.utc)
@@ -443,6 +460,26 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
         assert stored is not None
         assert stored.finished_at == execution.finished_at
         assert stored.exit_status == execution.exit_status
+
+        # `get_result` lands in PR2 of this two-PR slice; the widened
+        # insert is verified here by reading the raw stored columns
+        # directly, the same pattern
+        # `test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository`
+        # already uses.
+        row = counting._real.execute(  # noqa: SLF001
+            "SELECT failure_type, failure_message, captured_stdout, captured_stderr"
+            " FROM result WHERE run_id = ? AND node_id = ?",
+            (
+                execution.identity.value,
+                "packages/vantage/tests/test_bulk.py::test_0",
+            ),
+        ).fetchone()
+        assert row == (
+            failure.failure_type,
+            failure.failure_message,
+            captured.stdout,
+            captured.stderr,
+        )
     finally:
         adapter.close()
 
