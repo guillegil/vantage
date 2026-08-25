@@ -66,6 +66,19 @@ paths:
         "200": {description: A page of results., content: {application/json: {schema: {$ref: '#/components/schemas/ResultsResponse'}}}}
         "404": {description: No run with that id has been recorded.}
         "422": {description: limit below 1 or offset below 0 -- not a page.}
+  /runs/{run_id}/result:
+    get:
+      operationId: get_result
+      tags: [read]
+      summary: The full record for one result, unbounded by any list display width.
+      description: node_id is a named query parameter, not a path segment (design.md D54) -- the same reasoning /tests/history already applies.
+      parameters:
+        - $ref: '#/components/parameters/run_id'
+        - {name: node_id, in: query, required: true, schema: {type: string, maxLength: 1024}}
+      responses:
+        "200": {description: The result., content: {application/json: {schema: {$ref: '#/components/schemas/ResultDetailResponse'}}}}
+        "404": {description: No run with that id has been recorded, or the run has no result with that node_id.}
+        "422": {description: node_id missing or over 1024 characters.}
   /tests/history:
     get:
       operationId: list_history
@@ -184,6 +197,13 @@ components:
       type: object
       required: [items, has_more]
       properties: {items: {type: array, items: {$ref: '#/components/schemas/ResultListItem'}}, has_more: {type: boolean}}
+    # The single-result endpoint's response -- every field a list response
+    # bounds or excludes, unbounded, flat like `ResultReport`'s own wire
+    # shape rather than nesting `failure`/`captured` (design.md D78).
+    ResultDetailResponse:
+      type: object
+      required: [node_id, file_path, class_name, function_name, param_id, outcome, duration, started_at, finished_at, setup_outcome, call_outcome, teardown_outcome, setup_duration, call_duration, teardown_duration, worker_id, failure_type, failure_message, failure_message_truncated, failure_path, failure_lineno, failure_repr, failure_repr_truncated, traceback, traceback_truncated, skip_reason, skip_reason_truncated, xfail_reason, xfail_reason_truncated, captured_stdout, captured_stdout_truncated, captured_stderr, captured_stderr_truncated]
+      properties: {node_id: {type: string}, file_path: {type: string}, class_name: {type: [string, "null"]}, function_name: {type: string}, param_id: {type: [string, "null"]}, outcome: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}, duration: {type: [number, "null"]}, started_at: {type: [string, "null"], format: date-time}, finished_at: {type: [string, "null"], format: date-time}, setup_outcome: {type: [string, "null"]}, call_outcome: {type: [string, "null"]}, teardown_outcome: {type: [string, "null"]}, setup_duration: {type: [number, "null"]}, call_duration: {type: [number, "null"]}, teardown_duration: {type: [number, "null"]}, worker_id: {type: [string, "null"]}, failure_type: {type: [string, "null"]}, failure_message: {type: [string, "null"]}, failure_message_truncated: {type: boolean}, failure_path: {type: [string, "null"]}, failure_lineno: {type: [integer, "null"]}, failure_repr: {type: [string, "null"]}, failure_repr_truncated: {type: boolean}, traceback: {type: [string, "null"]}, traceback_truncated: {type: boolean}, skip_reason: {type: [string, "null"]}, skip_reason_truncated: {type: boolean}, xfail_reason: {type: [string, "null"]}, xfail_reason_truncated: {type: boolean}, captured_stdout: {type: [string, "null"]}, captured_stdout_truncated: {type: boolean}, captured_stderr: {type: [string, "null"]}, captured_stderr_truncated: {type: boolean}}
     HistoryEntry:
       type: object
       required: [run_id, started_at, finished_at, outcome, duration, vcs]

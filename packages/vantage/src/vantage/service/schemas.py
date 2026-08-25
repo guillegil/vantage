@@ -368,6 +368,49 @@ class ResultsResponse(BaseModel):
     has_more: bool
 
 
+class ResultDetailResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/result` (design.md
+    D77, D78) -- the full record, every field a list response bounds or
+    excludes, unbounded by any display width. Flat, matching
+    `ResultReport`'s own wire shape for the same fields, rather than
+    nesting `failure`/`captured` sub-objects. Built field by field in
+    `routes/read.py`, never `model_validate(..., from_attributes=True)`."""
+
+    node_id: str
+    file_path: str
+    class_name: str | None
+    function_name: str
+    param_id: str | None
+    outcome: str
+    duration: float | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    setup_outcome: str | None
+    call_outcome: str | None
+    teardown_outcome: str | None
+    setup_duration: float | None
+    call_duration: float | None
+    teardown_duration: float | None
+    worker_id: str | None
+    failure_type: str | None
+    failure_message: str | None
+    failure_message_truncated: bool
+    failure_path: str | None
+    failure_lineno: int | None
+    failure_repr: str | None
+    failure_repr_truncated: bool
+    traceback: str | None
+    traceback_truncated: bool
+    skip_reason: str | None
+    skip_reason_truncated: bool
+    xfail_reason: str | None
+    xfail_reason_truncated: bool
+    captured_stdout: str | None
+    captured_stdout_truncated: bool
+    captured_stderr: str | None
+    captured_stderr_truncated: bool
+
+
 class HistoryEntryResponse(BaseModel):
     """One entry of `HistoryResponse` (design.md D54, D57, D59, D60). `vcs`
     is a lean `RunVcsResponse` built from `HistoryEntry.vcs` (a

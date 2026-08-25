@@ -26,11 +26,13 @@ scheme, so a later `?stable_id=` arrives as an additive sibling. `node_id`
 is bounded at `MAX_IDENTITY_CHARS`; a missing or over-long value is shaped
 by `service/errors.py`'s `InvalidIdentityError`, never a proxy `414`.
 
-**Phase 8** leans `list_results`' projection (design.md D76, D77):
-`list_results` now reads a page of `ResultListEntry` -- identity, outcome,
-timings and a lean `FailureProjection`, never the full `FailureEvidence` or
-captured output. The single-result complement that reaches the full record
-is a later slice of this phase.
+**Phase 8** adds `GET /api/v1/runs/{run_id}/result?node_id=`, the
+single-result complement of `list_results`' now-lean projection (design.md
+D76-D78). `list_results` reads a page of `ResultListEntry` -- identity,
+outcome, timings and a lean `FailureProjection`, never the full
+`FailureEvidence` or captured output. The new route reads the whole stored
+`Result` via `store.get_result` and returns every field, unbounded,
+matching `node_id`'s existing query-value treatment on `/tests/history`.
 """
 
 from __future__ import annotations
@@ -43,6 +45,7 @@ from fastapi import APIRouter, Path, Query, Request, Response
 from vantage.core.domain.execution import VcsContext
 from vantage.core.domain.liveness import derive_presentation
 from vantage.core.domain.projection import FailureProjection, VcsProjection
+from vantage.core.domain.result import Result
 from vantage.core.ports.storage import (
     MAX_IDENTITY_CHARS,
     MAX_PAGE_ITEMS,
@@ -51,11 +54,12 @@ from vantage.core.ports.storage import (
     RunDetail,
     RunListEntry,
 )
-from vantage.service.errors import UnknownRunError
+from vantage.service.errors import UnknownResultError, UnknownRunError
 from vantage.service.schemas import (
     FailureProjectionResponse,
     HistoryEntryResponse,
     HistoryResponse,
+    ResultDetailResponse,
     ResultListItemResponse,
     ResultsResponse,
     RunDetailResponse,
@@ -170,6 +174,53 @@ def _result_item(entry: ResultListEntry) -> ResultListItemResponse:
     )
 
 
+def _result_detail_response(result: Result) -> ResultDetailResponse:
+    """Field by field, the full record (design.md D78) -- every field a
+    list response bounds or excludes, unbounded by any display width.
+    `result.failure` normalises to `None` when the result carries no
+    failure evidence at all (design.md D77); every failure field then
+    falls back to its absent shape (`None`/`False`) rather than being
+    omitted -- `ResultDetailResponse` always carries every field."""
+    identity = result.identity
+    failure = result.failure
+    captured = result.captured
+    return ResultDetailResponse(
+        node_id=identity.node_id,
+        file_path=identity.file_path,
+        class_name=identity.class_name,
+        function_name=identity.function_name,
+        param_id=identity.param_id,
+        outcome=result.outcome,
+        duration=result.duration,
+        started_at=result.started_at,
+        finished_at=result.finished_at,
+        setup_outcome=result.setup_outcome,
+        call_outcome=result.call_outcome,
+        teardown_outcome=result.teardown_outcome,
+        setup_duration=result.setup_duration,
+        call_duration=result.call_duration,
+        teardown_duration=result.teardown_duration,
+        worker_id=result.worker_id,
+        failure_type=failure.failure_type if failure else None,
+        failure_message=failure.failure_message if failure else None,
+        failure_message_truncated=failure.failure_message_truncated if failure else False,
+        failure_path=failure.failure_path if failure else None,
+        failure_lineno=failure.failure_lineno if failure else None,
+        failure_repr=failure.failure_repr if failure else None,
+        failure_repr_truncated=failure.failure_repr_truncated if failure else False,
+        traceback=failure.traceback if failure else None,
+        traceback_truncated=failure.traceback_truncated if failure else False,
+        skip_reason=failure.skip_reason if failure else None,
+        skip_reason_truncated=failure.skip_reason_truncated if failure else False,
+        xfail_reason=failure.xfail_reason if failure else None,
+        xfail_reason_truncated=failure.xfail_reason_truncated if failure else False,
+        captured_stdout=captured.stdout,
+        captured_stdout_truncated=captured.stdout_truncated,
+        captured_stderr=captured.stderr,
+        captured_stderr_truncated=captured.stderr_truncated,
+    )
+
+
 def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
     """Field by field -- `entry.vcs` is a lean `VcsProjection` (D59, D60),
     read through the same `_vcs_response` helper as the other routes."""
@@ -237,6 +288,28 @@ async def list_results(
     page = store.list_results(run_id, limit=limit, offset=offset)
     items = [_result_item(entry) for entry in page.items]
     return ResultsResponse(items=items, has_more=page.has_more)
+
+
+@router.get("/runs/{run_id}/result")
+async def get_result(
+    request: Request,
+    run_id: str = Path(pattern=_IDENTITY_PATTERN),
+    node_id: str = Query(..., max_length=MAX_IDENTITY_CHARS),
+) -> ResultDetailResponse:
+    """`GET /api/v1/runs/{run_id}/result?node_id=` (design.md D54, D78) --
+    `node_id` is again a named query value on an identity-free path segment,
+    not a path segment itself, the same reasoning `GET /api/v1/tests/history`
+    already applies. An unknown `run_id` is `404` via the existing
+    `UnknownRunError`; a known run with no result at that identity is a
+    distinct `404`, `UnknownResultError` -- `errors.py`'s one-shape-per-kind
+    rule."""
+    store = request.app.state.store
+    if store.get_execution(run_id) is None:
+        raise UnknownRunError()
+    result = store.get_result(run_id, node_id=node_id)
+    if result is None:
+        raise UnknownResultError()
+    return _result_detail_response(result)
 
 
 @router.get("/tests/history")

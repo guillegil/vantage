@@ -37,7 +37,7 @@ from fastapi.testclient import TestClient
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, LIST_FAILURE_MESSAGE_CHARS
 from vantage.core.domain.result import CaseIdentity, Result
-from vantage.core.ports.storage import ExecutionStore, HistoryEntry, Page
+from vantage.core.ports.storage import MAX_IDENTITY_CHARS, ExecutionStore, HistoryEntry, Page
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -784,6 +784,143 @@ def test_results_route_includes_bounded_failure_message_and_disjunction_flag(
     item = response.json()["items"][0]
     assert item["failure"]["failure_message"] == long_message[:LIST_FAILURE_MESSAGE_CHARS]
     assert item["failure"]["failure_message_truncated"] is True
+
+
+# --- 8.3 ----------------------------------------------------------------
+
+
+def test_result_detail_route_returns_full_record(client: TestClient, store: ExecutionStore) -> None:
+    """*(history-read-api -> Single result detail -> The full record is
+    reachable for a given result)*."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(72)
+    node_id = "t.py::test_x"
+    failure = _failure(traceback=_SENTINEL_TRACEBACK)
+    captured = _captured(stdout="out", stderr="err")
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[_result(node_id, outcome="failed", failure=failure, captured=captured)],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": node_id})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["traceback"] == _SENTINEL_TRACEBACK
+    assert body["captured_stdout"] == "out"
+    assert body["captured_stderr"] == "err"
+    assert body["failure_type"] == failure.failure_type
+    assert body["failure_message"] == failure.failure_message
+    assert body["failure_path"] == failure.failure_path
+    assert body["failure_lineno"] == failure.failure_lineno
+    assert body["failure_repr"] == failure.failure_repr
+
+
+# --- 8.4 ----------------------------------------------------------------
+
+
+def test_result_detail_truncation_flag_travels_with_the_field(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(A bounded field's truncation flag travels with it on the
+    single-item endpoint)*."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(73)
+    node_id = "t.py::test_x"
+    failure = _failure(traceback="a truncated traceback", traceback_truncated=True)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[_result(node_id, outcome="failed", failure=failure)],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": node_id})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["traceback"] == "a truncated traceback"
+    assert body["traceback_truncated"] is True
+
+
+# --- 8.5 ----------------------------------------------------------------
+
+
+def test_result_detail_unknown_run_id_is_404_unknown_run_error(client: TestClient) -> None:
+    response = client.get(f"/api/v1/runs/{_run_id(999)}/result", params={"node_id": "t.py::test_x"})
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_run"
+
+
+# --- 8.6 ----------------------------------------------------------------
+
+
+def test_result_detail_unknown_node_id_is_404_unknown_result_error(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(An unknown result identifier leaves stored data unchanged -- the
+    404 shape half)*. A known run, an unknown `node_id` -- a distinct error
+    kind from `UnknownRunError` (design.md D78)."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(74)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(
+        f"/api/v1/runs/{run_id}/result", params={"node_id": "t.py::test_never_ran"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_result"
+
+
+# --- 8.7 ----------------------------------------------------------------
+
+
+def test_result_detail_unknown_identifier_leaves_stored_data_unchanged(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(An unknown result identifier leaves stored data unchanged)*. The
+    table is read directly via the store, not through the response body --
+    a 404 must not create, alter or remove any row."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(75)
+    node_id = "t.py::test_x"
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[_result(node_id)],
+        received_at=now - timedelta(hours=1),
+    )
+    before_results = store.get_results(run_id)
+    before_detail = store.get_run_detail(run_id)
+
+    response = client.get(
+        f"/api/v1/runs/{run_id}/result", params={"node_id": "t.py::test_never_ran"}
+    )
+
+    assert response.status_code == 404
+    assert store.get_results(run_id) == before_results
+    assert store.count_results() == 1
+    assert store.get_run_detail(run_id) == before_detail
+
+
+# --- 8.8 ----------------------------------------------------------------
+
+
+def test_result_detail_overlong_node_id_is_422_not_414(client: TestClient) -> None:
+    """*(D54 inherited)*. An identifier over `MAX_IDENTITY_CHARS` is a
+    `422`, shaped by `InvalidIdentityError` -- never a proxy `414`."""
+    run_id = _run_id(76)
+    over_long = "x" * (MAX_IDENTITY_CHARS + 1)
+
+    response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": over_long})
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_identity"
 
 
 def test_result_item_carries_every_stored_column_by_value(

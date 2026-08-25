@@ -175,6 +175,14 @@ def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...
             lambda: client.get(f"{unknown_run}/results"),  # 404 (UnknownRunError)
             lambda: client.get(f"{run}/results", params={"limit": 0}),  # 422 (D61)
         ),
+        ("GET", "/runs/{run_id}/result"): (
+            lambda: client.get(f"{run}/result", params={"node_id": _NODE_ID}),
+            lambda: client.get(f"{unknown_run}/result", params={"node_id": _NODE_ID}),
+            # 404 (UnknownRunError)
+            lambda: client.get(f"{run}/result", params={"node_id": "no-such-node"}),
+            # 404 (UnknownResultError)
+            lambda: client.get(f"{run}/result"),  # 422 (InvalidIdentityError, D54)
+        ),
         ("GET", "/tests/history"): (
             lambda: client.get("/api/v1/tests/history", params={"node_id": _NODE_ID}),
             lambda: client.get("/api/v1/tests/history"),  # 422 (InvalidIdentityError, D54)

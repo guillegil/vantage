@@ -52,6 +52,7 @@ from vantage.service.schemas import (
     HeartbeatAcknowledgement,
     HistoryEntryResponse,
     HistoryResponse,
+    ResultDetailResponse,
     ResultListItemResponse,
     ResultsResponse,
     RunDetailResponse,
@@ -240,6 +241,28 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
     run = f"/api/v1/runs/{'6' * 32}"
     node_id = "tests/test_interface_document_probe.py::test_x"
     report = _report(run.rsplit("/", 1)[-1])
+    # A single passing result, present so `GET /runs/{run_id}/result` (the
+    # single-result endpoint, design.md D78) has something to bind against.
+    report["results"] = [
+        {
+            "node_id": node_id,
+            "file_path": "tests/test_interface_document_probe.py",
+            "class_name": None,
+            "function_name": "test_x",
+            "param_id": None,
+            "outcome": "passed",
+            "duration": 0.01,
+            "started_at": "2026-08-15T09:14:10+00:00",
+            "finished_at": "2026-08-15T09:14:10+00:00",
+            "setup_outcome": "passed",
+            "call_outcome": "passed",
+            "teardown_outcome": "passed",
+            "setup_duration": 0.001,
+            "call_duration": 0.001,
+            "teardown_duration": 0.001,
+            "worker_id": None,
+        }
+    ]
 
     # Ordered so the fixture data a later binding needs already exists --
     # the run must be reported before it can be read back or heartbeat'd.
@@ -249,6 +272,10 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
         (("GET", "/runs"), lambda: client.get("/api/v1/runs")),
         (("GET", "/runs/{run_id}"), lambda: client.get(run)),
         (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{run}/results")),
+        (
+            ("GET", "/runs/{run_id}/result"),
+            lambda: client.get(f"{run}/result", params={"node_id": node_id}),
+        ),
         (
             ("GET", "/tests/history"),
             lambda: client.get("/api/v1/tests/history", params={"node_id": node_id}),
@@ -290,6 +317,7 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "FailureProjection": FailureProjectionResponse,
     "ResultListItem": ResultListItemResponse,
     "ResultsResponse": ResultsResponse,
+    "ResultDetailResponse": ResultDetailResponse,
     "HistoryEntry": HistoryEntryResponse,
     "HistoryResponse": HistoryResponse,
 }
@@ -305,6 +333,7 @@ _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
     ("RunListItem", "presentation"): PRESENTATIONS,
     ("RunDetailResponse", "presentation"): PRESENTATIONS,
     ("ResultListItem", "outcome"): OUTCOMES,
+    ("ResultDetailResponse", "outcome"): OUTCOMES,
     ("HistoryEntry", "outcome"): OUTCOMES,
 }
 
