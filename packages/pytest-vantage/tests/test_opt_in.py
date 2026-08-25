@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pytest_vantage.plugin import _failure_text_capture_requested
 
 _SAMPLE_TEST = "def test_it():\n    assert True\n"
 
@@ -90,15 +91,23 @@ def test_failure_text_opt_in_ini_alone_cannot_enable_capture(
     committed configuration file cannot enable capture on its own.
 
     RQ-2's own established differential (above), applied to the
-    failure-text opt-in ini value specifically (design.md D72, revised
-    after Phase 9's RQ-25 measurement): with no invocation flag on either
-    run -- neither `--vantage` nor `--vantage-failure-text` -- a committed
-    `vantage_failure_text = true` ini value changes nothing.
-    `Unknown config option` is asserted absent from the run that carries it
-    -- the ini value must be a registered option for that to hold. Once
-    registered, the project tree -- excluding the ini file itself, which is
-    the one deliberate difference between the two runs -- must still be
-    byte-identical.
+    failure-text opt-in specifically (design.md D72, revised after Phase
+    9's RQ-25 measurement, and further corrected to remove the ini surface
+    entirely): with no invocation flag on either run -- neither `--vantage`
+    nor `--vantage-failure-text` -- a committed `vantage_failure_text =
+    true` ini value changes nothing. The scenario under test is that
+    failure-text capture behaves *identically* whether the configuration
+    file is present or absent, and the established differential form for
+    that is tree-identity: the project tree -- excluding the ini file
+    itself, which is the one deliberate difference between the two runs --
+    must still be byte-identical.
+
+    `vantage_failure_text` is not a registered option any more (the whole
+    point of this correction), so pytest now warns `Unknown config option`
+    on the run that carries the ini value. That warning is asserted
+    *present*, not absent: it is honest feedback that the knob does not
+    exist, and it is exactly what proves the ini value is inert rather than
+    silently consulted.
     """
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
 
@@ -113,7 +122,7 @@ def test_failure_text_opt_in_ini_alone_cannot_enable_capture(
 
     assert with_ini.returncode == 0, with_ini.stdout + with_ini.stderr
     assert without_ini.returncode == 0, without_ini.stdout + without_ini.stderr
-    assert "Unknown config option" not in with_ini.stdout + with_ini.stderr
+    assert "Unknown config option: vantage_failure_text" in with_ini.stdout + with_ini.stderr
     with_snapshot = {k: v for k, v in _tree_snapshot(with_ini_root).items() if k != "pytest.ini"}
     assert with_snapshot == _tree_snapshot(without_ini_root)
 
@@ -137,3 +146,45 @@ def test_no_connection_is_attempted_with_no_recording_option(
     # count it is not given UNCHECKED, so the spec's "and emits no warning"
     # half was silently unverified while this line read `passed=1` alone.
     result.assert_outcomes(passed=1, warnings=0)
+
+
+class _IniOnlyConfig:
+    """A config whose invocation activated recording but never asked for
+    failure text, while a committed `pytest.ini` sets the opt-in. Reading
+    the ini value at all is what this double is built to expose.
+    """
+
+    def __init__(self) -> None:
+        self.ini_reads: list[str] = []
+
+    def getoption(self, name: str) -> object:
+        if name == "vantage":
+            return True
+        if name == "vantage_failure_text":
+            return False
+        raise AssertionError(f"unexpected option read: {name}")
+
+    def getini(self, name: str) -> object:
+        self.ini_reads.append(name)
+        return True
+
+
+def test_a_committed_ini_cannot_be_the_means_by_which_capture_is_enabled() -> None:
+    """failure-evidence -> Capture is opt-in, absent by default: "no
+    committed configuration file MAY be the means by which capture is
+    enabled".
+
+    The invocation activates recording but never asks for failure text; a
+    committed `vantage_failure_text = true` does. Capture must stay absent,
+    for the same reason `_activation_requested` reads only `--vantage`:
+    a file one person commits must never silently turn capture on for
+    everyone who checks the project out -- and stored failure text is
+    unredacted (ADR-0016), so the harm here is disclosure, not only the
+    RQ-25 overhead this polarity exists to avoid.
+    """
+    config = _IniOnlyConfig()
+
+    assert _failure_text_capture_requested(config) is False  # type: ignore[arg-type]
+    assert config.ini_reads == [], (
+        f"the failure-text opt-in must not consult any ini value; read {config.ini_reads}"
+    )

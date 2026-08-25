@@ -94,16 +94,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help="Same as --vantage-timeout. Configures WHERE/HOW; never activates recording (RQ-2).",
         default=None,
     )
-    parser.addini(
-        "vantage_failure_text",
-        help=(
-            "Same as --vantage-failure-text. Can only widen an already-activated "
-            "session's capture from absent to present; never activates recording "
-            "on its own (design.md D72)."
-        ),
-        type="bool",
-        default=False,
-    )
 
 
 def _preflight_reachable(address: str, timeout: float) -> bool:
@@ -166,7 +156,6 @@ def _failure_text_capture_requested(config: pytest.Config) -> bool:
     return resolve_failure_text_capture(
         activated=True,
         cli_opt_in=bool(config.getoption("vantage_failure_text")),
-        ini_opt_in=bool(config.getini("vantage_failure_text")),
     )
 
 

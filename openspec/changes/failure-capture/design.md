@@ -295,51 +295,61 @@ as a known gap.
 
 ### D72 — The opt-in: `--vantage-failure-text`, absent by default, monotone by construction
 
-**Revised 2026-08-25, after Phase 9's own RQ-25 measurement.** This decision
-originally shipped as an opt-out (`--vantage-no-failure-text`, capture on by
-default). The measurement that decision itself called for (D79) found
-failure-text capture breaches RQ-25's 2% overhead budget **at every failure
-density tested, not only the pathological all-failing case** — ten failing
-tests out of a thousand already cost 3.45% of a recording-off baseline (see
+**Revised 2026-08-25, after Phase 9's own RQ-25 measurement, and corrected
+again the same day to remove the ini surface.** This decision originally
+shipped as an opt-out (`--vantage-no-failure-text`, capture on by default).
+The measurement that decision itself called for (D79) found failure-text
+capture breaches RQ-25's 2% overhead budget **at every failure density
+tested, not only the pathological all-failing case** — ten failing tests out
+of a thousand already cost 3.45% of a recording-off baseline (see
 `failure-evidence` → Measurements). An opt-out cannot fix that: the default
 path is the one everybody runs, and the default path was the expensive one.
-The decision is superseded in place, not renumbered: it is still D72, the
-surface it touches is still `pytest_vantage/config.py` and `plugin.py`'s two
-option registrations, and the reasoning below replaces the opt-out's, rather
-than sitting beside it as a second history.
+The first revision replaced the opt-out with an opt-in that still admitted
+two sources, CLI and ini, composed with OR. That second shape was itself a
+defect: it let a committed `pytest.ini` carrying `vantage_failure_text =
+true` turn capture on for anyone who runs `pytest --vantage`, exactly the
+failure `failure-evidence`'s "Capture is opt-in, absent by default"
+requirement forbids ("no committed configuration file MAY be the means by
+which capture is enabled") and exactly the precedent `_activation_requested`
+already set for `--vantage` itself. The decision is superseded in place a
+second time, not renumbered: it is still D72, the surface it touches is
+still `pytest_vantage/config.py` and `plugin.py`'s option registration, and
+the reasoning below replaces both prior histories.
 
-**Capture is now opt-in and absent unless the invocation asks for it.**
+**Capture is now opt-in and absent unless the invocation asks for it, and
+the invocation flag is the only means by which it can be asked for.**
 
 | Surface | Value | Can it enable? |
 | --- | --- | --- |
 | `--vantage` | `store_true` | **This and only this activates recording** (RQ-2, unchanged) |
 | `--vantage-failure-text` | `store_true`, default `False` | Yes — but only capture, never recording itself |
-| ini `vantage_failure_text` | bool, default `false` | Yes, identically — either source alone is enough |
+| ini `vantage_failure_text` | **removed — no ini surface exists** | No — never registered, never read |
 | environment variable | **none defined** | — |
 
-**Composition** is a single monotone disjunction:
+**Composition** is a single monotone conjunction:
 
 ```python
-def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool, ini_opt_in: bool) -> bool:
-    return activated and (cli_opt_in or ini_opt_in)
+def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool) -> bool:
+    return activated and cli_opt_in
 ```
 
 Three properties, each deliberate:
 
 1. **No source can turn recording's own `False` into a `True`.** The function
-   remains monotone in every argument — the property test carried forward
-   unchanged, `resolve(...) <= activated` for every one of the eight input
+   remains monotone in every argument — the property test carried forward,
+   `resolve(...) <= activated` for every one of the four input
    combinations — but where the opt-out was monotone-*decreasing* in its two
-   narrowing sources, the opt-in is monotone-*increasing* in `cli_opt_in` and
-   `ini_opt_in`: each can only ever ADD capture to an already-activated
-   session, never remove it, and neither can activate recording on its own.
+   narrowing sources, the opt-in is monotone-*increasing* in `cli_opt_in`:
+   it can only ever ADD capture to an already-activated session, never
+   remove it, and it cannot activate recording on its own.
    **The opt-in is monotone too, precisely because it only ever adds** — the
    same shape of guarantee the opt-out gave by only ever removing, mirrored
    rather than lost.
-2. **Both names now carry the plain capability, not a negation.** There is no
+2. **The name carries the plain capability, not a negation.** There is no
    syntactic form that reads as a refusal by accident, because there is
    nothing left to refuse by default — capture already defaults to absent.
-3. **No environment variable.** RQ-2's rationale is unchanged by the flip: an
+3. **No environment variable, and no ini value either.** RQ-2's rationale is
+   unchanged by the flip: an
    environment variable is invisible in the command line RQ-11 records. For an
    opt-in that means a run whose stored evidence is *present* with nothing in
    its own history to explain why it was requested — the same blind spot the

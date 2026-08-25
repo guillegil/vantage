@@ -83,20 +83,29 @@ def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | None
     return _DEFAULT_REPORT_TIMEOUT
 
 
-def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool, ini_opt_in: bool) -> bool:
+def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool) -> bool:
     """Whether `EvidenceCollector` should be registered for this session
     (design.md D72, revised after Phase 9's RQ-25 measurement: capture is
     now opt-in, absent by default). A single monotone conjunction, never a
-    case list: `resolve(...) <= activated` for every one of the eight input
+    case list: `resolve(...) <= activated` for every one of the four input
     combinations -- no opt-in source can turn a session on when recording
-    itself was never activated. Both `cli_opt_in` and `ini_opt_in` can only
-    WIDEN an already-activated session's capture from absent to present,
-    never narrow it -- the opt-in is monotone INCREASING in both, the exact
-    mirror of the opt-out's monotone-decreasing property it replaces. No
-    environment variable is defined for the opt-in (design.md D72) -- this
-    signature carries no parameter for one.
+    itself was never activated. `cli_opt_in` can only WIDEN an
+    already-activated session's capture from absent to present, never
+    narrow it -- the opt-in is monotone INCREASING in it, the exact mirror
+    of the opt-out's monotone-decreasing property it replaces.
+
+    **The invocation flag is the only means, by construction: this
+    signature carries no ini parameter and no environment-variable
+    parameter.** The capability spec forbids a committed configuration file
+    from being the means by which capture is enabled, and `_activation_
+    requested` holds the identical line for `--vantage` itself -- ini values
+    configure WHERE a report goes, they never switch anything on. Stored
+    failure text is unredacted (ADR-0016), so a file one person commits
+    would otherwise ship everyone's tracebacks, credentials included,
+    without them asking -- and put RQ-25's overhead back on the default
+    path this polarity exists to keep clean.
     """
-    return activated and (cli_opt_in or ini_opt_in)
+    return activated and cli_opt_in
 
 
 def resolve_liveness_timeout(report_timeout: float) -> float:

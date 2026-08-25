@@ -64,11 +64,11 @@ result's traceback, failure fields and captured stdout/stderr -- is a
 **second, separate opt-in, absent by default**: RQ-25's own overhead
 measurement found it breaches the project's 2% runtime budget at every
 failure density tested, so a session pays that cost only when it explicitly
-asks for it via `--vantage-failure-text` (or the equivalent
-`vantage_failure_text` ini value). Like `--vantage` itself, this is an
-invocation flag only -- no committed configuration file can enable capture
-or recording on its own (RQ-2's same invariant, extended by
-`failure-evidence`). When enabled, that text is recorded bounded and
+asks for it via `--vantage-failure-text`. Like `--vantage` itself, this is
+an invocation flag only -- there is no ini equivalent, and no committed
+configuration file can be the means by which capture or recording is
+enabled on its own (RQ-2's same invariant, extended by `failure-evidence`).
+When enabled, that text is recorded bounded and
 unredacted alongside the outcome -- **stored failure text is not scrubbed
 and may contain any value a test printed or asserted, including
 credentials**

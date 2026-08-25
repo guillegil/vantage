@@ -12,11 +12,12 @@ at all ran on a worker: `pytest_configure` returned before reading a single
 option. `EvidenceCollector` needs to run `pytest_runtest_makereport` on the
 worker -- that is the only process with `item`/`excinfo` -- so the worker
 branch now reads exactly three things: `getoption("vantage")` to decide
-whether to register at all; `getoption("vantage_failure_text")` and
-`getini("vantage_failure_text")`, both branches gated through the same
-`resolve_failure_text_capture` the controller uses (design.md D72, revised
-after Phase 9's RQ-25 measurement -- capture is opt-in, absent by default,
-and the opt-in is session-wide, not controller-only); and
+whether to register at all; and `getoption("vantage_failure_text")`, gated
+through the same `resolve_failure_text_capture` the controller uses
+(design.md D72, revised after Phase 9's RQ-25 measurement and further
+corrected to remove the ini surface entirely -- capture is opt-in, absent
+by default, the opt-in is session-wide, not controller-only, and
+`--vantage-failure-text` is the only means by which it is granted); and
 `EvidenceCollector.__init__` itself reads `getoption("capture")` once
 (design.md D71, the empty-vs-absent rule for captured output). **What
 survives unchanged is narrower and still absolute**: a worker never
@@ -57,12 +58,16 @@ class _RegisterCallDouble:
 class _WorkerConfigDouble:
     """A ``pytest.Config`` stand-in carrying xdist's ``workerinput`` marker.
 
-    ``getoption``/``getini`` answer only the option/ini names D68/D71/D72
-    require a worker to read -- `"vantage"`, `"vantage_failure_text"`
-    (both forms) and `"capture"` -- and raise for anything else: if
-    ``pytest_configure`` or `EvidenceCollector` ever reach for a server
-    address, a timeout, or anything else on a worker, this is where that
-    would be caught. ``pluginmanager`` is a ``_RegisterCallDouble``, so a
+    ``getoption`` answers only the option names D68/D71/D72 require a
+    worker to read -- `"vantage"`, `"vantage_failure_text"` (CLI only, no
+    ini form exists any more) and `"capture"` -- and raises for anything
+    else: if ``pytest_configure`` or `EvidenceCollector` ever reach for a
+    server address, a timeout, or anything else on a worker, this is where
+    that would be caught. ``getini`` raises unconditionally -- no ini value
+    is ever permitted on the opt-in path, on a worker or the controller,
+    now that the capability spec's "no committed configuration file MAY be
+    the means by which capture is enabled" requirement has removed that
+    surface entirely. ``pluginmanager`` is a ``_RegisterCallDouble``, so a
     worker that ever constructed a `Recorder` (never permitted, D68) is
     caught there too. Opted in (`True`) so this double still exercises the
     registration mechanism D68 proves -- under D72's revised default-absent
@@ -89,11 +94,9 @@ class _WorkerConfigDouble:
         )
 
     def getini(self, name: str) -> object:
-        if name == "vantage_failure_text":
-            return False
         raise AssertionError(
             f"pytest_configure must not read ini value {name!r} on an xdist worker "
-            "(design.md D72 -- only 'vantage_failure_text' may be read there)"
+            "(design.md D72, further corrected -- no ini value is ever read there)"
         )
 
 
