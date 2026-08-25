@@ -844,7 +844,7 @@ ADR-0014 (the plugin's execution boundary and its no-flag argument) and ADR-0015
         │    excinfo None → nothing | wasxfail → xfail_reason
         │    skipped      → skip_reason (longrepr[2])
         │    otherwise    → typename, exconly(), repr(value),
-        │                   str(item.repr_failure(excinfo,"long"))   (D69)
+        │                   str(item._repr_failure_py(excinfo,"long")) (D69)
         │                   reprcrash.path / .lineno
         ▼
   report.vantage_evidence : dict[str, str|int|bool|None]
@@ -903,7 +903,7 @@ ADR-0014 (the plugin's execution boundary and its no-flag argument) and ADR-0015
 | `packages/vantage/src/vantage/core/domain/result.py` | Modify | `FailureEvidence`, `CapturedOutput`, two fields on `Result` (D77) |
 | `packages/vantage/src/vantage/core/domain/projection.py` | Modify | `FailureProjection`, `project_failure`, `LIST_FAILURE_MESSAGE_CHARS` (D76, D77) |
 | `packages/vantage/src/vantage/core/ports/storage.py` | Modify | `get_result`; `ResultListEntry`; `list_results` return type (D77, D78) |
-| `packages/vantage/src/vantage/storage/sqlite_store.py` | Modify | 27-column insert, 29-column select, `substr` projection, `get_result` |
+| `packages/vantage/src/vantage/storage/sqlite_store.py` | Modify | 31-column insert, 33-column select, `substr` projection, `get_result` |
 | `packages/vantage/src/vantage/storage/memory.py` | Modify | the same, second mechanism |
 | `packages/vantage/src/vantage/storage/schema.sql` | **Unchanged** | every column and index 5 already exist (RQ-29, ADR-0005) |
 | `packages/vantage/src/vantage/service/schemas.py` | Modify | `ResultReport` optional fields + flags; `ResultListItemResponse`; `ResultDetailResponse` (D75, D76, D78) |
@@ -985,7 +985,7 @@ docstring, which is what `grep` has to find.
 | Integration (plugin) | `-s` ⇒ captured output absent; silent test ⇒ `""` | `pytester`, two invocations |
 | Integration (plugin) | RQ-2 differential: ini value present vs absent, no flag either way | The established differential form (D72) |
 | Unit (core) | `project_failure`: bounding, the disjunction flag, null passthrough, all-null → `None` | Pure function, no fixtures |
-| Contract (both adapters) | Evidence round-trip incl. `""`-vs-`None`; `get_result` hit and miss; the bounded message and its flag; 27-column insert | `vantage_port_contract.py`, inherited by both stores |
+| Contract (both adapters) | Evidence round-trip incl. `""`-vs-`None`; `get_result` hit and miss; the bounded message and its flag; 31-column insert | `vantage_port_contract.py`, inherited by both stores |
 | Integration (service) | Version skew both directions; the flag disjunction (client `true` + server `false` stores `true`); over-cap report stores nothing | ASGI in-process |
 | Integration (service) | The sentinel traceback is absent from the list body and present in the detail body | Substring assertion on raw bytes (D76) |
 | Test (storage) | An existing pre-change database opens unrefused and reads back its rows | Fixture DB written by the previous schema path; ADR-0013 proven not assumed |

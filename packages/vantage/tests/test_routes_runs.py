@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
 from vantage.core.domain.result import CapturedOutput
 from vantage.service.routes.runs import _to_execution, _to_result
 from vantage.service.schemas import ResultReport, RunReport, VcsReport
@@ -190,6 +191,51 @@ def test_to_result_disjunction_other_direction_server_flag_still_wins() -> None:
 
     assert result.failure is not None
     assert result.failure.traceback_truncated is True
+
+
+# Every field the per-report budget can drop, as `(wire value, wire flag,
+# container, stored flag)`. The budget spends in `budget.py`'s
+# `_BUDGETED_FIELDS` order -- smallest-and-most-informative first -- so
+# `failure_message` is the field most likely to survive and `traceback`,
+# `captured_stdout` and `captured_stderr` are the ones actually dropped
+# when a session runs out of room. Testing the disjunction at
+# `failure_message` alone therefore defends the one field that needs it
+# least; verify round 1 found the other six undefended, with a naive
+# server-only assignment leaving the whole suite green.
+_DISJUNCTION_FIELDS = (
+    ("failure_message", "failure_message_truncated", "failure", "failure_message_truncated"),
+    ("failure_repr", "failure_repr_truncated", "failure", "failure_repr_truncated"),
+    ("traceback", "traceback_truncated", "failure", "traceback_truncated"),
+    ("skip_reason", "skip_reason_truncated", "failure", "skip_reason_truncated"),
+    ("xfail_reason", "xfail_reason_truncated", "failure", "xfail_reason_truncated"),
+    ("captured_stdout", "captured_stdout_truncated", "captured", "stdout_truncated"),
+    ("captured_stderr", "captured_stderr_truncated", "captured", "stderr_truncated"),
+)
+
+
+@pytest.mark.parametrize(
+    ("wire_value", "wire_flag", "container", "stored_flag"),
+    _DISJUNCTION_FIELDS,
+    ids=[f[0] for f in _DISJUNCTION_FIELDS],
+)
+def test_to_result_disjunction_holds_at_every_budgeted_field(
+    wire_value: str, wire_flag: str, container: str, stored_flag: str
+) -> None:
+    """D75 at **every** field, not just `failure_message` (task 6.5's
+    original single case). The client reports a budget drop on a value that
+    fits the server's own bound whole, so `truncate()` returns `False`: a
+    naive `stored_flag = server_flag` assignment clears the client's report
+    and loses the fact that the field was dropped rather than never
+    captured. Parametrised because the invariant is per-field, and six of
+    the seven were undefended when only one case existed.
+    """
+    item = _result_report(**{wire_value: "short value", wire_flag: True})
+
+    result = _to_result(item)
+
+    subject = getattr(result, container)
+    assert subject is not None
+    assert getattr(subject, stored_flag) is True
 
 
 def test_to_result_normalizes_all_null_failure_to_none() -> None:
