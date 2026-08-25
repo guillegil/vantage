@@ -270,20 +270,20 @@ slice already carries.**
 
 - [x] 8.1 RED `test_routes_read.py::test_results_route_response_excludes_traceback_and_captured_output_sentinel` — a distinctive sentinel in the stored traceback is absent from the raw `GET /runs/{id}/results` body; **delete the retired task-7.6 Inspection comment in this same edit**. *(history-read-api → Lean list projections → List responses exclude traceback and captured output — now Test)*
 - [x] 8.2 RED `..._test_results_route_includes_bounded_failure_message_and_disjunction_flag` — a >200-char message; list entry carries the first 200 chars plus the flag.
-- [ ] 8.3 RED `..._test_result_detail_route_returns_full_record` — `GET /runs/{run_id}/result?node_id=...` returns 200 with the sentinel traceback and every failure/captured field, unbounded. *(Single result detail → The full record is reachable — route half)*
-- [ ] 8.4 RED `..._test_result_detail_truncation_flag_travels_with_the_field` — a truncated traceback; flag present alongside it. *(A bounded field's truncation flag travels with it on the single-item endpoint)*
-- [ ] 8.5 RED `..._test_result_detail_unknown_run_id_is_404_unknown_run_error`.
-- [ ] 8.6 RED `..._test_result_detail_unknown_node_id_is_404_unknown_result_error` — known run, unknown `node_id`, a distinct error shape. *(An unknown result identifier leaves stored data unchanged — 404 half)*
-- [ ] 8.7 RED `..._test_result_detail_unknown_identifier_leaves_stored_data_unchanged` — read the table directly after the request; no row created/altered/removed. *(An unknown result identifier leaves stored data unchanged)*
-- [ ] 8.8 RED `..._test_result_detail_overlong_node_id_is_422_not_414` — over `MAX_IDENTITY_CHARS`, D54 inherited.
-- [ ] 8.9 GREEN `errors.py`: `UnknownResultError` (404-shaped, its own kind).
-- [ ] 8.10 GREEN `schemas.py`: `ResultListItemResponse` (nested `FailureProjection` shape, done in PR8a); `ResultDetailResponse` (every field, field by field, never `from_attributes`, done in PR8b).
-- [ ] 8.11 GREEN `routes/read.py`: `GET /api/v1/runs/{run_id}/result?node_id=` (`Query(..., max_length=MAX_IDENTITY_CHARS)`) calling `store.get_result`, done in PR8b; `_result_item` reads from `ResultListEntry`/`FailureProjection`, never the full `Result`, done in PR8a.
-- [ ] 8.12 GREEN `openapi/v1.yaml`: new `read`-tagged `GET /runs/{run_id}/result` operation, hand-written (PR8b); the `ResultItem` → `ResultListItem` rename and nested `FailureProjection` schema landed in PR8a.
-- [ ] 8.13 RED `test_interface_document.py::test_the_new_result_detail_path_is_declared_and_answers_2xx` — extend the binding table. *(No new test function was added; the existing `test_every_documented_path_answers_2xx` binding table was extended in place, along with `_RESPONSE_SCHEMAS`/`_DECLARED_ENUMS` for `FailureProjection`/`ResultListItem`/`ResultDetailResponse` — task text names a test that does not exist as a distinct function, drift noted, not corrected.)*
-- [ ] 8.14 RED `test_read_only_surface.py::test_every_read_path_has_a_binding` — confirm the existing falsifier now also requires an entry for the new path.
-- [ ] 8.15 GREEN `test_read_only_surface.py`: add the binding-table entry for the new route.
-- [ ] 8.16 Gate: `uv run pytest packages/vantage/tests/test_routes_read.py packages/vantage/tests/test_interface_document.py packages/vantage/tests/test_read_only_surface.py`; `uv run mypy .` clean.
+- [x] 8.3 RED `..._test_result_detail_route_returns_full_record` — `GET /runs/{run_id}/result?node_id=...` returns 200 with the sentinel traceback and every failure/captured field, unbounded. *(Single result detail → The full record is reachable — route half)*
+- [x] 8.4 RED `..._test_result_detail_truncation_flag_travels_with_the_field` — a truncated traceback; flag present alongside it. *(A bounded field's truncation flag travels with it on the single-item endpoint)*
+- [x] 8.5 RED `..._test_result_detail_unknown_run_id_is_404_unknown_run_error`.
+- [x] 8.6 RED `..._test_result_detail_unknown_node_id_is_404_unknown_result_error` — known run, unknown `node_id`, a distinct error shape. *(An unknown result identifier leaves stored data unchanged — 404 half)*
+- [x] 8.7 RED `..._test_result_detail_unknown_identifier_leaves_stored_data_unchanged` — read the table directly after the request; no row created/altered/removed. *(An unknown result identifier leaves stored data unchanged)*
+- [x] 8.8 RED `..._test_result_detail_overlong_node_id_is_422_not_414` — over `MAX_IDENTITY_CHARS`, D54 inherited.
+- [x] 8.9 GREEN `errors.py`: `UnknownResultError` (404-shaped, its own kind).
+- [x] 8.10 GREEN `schemas.py`: `ResultListItemResponse` (nested `FailureProjection` shape, done in PR8a); `ResultDetailResponse` (every field, field by field, never `from_attributes`, done in PR8b).
+- [x] 8.11 GREEN `routes/read.py`: `GET /api/v1/runs/{run_id}/result?node_id=` (`Query(..., max_length=MAX_IDENTITY_CHARS)`) calling `store.get_result`, done in PR8b; `_result_item` reads from `ResultListEntry`/`FailureProjection`, never the full `Result`, done in PR8a.
+- [x] 8.12 GREEN `openapi/v1.yaml`: new `read`-tagged `GET /runs/{run_id}/result` operation, hand-written (PR8b); the `ResultItem` → `ResultListItem` rename and nested `FailureProjection` schema landed in PR8a.
+- [x] 8.13 RED `test_interface_document.py::test_the_new_result_detail_path_is_declared_and_answers_2xx` — extend the binding table. *(No new test function was added; the existing `test_every_documented_path_answers_2xx` binding table was extended in place, along with `_RESPONSE_SCHEMAS`/`_DECLARED_ENUMS` for `FailureProjection`/`ResultListItem`/`ResultDetailResponse` — task text names a test that does not exist as a distinct function, drift noted, not corrected.)*
+- [x] 8.14 RED `test_read_only_surface.py::test_every_read_path_has_a_binding` — confirm the existing falsifier now also requires an entry for the new path.
+- [x] 8.15 GREEN `test_read_only_surface.py`: add the binding-table entry for the new route.
+- [x] 8.16 Gate: `uv run pytest packages/vantage/tests/test_routes_read.py packages/vantage/tests/test_interface_document.py packages/vantage/tests/test_read_only_surface.py`; `uv run mypy .` clean.
 
 ## Phase 9: Measurements, overhead script, docs, ADR-0016, OQ-11 (PR9)
 
