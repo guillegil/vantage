@@ -4,7 +4,7 @@ Date: 2026-08-24
 
 ## Status
 
-Proposed
+Accepted on 2026-08-26, when PR #79 merged `failure-capture` into `main`.
 
 ## Context
 
