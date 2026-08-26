@@ -96,10 +96,10 @@ unit. A report already applied MUST NOT be overwritten by a stale or
 reordered later report for the same run: a start-write arriving after that
 run's finish has already been recorded MUST NOT null out the recorded finish,
 its exit fields, or its result rows.
-(Previously: the requirement's proof rested on the whole session — start
-through finish — being written in exactly one commit, which a start-write
-makes false. RQ-3.2 asserted that a truncated report leaves no run entry
-present at all, which was true only because everything arrived in one POST.)
+(Previously: this requirement's Measurements paragraph reflected the
+column set before `failure-evidence` added its columns to `result`'s
+insert/select lists; its own text obliges a re-run for exactly this kind of
+change.)
 
 #### Scenario: Server killed mid-write (RQ-3.1)
 - GIVEN a session of 500 tests whose finish report reaches the server
@@ -155,14 +155,62 @@ nothing would otherwise satisfy it.
 (The transit-truncation path shares its trigger with RQ-42's rejection
 behaviour — see `session-ingestion`.)
 
-**Measurements:** The 500-result finish-write generated in verification
-measures 252,511 bytes in body size. Server peak memory traced for one such
-finish-write request reaches approximately 2,021,039 bytes. These
-measurements are diagnostic; they inform payload size budgeting and resource
-planning for deployments. Future changes to the result schema or the
-batch-insert strategy MUST re-run the measurement test
-(`test_finish_report_reaches_storage_in_one_commit` via `tracemalloc` at
-request time) and justify any material increase.
+#### Scenario: Measurements are re-run for the failure-evidence column set
+- GIVEN `failure-evidence`'s columns added to `result`'s insert and select column lists
+- WHEN the 500-result finish-write measurement test is re-run
+- THEN this requirement's Measurements paragraph is updated with the re-measured body size and peak memory, and any material increase is justified in this spec
+
+**Verification: Analysis** — a re-measurement against the existing
+`tracemalloc`-based test, not a new assertion.
+
+**Measurements, re-run 2026-08-25 against the widened `_INSERT_RESULT`/
+`_SELECT_RESULTS_FOR_RUN` (31/33 columns) `failure-evidence` shipped**, via
+`uv run pytest packages/vantage/tests/test_rejection.py -k "five_hundred_results_fit_within_the_body_cap
+or server_peak_memory_for_one_five_hundred_result_request" -s` and one ad hoc
+script exercising `pytest_vantage.budget.spend_failure_text_budget` against a
+representative all-failing 500-result report (methodology below; the script
+itself is not committed — this paragraph is the citable record, the same
+treatment `version-control-context`'s Measurements paragraph gives its own
+script's output):
+
+- **No-failure 500-result body: 252,511 bytes, unchanged** from the
+  pre-`failure-evidence` figure. Stronger than "the new keys are `null`"
+  (design.md D80's forecast): a passing result carries none of the
+  seventeen new keys at all — they are absent from the wire, never emitted
+  as `null` — so a session with no failures costs nothing extra on the wire.
+- **Server peak memory, one 500-result finish-write request: 2,880,085
+  bytes, up from 2,021,039 (+859,046 bytes, +42.5%).** Material, and
+  explained: seventeen more `Optional[str | int | bool]` fields per result,
+  carried through both the wire-parsing model and the widened 31-column SQL
+  insert tuple, cost real Python object overhead even when every one of
+  them is `None` for all 500 results — a cost `tracemalloc` sees on the
+  server that the (unchanged) wire body does not.
+- **All-failing 500-result body (representative failure evidence and
+  captured output on all 500 results, spent through the plugin's
+  `spend_failure_text_budget` exactly as a real session would be): measured
+  794,291 bytes.** This is 17,492 bytes (2.25%) **over** design.md D80's
+  originally-stated bound of `252,511 + MAX_FAILURE_TEXT_BYTES` = 776,799
+  bytes — the bound formula undercounted, not this measurement. The budget
+  charges only the five budgeted fields' own JSON-encoded *values*; it
+  never charges their key names and punctuation, nor the twelve
+  non-budgeted columns present on every failing result (`failure_type`,
+  `failure_path`, `failure_lineno`, `skip_reason`, `xfail_reason`, and the
+  seven `_truncated` flags) — each short by construction, but not zero
+  across 500 results. **Still 254,285 bytes (24.2%) under `MAX_REPORT_BYTES`
+  (1,048,576)** for a 500-result, 100%-failing session, so this undercount
+  does not put RQ-3's whole-report cap at risk in practice; design.md D80
+  carries the corrected derivation.
+
+This requirement's own text already obliges a re-run for any change to the
+result schema or the batch-insert strategy, and widening `result`'s
+insert/select lists by seventeen columns for `failure-evidence` is exactly
+such a change. Future changes to the result schema or the batch-insert
+strategy MUST re-run the measurement test
+(`test_finish_report_reaches_storage_in_one_commit`,
+`test_five_hundred_results_fit_within_the_body_cap` and
+`test_server_peak_memory_for_one_five_hundred_result_request`, via
+`tracemalloc` at request time for the memory figure) and justify any
+material increase.
 
 ### Requirement: Concurrent session recording (RQ-38)
 

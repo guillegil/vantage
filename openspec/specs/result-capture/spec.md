@@ -5,6 +5,9 @@
 Defines what the system records for each individual test a session executed:
 an outcome that reflects every execution phase, the duration of each phase
 separately, and an identity decomposed into separately queryable values.
+What a failed result additionally records — its traceback, failure type,
+message and location, and its captured stdout and stderr — is defined in
+`failure-evidence`.
 
 Throughout this spec, **null means "did not happen"** and is never
 interchangeable with zero or with the empty string. That distinction is the
