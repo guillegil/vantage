@@ -202,6 +202,23 @@ class UnknownRunError(RejectionError):
         super().__init__("No run with that identifier has been recorded.")
 
 
+class UnknownResultError(RejectionError):
+    """A run is known, but no result matches the `node_id` used against the
+    single-result endpoint (design.md D78).
+
+    A distinct kind from `UnknownRunError`: "no run with that id" and "that
+    run exists but has no result at that identity" are two different facts,
+    and `errors.py`'s own docstring asks for one shape per rejection kind,
+    not one reused across two different reasons.
+    """
+
+    status_code = 404
+    error = "unknown_result"
+
+    def __init__(self) -> None:
+        super().__init__("No result with that identifier has been recorded for this run.")
+
+
 def _rejection_response(exc: RejectionError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
@@ -252,6 +269,7 @@ __all__ = [
     "InvalidReportError",
     "PayloadTooLargeError",
     "RejectionError",
+    "UnknownResultError",
     "UnknownRunError",
     "UnsupportedMediaTypeError",
     "register_error_handlers",

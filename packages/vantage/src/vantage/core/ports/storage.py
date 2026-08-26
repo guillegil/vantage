@@ -18,8 +18,8 @@ from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.execution import Execution
-from vantage.core.domain.projection import VcsProjection
-from vantage.core.domain.result import CatalogueEntry, Result
+from vantage.core.domain.projection import FailureProjection, VcsProjection
+from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 
 MAX_PAGE_ITEMS = 200
 """The hard cap on items in one page (design.md D61) -- clamped in the
@@ -91,6 +91,34 @@ class HistoryEntry:
     vcs: VcsProjection | None
 
 
+@dataclass(frozen=True, slots=True)
+class ResultListEntry:
+    """One row of `list_results` (design.md D76, D77).
+
+    Every field the pre-existing `/runs/{id}/results` wire contract already
+    carried -- identity, outcome, every phase outcome/duration, `worker_id`
+    -- is unchanged. Only `failure` is new here, and it is a lean
+    `FailureProjection`, never the full `FailureEvidence`: this type has no
+    field for `traceback`, `failure_repr` or captured output at all, the
+    same structural exclusion `VcsProjection` gives `vcs_root` (D59) --
+    nothing to leak because the type never carries it in the first place.
+    """
+
+    identity: CaseIdentity
+    outcome: str
+    duration: float | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    setup_outcome: str | None
+    call_outcome: str | None
+    teardown_outcome: str | None
+    setup_duration: float | None
+    call_duration: float | None
+    teardown_duration: float | None
+    worker_id: str | None
+    failure: FailureProjection | None
+
+
 class ExecutionStore(Protocol):
     """Persists `Execution` rows. Implementations live in `vantage.storage`."""
 
@@ -150,10 +178,20 @@ class ExecutionStore(Protocol):
         projection."""
         ...
 
-    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[Result]:
-        """Return a page of one run's results (design.md D57) -- the
-        paginated sibling of `get_results`, which is left unchanged. Same
-        clamp and `has_more` mechanism as `list_runs` (design.md D61)."""
+    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
+        """Return a page of one run's results (design.md D57, D76, D77) --
+        the paginated sibling of `get_results`, which is left unchanged.
+        Same clamp and `has_more` mechanism as `list_runs` (design.md D61).
+        Each entry's failure data is a lean `FailureProjection`, mirroring
+        `list_runs`' `VcsProjection` treatment of VCS data (design.md D59,
+        D76) -- the full record is reachable via `get_result`."""
+        ...
+
+    def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
+        """Return the full record for one result, or None if no result with
+        that `node_id` is stored for `execution_id` (design.md D77, D78) --
+        the complement of `list_results`' bounded projection. `failure` and
+        `captured` are populated in full, unbounded."""
         ...
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:

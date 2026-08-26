@@ -13,12 +13,14 @@ the same in PR5.
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
-from vantage.core.domain.result import CaseIdentity, Result
-from vantage.core.ports.storage import MAX_PAGE_ITEMS, ExecutionStore
+from vantage.core.domain.projection import LIST_FAILURE_MESSAGE_CHARS, project_failure
+from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
+from vantage.core.ports.storage import MAX_PAGE_ITEMS, ExecutionStore, ResultListEntry
 
 
 def _execution(
@@ -99,6 +101,8 @@ def _result(
     setup_duration: float | None = 0.001,
     call_duration: float | None = 0.001,
     teardown_duration: float | None = 0.001,
+    failure: FailureEvidence | None = None,
+    captured: CapturedOutput | None = None,
 ) -> Result:
     started = datetime(2026, 8, 15, 9, 0, 1, tzinfo=timezone.utc)
     return Result(
@@ -120,6 +124,60 @@ def _result(
         call_duration=call_duration,
         teardown_duration=teardown_duration,
         worker_id=None,
+        failure=failure,
+        captured=captured
+        if captured is not None
+        else CapturedOutput(
+            stdout=None, stdout_truncated=False, stderr=None, stderr_truncated=False
+        ),
+    )
+
+
+def _failure(
+    *,
+    failure_type: str | None = "AssertionError",
+    failure_message: str | None = "boom",
+    failure_message_truncated: bool = False,
+    failure_path: str | None = "t.py",
+    failure_lineno: int | None = 10,
+    failure_repr: str | None = "AssertionError('boom')",
+    failure_repr_truncated: bool = False,
+    traceback: str | None = "t.py:10: in test_x\n    assert False\nAssertionError",
+    traceback_truncated: bool = False,
+    skip_reason: str | None = None,
+    skip_reason_truncated: bool = False,
+    xfail_reason: str | None = None,
+    xfail_reason_truncated: bool = False,
+) -> FailureEvidence:
+    return FailureEvidence(
+        failure_type=failure_type,
+        failure_message=failure_message,
+        failure_message_truncated=failure_message_truncated,
+        failure_path=failure_path,
+        failure_lineno=failure_lineno,
+        failure_repr=failure_repr,
+        failure_repr_truncated=failure_repr_truncated,
+        traceback=traceback,
+        traceback_truncated=traceback_truncated,
+        skip_reason=skip_reason,
+        skip_reason_truncated=skip_reason_truncated,
+        xfail_reason=xfail_reason,
+        xfail_reason_truncated=xfail_reason_truncated,
+    )
+
+
+def _captured(
+    *,
+    stdout: str | None = None,
+    stdout_truncated: bool = False,
+    stderr: str | None = None,
+    stderr_truncated: bool = False,
+) -> CapturedOutput:
+    return CapturedOutput(
+        stdout=stdout,
+        stdout_truncated=stdout_truncated,
+        stderr=stderr,
+        stderr_truncated=stderr_truncated,
     )
 
 
@@ -945,3 +1003,123 @@ class ExecutionStoreContract:
 
         assert page.items == ()
         assert page.has_more is False
+
+    # -- list_results / get_result failure evidence (failure-capture Phase 7, design.md D76-D78) --
+
+    def test_list_results_projects_failure_evidence_via_failure_projection(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D76 -- the two-mechanism agreement: a stored result
+        with a >200-character message; the `list_results` entry's `failure`
+        agrees with `project_failure`'s own bounding and disjunction rule,
+        the same pattern `project_vcs`/SQL `substr` already proves for the
+        commit subject."""
+        long_message = "E" * (LIST_FAILURE_MESSAGE_CHARS + 51)
+        failure = _failure(failure_message=long_message, failure_message_truncated=False)
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_failing", outcome="failed", failure=failure),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        page = store.list_results(execution.identity.value, limit=10, offset=0)
+
+        entry = page.items[0]
+        assert entry.failure == project_failure(failure)
+        assert entry.failure is not None
+        assert entry.failure.failure_message == long_message[:LIST_FAILURE_MESSAGE_CHARS]
+        assert entry.failure.failure_message_truncated is True
+
+    def test_list_results_excludes_the_heavy_fields_structurally(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D76 -- `ResultListEntry` has no field to carry
+        `traceback`, `failure_repr` or captured output, proven against the
+        type `list_results` actually returns, not merely `ResultListEntry`
+        in isolation."""
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_failing", outcome="failed", failure=_failure()),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        page = store.list_results(execution.identity.value, limit=10, offset=0)
+
+        entry = page.items[0]
+        assert isinstance(entry, ResultListEntry)
+        field_names = {f.name for f in dataclasses.fields(ResultListEntry)}
+        assert "traceback" not in field_names
+        assert "failure_repr" not in field_names
+        assert "captured" not in field_names
+
+    def test_get_result_returns_the_full_record_hit(self, store: ExecutionStore) -> None:
+        """history-read-api -> Single result detail -> The full record is
+        reachable (port half, design.md D77, D78): `get_result` returns the
+        whole stored `Result`, `failure`/`captured` populated in full,
+        unbounded."""
+        execution = _execution("a" * 32)
+        failure = _failure()
+        captured = _captured(stdout="captured output", stderr="")
+        store.record_session(
+            execution,
+            results=(
+                _result("t.py::test_x", outcome="failed", failure=failure, captured=captured),
+            ),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+
+        assert found is not None
+        assert found.identity.node_id == "t.py::test_x"
+        assert found.failure == failure
+        assert found.captured == captured
+
+    def test_get_result_returns_none_for_unknown_node_id_miss(self, store: ExecutionStore) -> None:
+        execution = _execution("a" * 32)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        assert store.get_result(execution.identity.value, node_id="t.py::test_never_ran") is None
+
+    def test_get_result_truncation_flag_travels_with_the_field(self, store: ExecutionStore) -> None:
+        """A bounded field's truncation flag travels with it -- port half
+        (design.md D77): `get_result`'s `traceback_truncated` is exactly
+        what was stored, never dropped or defaulted."""
+        execution = _execution("a" * 32)
+        failure = _failure(traceback="a truncated traceback", traceback_truncated=True)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+
+        assert found is not None
+        assert found.failure is not None
+        assert found.failure.traceback == "a truncated traceback"
+        assert found.failure.traceback_truncated is True
+
+    def test_captured_output_empty_versus_absent_round_trips_through_storage(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D77's asymmetry: `""` (captured, empty) and `None`
+        (never captured) round-trip distinctly through storage, both
+        adapters -- collapsing `""` to `None` (a truthy check on the
+        string) would make the two indistinguishable."""
+        execution = _execution("a" * 32)
+        empty_captured = _captured(stdout="", stderr=None)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x", captured=empty_captured),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+
+        assert found is not None
+        assert found.captured.stdout == ""
+        assert found.captured.stdout_truncated is False
+        assert found.captured.stderr is None

@@ -18,6 +18,7 @@ it costs more than a sprint to reverse.
 | OQ-8 | What can the launch surface actually launch? | **Answered** 2026-08-18 |
 | OQ-9 | Can the read-only guarantee stay read-only once launching exists? | **Answered** 2026-08-21 — ADR-15 |
 | OQ-10 | Is the interface document generated or hand-written? | **Answered** 2026-08-18 |
+| OQ-11 | Unredacted failure-text storage: is a redactor ever needed? | **Open** — failure-count cap rejected 2026-08-25 |
 
 ---
 
@@ -111,3 +112,47 @@ serves, and compares them.
 RQ-36's criterion 3 — *an endpoint present in the service and absent from the
 document is reported* — could never fail. A green check that cannot fail is the
 failure mode RQ-26 already guards against with its second, anti-vacuous test.
+
+## OQ-11 · Unredacted failure-text storage: is a redactor ever needed?
+
+ADR-0016 decides the storage question — Vantage stores pytest's rendered
+failure evidence and captured output verbatim and unredacted, disclosed
+rather than claimed safe, refusable by omission: capture is opt-in and
+absent unless a session's invocation asks for it via
+`--vantage-failure-text`. It leaves one thing open rather than deciding it,
+named in its own Consequences and Alternatives-rejected sections:
+
+**A redactor.** Content-scanning free-form text for secrets is an unbounded
+problem and a redactor that misses once is more dangerous than none, so
+ADR-0016 defers it rather than refusing it forever. Nothing changes this
+until one is designed and its false-negative rate is itself measured and
+disclosed — a redactor nobody has evaluated is not a safer default than the
+disclosed absence of one.
+
+**A failure-count cap — considered, and rejected 2026-08-25.**
+`failure-evidence`'s own Measurements paragraph (RQ-25) found that **every
+measured failure density breaches RQ-25's 2% overhead budget, not only a
+pathological all-failing session** — ten failing tests out of a thousand
+already cost 3.45%–3.71% of a recording-off baseline, because
+`version-control-context`'s own git-read overhead already spends most of the
+budget before a single failure is rendered. Design.md D79 named this
+possibility explicitly and declined to invent one without a number behind
+it; that number now exists, and the arithmetic it produces rejects the cap
+rather than sizing one: RQ-25 leaves roughly 55 ms of headroom per session,
+and a single rendered failure costs 32–48 ms depending on density, so the
+budget admits **roughly four failures per session** before it is spent — not
+a failure-capture feature, a feature that fails on the fifth test in an
+otherwise-healthy suite. The response taken instead was `design.md` D72's
+polarity flip: capture is now opt-in and absent by default, so the common
+case pays nothing at all rather than a small, arbitrary amount, and a
+session that does opt in accepts the measured cost knowingly. Whether a
+narrower mechanism is worth building for a session that has already opted in
+— a lower per-report budget, a cheaper rendering path, or something else —
+remains genuinely open, distinct from the cap question this paragraph
+closes.
+
+**Not open:** whether to store unredacted text at all (ADR-0016 decided
+that), whether an opt-in surface must exist and stay invocation-flag-only
+(it does, under RQ-2's own invariant), or whether a failure-count cap should
+replace the opt-in default (considered and rejected above, with the
+arithmetic behind it).

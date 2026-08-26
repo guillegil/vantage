@@ -30,7 +30,7 @@ from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
 from vantage.service.schemas import _Outcome
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _execution, _result, _start_only_execution
+from vantage_port_contract import _captured, _execution, _failure, _result, _start_only_execution
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -164,6 +164,31 @@ def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore
 
     oversized_report = _well_formed_report()
     oversized_report["run"]["interrupt_reason"] = "x" * (MAX_REPORT_BYTES + 1)
+
+    response = client.post("/api/v1/runs", json=oversized_report)
+
+    assert response.status_code == 413
+    body = response.json()
+    assert body["error"] == "payload_too_large"
+    assert store.count_executions() == 0
+
+
+def test_a_report_exceeding_the_size_cap_with_failure_evidence_stores_nothing(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """session-ingestion → A report exceeding the size cap stores nothing
+    (task 6.13): the encoded body -- failure evidence included -- exceeds
+    `MAX_REPORT_BYTES`; the run table stays empty. Whole-report rejection,
+    unchanged by `failure-capture` -- the same `413` `_read_bounded_body`
+    already raises for any oversized field."""
+    oversized_report = _well_formed_report()
+    oversized_report["results"] = [
+        _result_entry(
+            "packages/vantage/tests/test_f.py::test_one",
+            outcome="failed",
+            traceback="x" * (MAX_REPORT_BYTES + 1),
+        )
+    ]
 
     response = client.post("/api/v1/runs", json=oversized_report)
 
@@ -393,6 +418,13 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
     resource planning for deployments. Future changes to the result schema or
     the batch-insert strategy MUST re-run this test via `tracemalloc` at
     request time and justify any material increase.
+
+    **failure-capture Phase 7 (design.md D80):** `_INSERT_RESULT` widened
+    from 14 to 31 bound columns, one per result row; a handful of the 500
+    carry failure evidence and captured output. The premise this test
+    exists to guard -- one commit for the whole batch -- must still hold at
+    the wider width, and a failing result's evidence must still round-trip,
+    or the batch-insert strategy silently split under the extra columns.
     """
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     counting = _CommitCountingConnection(adapter._conn)
@@ -400,7 +432,17 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
 
     try:
         execution = _execution("f" + "0" * 31)
-        results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
+        failure = _failure()
+        captured = _captured(stdout="some output", stderr="")
+        results = [
+            _result(
+                f"packages/vantage/tests/test_bulk.py::test_{i}",
+                outcome="failed" if i < 5 else "passed",
+                failure=failure if i < 5 else None,
+                captured=captured if i < 5 else None,
+            )
+            for i in range(500)
+        ]
 
         created = adapter.record_session(
             execution, results=results, received_at=datetime.now(timezone.utc)
@@ -418,6 +460,14 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
         assert stored is not None
         assert stored.finished_at == execution.finished_at
         assert stored.exit_status == execution.exit_status
+
+        found = adapter.get_result(
+            execution.identity.value,
+            node_id="packages/vantage/tests/test_bulk.py::test_0",
+        )
+        assert found is not None
+        assert found.failure == failure
+        assert found.captured == captured
     finally:
         adapter.close()
 

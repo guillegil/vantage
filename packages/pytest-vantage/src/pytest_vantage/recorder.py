@@ -51,6 +51,7 @@ import pytest
 
 from pytest_vantage import vcs
 from pytest_vantage.boundary import _warn, fault_isolated, liveness_isolated
+from pytest_vantage.budget import spend_failure_text_budget
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.config import resolve_liveness_timeout
 from pytest_vantage.transport import send, send_heartbeat
@@ -282,6 +283,12 @@ class Recorder:
         orderly = exit_status not in _NULL_FINISH_EXIT_STATUSES
         finished_at = datetime.now(timezone.utc) if orderly else None
 
+        results = assemble_results(self._results)
+        # design.md D74: spent before the report exists -- a 413 costs the
+        # whole session, and `truncate()` (server-side, D75) is structurally
+        # too late to help a session that never gets that far.
+        spend_failure_text_budget(results)
+
         report: dict[str, object] = {
             "run": {
                 "id": self._run_id,
@@ -291,7 +298,7 @@ class Recorder:
                 "interrupted": exit_status == _INTERRUPTED_EXIT_STATUS,
                 "interrupt_reason": None,
             },
-            "results": assemble_results(self._results),
+            "results": results,
             "vcs": self._vcs_section(),
         }
         send(self._address, report, timeout=self._timeout)

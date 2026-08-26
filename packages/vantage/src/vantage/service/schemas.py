@@ -110,6 +110,13 @@ class ResultReport(BaseModel):
     corresponding phase may never have run (RQ-5.2) or the identity
     component may genuinely be absent (RQ-9.2/9.3).
 
+    **The failure-evidence fields below are the one exception to "every
+    known field is required with no default."** An older plugin's report
+    predates every one of them, so each defaults to the absent shape
+    (`None`/`False`) rather than rejecting (design.md D75).
+    `routes/runs.py`'s `_to_failure_evidence`/`_to_captured_output` OR each
+    `*_truncated` flag with the server's own bound, never assign it.
+
     `class_name` and `param_id` are plain `str | None`, never a
     length-constrained string: `param_id=""` (RQ-9's extension scenario)
     must arrive intact. **No `min_length=1`, no validator that coerces a
@@ -138,6 +145,23 @@ class ResultReport(BaseModel):
     call_duration: float | None
     teardown_duration: float | None
     worker_id: str | None
+    failure_type: str | None = None
+    failure_message: str | None = None
+    failure_message_truncated: bool = False
+    failure_path: str | None = None
+    failure_lineno: int | None = None
+    failure_repr: str | None = None
+    failure_repr_truncated: bool = False
+    traceback: str | None = None
+    traceback_truncated: bool = False
+    skip_reason: str | None = None
+    skip_reason_truncated: bool = False
+    xfail_reason: str | None = None
+    xfail_reason_truncated: bool = False
+    captured_stdout: str | None = None
+    captured_stdout_truncated: bool = False
+    captured_stderr: str | None = None
+    captured_stderr_truncated: bool = False
 
 
 class VcsReport(BaseModel):
@@ -293,10 +317,29 @@ class RunDetailResponse(BaseModel):
     vcs: RunVcsResponse | None
 
 
-class ResultItemResponse(BaseModel):
-    """One entry of `ResultsResponse` (design.md D57). Traceback/captured
-    output are excluded, unfailable by construction -- `Result` has no such
-    field yet (task 7.6). Built field by field in `routes/read.py`."""
+class FailureProjectionResponse(BaseModel):
+    """The lean failure projection nested on `ResultListItemResponse`
+    (design.md D76). No `traceback`, `failure_repr` or captured-output
+    field at all -- the exclusion is structural, the same defence
+    `RunVcsResponse` gives `vcs_root` (D59): a results list has nothing to
+    leak because this model never carries those fields in the first
+    place."""
+
+    failure_type: str | None
+    failure_message: str | None
+    failure_message_truncated: bool
+    failure_path: str | None
+    failure_lineno: int | None
+    skip_reason: str | None
+    xfail_reason: str | None
+
+
+class ResultListItemResponse(BaseModel):
+    """One entry of `ResultsResponse` (design.md D57, D76). `failure` is a
+    lean `FailureProjectionResponse`, never the full failure evidence --
+    the full record is reachable via `ResultDetailResponse`, the
+    single-result endpoint's response model. Built field by field in
+    `routes/read.py`, never `model_validate(..., from_attributes=True)`."""
 
     node_id: str
     file_path: str
@@ -314,14 +357,58 @@ class ResultItemResponse(BaseModel):
     call_duration: float | None
     teardown_duration: float | None
     worker_id: str | None
+    failure: FailureProjectionResponse | None
 
 
 class ResultsResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}/results` (design.md
     D57, D61)."""
 
-    items: list[ResultItemResponse]
+    items: list[ResultListItemResponse]
     has_more: bool
+
+
+class ResultDetailResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/result` (design.md
+    D77, D78) -- the full record, every field a list response bounds or
+    excludes, unbounded by any display width. Flat, matching
+    `ResultReport`'s own wire shape for the same fields, rather than
+    nesting `failure`/`captured` sub-objects. Built field by field in
+    `routes/read.py`, never `model_validate(..., from_attributes=True)`."""
+
+    node_id: str
+    file_path: str
+    class_name: str | None
+    function_name: str
+    param_id: str | None
+    outcome: str
+    duration: float | None
+    started_at: datetime | None
+    finished_at: datetime | None
+    setup_outcome: str | None
+    call_outcome: str | None
+    teardown_outcome: str | None
+    setup_duration: float | None
+    call_duration: float | None
+    teardown_duration: float | None
+    worker_id: str | None
+    failure_type: str | None
+    failure_message: str | None
+    failure_message_truncated: bool
+    failure_path: str | None
+    failure_lineno: int | None
+    failure_repr: str | None
+    failure_repr_truncated: bool
+    traceback: str | None
+    traceback_truncated: bool
+    skip_reason: str | None
+    skip_reason_truncated: bool
+    xfail_reason: str | None
+    xfail_reason_truncated: bool
+    captured_stdout: str | None
+    captured_stdout_truncated: bool
+    captured_stderr: str | None
+    captured_stderr_truncated: bool
 
 
 class HistoryEntryResponse(BaseModel):

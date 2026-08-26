@@ -64,9 +64,27 @@ from pathlib import Path
 from typing import cast
 
 from vantage.core.domain.execution import Execution, Identity, VcsContext
-from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, VcsProjection
-from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
-from vantage.core.ports.storage import MAX_PAGE_ITEMS, HistoryEntry, Page, RunDetail, RunListEntry
+from vantage.core.domain.projection import (
+    LIST_COMMIT_SUBJECT_CHARS,
+    LIST_FAILURE_MESSAGE_CHARS,
+    FailureProjection,
+    VcsProjection,
+)
+from vantage.core.domain.result import (
+    CapturedOutput,
+    CaseIdentity,
+    CatalogueEntry,
+    FailureEvidence,
+    Result,
+)
+from vantage.core.ports.storage import (
+    MAX_PAGE_ITEMS,
+    HistoryEntry,
+    Page,
+    ResultListEntry,
+    RunDetail,
+    RunListEntry,
+)
 from vantage.storage.connection import open_database
 
 # SQLITE_MAX_VARIABLE_NUMBER is 999 on older SQLite builds; 500 leaves
@@ -184,33 +202,91 @@ _UPSERT_TEST_CASE = """
         last_seen_at     = MAX(test_case.last_seen_at, excluded.last_seen_at)
 """
 
+# Widened from 14 to 31 bound columns (design.md D80): the thirteen
+# `FailureEvidence` fields plus the four `CapturedOutput` fields, appended
+# after `worker_id` -- `worker_id` itself keeps its original position so the
+# first fourteen values are unchanged (`_result_rows` below). `schema.sql`
+# is NOT touched by this widening: RQ-29 already created these columns at
+# first use, so nothing here is a migration.
 _INSERT_RESULT = """
     INSERT INTO result (
         run_id, test_case_id, node_id, outcome, duration, started_at, finished_at,
         setup_outcome, call_outcome, teardown_outcome,
-        setup_duration, call_duration, teardown_duration, worker_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        setup_duration, call_duration, teardown_duration, worker_id,
+        failure_type, failure_message, failure_message_truncated,
+        failure_path, failure_lineno,
+        failure_repr, failure_repr_truncated,
+        traceback, traceback_truncated,
+        skip_reason, skip_reason_truncated,
+        xfail_reason, xfail_reason_truncated,
+        captured_stdout, captured_stdout_truncated,
+        captured_stderr, captured_stderr_truncated
+    ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    )
     ON CONFLICT(run_id, node_id, attempt) DO NOTHING
 """
 
+# Widened from 16 to 33 columns (design.md D80) -- the full, unbounded
+# record `get_results`/`get_result` return; every failure/captured-output
+# column is selected here, unlike the lean `_LIST_RESULTS` below.
 _SELECT_RESULTS_FOR_RUN = """
     SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
            r.outcome, r.duration, r.started_at, r.finished_at,
            r.setup_outcome, r.call_outcome, r.teardown_outcome,
-           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id
+           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id,
+           r.failure_type, r.failure_message, r.failure_message_truncated,
+           r.failure_path, r.failure_lineno,
+           r.failure_repr, r.failure_repr_truncated,
+           r.traceback, r.traceback_truncated,
+           r.skip_reason, r.skip_reason_truncated,
+           r.xfail_reason, r.xfail_reason_truncated,
+           r.captured_stdout, r.captured_stdout_truncated,
+           r.captured_stderr, r.captured_stderr_truncated
     FROM result r
     JOIN test_case tc ON tc.id = r.test_case_id
     WHERE r.run_id = ?
     ORDER BY r.id
 """
 
-# `list_results`' SELECT -- the paginated sibling of `_SELECT_RESULTS_FOR_RUN`
-# (design.md D57). Same shape, same `r.id` order, `LIMIT`/`OFFSET` added.
+# `get_result`'s SELECT -- the same full-record column set as
+# `_SELECT_RESULTS_FOR_RUN`, narrowed to one `node_id` (design.md D77, D78).
+_SELECT_RESULT = """
+    SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
+           r.outcome, r.duration, r.started_at, r.finished_at,
+           r.setup_outcome, r.call_outcome, r.teardown_outcome,
+           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id,
+           r.failure_type, r.failure_message, r.failure_message_truncated,
+           r.failure_path, r.failure_lineno,
+           r.failure_repr, r.failure_repr_truncated,
+           r.traceback, r.traceback_truncated,
+           r.skip_reason, r.skip_reason_truncated,
+           r.xfail_reason, r.xfail_reason_truncated,
+           r.captured_stdout, r.captured_stdout_truncated,
+           r.captured_stderr, r.captured_stderr_truncated
+    FROM result r
+    JOIN test_case tc ON tc.id = r.test_case_id
+    WHERE r.run_id = ? AND r.node_id = ?
+"""
+
+# `list_results`' SELECT -- the paginated, LEAN sibling of
+# `_SELECT_RESULTS_FOR_RUN` (design.md D57, D76): same shape, same `r.id`
+# order, `LIMIT`/`OFFSET` added, but the failure projection here is the
+# `substr`/`length`-bounded, disjoined shape `_LIST_RUNS` already uses for
+# the commit subject -- and no `failure_repr`/`traceback`/captured-output
+# column is selected at all, the SQL half of D76's structural exclusion.
 _LIST_RESULTS = """
     SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
            r.outcome, r.duration, r.started_at, r.finished_at,
            r.setup_outcome, r.call_outcome, r.teardown_outcome,
-           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id
+           r.setup_duration, r.call_duration, r.teardown_duration, r.worker_id,
+           r.failure_type,
+           substr(r.failure_message, 1, ?)                          AS failure_message,
+           CASE WHEN r.failure_message_truncated = 1
+                  OR COALESCE(length(r.failure_message) > ?, 0) = 1
+                THEN 1 ELSE 0 END                                   AS failure_message_truncated,
+           r.failure_path, r.failure_lineno, r.skip_reason, r.xfail_reason
     FROM result r
     JOIN test_case tc ON tc.id = r.test_case_id
     WHERE r.run_id = ?
@@ -431,6 +507,105 @@ def _row_to_history_entry(row: tuple[object, ...]) -> HistoryEntry:
     )
 
 
+def _row_to_failure_evidence(row: tuple[object, ...]) -> FailureEvidence | None:
+    """The all-null-or-false normalisation rule (design.md D48, D77),
+    applied to all thirteen stored `FailureEvidence` columns -- mirrors
+    `_row_to_vcs_context`'s rule, widened from five value columns to
+    thirteen: a result with no failure evidence at all reads back as
+    `None`, never as a `FailureEvidence` full of nulls."""
+    (
+        failure_type,
+        failure_message,
+        failure_message_truncated,
+        failure_path,
+        failure_lineno,
+        failure_repr,
+        failure_repr_truncated,
+        traceback,
+        traceback_truncated,
+        skip_reason,
+        skip_reason_truncated,
+        xfail_reason,
+        xfail_reason_truncated,
+    ) = row
+    if (
+        failure_type is None
+        and failure_message is None
+        and not failure_message_truncated
+        and failure_path is None
+        and failure_lineno is None
+        and failure_repr is None
+        and not failure_repr_truncated
+        and traceback is None
+        and not traceback_truncated
+        and skip_reason is None
+        and not skip_reason_truncated
+        and xfail_reason is None
+        and not xfail_reason_truncated
+    ):
+        return None
+    return FailureEvidence(
+        failure_type=cast("str | None", failure_type),
+        failure_message=cast("str | None", failure_message),
+        failure_message_truncated=bool(failure_message_truncated),
+        failure_path=cast("str | None", failure_path),
+        failure_lineno=cast("int | None", failure_lineno),
+        failure_repr=cast("str | None", failure_repr),
+        failure_repr_truncated=bool(failure_repr_truncated),
+        traceback=cast("str | None", traceback),
+        traceback_truncated=bool(traceback_truncated),
+        skip_reason=cast("str | None", skip_reason),
+        skip_reason_truncated=bool(skip_reason_truncated),
+        xfail_reason=cast("str | None", xfail_reason),
+        xfail_reason_truncated=bool(xfail_reason_truncated),
+    )
+
+
+def _row_to_captured_output(row: tuple[object, ...]) -> CapturedOutput:
+    """Never `None` (design.md D77's asymmetry) -- reads the four columns
+    straight through, so a stored `''` reads back as `''`, never coerced to
+    `None`."""
+    stdout, stdout_truncated, stderr, stderr_truncated = row
+    return CapturedOutput(
+        stdout=cast("str | None", stdout),
+        stdout_truncated=bool(stdout_truncated),
+        stderr=cast("str | None", stderr),
+        stderr_truncated=bool(stderr_truncated),
+    )
+
+
+def _row_to_failure_projection(
+    failure_type: object,
+    failure_message: object,
+    failure_message_truncated: object,
+    failure_path: object,
+    failure_lineno: object,
+    skip_reason: object,
+    xfail_reason: object,
+) -> FailureProjection | None:
+    """The same all-null-or-false rule as `_row_to_failure_evidence`, over
+    only the seven lean columns `_LIST_RESULTS` selects (design.md D76)."""
+    if (
+        failure_type is None
+        and failure_message is None
+        and not failure_message_truncated
+        and failure_path is None
+        and failure_lineno is None
+        and skip_reason is None
+        and xfail_reason is None
+    ):
+        return None
+    return FailureProjection(
+        failure_type=cast("str | None", failure_type),
+        failure_message=cast("str | None", failure_message),
+        failure_message_truncated=bool(failure_message_truncated),
+        failure_path=cast("str | None", failure_path),
+        failure_lineno=cast("int | None", failure_lineno),
+        skip_reason=cast("str | None", skip_reason),
+        xfail_reason=cast("str | None", xfail_reason),
+    )
+
+
 def _row_to_result(row: tuple[object, ...]) -> Result:
     (
         node_id,
@@ -449,6 +624,7 @@ def _row_to_result(row: tuple[object, ...]) -> Result:
         call_duration,
         teardown_duration,
         worker_id,
+        *failure_and_captured,
     ) = row
     return Result(
         identity=CaseIdentity(
@@ -469,6 +645,65 @@ def _row_to_result(row: tuple[object, ...]) -> Result:
         call_duration=cast("float | None", call_duration),
         teardown_duration=cast("float | None", teardown_duration),
         worker_id=cast("str | None", worker_id),
+        failure=_row_to_failure_evidence(tuple(failure_and_captured[:13])),
+        captured=_row_to_captured_output(tuple(failure_and_captured[13:])),
+    )
+
+
+def _row_to_result_list_entry(row: tuple[object, ...]) -> ResultListEntry:
+    (
+        node_id,
+        file_path,
+        class_name,
+        function_name,
+        param_id,
+        outcome,
+        duration,
+        started_at,
+        finished_at,
+        setup_outcome,
+        call_outcome,
+        teardown_outcome,
+        setup_duration,
+        call_duration,
+        teardown_duration,
+        worker_id,
+        failure_type,
+        failure_message,
+        failure_message_truncated,
+        failure_path,
+        failure_lineno,
+        skip_reason,
+        xfail_reason,
+    ) = row
+    return ResultListEntry(
+        identity=CaseIdentity(
+            node_id=cast(str, node_id),
+            file_path=cast(str, file_path),
+            class_name=cast("str | None", class_name),
+            function_name=cast(str, function_name),
+            param_id=cast("str | None", param_id),
+        ),
+        outcome=cast(str, outcome),
+        duration=cast("float | None", duration),
+        started_at=datetime.fromisoformat(started_at) if isinstance(started_at, str) else None,
+        finished_at=datetime.fromisoformat(finished_at) if isinstance(finished_at, str) else None,
+        setup_outcome=cast("str | None", setup_outcome),
+        call_outcome=cast("str | None", call_outcome),
+        teardown_outcome=cast("str | None", teardown_outcome),
+        setup_duration=cast("float | None", setup_duration),
+        call_duration=cast("float | None", call_duration),
+        teardown_duration=cast("float | None", teardown_duration),
+        worker_id=cast("str | None", worker_id),
+        failure=_row_to_failure_projection(
+            failure_type,
+            failure_message,
+            failure_message_truncated,
+            failure_path,
+            failure_lineno,
+            skip_reason,
+            xfail_reason,
+        ),
     )
 
 
@@ -524,6 +759,44 @@ def _catalogue_rows(
     ]
 
 
+def _failure_columns(failure: FailureEvidence | None) -> tuple[object, ...]:
+    """The thirteen `FailureEvidence` `_INSERT_RESULT` parameters (design.md
+    D77). `None` writes every column NULL/0, mirroring `_vcs_columns`'s
+    `None` branch -- `failure=None` means no failure evidence at all, not
+    an evidence record whose fields all happen to be null."""
+    if failure is None:
+        return (None, None, 0, None, None, None, 0, None, 0, None, 0, None, 0)
+    return (
+        failure.failure_type,
+        failure.failure_message,
+        1 if failure.failure_message_truncated else 0,
+        failure.failure_path,
+        failure.failure_lineno,
+        failure.failure_repr,
+        1 if failure.failure_repr_truncated else 0,
+        failure.traceback,
+        1 if failure.traceback_truncated else 0,
+        failure.skip_reason,
+        1 if failure.skip_reason_truncated else 0,
+        failure.xfail_reason,
+        1 if failure.xfail_reason_truncated else 0,
+    )
+
+
+def _captured_columns(captured: CapturedOutput) -> tuple[object, ...]:
+    """The four `CapturedOutput` `_INSERT_RESULT` parameters (design.md
+    D77). `captured.stdout`/`.stderr` are written through UNCHANGED -- never
+    `value or None` or any other truthy check, which would collapse `""`
+    (captured, empty) into SQL `NULL` (never captured) and destroy the
+    distinction the `failure-evidence` capability requires."""
+    return (
+        captured.stdout,
+        1 if captured.stdout_truncated else 0,
+        captured.stderr,
+        1 if captured.stderr_truncated else 0,
+    )
+
+
 def _result_rows(
     execution: Execution, results: Sequence[Result], test_case_ids: dict[str, int]
 ) -> list[tuple[object, ...]]:
@@ -544,6 +817,8 @@ def _result_rows(
             result.call_duration,
             result.teardown_duration,
             result.worker_id,
+            *_failure_columns(result.failure),
+            *_captured_columns(result.captured),
         )
         for result in results
     ]
@@ -691,14 +966,31 @@ class SqliteExecutionStore:
             ),
         )
 
-    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[Result]:
-        # The paginated sibling of `get_results` (design.md D57): same
-        # `min(limit, 200) + 1` clamp/`has_more` mechanism as `list_runs`.
+    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
+        # The paginated, LEAN sibling of `get_results` (design.md D57, D76):
+        # same `min(limit, 200) + 1` clamp/`has_more` mechanism as
+        # `list_runs`, with the failure data bounded in SQL before it ever
+        # leaves SQLite (design.md D76).
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        rows = self._conn.execute(_LIST_RESULTS, (execution_id, page_limit + 1, offset)).fetchall()
+        rows = self._conn.execute(
+            _LIST_RESULTS,
+            (
+                LIST_FAILURE_MESSAGE_CHARS,
+                LIST_FAILURE_MESSAGE_CHARS,
+                execution_id,
+                page_limit + 1,
+                offset,
+            ),
+        ).fetchall()
         has_more = len(rows) > page_limit
-        items = tuple(_row_to_result(row) for row in rows[:page_limit])
+        items = tuple(_row_to_result_list_entry(row) for row in rows[:page_limit])
         return Page(items=items, has_more=has_more)
+
+    def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
+        row = self._conn.execute(_SELECT_RESULT, (execution_id, node_id)).fetchone()
+        if row is None:
+            return None
+        return _row_to_result(row)
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
         # `node_id` is always a bound parameter, never interpolated into SQL

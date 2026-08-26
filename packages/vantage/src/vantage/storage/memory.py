@@ -36,12 +36,13 @@ from dataclasses import replace
 from datetime import datetime
 
 from vantage.core.domain.execution import Execution, VcsContext
-from vantage.core.domain.projection import project_vcs
+from vantage.core.domain.projection import project_failure, project_vcs
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
     HistoryEntry,
     Page,
+    ResultListEntry,
     RunDetail,
     RunListEntry,
 )
@@ -216,10 +217,12 @@ class InMemoryExecutionStore:
             last_contact_at=self._last_contact.get(execution_id),
         )
 
-    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[Result]:
+    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         # Same clamp/`has_more` mechanism as `list_runs` (design.md D57,
-        # D61) -- the paginated sibling of `get_results`. Dict insertion
-        # order mirrors the SQLite adapter's `ORDER BY r.id`.
+        # D61) -- the paginated, LEAN sibling of `get_results`. Dict
+        # insertion order mirrors the SQLite adapter's `ORDER BY r.id`.
+        # `project_failure` is the reference implementation the SQLite
+        # adapter's SQL is held to agreement with (design.md D76).
         page_limit = min(limit, MAX_PAGE_ITEMS)
         matching = [
             result
@@ -228,7 +231,28 @@ class InMemoryExecutionStore:
         ]
         window = matching[offset : offset + page_limit + 1]
         has_more = len(window) > page_limit
-        return Page(items=tuple(window[:page_limit]), has_more=has_more)
+        items = tuple(
+            ResultListEntry(
+                identity=result.identity,
+                outcome=result.outcome,
+                duration=result.duration,
+                started_at=result.started_at,
+                finished_at=result.finished_at,
+                setup_outcome=result.setup_outcome,
+                call_outcome=result.call_outcome,
+                teardown_outcome=result.teardown_outcome,
+                setup_duration=result.setup_duration,
+                call_duration=result.call_duration,
+                teardown_duration=result.teardown_duration,
+                worker_id=result.worker_id,
+                failure=project_failure(result.failure),
+            )
+            for result in window[:page_limit]
+        )
+        return Page(items=items, has_more=has_more)
+
+    def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
+        return self._results.get((execution_id, node_id, _ATTEMPT))
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
         # Mirrors `list_runs`' total order -- `(started_at, run_id)`

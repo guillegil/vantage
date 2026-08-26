@@ -50,6 +50,32 @@ released independently through prefixed tags. The contract between them is
 the versioned HTTP API, not their version numbers -- so a 1.2 plugin talking
 to a 1.5 server is ordinary rather than a bug.
 
+## Usage
+
+```bash
+pytest --vantage --vantage-server http://localhost:8000   # record this session
+pytest --vantage --vantage-server ... --vantage-failure-text  # also capture failure text
+pytest                                                     # unchanged -- opt-in (RQ-2)
+```
+
+`--vantage` is the only thing that activates recording; `--vantage-server`
+configures where, never whether. Failure-text capture -- a failed or errored
+result's traceback, failure fields and captured stdout/stderr -- is a
+**second, separate opt-in, absent by default**: RQ-25's own overhead
+measurement found it breaches the project's 2% runtime budget at every
+failure density tested, so a session pays that cost only when it explicitly
+asks for it via `--vantage-failure-text`. Like `--vantage` itself, this is
+an invocation flag only -- there is no ini equivalent, and no committed
+configuration file can be the means by which capture or recording is
+enabled on its own (RQ-2's same invariant, extended by `failure-evidence`).
+When enabled, that text is recorded bounded and
+unredacted alongside the outcome -- **stored failure text is not scrubbed
+and may contain any value a test printed or asserted, including
+credentials**
+(`docs/adr/0016-store-pytest-s-rendered-failure-text-bounded-and-unredacted.md`)
+-- which is exactly why the flag that turns it on is also where this
+disclosure lives.
+
 ## Architecture
 
 Clean architecture, not hexagonal

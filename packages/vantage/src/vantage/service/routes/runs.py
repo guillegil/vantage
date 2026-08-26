@@ -52,7 +52,7 @@ from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
 from vantage.core.domain.execution import Execution, Identity, VcsContext
-from vantage.core.domain.result import CaseIdentity, Result
+from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.service.errors import (
     MAX_REPORT_BYTES,
     IncompleteBodyError,
@@ -147,6 +147,83 @@ def _to_execution(run: RunReport, vcs: VcsReport | None) -> Execution:
     )
 
 
+def _to_failure_evidence(item: ResultReport) -> FailureEvidence | None:
+    """Normalises the failure-evidence fields (design.md D75, D77) --
+    `None` when every field is null-or-false, mirroring `_to_vcs_context`'s
+    D48 rule: a failure either happened or it did not.
+
+    `truncate()` applies the server's own 64 KiB bound to every string
+    field, exactly as `_to_vcs_context` applies it to `commit_subject`
+    (D49). The truncation flag is a **disjunction** of the client's report
+    and the server's own result, never a plain assignment: `truncate(None)`
+    returns `(None, False)`, so a server that assigns `stored_flag =
+    server_flag` would silently clear a budget drop the client already
+    reported (design.md D75) -- the client is the only side that knows a
+    field was dropped for budget rather than never captured.
+    """
+    failure_message, message_cut = truncate(item.failure_message)
+    failure_message_truncated = bool(item.failure_message_truncated) or message_cut
+    failure_repr, repr_cut = truncate(item.failure_repr)
+    failure_repr_truncated = bool(item.failure_repr_truncated) or repr_cut
+    traceback, traceback_cut = truncate(item.traceback)
+    traceback_truncated = bool(item.traceback_truncated) or traceback_cut
+    skip_reason, skip_cut = truncate(item.skip_reason)
+    skip_reason_truncated = bool(item.skip_reason_truncated) or skip_cut
+    xfail_reason, xfail_cut = truncate(item.xfail_reason)
+    xfail_reason_truncated = bool(item.xfail_reason_truncated) or xfail_cut
+
+    if (
+        item.failure_type is None
+        and failure_message is None
+        and not failure_message_truncated
+        and item.failure_path is None
+        and item.failure_lineno is None
+        and failure_repr is None
+        and not failure_repr_truncated
+        and traceback is None
+        and not traceback_truncated
+        and skip_reason is None
+        and not skip_reason_truncated
+        and xfail_reason is None
+        and not xfail_reason_truncated
+    ):
+        return None
+
+    return FailureEvidence(
+        failure_type=item.failure_type,
+        failure_message=failure_message,
+        failure_message_truncated=failure_message_truncated,
+        failure_path=item.failure_path,
+        failure_lineno=item.failure_lineno,
+        failure_repr=failure_repr,
+        failure_repr_truncated=failure_repr_truncated,
+        traceback=traceback,
+        traceback_truncated=traceback_truncated,
+        skip_reason=skip_reason,
+        skip_reason_truncated=skip_reason_truncated,
+        xfail_reason=xfail_reason,
+        xfail_reason_truncated=xfail_reason_truncated,
+    )
+
+
+def _to_captured_output(item: ResultReport) -> CapturedOutput:
+    """Normalises captured stdout/stderr (design.md D71, D77). Never
+    `None` -- the empty-versus-absent distinction lives INSIDE this type,
+    in the `str | None` fields, so `Result.captured` is always a
+    `CapturedOutput` instance. `truncate()`'s `(None, False)` result for a
+    `None` input keeps `None` (never captured) distinct from `""`
+    (captured, empty) all the way through the bound.
+    """
+    stdout, stdout_cut = truncate(item.captured_stdout)
+    stderr, stderr_cut = truncate(item.captured_stderr)
+    return CapturedOutput(
+        stdout=stdout,
+        stdout_truncated=bool(item.captured_stdout_truncated) or stdout_cut,
+        stderr=stderr,
+        stderr_truncated=bool(item.captured_stderr_truncated) or stderr_cut,
+    )
+
+
 def _to_result(item: ResultReport) -> Result:
     # `started_at`/`finished_at` go through `_normalize_to_utc`, same as
     # `_to_execution` above -- one path, not two (Phase 5 UTC-normalization
@@ -171,6 +248,8 @@ def _to_result(item: ResultReport) -> Result:
         call_duration=item.call_duration,
         teardown_duration=item.teardown_duration,
         worker_id=item.worker_id,
+        failure=_to_failure_evidence(item),
+        captured=_to_captured_output(item),
     )
 
 

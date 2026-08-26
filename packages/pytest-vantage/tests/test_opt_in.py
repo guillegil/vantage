@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from pytest_vantage.plugin import _failure_text_capture_requested
 
 _SAMPLE_TEST = "def test_it():\n    assert True\n"
 
@@ -83,6 +84,50 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
 
 
 @pytest.mark.req(id="RQ-2")
+def test_failure_text_opt_in_ini_alone_cannot_enable_capture(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """failure-evidence -> Capture is opt-in, absent by default -> A
+    committed configuration file cannot enable capture on its own.
+
+    RQ-2's own established differential (above), applied to the
+    failure-text opt-in specifically (design.md D72, revised after Phase
+    9's RQ-25 measurement, and further corrected to remove the ini surface
+    entirely): with no invocation flag on either run -- neither `--vantage`
+    nor `--vantage-failure-text` -- a committed `vantage_failure_text =
+    true` ini value changes nothing. The scenario under test is that
+    failure-text capture behaves *identically* whether the configuration
+    file is present or absent, and the established differential form for
+    that is tree-identity: the project tree -- excluding the ini file
+    itself, which is the one deliberate difference between the two runs --
+    must still be byte-identical.
+
+    `vantage_failure_text` is not a registered option any more (the whole
+    point of this correction), so pytest now warns `Unknown config option`
+    on the run that carries the ini value. That warning is asserted
+    *present*, not absent: it is honest feedback that the knob does not
+    exist, and it is exactly what proves the ini value is inert rather than
+    silently consulted.
+    """
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+
+    with_ini_root = tmp_path_factory.mktemp("vantage-failtext-with-ini")
+    without_ini_root = tmp_path_factory.mktemp("vantage-failtext-without-ini")
+    (with_ini_root / "test_sample.py").write_text(_SAMPLE_TEST)
+    (without_ini_root / "test_sample.py").write_text(_SAMPLE_TEST)
+    (with_ini_root / "pytest.ini").write_text("[pytest]\nvantage_failure_text = true\n")
+
+    with_ini = _run_pytest(with_ini_root)
+    without_ini = _run_pytest(without_ini_root)
+
+    assert with_ini.returncode == 0, with_ini.stdout + with_ini.stderr
+    assert without_ini.returncode == 0, without_ini.stdout + without_ini.stderr
+    assert "Unknown config option: vantage_failure_text" in with_ini.stdout + with_ini.stderr
+    with_snapshot = {k: v for k, v in _tree_snapshot(with_ini_root).items() if k != "pytest.ini"}
+    assert with_snapshot == _tree_snapshot(without_ini_root)
+
+
+@pytest.mark.req(id="RQ-2")
 def test_no_connection_is_attempted_with_no_recording_option(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -101,3 +146,75 @@ def test_no_connection_is_attempted_with_no_recording_option(
     # count it is not given UNCHECKED, so the spec's "and emits no warning"
     # half was silently unverified while this line read `passed=1` alone.
     result.assert_outcomes(passed=1, warnings=0)
+
+
+class _IniOnlyConfig:
+    """A config whose invocation activated recording but never asked for
+    failure text, while a committed `pytest.ini` sets the opt-in. Reading
+    the ini value at all is what this double is built to expose.
+    """
+
+    def __init__(self) -> None:
+        self.ini_reads: list[str] = []
+
+    def getoption(self, name: str) -> object:
+        if name == "vantage":
+            return True
+        if name == "vantage_failure_text":
+            return False
+        raise AssertionError(f"unexpected option read: {name}")
+
+    def getini(self, name: str) -> object:
+        self.ini_reads.append(name)
+        return True
+
+
+def test_a_committed_ini_cannot_be_the_means_by_which_capture_is_enabled() -> None:
+    """failure-evidence -> Capture is opt-in, absent by default: "no
+    committed configuration file MAY be the means by which capture is
+    enabled".
+
+    The invocation activates recording but never asks for failure text; a
+    committed `vantage_failure_text = true` does. Capture must stay absent,
+    for the same reason `_activation_requested` reads only `--vantage`:
+    a file one person commits must never silently turn capture on for
+    everyone who checks the project out -- and stored failure text is
+    unredacted (ADR-0016), so the harm here is disclosure, not only the
+    RQ-25 overhead this polarity exists to avoid.
+    """
+    config = _IniOnlyConfig()
+
+    assert _failure_text_capture_requested(config) is False  # type: ignore[arg-type]
+    assert config.ini_reads == [], (
+        f"the failure-text opt-in must not consult any ini value; read {config.ini_reads}"
+    )
+
+
+@pytest.mark.req(id="RQ-2")
+def test_the_shipped_help_text_advertises_no_ini_equivalent(tmp_path: Path) -> None:
+    """failure-evidence -> Capture is opt-in, absent by default: "no
+    committed configuration file MAY be the means by which capture is
+    enabled".
+
+    `_IniOnlyConfig` above proves the *behaviour*; this proves the
+    *promise*. `pytest --help` is the surface a user reads before deciding
+    how to enable capture, and for a while it read "capture never happens
+    unless this or the ini equivalent is given" -- advertising exactly the
+    means the requirement forbids, and inviting someone to commit a file
+    that would then silently do nothing. Removing a configuration surface
+    is not finished until the help text stops offering it.
+    """
+    result = _run_pytest(tmp_path, "--help")
+    assert result.returncode == 0, result.stderr
+
+    rendered = " ".join(result.stdout.split())
+    assert "--vantage-failure-text" in rendered, (
+        "the opt-in flag must appear in --help; without it this assertion proves nothing"
+    )
+    assert "or the ini equivalent is given" not in rendered, (
+        "--help must not offer an ini equivalent as a means of enabling capture"
+    )
+    assert "there is no ini equivalent" in rendered, (
+        "--help must actively deny an ini equivalent rather than merely omit it: "
+        "silence invites someone to commit a file that would then do nothing"
+    )

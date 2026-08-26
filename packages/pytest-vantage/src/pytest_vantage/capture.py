@@ -200,6 +200,86 @@ def _worker_id(report: pytest.TestReport) -> str | None:
     return str(gateway_id) if gateway_id is not None else None
 
 
+def _select_evidence_phase(
+    setup: pytest.TestReport,
+    call: pytest.TestReport | None,
+    teardown: pytest.TestReport,
+    outcome: str,
+) -> pytest.TestReport | None:
+    """Which phase report's `vantage_evidence` (design.md D68) belongs in
+    the recorded result -- design.md D69's phase-precedence table, keyed
+    off the DERIVED outcome, never restated as an independent condition:
+
+    | Derived outcome    | Evidence taken from                          |
+    | ------------------- | --------------------------------------------- |
+    | `error`             | setup if setup failed, else teardown          |
+    | `failed`, `xfailed` | call                                          |
+    | `skipped`           | setup if setup skipped, else call             |
+    | `xpassed`, `passed` | none                                          |
+
+    `call` is `None` only when `setup.outcome` is not `"passed"`
+    (`derive_outcome`'s own precondition) -- exactly the cases this
+    function never needs `call` for (`error`/`skipped` with a skipped
+    setup), so the `pytest.TestReport | None` signature never needs a
+    runtime `None` check.
+    """
+    if outcome == "error":
+        return setup if setup.outcome == "failed" else teardown
+    if outcome in ("failed", "xfailed"):
+        return call
+    if outcome == "skipped":
+        return setup if setup.outcome == "skipped" else call
+    return None  # xpassed, passed -- design.md D69
+
+
+def _captured_output(
+    setup: pytest.TestReport,
+    call: pytest.TestReport | None,
+    teardown: pytest.TestReport,
+) -> dict[str, object]:
+    """`captured_stdout`/`captured_stderr`, concatenated across every phase
+    that ran, in setup->call->teardown order, with NO delimiter (design.md
+    D71) -- independent of `_select_evidence_phase`'s D69 failure-evidence
+    precedence, because captured output is a record of what ran, not of
+    what went wrong: even a passing test's output is included.
+
+    Absent entirely from the returned dict (never a dict of nulls) when
+    `EvidenceCollector` never ran on ANY phase of this test -- e.g. the
+    opt-in absent (D72, revised for RQ-25: capture defaults off) -- the same
+    convention `build_result`'s failure-evidence merge already follows
+    below.
+
+    `capture_disabled` is one session-constant flag every phase's `_extract`
+    call receives identically (`evidence.py::_captured_fields`), so a phase
+    reporting `None` for a field means the WHOLE session had capture
+    disabled -- never a genuine per-phase mix of `None` and text. The first
+    `None` encountered therefore settles the field for the whole result.
+    """
+    evidences = [
+        evidence
+        for report in (setup, call, teardown)
+        if report is not None
+        for evidence in (getattr(report, "vantage_evidence", None),)
+    ]
+    if not any(isinstance(evidence, dict) for evidence in evidences):
+        return {}
+
+    fields: dict[str, object] = {}
+    for field in ("captured_stdout", "captured_stderr"):
+        parts: list[str] = []
+        disabled = False
+        for evidence in evidences:
+            if not isinstance(evidence, dict):
+                continue
+            value = evidence.get(field)
+            if value is None:
+                disabled = True
+                break
+            parts.append(str(value))
+        fields[field] = None if disabled else "".join(parts)
+    return fields
+
+
 def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
     """Build one wire-shape `results[]` entry from an accumulated `_Pending`
     (design.md D16-D18). Returns `None` -- dropped, never invented -- when
@@ -224,7 +304,7 @@ def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
     durations = [d for d in (setup_duration, call_duration, teardown_duration) if d is not None]
     duration = sum(durations) if durations else None
 
-    return {
+    result: dict[str, object] = {
         "node_id": identity.node_id,
         "file_path": identity.file_path,
         "class_name": identity.class_name,
@@ -242,6 +322,24 @@ def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
         "teardown_duration": teardown_duration,
         "worker_id": _worker_id(setup),
     }
+
+    # design.md D69: the evidence `EvidenceCollector` attached to whichever
+    # phase report D69's precedence table selects, merged in -- absent
+    # entirely (never a dict of nulls) when that phase carries none, e.g. a
+    # session with `EvidenceCollector` never registered (the opt-in absent,
+    # D72, revised for RQ-25).
+    evidence_report = _select_evidence_phase(setup, call, teardown, outcome)
+    evidence = getattr(evidence_report, "vantage_evidence", None)
+    if isinstance(evidence, dict):
+        result.update(evidence)
+
+    # design.md D71: captured output is concatenated across ALL phases,
+    # never just the one D69's failure-evidence precedence selected above --
+    # applied AFTER the evidence merge so it overrides any single-phase
+    # captured_stdout/captured_stderr that merge may have carried in.
+    result.update(_captured_output(setup, call, teardown))
+
+    return result
 
 
 def assemble_results(pending: dict[str, _Pending]) -> list[dict[str, object]]:
