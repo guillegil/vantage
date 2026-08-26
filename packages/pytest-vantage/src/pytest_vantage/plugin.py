@@ -78,10 +78,10 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help=(
             "Enable failure-text capture (traceback, failure fields, captured output) "
             "for this session. Absent by default (RQ-25) -- capture never happens "
-            "unless this or the ini equivalent is given, and neither can activate "
-            "recording on its own (design.md D72). Stored failure text is unredacted "
-            "and may contain any value a test printed or asserted, including "
-            "credentials."
+            "unless this flag is given, there is no ini equivalent, and the flag "
+            "cannot activate recording on its own (design.md D72). Stored failure "
+            "text is unredacted and may contain any value a test printed or "
+            "asserted, including credentials."
         ),
     )
     parser.addini(
@@ -140,16 +140,19 @@ def _activation_requested(config: pytest.Config) -> bool:
 def _failure_text_capture_requested(config: pytest.Config) -> bool:
     """Whether `EvidenceCollector` should be registered for this session
     (design.md D72, revised after Phase 9's RQ-25 measurement: capture is
-    opt-in, absent by default). Composes `_activation_requested` with both
-    opt-in surfaces through `resolve_failure_text_capture` -- the single
-    monotone disjunction that can only widen an activated session's capture
-    from absent to present, never enable recording itself. Called
-    identically on both the worker and controller branches of
-    `pytest_configure`: the opt-in is session-wide, not controller-only.
+    opt-in, absent by default). Composes `_activation_requested` with the
+    sole opt-in surface -- the `--vantage-failure-text` invocation flag --
+    through `resolve_failure_text_capture`, whose conjunction is monotone
+    increasing in that flag: it can only widen an activated session's
+    capture from absent to present, never enable recording itself. There is
+    deliberately no ini equivalent and no environment variable, so a
+    committed configuration file can never be the means by which capture is
+    enabled. Called identically on both the worker and controller branches
+    of `pytest_configure`: the opt-in is session-wide, not controller-only.
 
-    Short-circuits before reading either opt-in surface when the session
-    was never activated at all (RQ-2): an unactivated worker or controller
-    reads `"vantage"` alone, exactly as it did before this decision existed.
+    Short-circuits before reading the opt-in surface when the session was
+    never activated at all (RQ-2): an unactivated worker or controller reads
+    `"vantage"` alone, exactly as it did before this decision existed.
     """
     if not _activation_requested(config):
         return False

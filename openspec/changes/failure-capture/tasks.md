@@ -364,27 +364,28 @@ left `Proposed`), `docs/open-questions.md`, `README.md`.
 | 10 | A session of many large failures stays within the report size cap | failure-evidence | 5.11 |
 | 11 | A field dropped for budget is flagged, not missing | failure-evidence | 5.7 |
 | 12 | A session within budget carries no exhaustion flags | failure-evidence | 5.8 |
-| 13 | The opt-out suppresses failure-text capture | failure-evidence | 2.10 |
-| 14 | A committed configuration file cannot enable capture on its own | failure-evidence | 2.9 |
-| 15 | The opt-out does not suppress the rest of the result | failure-evidence | 2.11 |
-| 16 | The disclosure is present in the capability spec and the README | failure-evidence | 9.9 |
-| 17 | List responses exclude traceback and captured output | history-read-api | 8.1 |
-| 18 | The commit subject is bounded in list responses | history-read-api | pre-existing (`read-api`), unaffected; re-confirmed by 8.16/9.10's regression gate |
-| 19 | The truncation flag never surfaces independently of its subject | history-read-api | pre-existing, unaffected; regression gate |
-| 20 | `vcs_root` appears in no run list or run detail response | history-read-api | pre-existing, unaffected; regression gate |
-| 21 | The full record is reachable for a given result | history-read-api | 7.5 (port), 8.3 (route) |
-| 22 | A bounded field's truncation flag travels with it on the single-item endpoint | history-read-api | 7.7 (port), 8.4 (route) |
-| 23 | An unknown result identifier leaves stored data unchanged | history-read-api | 7.6 (port miss), 8.6, 8.7 (route) |
-| 24 | An older plugin omitting the fields still stores its run and results | session-ingestion | 6.10 |
-| 25 | A newer plugin's failure-evidence fields are persisted | session-ingestion | 6.11 |
-| 26 | An older server tolerates a newer plugin's failure-evidence fields | session-ingestion | 6.12 |
-| 27 | A report exceeding the size cap stores nothing | session-ingestion | 6.13 |
-| 28 | A report carrying failure evidence within the cap is accepted normally | session-ingestion | 6.14 |
-| 29 | Measurements are re-run for the failure-evidence column set | run-recording | 9.4 |
+| 13 | Absent the opt-in, no failure text is captured | failure-evidence | 2.10, inverted at 10.4 |
+| 14 | The opt-in enables failure-text capture | failure-evidence | 10.4 |
+| 15 | A committed configuration file cannot enable capture on its own | failure-evidence | 2.9; ini surface removed entirely by the post-Phase-10 correction (commit `7fc7677`) |
+| 16 | Capture being absent does not suppress the rest of the result | failure-evidence | 2.11, inverted at 10.4 |
+| 17 | The disclosure is present in the capability spec and the README | failure-evidence | 9.9 |
+| 18 | List responses exclude traceback and captured output | history-read-api | 8.1 |
+| 19 | The commit subject is bounded in list responses | history-read-api | pre-existing (`read-api`), unaffected; re-confirmed by 8.16/9.10's regression gate |
+| 20 | The truncation flag never surfaces independently of its subject | history-read-api | pre-existing, unaffected; regression gate |
+| 21 | `vcs_root` appears in no run list or run detail response | history-read-api | pre-existing, unaffected; regression gate |
+| 22 | The full record is reachable for a given result | history-read-api | 7.5 (port), 8.3 (route) |
+| 23 | A bounded field's truncation flag travels with it on the single-item endpoint | history-read-api | 7.7 (port), 8.4 (route) |
+| 24 | An unknown result identifier leaves stored data unchanged | history-read-api | 7.6 (port miss), 8.6, 8.7 (route) |
+| 25 | An older plugin omitting the fields still stores its run and results | session-ingestion | 6.10 |
+| 26 | A newer plugin's failure-evidence fields are persisted | session-ingestion | 6.11 |
+| 27 | An older server tolerates a newer plugin's failure-evidence fields | session-ingestion | 6.12 |
+| 28 | A report exceeding the size cap stores nothing | session-ingestion | 6.13 |
+| 29 | A report carrying failure evidence within the cap is accepted normally | session-ingestion | 6.14 |
+| 30 | Measurements are re-run for the failure-evidence column set | run-recording | 9.4 |
 | — | RQ-3.1–RQ-3.4, reordered-start-write scenarios | run-recording | pre-existing, unmodified by this change; re-confirmed by 7.9 and 9.10's full-suite gate |
 | — | `result-capture`'s Purpose cross-reference to `failure-evidence` | result-capture | Purpose-text-only delta, no requirement change; verified by inspection at archive, not a task |
 
-**All 29 new/modified scenarios trace to at least one task.** Scenarios 18–20
+**All 30 new/modified scenarios trace to at least one task.** Scenarios 19–21
 and the run-recording atomicity scenarios are pre-existing obligations this
 change does not modify — they trace to the already-shipped tests plus this
 change's own full-suite regression gate (9.10), not a newly authored RED

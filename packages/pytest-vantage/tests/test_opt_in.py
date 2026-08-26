@@ -188,3 +188,33 @@ def test_a_committed_ini_cannot_be_the_means_by_which_capture_is_enabled() -> No
     assert config.ini_reads == [], (
         f"the failure-text opt-in must not consult any ini value; read {config.ini_reads}"
     )
+
+
+@pytest.mark.req(id="RQ-2")
+def test_the_shipped_help_text_advertises_no_ini_equivalent(tmp_path: Path) -> None:
+    """failure-evidence -> Capture is opt-in, absent by default: "no
+    committed configuration file MAY be the means by which capture is
+    enabled".
+
+    `_IniOnlyConfig` above proves the *behaviour*; this proves the
+    *promise*. `pytest --help` is the surface a user reads before deciding
+    how to enable capture, and for a while it read "capture never happens
+    unless this or the ini equivalent is given" -- advertising exactly the
+    means the requirement forbids, and inviting someone to commit a file
+    that would then silently do nothing. Removing a configuration surface
+    is not finished until the help text stops offering it.
+    """
+    result = _run_pytest(tmp_path, "--help")
+    assert result.returncode == 0, result.stderr
+
+    rendered = " ".join(result.stdout.split())
+    assert "--vantage-failure-text" in rendered, (
+        "the opt-in flag must appear in --help; without it this assertion proves nothing"
+    )
+    assert "or the ini equivalent is given" not in rendered, (
+        "--help must not offer an ini equivalent as a means of enabling capture"
+    )
+    assert "there is no ini equivalent" in rendered, (
+        "--help must actively deny an ini equivalent rather than merely omit it: "
+        "silence invites someone to commit a file that would then do nothing"
+    )
