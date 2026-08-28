@@ -5,11 +5,12 @@ context: |
   SOURCE OF TRUTH: this repository. Specs live in openspec/, decisions in docs/adr/,
   session memory in Engram. Notion was the source of truth until 2026-08-18 and is not
   used any more -- do not read from it or write to it.
-  The requirement corpus is NOT migrated yet. All 43 requirements (RQ-1..RQ-44; there is
-  no RQ-43) were dumped on the way out to docs/legacy/notion-2026-08-18/, which is FROZEN,
-  authoritative of nothing, and scheduled for deletion once migrated into openspec/.
-  Read it for the rejected alternatives, not as instruction. The RQ-xx/FT-xx identifiers
-  remain the join key and still mean the same obligations.
+  The requirement corpus is NOT migrated and will not be -- decided 2026-08-28. The
+  frozen Notion dump at docs/legacy/notion-2026-08-18/ was DELETED rather than migrated,
+  because openspec/specs/ already carries every obligation this project acts on. The
+  existing RQ-xx/FT-xx identifiers stay, and no new ones are minted. An ID resolves to
+  the capability spec that carries it and to nothing else -- there is no normative source
+  behind it any more, so never cite one.
 
   Architecture: CLEAN, not hexagonal (ADR-3 rejects hexagonal by name). Ports are
   typing.Protocol, never abstract base classes, so an adapter satisfies a port without
@@ -56,9 +57,8 @@ context: |
 rules:
   proposal:
     - Include a rollback plan for risky or schema-affecting changes
-    - Cross-check scope against openspec/specs/ and, for a requirement not migrated yet,
-      against docs/legacy/notion-2026-08-18/ -- reading the latter for intent, never as
-      an authoritative current statement
+    - Cross-check scope against openspec/specs/, which is the only statement of any
+      obligation; a requirement ID with no capability spec behind it is not a requirement
     - State the changed-line forecast against the review budget; do not silently exceed it
   specs:
     - Use Given/When/Then for scenarios

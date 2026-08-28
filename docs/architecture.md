@@ -6,9 +6,8 @@ two published distributions with an HTTP boundary between them
 `docs/adr/0009-record-over-http-and-let-the-server-own-every-write.md`).
 
 This file is a map. The decisions live in `docs/adr/`; the Milestone 1 design
-lives in `openspec/changes/milestone-1-write-one-row/design.md`; the
-requirements are being migrated into `openspec/` from the frozen dump in
-`docs/legacy/notion-2026-08-18/`.
+lives in `openspec/changes/archive/2026-08-16-milestone-1-write-one-row/design.md`;
+the requirements live in `openspec/specs/` and nowhere else.
 
 ## Two distributions, one repository
 

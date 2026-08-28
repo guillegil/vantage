@@ -22,17 +22,20 @@ Nothing else.
 > in this repository telling you to sync a requirement, feature or ADR to Notion
 > is stale — ignore it and correct it where you find it.
 
-**The requirement corpus has not been migrated yet.** Notion held 43
-requirements (`RQ-1`…`RQ-44`; there is no `RQ-43`) and only 16 of them were ever
-mirrored into the repository. All 43 were dumped on the way out to
-`docs/legacy/notion-2026-08-18/`, which is **frozen, authoritative of nothing,
-and scheduled for deletion.** Read it for the rejected alternatives — they are
-there because someone already tried the obvious thing — and migrate what
-survives into OpenSpec. Then delete the directory.
+**The requirement corpus is not migrated, and will not be. Decided 2026-08-28.**
+Notion held 43 requirements (`RQ-1`…`RQ-44`; there is no `RQ-43`). They were
+dumped on the way out to `docs/legacy/notion-2026-08-18/`, and that directory
+has now been **deleted** — the migration was abandoned rather than finished,
+because OpenSpec already carries every obligation this project acts on, as a
+capability and a scenario, and a second corpus in a second notation was one
+copy too many. The dump is recoverable from git history if a rejected
+alternative is ever worth re-reading; nothing in the working tree depends on it.
 
-Where a requirement ID appears in this file, in a test marker, or in
-`openspec/`, it still means the same obligation. The IDs are the join key and
-they outlive the tool that issued them.
+**The `RQ-xx` identifiers that already exist stay** — see *No new `RQ-xx`
+identifiers are minted* under Conventions for why. What the deletion changes is
+what an ID resolves to: the capability spec carrying it is now the only
+statement of it. Do not go looking for a normative source behind the ID. There
+isn't one any more, and the spec is not a pointer to it — the spec **is** it.
 
 ### ADRs
 
@@ -150,7 +153,7 @@ never narrowed. Applied as `req(id=...)`, selection works and an unknown ID
 correctly collects nothing. Verified on pytest 9.1.1, 2026-08-19.
 
 **No new `RQ-xx` identifiers are minted.** Decided 2026-08-18. The existing ones
-stay because they are executable — 55 markers, `--strict-markers` is on, and CI
+stay because they are executable — 161 markers, `--strict-markers` is on, and CI
 and `docs/schema-manifest.md` both cite them — and removing them would break the
 traceability of work already delivered. But they were Notion's numbering scheme,
 Notion is gone, and OpenSpec already carries identity in a form this project
@@ -178,9 +181,8 @@ conversation happened in.
 **Spec-driven development runs the full cycle now.** Milestone 1 entered at
 `sdd-tasks` because explore, propose, spec and design had been done by hand in
 Notion and regenerating them would have produced a worse second copy. That
-shortcut is spent: the hand-written originals are frozen in
-`docs/legacy/notion-2026-08-18/` and nothing maintains them. New work starts at
-the phase the change actually needs.
+shortcut is spent: the hand-written originals are gone with the legacy dump.
+New work starts at the phase the change actually needs.
 
 ## Constraints
 
