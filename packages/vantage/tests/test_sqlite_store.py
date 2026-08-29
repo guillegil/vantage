@@ -8,13 +8,16 @@ implementation.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from vantage.core.domain.result import CapturedOutput
 from vantage.core.ports.storage import ExecutionStore
+from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import ExecutionStoreContract, _execution, _start_only_execution
 
@@ -239,3 +242,47 @@ def test_an_existing_pre_change_database_opens_unrefused_and_reads_back_its_rows
         )
     finally:
         reader.close()
+
+
+def test_a_v2_stamped_database_is_refused_naming_version_found_required_and_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """design.md D82: this change bumps `meta.schema_version` from 2 to 3.
+    A database stamped `2` by an earlier release -- exactly what every
+    developer database looks like before this change -- must be refused at
+    open, naming the version found, the version required and the database
+    path (ADR-0013), and it must issue no schema-altering statement in the
+    process (RQ-29's refusal scenario)."""
+    db_path = tmp_path / "store" / "vantage.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    seed = sqlite3.connect(str(db_path))
+    try:
+        seed.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        seed.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '2')")
+        seed.commit()
+    finally:
+        seed.close()
+
+    captured: list[str] = []
+
+    class _SpyConnection(sqlite3.Connection):
+        def executescript(self, sql_script: str) -> sqlite3.Cursor:
+            captured.append(sql_script)
+            return super().executescript(sql_script)
+
+    real_connect = sqlite3.connect
+
+    def _spy_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        kwargs.setdefault("factory", _SpyConnection)
+        return cast(sqlite3.Connection, real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(sqlite3, "connect", _spy_connect)
+
+    with pytest.raises(SchemaVersionError) as exc_info:
+        SqliteExecutionStore(db_path)
+
+    message = str(exc_info.value)
+    assert "2" in message
+    assert "3" in message
+    assert str(db_path) in message
+    assert captured == []
