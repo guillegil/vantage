@@ -57,11 +57,11 @@ tracker (draft, no-merge)
 
 ## Phase 2 (Slice 2): Core section domain — pure, stdlib only
 
-- [ ] 2.1 RED: `test_sections.py` — `normalize_prefix` coercion/idempotence; `tests/SectA` never matches `tests/SectAlpha/test_x.py` (spec test-sections: coercion, sibling non-bleed)
-- [ ] 2.2 RED: same file — `derive_section` longest-wins, no-match→`UNASSIGNED`, alphabetical tie-break, case sensitivity (spec test-sections: longest-prefix-wins)
-- [ ] 2.3 RED: same file — `summarize_sections`: worked example → 94.4; `measured == 0` → `None`; `total - measured` == skipped; items alphabetical; `unassigned` present-when-empty (spec test-sections: pass percentage, ordering, unassigned bucket)
-- [ ] 2.4 GREEN: create `core/domain/sections.py` — `UNASSIGNED`, three bounds, `SectionDefinition`, `normalize_prefix`, `derive_section`, `SectionSummary`, `RunSectionSummary`, `summarize_sections` (D84, D85)
-- [ ] 2.5 Verify: 2.1–2.3 green; AST architecture test confirms the module imports nothing outside stdlib (RQ-26)
+- [x] 2.1 RED: `test_sections.py` — `normalize_prefix` coercion/idempotence; `tests/SectA` never matches `tests/SectAlpha/test_x.py` (spec test-sections: coercion, sibling non-bleed)
+- [x] 2.2 RED: same file — `derive_section` longest-wins, no-match→`UNASSIGNED`, alphabetical tie-break, case sensitivity (spec test-sections: longest-prefix-wins)
+- [x] 2.3 RED: same file — `summarize_sections`: worked example → 94.4; `measured == 0` → `None`; `total - measured` == skipped; items alphabetical; `unassigned` present-when-empty (spec test-sections: pass percentage, ordering, unassigned bucket)
+- [x] 2.4 GREEN: create `core/domain/sections.py` — `UNASSIGNED`, three bounds, `SectionDefinition`, `normalize_prefix`, `derive_section`, `SectionSummary`, `RunSectionSummary`, `summarize_sections` (D84, D85)
+- [x] 2.5 Verify: 2.1–2.3 green; AST architecture test confirms the module imports nothing outside stdlib (RQ-26)
 
 ## Phase 3 (Slice 3): Definitions API — depends on Slice 1
 
