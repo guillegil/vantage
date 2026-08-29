@@ -132,6 +132,18 @@ paths:
       responses:
         "204": {description: Deleted.}
         "404": {description: No section with that name has been stored.}
+  /runs/{run_id}/sections:
+    get:
+      operationId: get_run_sections
+      tags: [read]
+      summary: One run's section summary -- every defined section, plus the always-present unassigned bucket.
+      description: Section definitions are read fresh on every call, never cached (design.md D88); classification happens at read time (design.md D84, D85).
+      parameters:
+        - $ref: '#/components/parameters/run_id'
+      responses:
+        "200": {description: The run's section summary., content: {application/json: {schema: {$ref: '#/components/schemas/RunSectionSummaryResponse'}}}}
+        "404": {description: No run with that id has been recorded.}
+        "500": {description: A stored section's value could not be parsed (design.md D89 -- unreadable_setting).}
 components:
   parameters:
     run_id: {name: run_id, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{32}$'}}
@@ -250,3 +262,11 @@ components:
       type: object
       required: [items]
       properties: {items: {type: array, items: {$ref: '#/components/schemas/SectionResponse'}}}
+    SectionSummary:
+      type: object
+      required: [name, total, measured, passing, pass_percentage]
+      properties: {name: {type: string}, total: {type: integer}, measured: {type: integer}, passing: {type: integer}, pass_percentage: {type: [number, "null"]}}
+    RunSectionSummaryResponse:
+      type: object
+      required: [items, unassigned]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/SectionSummary'}}, unassigned: {$ref: '#/components/schemas/SectionSummary'}}

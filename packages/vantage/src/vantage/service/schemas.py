@@ -464,3 +464,28 @@ class SectionListResponse(BaseModel):
     """The response body for `GET /api/v1/config/sections` (design.md D87)."""
 
     items: list[SectionResponse]
+
+
+class SectionSummaryResponse(BaseModel):
+    """One bucket's four published numbers (design.md D85) -- the wire shape
+    of `vantage.core.domain.sections.SectionSummary`. Built field by field in
+    `routes/sections.py`, never `model_validate(..., from_attributes=True)`;
+    `pass_percentage` is never recomputed here, only carried through from the
+    pure core, which rounds it exactly once."""
+
+    name: str
+    total: int
+    measured: int
+    passing: int
+    pass_percentage: float | None
+
+
+class RunSectionSummaryResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/sections`
+    (design.md D85, D87). `unassigned` is its own field, never an entry of
+    `items` -- always present, even when empty, so the sum of every item's
+    `total` plus `unassigned.total` reconciles against the run's result
+    count."""
+
+    items: list[SectionSummaryResponse]
+    unassigned: SectionSummaryResponse

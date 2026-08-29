@@ -12,6 +12,7 @@ its own docstring.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime, timezone
 
 import httpx2 as httpx
 import pytest
@@ -22,16 +23,25 @@ from vantage.core.domain.sections import (
     SECTION_PREFIX_MAX_CHARS,
 )
 from vantage.service.app import create_app
+from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
 from vantage.storage.memory import InMemoryExecutionStore
+from vantage_port_contract import _execution, _result
 
 _SECTIONS = "/api/v1/config/sections"
 
+_UNKNOWN_RUN_ID = "0" * 32
+
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def store() -> Iterator[InMemoryExecutionStore]:
     store = InMemoryExecutionStore()
-    yield TestClient(create_app(store))
+    yield store
     store.close()
+
+
+@pytest.fixture
+def client(store: InMemoryExecutionStore) -> TestClient:
+    return TestClient(create_app(store))
 
 
 def _upsert(client: TestClient, name: str, prefix: str) -> httpx.Response:
@@ -170,3 +180,133 @@ def test_a_quoting_shaped_name_round_trips_byte_identically(client: TestClient) 
 
     listing = client.get(_SECTIONS)
     assert listing.json()["items"][0]["name"] == name
+
+
+# --- GET /runs/{run_id}/sections: the run aggregate (Phase 4) ---------------
+
+_SECTIONED_START = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+
+
+def _run_sections(client: TestClient, run_id: str) -> httpx.Response:
+    return client.get(f"/api/v1/runs/{run_id}/sections")
+
+
+def test_run_sections_summary_unknown_run_is_404(client: TestClient) -> None:
+    """Scenario: A run's summary reflects its sections -- the unknown-run
+    half (design.md D87's fourth route)."""
+    response = _run_sections(client, _UNKNOWN_RUN_ID)
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_run"
+
+
+def test_run_sections_summary_worked_example_yields_94_4_percent(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Scenario: The worked example yields 94.4% (spec test-sections: pass
+    percentage) -- 80 passed, 5 xfailed, 2 xpassed, 3 failed, 10 skipped,
+    reached through the live route rather than `summarize_sections`
+    directly."""
+    _upsert(client, "Billing", "tests/billing")
+    run_id = "1" * 32
+    outcomes = (
+        ["passed"] * 80 + ["xfailed"] * 5 + ["xpassed"] * 2 + ["failed"] * 3 + ["skipped"] * 10
+    )
+    results = [
+        _result(f"tests/billing/test_x.py::test_{index}", outcome=outcome)
+        for index, outcome in enumerate(outcomes)
+    ]
+    store.record_session(
+        _execution(run_id, started=_SECTIONED_START), results=results, received_at=_SECTIONED_START
+    )
+
+    response = _run_sections(client, run_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    billing = next(item for item in body["items"] if item["name"] == "Billing")
+    assert billing == {
+        "name": "Billing",
+        "total": 100,
+        "measured": 90,
+        "passing": 85,
+        "pass_percentage": 94.4,
+    }
+
+
+def test_run_sections_summary_totals_reconcile_with_unassigned_results(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Scenario: Section totals plus unassigned equal the run total (spec
+    test-sections: `unassigned` bucket is always present and reconciles) --
+    a run carrying results that match no section."""
+    _upsert(client, "Billing", "tests/billing")
+    run_id = "2" * 32
+    results = [
+        _result("tests/billing/test_x.py::test_0"),
+        _result("tests/billing/test_x.py::test_1", outcome="failed"),
+        _result("tests/other/test_y.py::test_z"),
+        _result("tests/other/test_y.py::test_w", outcome="skipped"),
+    ]
+    store.record_session(
+        _execution(run_id, started=_SECTIONED_START), results=results, received_at=_SECTIONED_START
+    )
+
+    response = _run_sections(client, run_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    total = sum(item["total"] for item in body["items"]) + body["unassigned"]["total"]
+    assert total == len(results)
+    assert body["unassigned"]["total"] == 2
+
+
+def test_renaming_a_section_regroups_history_with_zero_writes(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Scenario: Renaming a section re-groups history with no backfill (spec
+    test-sections: longest-prefix-wins derivation at read time) -- the
+    load-bearing test for "derived at read time": the run/result rows must
+    be byte-identical before and after the rename."""
+    _upsert(client, "Billing", "tests/billing")
+    run_id = "3" * 32
+    results = [_result("tests/billing/test_x.py::test_0")]
+    store.record_session(
+        _execution(run_id, started=_SECTIONED_START), results=results, received_at=_SECTIONED_START
+    )
+    before_results = store.get_results(run_id)
+    before_execution = store.get_execution(run_id)
+
+    _upsert(client, "Accounts", "tests/billing")
+    delete_response = client.delete(_SECTIONS, params={"name": "Billing"})
+    assert delete_response.status_code == 204
+
+    response = _run_sections(client, run_id)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {item["name"] for item in body["items"]} == {"Accounts"}
+    accounts = next(item for item in body["items"] if item["name"] == "Accounts")
+    assert accounts["total"] == 1
+    assert body["unassigned"]["total"] == 0
+    assert store.get_results(run_id) == before_results
+    assert store.get_execution(run_id) == before_execution
+
+
+def test_run_sections_summary_malformed_stored_value_is_500(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Scenario: a stored `value` failing its namespace's model is a named
+    `500`, never a traceback (design.md D89 -- `UnreadableSettingError`)."""
+    run_id = "4" * 32
+    store.record_session(
+        _execution(run_id, started=_SECTIONED_START), results=[], received_at=_SECTIONED_START
+    )
+    store.upsert_setting(
+        TEST_SECTIONS_NAMESPACE, "Broken", value="not valid json", updated_at=_SECTIONED_START
+    )
+
+    response = _run_sections(client, run_id)
+
+    assert response.status_code == 500
+    assert response.json()["error"] == "unreadable_setting"
