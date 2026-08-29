@@ -145,7 +145,7 @@ def test_opening_a_database_with_no_schema_version_row_is_refused(tmp_path: Path
 
     message = str(exc_info.value)
     assert "absent" in message
-    assert "2" in message
+    assert "3" in message
 
 
 def test_opening_a_database_with_an_older_schema_version_is_refused(tmp_path: Path) -> None:
@@ -157,19 +157,19 @@ def test_opening_a_database_with_an_older_schema_version_is_refused(tmp_path: Pa
 
     message = str(exc_info.value)
     assert "1" in message
-    assert "2" in message
+    assert "3" in message
 
 
 def test_opening_a_database_with_a_newer_schema_version_is_refused(tmp_path: Path) -> None:
     db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="3")
+    _seed_meta_only_database(db_path, schema_version_value="4")
 
     with pytest.raises(SchemaVersionError) as exc_info:
         open_database(db_path)
 
     message = str(exc_info.value)
+    assert "4" in message
     assert "3" in message
-    assert "2" in message
 
 
 def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
@@ -218,7 +218,7 @@ def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="2")
+    _seed_meta_only_database(db_path, schema_version_value="3")
 
     captured = _spy_on_executescript(monkeypatch)
 
@@ -254,5 +254,5 @@ def test_creating_a_database_survives_a_username_lookup_failure(
         conn.close()
 
     # The database exists and is usable; only the convenience row is absent.
-    assert stored["schema_version"] == "2"
+    assert stored["schema_version"] == "3"
     assert "created_by" not in stored

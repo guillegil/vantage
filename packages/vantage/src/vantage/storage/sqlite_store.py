@@ -84,6 +84,7 @@ from vantage.core.ports.storage import (
     ResultListEntry,
     RunDetail,
     RunListEntry,
+    UserSetting,
 )
 from vantage.storage.connection import open_database
 
@@ -322,6 +323,38 @@ _SELECT_TEST_CASE = """
     SELECT node_id, file_path, class_name, function_name, param_id,
            first_seen_at, last_seen_at, last_seen_run_id
     FROM test_case WHERE node_id = ?
+"""
+
+# `_LIST_SETTINGS`: alphabetical by key == alphabetical by section name
+# (design.md D85, D86).
+_LIST_SETTINGS = """
+    SELECT namespace, key, value, updated_at
+    FROM user_setting WHERE namespace = ? ORDER BY key
+"""
+
+# `_UPSERT_SETTING`: the existence probe precedes it inside the same
+# `BEGIN IMMEDIATE`, because `rowcount` cannot distinguish insert from
+# update under `DO UPDATE` (design.md D26's reason, unchanged).
+_PROBE_SETTING_EXISTS = "SELECT 1 FROM user_setting WHERE namespace = ? AND key = ?"
+
+_UPSERT_SETTING = """
+    INSERT INTO user_setting (namespace, key, value, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT (namespace, key) DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+"""
+
+# `_DELETE_SETTING`: `rowcount == 1` is the "it existed" answer.
+_DELETE_SETTING = "DELETE FROM user_setting WHERE namespace = ? AND key = ?"
+
+# `_SELECT_RUN_CASE_OUTCOMES`: the per-run aggregate read (design.md D85,
+# D86). No index on `test_case.file_path` -- deliberate, see design.md D86.
+_SELECT_RUN_CASE_OUTCOMES = """
+    SELECT tc.file_path, r.outcome
+    FROM result r
+    JOIN test_case tc ON tc.id = r.test_case_id
+    WHERE r.run_id = ?
 """
 
 
@@ -841,6 +874,16 @@ def _resolve_test_case_ids(conn: sqlite3.Connection, node_ids: Sequence[str]) ->
     return resolved
 
 
+def _row_to_user_setting(row: tuple[object, ...]) -> UserSetting:
+    namespace, key, value, updated_at = row
+    return UserSetting(
+        namespace=cast(str, namespace),
+        key=cast(str, key),
+        value=cast(str, value),
+        updated_at=datetime.fromisoformat(cast(str, updated_at)),
+    )
+
+
 class SqliteExecutionStore:
     """Implements `vantage.core.ports.storage.ExecutionStore` against SQLite.
 
@@ -1009,6 +1052,36 @@ class SqliteExecutionStore:
         has_more = len(rows) > page_limit
         items = tuple(_row_to_history_entry(row) for row in rows[:page_limit])
         return Page(items=items, has_more=has_more)
+
+    def list_settings(self, namespace: str) -> Sequence[UserSetting]:
+        rows = self._conn.execute(_LIST_SETTINGS, (namespace,)).fetchall()
+        return tuple(_row_to_user_setting(row) for row in rows)
+
+    def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
+        # Same existence-probe-then-upsert shape as `record_session`
+        # (design.md D26): `rowcount` cannot distinguish insert from update
+        # under `DO UPDATE`.
+        formatted = _fixed_width_isoformat(updated_at)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                probe = self._conn.execute(_PROBE_SETTING_EXISTS, (namespace, key)).fetchone()
+                created = probe is None
+                self._conn.execute(_UPSERT_SETTING, (namespace, key, value, formatted))
+            except BaseException:
+                self._conn.execute("ROLLBACK")
+                raise
+            self._conn.execute("COMMIT")
+            return created
+
+    def delete_setting(self, namespace: str, key: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(_DELETE_SETTING, (namespace, key))
+            return cursor.rowcount == 1
+
+    def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
+        rows = self._conn.execute(_SELECT_RUN_CASE_OUTCOMES, (execution_id,)).fetchall()
+        return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
 
     def close(self) -> None:
         self._conn.close()

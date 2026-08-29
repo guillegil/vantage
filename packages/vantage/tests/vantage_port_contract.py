@@ -20,7 +20,7 @@ import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_FAILURE_MESSAGE_CHARS, project_failure
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
-from vantage.core.ports.storage import MAX_PAGE_ITEMS, ExecutionStore, ResultListEntry
+from vantage.core.ports.storage import MAX_PAGE_ITEMS, ExecutionStore, ResultListEntry, UserSetting
 
 
 def _execution(
@@ -1123,3 +1123,94 @@ class ExecutionStoreContract:
         assert found.captured.stdout == ""
         assert found.captured.stdout_truncated is False
         assert found.captured.stderr is None
+
+    # user-configuration: namespaced setting persistence, create/replace/delete/parity.
+
+    def test_list_settings_is_empty_for_an_unknown_namespace(self, store: ExecutionStore) -> None:
+        assert store.list_settings("test_sections") == ()
+
+    def test_upsert_setting_creates_a_new_pair(self, store: ExecutionStore) -> None:
+        now = datetime.now(timezone.utc)
+
+        created = store.upsert_setting(
+            "test_sections", "Billing", value='{"prefix": "tests/billing/"}', updated_at=now
+        )
+
+        assert created is True
+        settings = store.list_settings("test_sections")
+        assert len(settings) == 1
+        assert settings[0] == UserSetting(
+            namespace="test_sections",
+            key="Billing",
+            value='{"prefix": "tests/billing/"}',
+            updated_at=now,
+        )
+
+    def test_upsert_setting_on_an_existing_pair_replaces_not_duplicates(
+        self, store: ExecutionStore
+    ) -> None:
+        first = datetime.now(timezone.utc)
+        second = first + timedelta(seconds=1)
+        store.upsert_setting("test_sections", "Billing", value="a", updated_at=first)
+
+        replaced = store.upsert_setting("test_sections", "Billing", value="b", updated_at=second)
+
+        assert replaced is False
+        settings = store.list_settings("test_sections")
+        assert len(settings) == 1
+        assert settings[0].value == "b"
+
+    def test_delete_setting_then_a_later_read_reports_it_absent(
+        self, store: ExecutionStore
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+
+        deleted = store.delete_setting("test_sections", "Billing")
+
+        assert deleted is True
+        assert store.list_settings("test_sections") == ()
+
+    def test_delete_setting_for_an_absent_key_reports_false(self, store: ExecutionStore) -> None:
+        assert store.delete_setting("test_sections", "never-stored") is False
+
+    def test_list_settings_orders_by_key(self, store: ExecutionStore) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("test_sections", "Checkout", value="b", updated_at=now)
+        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+
+        settings = store.list_settings("test_sections")
+
+        assert [setting.key for setting in settings] == ["Billing", "Checkout"]
+
+    def test_list_settings_only_returns_its_own_namespace(self, store: ExecutionStore) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+        store.upsert_setting("other_namespace", "Billing", value="b", updated_at=now)
+
+        settings = store.list_settings("test_sections")
+
+        assert len(settings) == 1
+        assert settings[0].value == "a"
+
+    def test_get_run_case_outcomes_is_empty_for_a_run_with_no_results(
+        self, store: ExecutionStore
+    ) -> None:
+        execution = _execution("a" * 32)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        assert store.get_run_case_outcomes(execution.identity.value) == ()
+
+    def test_get_run_case_outcomes_pairs_file_path_with_outcome(
+        self, store: ExecutionStore
+    ) -> None:
+        execution = _execution("b" * 32)
+        results = (
+            _result("t.py::test_a", outcome="passed"),
+            _result("t.py::test_b", outcome="failed"),
+        )
+        store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
+
+        outcomes = store.get_run_case_outcomes(execution.identity.value)
+
+        assert sorted(outcomes) == sorted([("t.py", "passed"), ("t.py", "failed")])

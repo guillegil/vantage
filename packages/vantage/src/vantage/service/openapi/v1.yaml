@@ -106,6 +106,44 @@ paths:
       summary: This document, served as raw bytes.
       responses:
         "200": {description: The hand-written OpenAPI 3.1 YAML; media type application/yaml.}
+  /config/sections:
+    get:
+      operationId: list_sections
+      tags: [read]
+      summary: List every defined test section.
+      responses:
+        "200": {description: Every stored section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionListResponse'}}}}
+    post:
+      operationId: upsert_section
+      tags: [write]
+      summary: Create or update a section's prefix. A section name is never a path segment (design.md D54, D87) -- it travels here as a body field.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SectionUpsertRequest'}}}}
+      responses:
+        "201": {description: Stored, a new section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
+        "200": {description: Updated; the name was already stored., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
+        "422": {description: An invalid or reserved name, an invalid prefix, or the stored-section count bound.}
+    delete:
+      operationId: delete_section
+      tags: [write]
+      summary: Delete a section by name.
+      description: name is a query value, not a path segment (design.md D54, D87), for the same reason it is a body field on write.
+      parameters:
+        - {name: name, in: query, required: true, schema: {type: string}}
+      responses:
+        "204": {description: Deleted.}
+        "404": {description: No section with that name has been stored.}
+  /runs/{run_id}/sections:
+    get:
+      operationId: get_run_sections
+      tags: [read]
+      summary: One run's section summary -- every defined section, plus the always-present unassigned bucket.
+      description: Section definitions are read fresh on every call, never cached (design.md D88); classification happens at read time (design.md D84, D85).
+      parameters:
+        - $ref: '#/components/parameters/run_id'
+      responses:
+        "200": {description: The run's section summary., content: {application/json: {schema: {$ref: '#/components/schemas/RunSectionSummaryResponse'}}}}
+        "404": {description: No run with that id has been recorded.}
+        "500": {description: A stored section's value could not be parsed (design.md D89 -- unreadable_setting).}
 components:
   parameters:
     run_id: {name: run_id, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{32}$'}}
@@ -212,3 +250,23 @@ components:
       type: object
       required: [items, has_more]
       properties: {items: {type: array, items: {$ref: '#/components/schemas/HistoryEntry'}}, has_more: {type: boolean}}
+    SectionUpsertRequest:
+      type: object
+      required: [name, prefix]
+      properties: {name: {type: string}, prefix: {type: string}}
+    SectionResponse:
+      type: object
+      required: [name, prefix]
+      properties: {name: {type: string}, prefix: {type: string}}
+    SectionListResponse:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/SectionResponse'}}}
+    SectionSummary:
+      type: object
+      required: [name, total, measured, passing, pass_percentage]
+      properties: {name: {type: string}, total: {type: integer}, measured: {type: integer}, passing: {type: integer}, pass_percentage: {type: [number, "null"]}}
+    RunSectionSummaryResponse:
+      type: object
+      required: [items, unassigned]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/SectionSummary'}}, unassigned: {$ref: '#/components/schemas/SectionSummary'}}
