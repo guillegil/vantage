@@ -36,7 +36,7 @@ All of tasks 2.1–2.5 in `tasks.md` are done and checked off there. Summary:
 - Branch diff vs. `ft/user-configuration-01-storage-foundation`: 360
   changed lines, under the 400 budget.
 
-## Slice 3 (definitions API) — 8/8 tasks implemented and verified; budget split, only half committed
+## Slice 3 (definitions API) — 8/8 tasks complete; shipped as two branches after a budget split
 
 All of 3.1–3.8 are implemented and green together (587 passed, whole
 workspace; `mypy --strict`, `ruff`, `deptry` clean). Measured against
@@ -51,18 +51,20 @@ Per the budget guard, split into two units instead of one oversized commit:
   classes) + `service/schemas.py` (four models). 126 lines. Purely
   additive, no route wires them up yet, verified standalone (573 passed,
   matching slice 2's count — no regression) before committing.
-- **3b — implemented, verified, NOT committed**: `service/routes/sections.py`
+- **3b — committed (`b0104f6`, PR #85, targets 3a)**: `service/routes/sections.py`
   (new), `service/app.py` (router wiring), `service/openapi/v1.yaml` (three
   operations + three schemas), `test_routes_sections.py` (new, 14 tests),
   `test_interface_document.py` (+3 bindings, +3 schema entries —
   undiscovered obligation: adding operations to `v1.yaml` makes its
   `test_every_documented_path_answers_2xx` binding table stale unless
   extended, beyond the two obligations design.md names), `test_read_only_surface.py`
-  (+1 binding). 346 lines, sitting uncommitted in the working tree.
+  (+1 binding). 346 lines.
 
-**Decision needed**: commit 3b as-is (branch total becomes 472, `size:exception`),
-or have the orchestrator open a genuinely separate child branch for it. Not
-decided here — apply STOPPED before committing the overflow per instruction.
+**Resolved.** Apply stopped before committing the overflow, as instructed, and
+the orchestrator opened a genuinely separate child branch. Splitting commits
+inside one branch would not have reduced anything: a PR's review diff is its
+whole branch, so only a second branch brings it under budget. Both PRs are
+green and under the ceiling.
 
 ## Slice 4 (run aggregate) — 6/6 tasks complete, plus Phase 5 gates
 
@@ -87,8 +89,10 @@ delete, proving zero writes to any run/result row.
 
 Full suite: 592 passed. `mypy --strict`, `ruff`, `deptry` clean.
 `git diff --stat packages/pytest-vantage` empty. Branch diff vs.
-`ft/user-configuration-03b-section-routes`: 263 changed lines, well under
-the 400 budget (first slice of four not to overrun the estimate).
+`ft/user-configuration-03b-section-routes`: **317 changed lines** (297
+insertions + 20 deletions), under the 400 budget. This entry first recorded
+263, measured before the final documentation commit; 317 is the branch total
+and is the number the budget is judged against.
 
 ## Status
 

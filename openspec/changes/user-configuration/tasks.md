@@ -67,19 +67,19 @@ tracker (draft, no-merge)
 
 **Budget split (apply-time discovery).** The full slice measured 472 changed
 lines against `ft/user-configuration-02-sections-domain`, over the 400-line
-hard ceiling. Split into 3a (committed, `0233e8b`) and 3b (implemented,
-verified green, **uncommitted** — sitting in the working tree pending a
-chain/exception decision, since committing it as-is would still put the
-branch at 472 lines). See `apply-progress` for the measured breakdown.
+hard ceiling. Splitting commits inside one branch would not have helped: a
+PR's review diff is its whole branch. So the slice became two branches —
+3a (`0233e8b`, 180 lines, PR #84) and 3b (`b0104f6`, 346 lines, PR #85,
+targeting 3a). Both landed. See `apply-progress` for the measured breakdown.
 
-- [x] 3.1 RED: `test_routes_sections.py` — POST 201/200; trailing-slash coercion; empty/whitespace name rejected; `Unassigned`/`UNASSIGNED` rejected case-insensitively; over-length name/prefix rejected; `too_many_sections` at the bound; DELETE 204 then 404 `unknown_section`; GET lists an upserted section; a CR/LF + `</script>` name is rejected without appearing in the body; a quoting-shaped name round-trips byte-identically (spec test-sections: name constraints, trailing slash, listed section; design.md threat notes) — **3b, uncommitted**
-- [x] 3.2 GREEN: six rejection classes in `service/errors.py` — `InvalidSectionNameError`, `ReservedSectionNameError`, `InvalidSectionPrefixError`, `UnknownSectionError`, `TooManySectionsError`, `UnreadableSettingError`; update `__all__` (D89) — **3a, committed**
-- [x] 3.3 GREEN: `SectionValue`, `SectionUpsertRequest`, `SectionResponse`, `SectionListResponse` in `service/schemas.py` — **3a, committed**
-- [x] 3.4 GREEN: create `service/routes/sections.py` — `TEST_SECTIONS_NAMESPACE` constant, definition loader, GET/POST/DELETE `/config/sections` (D87, D89); typed `store: ExecutionStore = request.app.state.store` — **3b, uncommitted**
-- [x] 3.5 GREEN: `include_router(sections_router, prefix="/api/v1")` in `service/app.py` — **3b, uncommitted**
-- [x] 3.6 GREEN: hand-write the three operations into `service/openapi/v1.yaml`, `read`/`write` tagged (D87) — **3b, uncommitted**
-- [x] 3.7 GREEN: add the GET `read` path's binding-table entry in `test_read_only_surface.py` — **3b, uncommitted**
-- [x] 3.8 Verify: 3.1 green; `test_interface_document.py` and `test_read_only_surface.py` still pass — verified with 3a+3b together (587 passed, whole workspace); 3b's own diff not yet committed
+- [x] 3.1 RED: `test_routes_sections.py` — POST 201/200; trailing-slash coercion; empty/whitespace name rejected; `Unassigned`/`UNASSIGNED` rejected case-insensitively; over-length name/prefix rejected; `too_many_sections` at the bound; DELETE 204 then 404 `unknown_section`; GET lists an upserted section; a CR/LF + `</script>` name is rejected without appearing in the body; a quoting-shaped name round-trips byte-identically (spec test-sections: name constraints, trailing slash, listed section; design.md threat notes) — **3b, `b0104f6`**
+- [x] 3.2 GREEN: six rejection classes in `service/errors.py` — `InvalidSectionNameError`, `ReservedSectionNameError`, `InvalidSectionPrefixError`, `UnknownSectionError`, `TooManySectionsError`, `UnreadableSettingError`; update `__all__` (D89) — **3a, `0233e8b`**
+- [x] 3.3 GREEN: `SectionValue`, `SectionUpsertRequest`, `SectionResponse`, `SectionListResponse` in `service/schemas.py` — **3a, `0233e8b`**
+- [x] 3.4 GREEN: create `service/routes/sections.py` — `TEST_SECTIONS_NAMESPACE` constant, definition loader, GET/POST/DELETE `/config/sections` (D87, D89); typed `store: ExecutionStore = request.app.state.store` — **3b, `b0104f6`**
+- [x] 3.5 GREEN: `include_router(sections_router, prefix="/api/v1")` in `service/app.py` — **3b, `b0104f6`**
+- [x] 3.6 GREEN: hand-write the three operations into `service/openapi/v1.yaml`, `read`/`write` tagged (D87) — **3b, `b0104f6`**
+- [x] 3.7 GREEN: add the GET `read` path's binding-table entry in `test_read_only_surface.py` — **3b, `b0104f6`**
+- [x] 3.8 Verify: 3.1 green; `test_interface_document.py` and `test_read_only_surface.py` still pass — verified with 3a+3b together (587 passed, whole workspace)
 
 ## Phase 4 (Slice 4): Run aggregate — depends on Slices 1, 2, 3
 
