@@ -105,12 +105,16 @@ uv run --extra dev pip-audit                         # CVEs
 
 ## Requirement traceability
 
-Every test that verifies a requirement carries `@pytest.mark.req("RQ-nn")`.
+Every test that verifies a requirement carries `@pytest.mark.req(id="RQ-nn")`.
+The `id=` keyword is load-bearing. pytest matches marker arguments in a `-m`
+expression only when they were applied as keywords, so with the marker applied
+positionally `-m 'req("RQ-nn")'` **selects the whole suite** rather than
+narrowing it. The filter fails open — green over a set it never filtered.
 Where verification is not a test -- a CI matrix job, an inspection artifact --
 the ID goes in a comment on the block that proves it. The invariant:
 `grep -r "RQ-12"` reaches the thing that proves RQ-12.
 
 Specs live in `openspec/` and decisions in `docs/adr/`. Both are authored here;
-nothing mirrors them anywhere else. The requirement corpus predates that and is
-still being migrated — see `docs/legacy/notion-2026-08-18/`, which is frozen and
-scheduled for deletion.
+nothing mirrors them anywhere else. The `RQ-nn` identifiers predate OpenSpec and
+are kept because they are executable, but no corpus stands behind them any more:
+the capability spec carrying an ID is the whole statement of it.
