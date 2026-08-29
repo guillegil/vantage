@@ -36,6 +36,35 @@ All of tasks 2.1–2.5 in `tasks.md` are done and checked off there. Summary:
 - Branch diff vs. `ft/user-configuration-01-storage-foundation`: 360
   changed lines, under the 400 budget.
 
+## Slice 3 (definitions API) — 8/8 tasks implemented and verified; budget split, only half committed
+
+All of 3.1–3.8 are implemented and green together (587 passed, whole
+workspace; `mypy --strict`, `ruff`, `deptry` clean). Measured against
+`ft/user-configuration-02-sections-domain`: **472 changed lines, over the
+400 ceiling** (estimate was ~330 — same overrun pattern as slices 1 and 2).
+RED confirmed first via `git stash` (all 14 new tests failed 404, restored
+before GREEN).
+
+Per the budget guard, split into two units instead of one oversized commit:
+
+- **3a — committed (`0233e8b`)**: `service/errors.py` (six rejection
+  classes) + `service/schemas.py` (four models). 126 lines. Purely
+  additive, no route wires them up yet, verified standalone (573 passed,
+  matching slice 2's count — no regression) before committing.
+- **3b — implemented, verified, NOT committed**: `service/routes/sections.py`
+  (new), `service/app.py` (router wiring), `service/openapi/v1.yaml` (three
+  operations + three schemas), `test_routes_sections.py` (new, 14 tests),
+  `test_interface_document.py` (+3 bindings, +3 schema entries —
+  undiscovered obligation: adding operations to `v1.yaml` makes its
+  `test_every_documented_path_answers_2xx` binding table stale unless
+  extended, beyond the two obligations design.md names), `test_read_only_surface.py`
+  (+1 binding). 346 lines, sitting uncommitted in the working tree.
+
+**Decision needed**: commit 3b as-is (branch total becomes 472, `size:exception`),
+or have the orchestrator open a genuinely separate child branch for it. Not
+decided here — apply STOPPED before committing the overflow per instruction.
+
 ## Status
 
-Ready for `sdd-verify`. Phases 3–5 not started (separate branches).
+3a on branch, ready. 3b implemented+verified but uncommitted pending the
+split/exception decision above. Phases 4–5 not started (separate branches).
