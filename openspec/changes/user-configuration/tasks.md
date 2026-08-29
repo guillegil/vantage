@@ -43,17 +43,17 @@ tracker (draft, no-merge)
 
 ## Phase 1 (Slice 1): Storage foundation — user_setting, schema v3, port, adapters
 
-- [ ] 1.1 RED: add failing `vantage_port_contract.py` cases for `list_settings`/`upsert_setting`/`delete_setting`/`get_run_case_outcomes` — create, replace-not-duplicate, delete-then-absent, `ORDER BY key`, empty-run pairs (spec user-configuration: create/replace/delete/parity)
-- [ ] 1.2 RED: add failing test in `test_sqlite_store.py` — a v2-stamped db is refused with version-found/required/path, no DDL issued (spec recording-schema: refusal, no-alter)
-- [ ] 1.3 GREEN: add `user_setting` table to `storage/schema.sql`, header count 10→11, stamp `'3'` (D82)
-- [ ] 1.4 GREEN: `_SCHEMA_VERSION = 3` in `storage/connection.py` (D82)
-- [ ] 1.5 GREEN: add `UserSetting` dataclass + four `Protocol` methods to `core/ports/storage.py` (D83, D86)
-- [ ] 1.6 GREEN: implement the four SQL constants/methods in `storage/sqlite_store.py`, `updated_at` via `_fixed_width_isoformat` (D86)
-- [ ] 1.7 GREEN: implement the same four methods in `storage/memory.py` (`dict[tuple[str,str], UserSetting]`, `sorted()`) (D86)
-- [ ] 1.8 Verify: 1.1/1.2 now green on both adapters
-- [ ] 1.9 GREEN: update `docs/schema-manifest.md` — `### user_setting` section, ten→eleven, indexes unchanged at fourteen, `meta` stamp `3` (D82, RQ-29 Inspection; spec recording-schema: fresh db matches manifest)
-- [ ] 1.10 Verify (Inspection): open an existing v2 db with new code, confirm zero schema-altering statements issued
-- [ ] 1.11 Verify: `git diff --stat packages/pytest-vantage` is empty (RQ-24, ADR-0009)
+- [x] 1.1 RED: add failing `vantage_port_contract.py` cases for `list_settings`/`upsert_setting`/`delete_setting`/`get_run_case_outcomes` — create, replace-not-duplicate, delete-then-absent, `ORDER BY key`, empty-run pairs (spec user-configuration: create/replace/delete/parity)
+- [x] 1.2 RED: add failing test in `test_sqlite_store.py` — a v2-stamped db is refused with version-found/required/path, no DDL issued (spec recording-schema: refusal, no-alter)
+- [x] 1.3 GREEN: add `user_setting` table to `storage/schema.sql`, header count 10→11, stamp `'3'` (D82)
+- [x] 1.4 GREEN: `_SCHEMA_VERSION = 3` in `storage/connection.py` (D82)
+- [x] 1.5 GREEN: add `UserSetting` dataclass + four `Protocol` methods to `core/ports/storage.py` (D83, D86)
+- [x] 1.6 GREEN: implement the four SQL constants/methods in `storage/sqlite_store.py`, `updated_at` via `_fixed_width_isoformat` (D86)
+- [x] 1.7 GREEN: implement the same four methods in `storage/memory.py` (`dict[tuple[str,str], UserSetting]`, `sorted()`) (D86)
+- [x] 1.8 Verify: 1.1/1.2 now green on both adapters
+- [x] 1.9 GREEN: update `docs/schema-manifest.md` — `### user_setting` section, ten→eleven, indexes unchanged at fourteen, `meta` stamp `3` (D82, RQ-29 Inspection; spec recording-schema: fresh db matches manifest)
+- [x] 1.10 Verify (Inspection): open an existing v2 db with new code, confirm zero schema-altering statements issued
+- [x] 1.11 Verify: `git diff --stat packages/pytest-vantage` is empty (RQ-24, ADR-0009)
 
 ## Phase 2 (Slice 2): Core section domain — pure, stdlib only
 

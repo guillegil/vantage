@@ -119,6 +119,18 @@ class ResultListEntry:
     failure: FailureProjection | None
 
 
+@dataclass(frozen=True, slots=True)
+class UserSetting:
+    """One row of `user_setting`. `value` is JSON TEXT this layer never
+    parses -- the namespace's own Pydantic model in `vantage.service` is the
+    only thing that knows its shape (design.md D83)."""
+
+    namespace: str
+    key: str
+    value: str
+    updated_at: datetime
+
+
 class ExecutionStore(Protocol):
     """Persists `Execution` rows. Implementations live in `vantage.storage`."""
 
@@ -199,6 +211,31 @@ class ExecutionStore(Protocol):
         (design.md D57, D61, D63). An unknown `node_id` yields an empty
         page, never an error. Each entry's VCS data is a lean
         `VcsProjection` (design.md D59, D60), same as `list_runs`."""
+        ...
+
+    def list_settings(self, namespace: str) -> Sequence[UserSetting]:
+        """Return every setting stored for `namespace`, ordered by `key`
+        (design.md D85, D86) -- the same order `summarize_sections` presents
+        its section list in."""
+        ...
+
+    def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
+        """Create or replace one `(namespace, key)` pair. Returns True only
+        on a true first insert, mirroring `record_session`'s `created`
+        boolean -- the route needs `201` versus `200` (design.md D86)."""
+        ...
+
+    def delete_setting(self, namespace: str, key: str) -> bool:
+        """Delete one `(namespace, key)` pair. Returns False for a key that
+        was not there, mirroring `touch_last_contact`'s boolean -- the route
+        needs `404` versus `204` (design.md D86)."""
+        ...
+
+    def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
+        """Return `(file_path, outcome)` for every result of `execution_id`
+        (design.md D85, D86) -- the aggregate input `summarize_sections`
+        classifies. Not paginated, like `get_results`: this is an aggregate
+        input, not a response."""
         ...
 
     def close(self) -> None:
