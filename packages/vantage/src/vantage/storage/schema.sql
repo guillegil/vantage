@@ -1,12 +1,12 @@
 -- Vantage database schema (RQ-29: complete schema from first use, ADR-5).
 --
--- All ten tables and their fourteen indexes are declared here, whole, and
+-- All eleven tables and their fourteen indexes are declared here, whole, and
 -- applied the first time a database is opened (vantage/storage/connection.py,
 -- PR4). Every statement is IF NOT EXISTS so a second process opening the same
 -- fresh database races safely (design.md D8) and reopening an existing
 -- database issues no schema-altering statement (RQ-29.2).
 --
--- Milestone 1 populates only the marked `run` columns; the other nine tables
+-- Milestone 1 populates only the marked `run` columns; the other ten tables
 -- exist empty until the milestone that writes them. No migration framework
 -- ships in Phase 1 (ADR-5) -- `meta.schema_version` is the seam, not a
 -- substitute for one. This file stamps that seam itself, as its own last
@@ -233,6 +233,20 @@ CREATE TABLE IF NOT EXISTS result_artifact (
 );
 
 -- ---------------------------------------------------------------------------
+-- user_setting -- namespaced, server-persisted user preferences. Generic
+-- storage, specific validation: `value` is JSON text this schema does not
+-- describe and this adapter never parses; each namespace's shape is validated
+-- by an ordinary Pydantic model in `vantage.service` (design.md D83).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS user_setting (
+    namespace   TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (namespace, key)
+);
+
+-- ---------------------------------------------------------------------------
 -- Indexes -- fourteen in total (docs/schema-manifest.md enumerates the same
 -- list). The failure index (5) is RQ-8's criterion that twenty tests failing
 -- at one source line come back as one `GROUP BY failure_path, failure_lineno`
@@ -279,4 +293,4 @@ CREATE INDEX IF NOT EXISTS idx_run_last_contact_at
 -- relies on, so reapplying this script against an already-stamped database
 -- changes nothing.
 -- ---------------------------------------------------------------------------
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '2');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '3');

@@ -47,7 +47,7 @@ redundant storage.
 
 ## Tables
 
-**Ten tables, fourteen indexes.** `PRAGMA foreign_keys=ON` is set by every
+**Eleven tables, fourteen indexes.** `PRAGMA foreign_keys=ON` is set by every
 connection in `vantage/storage/connection.py` (PR4), not by `schema.sql`
 itself — SQLite ignores unenforced foreign keys by default, so the
 `REFERENCES` clauses below only take effect once a connection turns the
@@ -315,6 +315,24 @@ directory design.md D9 creates at `0700` (RQ-40.2).
 | `created_at` | TEXT NOT NULL | Phase 2 | Phase 2 |
 
 `UNIQUE(result_id, content_hash, label)`.
+
+### `user_setting` (`user-configuration` — namespaced, server-persisted user preferences)
+
+| Column | Type | Driver | Populated |
+| --- | --- | --- | --- |
+| `namespace` | TEXT NOT NULL | user-configuration | M2 |
+| `key` | TEXT NOT NULL | user-configuration | M2 |
+| `value` | TEXT NOT NULL | user-configuration | M2 |
+| `updated_at` | TEXT NOT NULL | user-configuration | M2 |
+
+`PRIMARY KEY (namespace, key)` — the one uniqueness rule this table has,
+stated in SQL rather than application code (design.md D82). `value` is
+JSON `TEXT` this schema does not describe and `vantage.storage` never
+parses; each namespace's shape is validated by an ordinary Pydantic model
+in `vantage.service` (design.md D83). No new index: the only query is the
+equality on the primary key's leading column, already served by its
+implicit index — `test_case.file_path` gets no index either (design.md
+D86).
 
 ## Indexes
 
