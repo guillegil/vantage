@@ -6,7 +6,7 @@
 -- fresh database races safely (design.md D8) and reopening an existing
 -- database issues no schema-altering statement (RQ-29.2).
 --
--- Milestone 1 populates only the marked `run` columns; the other nine tables
+-- Milestone 1 populates only the marked `run` columns; the other ten tables
 -- exist empty until the milestone that writes them. No migration framework
 -- ships in Phase 1 (ADR-5) -- `meta.schema_version` is the seam, not a
 -- substitute for one. This file stamps that seam itself, as its own last
