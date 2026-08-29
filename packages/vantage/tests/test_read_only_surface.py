@@ -189,6 +189,7 @@ def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...
         ),
         ("GET", "/capabilities"): (lambda: client.get("/api/v1/capabilities"),),
         ("GET", "/openapi.yaml"): (lambda: client.get("/api/v1/openapi.yaml"),),
+        ("GET", "/config/sections"): (lambda: client.get("/api/v1/config/sections"),),
     }
 
 
