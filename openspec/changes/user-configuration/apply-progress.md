@@ -64,7 +64,34 @@ Per the budget guard, split into two units instead of one oversized commit:
 or have the orchestrator open a genuinely separate child branch for it. Not
 decided here — apply STOPPED before committing the overflow per instruction.
 
+## Slice 4 (run aggregate) — 6/6 tasks complete, plus Phase 5 gates
+
+Branch `ft/user-configuration-04-run-aggregate`, off
+`ft/user-configuration-03b-section-routes` (3b landed there, `b0104f6`).
+Tasks 4.1–4.6 done: `GET /runs/{run_id}/sections` wired into
+`routes/sections.py`, reading `store.get_run_case_outcomes` and calling
+`summarize_sections` fresh on every request (no caching, D88).
+`SectionSummaryResponse`/`RunSectionSummaryResponse` added to
+`schemas.py`, the fourth operation hand-written into `v1.yaml`
+(`read`-tagged), and all three obligations extended: `test_read_only_surface.py`'s
+binding table, plus `test_interface_document.py`'s `ordered_bindings` and
+`_RESPONSE_SCHEMAS` (the third obligation slice 3 discovered).
+
+RED confirmed first: all five new tests failed with a plain 404 (no route
+mounted) before the handler existed. Both published identities are tested
+directly through the live route, not just the core: worked example (94.4%),
+`sum(items.total) + unassigned.total == run result count` over unmatched
+results, and the load-bearing rename test — `store.get_results`/
+`get_execution` asserted byte-identical before and after a rename plus
+delete, proving zero writes to any run/result row.
+
+Full suite: 592 passed. `mypy --strict`, `ruff`, `deptry` clean.
+`git diff --stat packages/pytest-vantage` empty. Branch diff vs.
+`ft/user-configuration-03b-section-routes`: 263 changed lines, well under
+the 400 budget (first slice of four not to overrun the estimate).
+
 ## Status
 
-3a on branch, ready. 3b implemented+verified but uncommitted pending the
-split/exception decision above. Phases 4–5 not started (separate branches).
+Chain complete: slices 1, 2, 3a, 3b and 4 all implemented, committed (or
+ready to commit), and green together. Phase 5's cross-cutting gates all
+pass on this branch, chain-final.

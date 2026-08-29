@@ -59,9 +59,11 @@ from vantage.service.schemas import (
     RunListItemResponse,
     RunListResponse,
     RunReport,
+    RunSectionSummaryResponse,
     RunVcsResponse,
     SectionListResponse,
     SectionResponse,
+    SectionSummaryResponse,
     SectionUpsertRequest,
     SessionReport,
 )
@@ -294,6 +296,10 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
         ),
         (("GET", "/config/sections"), lambda: client.get("/api/v1/config/sections")),
         (
+            ("GET", "/runs/{run_id}/sections"),
+            lambda: client.get(f"{run}/sections"),
+        ),
+        (
             ("DELETE", "/config/sections"),
             lambda: client.delete("/api/v1/config/sections", params={"name": "InterfaceProbe"}),
         ),
@@ -338,6 +344,8 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "HistoryResponse": HistoryResponse,
     "SectionResponse": SectionResponse,
     "SectionListResponse": SectionListResponse,
+    "SectionSummary": SectionSummaryResponse,
+    "RunSectionSummaryResponse": RunSectionSummaryResponse,
 }
 _BOUND_MODELS: dict[str, type[BaseModel]] = {**_REQUEST_SCHEMAS, **_RESPONSE_SCHEMAS}
 
