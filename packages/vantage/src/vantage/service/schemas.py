@@ -431,3 +431,61 @@ class HistoryResponse(BaseModel):
 
     items: list[HistoryEntryResponse]
     has_more: bool
+
+
+class SectionValue(BaseModel):
+    """The stored `value` for one `test_sections` row (design.md D83, D87).
+
+    `model_dump_json()` on write, `model_validate_json()` on read -- Pydantic
+    begins and ends at this model in both directions. The section's name is
+    not repeated here: it is already the row's `key`, and two encodings of
+    one fact would drift."""
+
+    prefix: str
+
+
+class SectionUpsertRequest(BaseModel):
+    """The request body for `POST /api/v1/config/sections` (design.md D87)."""
+
+    name: str
+    prefix: str
+
+
+class SectionResponse(BaseModel):
+    """One section, name and its normalized prefix (design.md D87) -- the
+    response body for the upsert route, and one entry of
+    `SectionListResponse`."""
+
+    name: str
+    prefix: str
+
+
+class SectionListResponse(BaseModel):
+    """The response body for `GET /api/v1/config/sections` (design.md D87)."""
+
+    items: list[SectionResponse]
+
+
+class SectionSummaryResponse(BaseModel):
+    """One bucket's four published numbers (design.md D85) -- the wire shape
+    of `vantage.core.domain.sections.SectionSummary`. Built field by field in
+    `routes/sections.py`, never `model_validate(..., from_attributes=True)`;
+    `pass_percentage` is never recomputed here, only carried through from the
+    pure core, which rounds it exactly once."""
+
+    name: str
+    total: int
+    measured: int
+    passing: int
+    pass_percentage: float | None
+
+
+class RunSectionSummaryResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/sections`
+    (design.md D85, D87). `unassigned` is its own field, never an entry of
+    `items` -- always present, even when empty, so the sum of every item's
+    `total` plus `unassigned.total` reconciles against the run's result
+    count."""
+
+    items: list[SectionSummaryResponse]
+    unassigned: SectionSummaryResponse

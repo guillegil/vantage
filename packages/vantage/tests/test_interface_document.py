@@ -59,7 +59,12 @@ from vantage.service.schemas import (
     RunListItemResponse,
     RunListResponse,
     RunReport,
+    RunSectionSummaryResponse,
     RunVcsResponse,
+    SectionListResponse,
+    SectionResponse,
+    SectionSummaryResponse,
+    SectionUpsertRequest,
     SessionReport,
 )
 from vantage.storage.memory import InMemoryExecutionStore
@@ -282,6 +287,22 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
         ),
         (("GET", "/capabilities"), lambda: client.get("/api/v1/capabilities")),
         (("GET", "/openapi.yaml"), lambda: client.get("/api/v1/openapi.yaml")),
+        (
+            ("POST", "/config/sections"),
+            lambda: client.post(
+                "/api/v1/config/sections",
+                json={"name": "InterfaceProbe", "prefix": "tests/interface-probe"},
+            ),
+        ),
+        (("GET", "/config/sections"), lambda: client.get("/api/v1/config/sections")),
+        (
+            ("GET", "/runs/{run_id}/sections"),
+            lambda: client.get(f"{run}/sections"),
+        ),
+        (
+            ("DELETE", "/config/sections"),
+            lambda: client.delete("/api/v1/config/sections", params={"name": "InterfaceProbe"}),
+        ),
     ]
     bound_keys = {key for key, _ in ordered_bindings}
     assert bound_keys == declared, "binding table does not cover every documented path"
@@ -306,6 +327,7 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
 _REQUEST_SCHEMAS: dict[str, type[BaseModel]] = {
     "SessionReport": SessionReport,
     "RunReport": RunReport,
+    "SectionUpsertRequest": SectionUpsertRequest,
 }
 _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "Acknowledgement": Acknowledgement,
@@ -320,6 +342,10 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "ResultDetailResponse": ResultDetailResponse,
     "HistoryEntry": HistoryEntryResponse,
     "HistoryResponse": HistoryResponse,
+    "SectionResponse": SectionResponse,
+    "SectionListResponse": SectionListResponse,
+    "SectionSummary": SectionSummaryResponse,
+    "RunSectionSummaryResponse": RunSectionSummaryResponse,
 }
 _BOUND_MODELS: dict[str, type[BaseModel]] = {**_REQUEST_SCHEMAS, **_RESPONSE_SCHEMAS}
 

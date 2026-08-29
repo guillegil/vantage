@@ -216,8 +216,8 @@ def test_fresh_database_matches_the_manifest_in_both_directions() -> None:
 def test_fresh_database_matches_the_recorded_ground_truth() -> None:
     snapshot = _real_schema_snapshot()
 
-    assert len(snapshot.tables) == 10
-    assert sum(len(columns) for columns in snapshot.tables.values()) == 126
+    assert len(snapshot.tables) == 11
+    assert sum(len(columns) for columns in snapshot.tables.values()) == 130
     assert len(snapshot.indexes) == 14
 
 

@@ -39,7 +39,7 @@ _SCHEMA_SENTINEL_TABLE = "meta"
 # not have (ADR-0013). `schema.sql`'s own last statement stamps this same
 # value into `meta.schema_version`, atomically with the schema it describes --
 # the two must move together, or `open_database` refuses its own fresh schema.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 class SchemaVersionError(RuntimeError):

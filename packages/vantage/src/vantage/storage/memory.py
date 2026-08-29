@@ -45,6 +45,7 @@ from vantage.core.ports.storage import (
     ResultListEntry,
     RunDetail,
     RunListEntry,
+    UserSetting,
 )
 
 
@@ -83,6 +84,7 @@ class InMemoryExecutionStore:
         self._catalogue: dict[str, CatalogueEntry] = {}
         self._results: dict[tuple[str, str, int], Result] = {}
         self._last_contact: dict[str, datetime] = {}
+        self._settings: dict[tuple[str, str], UserSetting] = {}
 
     def record_session(
         self, execution: Execution, *, results: Sequence[Result], received_at: datetime
@@ -286,8 +288,41 @@ class InMemoryExecutionStore:
         )
         return Page(items=items, has_more=has_more)
 
+    def list_settings(self, namespace: str) -> Sequence[UserSetting]:
+        # `sorted()` on `key` mirrors the SQLite adapter's `ORDER BY key`
+        # (design.md D85, D86).
+        matching = [
+            setting
+            for (setting_namespace, _key), setting in self._settings.items()
+            if setting_namespace == namespace
+        ]
+        return tuple(sorted(matching, key=lambda setting: setting.key))
+
+    def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
+        identity = (namespace, key)
+        created = identity not in self._settings
+        self._settings[identity] = UserSetting(
+            namespace=namespace, key=key, value=value, updated_at=updated_at
+        )
+        return created
+
+    def delete_setting(self, namespace: str, key: str) -> bool:
+        identity = (namespace, key)
+        if identity not in self._settings:
+            return False
+        del self._settings[identity]
+        return True
+
+    def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
+        return tuple(
+            (result.identity.file_path, result.outcome)
+            for (run_id, _node_id, _attempt), result in self._results.items()
+            if run_id == execution_id
+        )
+
     def close(self) -> None:
         self._executions.clear()
         self._catalogue.clear()
         self._results.clear()
         self._last_contact.clear()
+        self._settings.clear()

@@ -219,6 +219,93 @@ class UnknownResultError(RejectionError):
         super().__init__("No result with that identifier has been recorded for this run.")
 
 
+class InvalidSectionNameError(RejectionError):
+    """A section name is empty after `strip()`, or exceeds
+    `SECTION_NAME_MAX_CHARS` (design.md D89).
+
+    The message and `fields` are both fixed strings -- the submitted name is
+    never interpolated into either, which is what keeps a hostile name (a
+    CR/LF, a `</script>`) from ever riding along in the rejection body
+    (design.md, Threat Matrix -- "Client-chosen text reaching a rejection
+    body")."""
+
+    status_code = 422
+    error = "invalid_section_name"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The section name is empty after stripping whitespace, or exceeds the maximum length.",
+            ["name"],
+        )
+
+
+class ReservedSectionNameError(RejectionError):
+    """A section name equals `unassigned`, matched case-insensitively
+    (design.md D89) -- a distinct kind from `InvalidSectionNameError`
+    because the client fixes them differently."""
+
+    status_code = 422
+    error = "reserved_section_name"
+
+    def __init__(self) -> None:
+        super().__init__("The name 'unassigned' is reserved and cannot be used.", ["name"])
+
+
+class InvalidSectionPrefixError(RejectionError):
+    """A section prefix is empty after `strip()`, or exceeds
+    `SECTION_PREFIX_MAX_CHARS` (design.md D89). Same no-echo discipline as
+    `InvalidSectionNameError`."""
+
+    status_code = 422
+    error = "invalid_section_prefix"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The section prefix is empty after stripping whitespace, "
+            "or exceeds the maximum length.",
+            ["prefix"],
+        )
+
+
+class UnknownSectionError(RejectionError):
+    """`DELETE /api/v1/config/sections` for a name that is not stored
+    (design.md D89)."""
+
+    status_code = 404
+    error = "unknown_section"
+
+    def __init__(self) -> None:
+        super().__init__("No section with that name has been stored.")
+
+
+class TooManySectionsError(RejectionError):
+    """A *new* section name would exceed `MAX_SECTIONS` (design.md D89) --
+    renaming or updating an existing name is never refused by this check."""
+
+    status_code = 422
+    error = "too_many_sections"
+
+    def __init__(self) -> None:
+        super().__init__("The maximum number of stored sections has already been reached.")
+
+
+class UnreadableSettingError(RejectionError):
+    """A stored `value` fails its namespace's own Pydantic model (design.md
+    D83) -- a named `500`, not a traceback. `key` is routed through
+    `safe_segment` before it ever reaches the body: a hand-edited database
+    row is not guaranteed to hold a name this API would have accepted."""
+
+    status_code = 500
+    error = "unreadable_setting"
+
+    def __init__(self, namespace: str, key: str) -> None:
+        safe_key = safe_segment(key)
+        super().__init__(
+            f"The stored value for {safe_key!r} in namespace {namespace!r} could not be parsed.",
+            [safe_key],
+        )
+
+
 def _rejection_response(exc: RejectionError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
@@ -267,10 +354,16 @@ __all__ = [
     "InvalidIdentityError",
     "InvalidJsonError",
     "InvalidReportError",
+    "InvalidSectionNameError",
+    "InvalidSectionPrefixError",
     "PayloadTooLargeError",
     "RejectionError",
+    "ReservedSectionNameError",
+    "TooManySectionsError",
     "UnknownResultError",
     "UnknownRunError",
+    "UnknownSectionError",
+    "UnreadableSettingError",
     "UnsupportedMediaTypeError",
     "register_error_handlers",
     "safe_segment",
