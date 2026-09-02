@@ -14,7 +14,11 @@ in full.
 - Phase 5 (PR5 → PR4) — complete, this batch, **re-sliced into PR5a and
   PR5b** (see Phase 5's own note in `tasks.md`): PR5a (flag + resolver,
   → PR4) and PR5b (C1/C2/C3 + Q3, → PR5a) are both landed.
-- Phases 6-11 are untouched and remain for future `sdd-apply` batches.
+- Phase 6 (PR6 → PR5b) — **partial, this batch, re-scoped at apply time**:
+  `resolve_declared_path` (6.1/6.2/6.5/6.6) is landed; `read_declaration`
+  (6.3/6.4) is deferred to the next `sdd-apply` batch per this launch's
+  explicit narrowing (see Phase 6's own note in `tasks.md`).
+- Phases 7-11 are untouched and remain for future `sdd-apply` batches.
 
 ## Completed Tasks
 
@@ -67,6 +71,100 @@ in full.
 - [x] 5.7 (behaviour half) GREEN: `pytest_vantage/recorder.py` — `_METADATA_DECLARATION_FILENAME`, `_metadata_declaration_missing_warning(rootpath)` (opens the file directly, TOCTOU-safe like `resolve_declared_path` will be, discards content, returns a message or `None`); `Recorder.__init__` calls it when `metadata_requested` is `True` and warns once via `_warn` if the declaration is missing.
 - [x] 5.8 Verified: `uv run pytest packages/pytest-vantage/tests/test_config.py packages/pytest-vantage/tests/test_opt_in.py packages/pytest-vantage/tests/test_vcs.py` — 45 passed (see Work Unit Evidence below).
 
+### Phase 6 (PR6) — Path containment, re-scoped
+
+**Re-scoped at apply time, per the launch instructions.** The launch brief
+for this batch narrowed Phase 6 explicitly to "path containment
+(`resolve_declared_path`, and the symlink / loop / FIFO / absolute / `..`
+cases)" and named "no file reading, no bounding" among this PR's exclusions.
+`read_declaration` (6.3/6.4) parses the declaration file's own JSON content
+-- exactly the "file reading" excluded -- so it is deferred to the next
+batch. 6.1, 6.2, 6.5 and 6.6 land here, re-worded in `tasks.md` to describe
+what this PR actually proves.
+
+- [x] 6.1 RED: `packages/pytest-vantage/tests/test_metadata_containment.py`
+  -- 10 tests: absolute path, `..` escape, a real symlink pointing outside
+  `rootpath`, a real symlink loop (`os.symlink`, cyclic), a directory, a
+  real FIFO (`os.mkfifo`, `skipif` where unsupported), a path equal to
+  `rootpath` itself, a missing path -- each asserted rejected (`None`);
+  plus a legitimate nested path accepted and a root reached through a
+  symlink still accepting its own children. Confirmed failing before 6.2:
+  `ImportError: cannot import name 'metadata' from 'pytest_vantage'`.
+- [x] 6.2 GREEN: created `packages/pytest-vantage/src/pytest_vantage/metadata.py`
+  -- `resolve_declared_path` exactly as D93's code sample: `PurePath`
+  absolute/drive/anchor pre-check, `..` in `parts` pre-check, both
+  `rootpath` and the candidate resolved (in that order) before the
+  purely-lexical `is_relative_to` containment check, `target == root` and
+  `not target.is_file()` rejections, `except (OSError, RuntimeError)`
+  around the whole resolve-and-check block. Stdlib only (`pathlib`), no
+  other import (RQ-24).
+- [x] 6.5 Threat-matrix RED, scoped to `resolve_declared_path` itself (no
+  production code calls it from `pytest_sessionstart` yet -- that wiring is
+  Phase 7): `test_a_fifo_is_rejected_without_blocking` asserts both the
+  outcome (`None`) and a bounded wall-clock time (`< 1.0s`) around the
+  call, with no reader ever attached to the FIFO -- the only way the test
+  can finish at all is if `resolve_declared_path` never calls `open()` on
+  it, only `stat` via `is_file()`.
+- [x] 6.6 Verify: `uv run pytest packages/pytest-vantage/tests/test_metadata_containment.py`
+  -- 10 passed. Additionally run individually under `uv run --python 3.10`,
+  `3.11`, `3.12` and `3.13` (see Cross-Version Verification below) --
+  10 passed on every one, unmodified.
+- [ ] 6.3, 6.4 (next batch): `read_declaration` and its four constants.
+
+**Real basename collision found and resolved, not worked around silently.**
+`packages/vantage/tests/test_metadata.py` already exists (PR3, core
+vocabulary tests for `FILE_STATUSES`/`KEY_STATUSES`). Neither
+`packages/vantage/tests/` nor `packages/pytest-vantage/tests/` carries an
+`__init__.py`, and this workspace has exactly one `pytest.ini_options`
+section (D9, enforced by its own guard test) covering both trees in one
+run. pytest's classic import mode therefore requires every test module
+basename to be globally unique across the whole workspace, not merely
+within its own package. Naming the new plugin-side test file
+`test_metadata.py`, as `tasks.md`'s original wording said, collides and
+fails collection outright: proven by running both files together and
+reading pytest's own `import file mismatch` error before choosing a
+different name, not assumed. The plugin-side file is
+`test_metadata_containment.py` instead. **This is a task-authoring gap in
+the original `tasks.md`, not an apply-time judgment call to second-guess
+freely** -- flagged here explicitly, plus a forward note in `tasks.md`
+itself, so Phase 7's `read_declaration`/`capture_metadata` tests (which
+`tasks.md` also calls `test_metadata.py`) pick a second unique name rather
+than repeating the same collision against this PR's file.
+
+**Cross-version verification of D93's stated trap -- measured, not
+trusted.** The design's own text states: "on the interpreters in the
+supported 3.10–3.13 range that predate `resolve()`'s reimplementation over
+`os.path.realpath`, a symlink loop raises `RuntimeError`, not `OSError`."
+This was verified directly this session, against a real `os.symlink`
+cyclic pair (`a -> b -> a`) built under `tmp_path` on each of the four
+`uv`-managed interpreters (`cpython-3.10.21`, `3.11.16`, `3.12.14`,
+`3.13.15` -- this project's exact floor, ceiling, and the two versions
+between):
+
+| Interpreter | `Path.resolve()` on a symlink loop | What rejects it |
+| --- | --- | --- |
+| 3.10.21 | Raises `RuntimeError: Symlink loop from '...'` | The `except (OSError, RuntimeError)` clause |
+| 3.11.16 | Raises the same `RuntimeError` | The same clause |
+| 3.12.14 | Raises the same `RuntimeError` | The same clause |
+| 3.13.15 | **Raises nothing** with the default `strict=False` -- silently returns the path lexically unresolved (confirmed: `resolve()` returned the literal `.../a`, unchanged) | `target.is_file()` returns `False` (a `stat` through the unresolvable loop fails internally, and `Path.is_file()` swallows that `OSError` per its own contract rather than propagating it) |
+
+**This is a more precise finding than "catches only one of two exception
+types crashes the other version," which is what the launch brief warned
+against and what was checked for.** The actual trap is subtler: on 3.13
+`Path.resolve()` doesn't raise *at all* for a loop by default, so the
+`except (OSError, RuntimeError)` clause is not even what rejects the loop
+there -- `is_file()`'s own `False` is. The clause remains necessary anyway,
+because it is the only thing standing between a committed symlink loop and
+an uncaught `RuntimeError` crashing `pytest_sessionstart` on 3.10, 3.11 and
+3.12 -- three of the four supported interpreters, not one. The test file
+asserts the outcome (`None`) rather than which mechanism produced it, so
+the same unmodified test proves the property on all four without branching
+on `sys.version_info`. `resolve()` also accepts a `strict=True` argument
+that DOES raise `OSError` (`errno 40`, "Too many levels of symbolic
+links") for the same loop on 3.13 -- not used here, since D93's code
+sample uses the default `strict=False` throughout and this implementation
+follows it exactly.
+
 ## Files Changed
 
 | File | Action | What Was Done |
@@ -95,6 +193,9 @@ in full.
 | `openspec/changes/run-metadata-capture/tasks.md` | Modified (PR5) | Phase 5 tasks marked `[x]`, re-slicing note added |
 | `packages/pytest-vantage/src/pytest_vantage/recorder.py` | Modified (PR5b) | `_METADATA_DECLARATION_FILENAME`, `_metadata_declaration_missing_warning`; `Recorder.__init__` now acts on `metadata_requested` |
 | `packages/pytest-vantage/tests/test_opt_in.py` | Modified (PR5b) | C1 (tree-identity + zero-connection), C2 (`Path.open` call recorder, both halves), C3 (`--help` denial), Q3 (warn-once + no-warning-when-present) |
+| `packages/pytest-vantage/src/pytest_vantage/metadata.py` | Created (PR6) | `resolve_declared_path` (D93) -- stdlib-only (`pathlib`) path containment, resolving both `rootpath` and the candidate before a lexical `is_relative_to` check |
+| `packages/pytest-vantage/tests/test_metadata_containment.py` | Created (PR6) | 10 tests: 8 rejection cases (absolute, `..`, symlink escape, symlink loop, directory, FIFO with bounded wall-time, root-itself, missing) + 2 acceptance cases (nested path, root reached through a symlink) |
+| `openspec/changes/run-metadata-capture/tasks.md` | Modified (PR6) | Phase 6 re-scoped: 6.1/6.2/6.5/6.6 marked `[x]`, 6.3/6.4 deferred with an explicit next-batch note; basename-collision note added |
 
 ## Work Unit Evidence (PR3)
 
@@ -132,6 +233,15 @@ in full.
 | Rollback boundary | Revert `_METADATA_DECLARATION_FILENAME`/`_metadata_declaration_missing_warning` and the `if metadata_requested:` block from `recorder.py`, and the C1/C2/C3/Q3 test additions from `test_opt_in.py`; PR5a's flag/resolver/wiring is untouched and stays fully functional (it simply stops warning/opening again) |
 | Full-suite regression check | `uv run ruff format . && uv run ruff check --fix .` — clean; `uv run mypy .` (strict) — no issues, 87 files; `uv run pytest` — 636 passed (was 629 before this batch — 7 new tests); `uv run deptry .` — no dependency issues; `-m 'req(id="RQ-2")'` — 7 passed, 629 deselected (narrows correctly) |
 
+## Work Unit Evidence (PR6)
+
+| Evidence | Value |
+|---|---|
+| Focused test command and result | `uv run pytest packages/pytest-vantage/tests/test_metadata_containment.py` — 10 passed. Re-run individually via `uv run --python 3.10/3.11/3.12/3.13 pytest packages/pytest-vantage/tests/test_metadata_containment.py` — 10 passed on every interpreter, unmodified (proves the cross-version symlink-loop claim empirically, not just on the default interpreter) |
+| Runtime harness command/scenario and result | N/A in the HTTP-boundary sense — `resolve_declared_path` is a pure filesystem function with no server involved. Its "runtime harness" equivalent is real `os.symlink`/`os.mkfifo` fixtures under `tmp_path` rather than a mock of filesystem behaviour, matching `test_vcs.py`'s own verification approach for the plugin's other filesystem/subprocess boundary; there is no in-process server or subprocess to exercise for a pure `pathlib` function |
+| Rollback boundary | Revert `pytest_vantage/metadata.py` and `test_metadata_containment.py`; nothing else in the tree imports `pytest_vantage.metadata` yet (Phase 7 is the first caller), so this reverts standalone |
+| Full-suite regression check | `uv run ruff format . && uv run ruff check --fix .` — clean, 89 files; `uv run mypy .` (strict) — no issues, 89 files (after resolving the `test_metadata.py` basename collision, which `mypy` also caught independently as "Duplicate module named"); `uv run pytest` — 646 passed (was 636 before this batch — 10 new tests); `uv run deptry .` — no dependency issues, 88 files scanned; `uv run pytest packages/pytest-vantage/tests/test_plugin_imports.py` — 2 passed, confirming the new module is still stdlib-only and is included in the RQ-24 import walk (it scans the whole `pytest_vantage` directory, so no test update was needed for the walk itself to see the new file) |
+
 ## TDD Cycle Evidence
 
 | Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
@@ -145,6 +255,7 @@ in full.
 | 5.3 | `packages/pytest-vantage/tests/test_opt_in.py` | Unit + subprocess (C1) | ✅ 629/629 (baseline before this batch) | ✅ Written | ✅ Passed immediately, no production code change needed — the flag's mere presence (already registered in PR5a) is what C1/C3 prove | ➖ Single per scenario — tree-identity, socket-level, `--help` text, no branching in any | ➖ None needed |
 | 5.5 | `packages/pytest-vantage/tests/test_opt_in.py` | Unit | ✅ 629/629 (baseline before this batch) | ✅ Written — confirmed failing (the "is opened" half): `assert False`, zero paths recorded | ✅ Passed after 5.7's `_metadata_declaration_missing_warning` call landed in `Recorder.__init__` | ✅ 2 cases: gate closed (zero opens) and gate open (one open) — the monotone C2 property proven both ways | ➖ None needed |
 | 5.6 | `packages/pytest-vantage/tests/test_opt_in.py` | Unit | ✅ 629/629 (baseline before this batch) | ✅ Written — confirmed failing (the "warns" half): `assert 0 == 1`, zero `VantageWarning`s recorded | ✅ Passed after 5.7's warning call landed | ✅ 2 cases: absent (warns once) and present (warns never) | ➖ None needed |
+| 6.1/6.2 | `packages/pytest-vantage/tests/test_metadata_containment.py` | Unit (real filesystem: `os.symlink`, `os.mkfifo`) | ✅ 636/636 (baseline before this batch) | ✅ Written — confirmed failing: `ImportError: cannot import name 'metadata' from 'pytest_vantage'` | ✅ Passed after 6.2's module landed — 10/10, on the default interpreter and re-confirmed individually on 3.10/3.11/3.12/3.13 | ✅ 10 cases: 8 rejection (absolute, `..`, symlink escape, symlink loop, directory, FIFO, root-itself, missing) + 2 acceptance (nested, symlinked-root) — no branching within any single case | ➖ None needed |
 
 ### Test Summary (PR3)
 
@@ -177,6 +288,14 @@ in full.
 - **Layers used**: Unit (`Recorder.__init__` direct construction, C2/Q3), subprocess (tree-identity differential, C1), in-process `pytester` (socket-level, C1)
 - **Approval tests** (refactoring): None — no refactoring tasks in this phase
 - **Pure functions created**: `_metadata_declaration_missing_warning` (recorder.py) — no side effects beyond the file it deliberately opens and closes
+
+### Test Summary (PR6)
+
+- **Total tests written this batch**: 10 new in `test_metadata_containment.py`
+- **Total tests passing (full suite)**: 646
+- **Layers used**: Unit, over a real filesystem (`tmp_path`, `os.symlink`, `os.mkfifo`) — no mock of filesystem or subprocess behaviour, matching `test_vcs.py`'s own verification approach
+- **Approval tests** (refactoring): None — no refactoring tasks in this phase
+- **Pure functions created**: `resolve_declared_path` (metadata.py) — pure with respect to program state, though it performs real filesystem `stat` calls (`resolve()`, `is_file()`), never a write and never an `open()`
 
 ## Deviations from Design
 
@@ -214,6 +333,20 @@ consumes the value in this slice. The property D99 actually cares about
 (the declaration read exactly once per session, worker count irrelevant)
 holds regardless, because no `Recorder` is ever constructed on a worker.
 
+**PR6: one scope deviation from `tasks.md`'s literal text, authorised by
+the launch instructions.** `tasks.md`'s original Phase 6 bundled
+`read_declaration` (6.3/6.4) together with `resolve_declared_path`
+(6.1/6.2). This batch's launch instructions explicitly narrowed scope to
+"path containment (`resolve_declared_path` ...)" and named "no file
+reading, no bounding" as out of scope, which is exactly what
+`read_declaration` does. `tasks.md` itself is updated to record this
+re-scoping and defer 6.3/6.4, rather than silently implementing a subset
+and leaving the task list looking like it covers more than it does. **One
+naming deviation, not authorised by anything, just a real collision found
+and fixed**: the plugin-side test file is `test_metadata_containment.py`,
+not `test_metadata.py` as `tasks.md` originally said — see the Phase 6
+section above for the proof.
+
 ## Issues Found
 
 None beyond the `MAX_METADATA_KEY_CHARS` gap noted above (PR3). Task 3.3
@@ -249,6 +382,11 @@ check's exact mechanism, only that a missing declaration warns). It is
 consistent with the codebase's stated preference for attempt-first over
 check-then-act, and it means this presence check needs no second read once
 `pytest_vantage.metadata`'s `read_declaration` lands in Phase 6/7.
+
+**PR6.** The real basename collision against `packages/vantage/tests/
+test_metadata.py` (see Phase 6 section above) — resolved by renaming the
+new file, not by touching the pre-existing PR3 file, since PR3 is earlier
+in the chain and already open/reviewed.
 
 ## Git / PR State
 
