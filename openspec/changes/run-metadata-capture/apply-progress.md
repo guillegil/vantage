@@ -384,6 +384,8 @@ in the chain and already open/reviewed.
 - PR5a commits: `c10703e` (flag + resolver + Recorder wiring), `c6f8c85` (tasks.md checkboxes, re-slicing note), `bfea150` (apply-progress).
 - PR5b: https://github.com/guillegil/vantage/pull/93 — base `ft/run-metadata-capture-05-flag`, head `ft/run-metadata-capture-05b-checks`. Open. Not merged.
 - PR5b commits: `e45f5b8` (declaration presence check + Q3 warning + C1/C2/C3 tests), `2e6216e` (apply-progress).
+- PR6: https://github.com/guillegil/vantage/pull/94 — base `ft/run-metadata-capture-05b-checks`, head `ft/run-metadata-capture-06-paths`. Open, pending CI. Not merged.
+- PR6 commits: `7d58af1` (`resolve_declared_path` + tests), `776407a` (tasks.md re-scope), `dad4579`+`8d39c0a` (apply-progress, written then trimmed).
 
 ## Measured changed-line count
 
@@ -443,23 +445,34 @@ PR4, an honest seam existed here (the flag/resolver/wiring is independently
 useful and independently testable from the differential/Q3 behaviour that
 consumes it), so this batch split rather than repeating a `size:exception`.
 
+**PR6** (vs. PR5b branch, `git diff --stat ft/run-metadata-capture-05b-checks..HEAD`,
+full PR diff including bookkeeping): **392 changed lines** (385 insertions
++ 7 deletions) as opened. Code+tests alone: `metadata.py` +94,
+`test_metadata_containment.py` +142 — 236 lines, comfortably under this
+task's ~380 forecast even before bookkeeping. No `size:exception` needed.
+
 ## Remaining Tasks
 
-All of Phase 6 through Phase 11 (tasks 6.1 through 11.5) — see tasks.md.
-Phase 6 (path containment) is next in the chain and must target
-`ft/run-metadata-capture-05b-checks` per `feature-branch-chain`.
+Phase 6.3-6.4 (`read_declaration` + its constants, deferred this batch,
+out of this launch's scope) through Phase 11 (tasks 11.1-11.5) — see
+tasks.md. The rest of Phase 6 targets `ft/run-metadata-capture-06-paths`
+(this PR's branch) per `feature-branch-chain`.
 
 ## Workload / PR Boundary
 
-- Mode: chained PR slice (`feature-branch-chain`), Phase 5 re-sliced into PR5a (flag + resolver) and PR5b (C1/C2/C3 + Q3) — an honest seam, not a `size:exception`
-- Current work unit: Phase 5 — the `--vantage-metadata` opt-in flag end to end: registration, resolver, gate short-circuit, declaration presence check, Q3's warning, and the C1/C2/C3 proof that the flag is correctly inert
-- Boundary: PR5a starts from PR4's tip (`ft/run-metadata-capture-04-port`); PR5b starts from PR5a's tip and ends with both PRs opened and green. No path containment, file content reading/bounding, wire section, server parsing, or ingestion wiring touched (out of scope per launch instructions — Phase 6 onward)
-- Estimated review budget impact: PR5a 270 changed lines, PR5b 254 changed lines — both comfortably under the 400-line budget, no `size:exception` needed
+- Mode: chained PR slice (`feature-branch-chain`); Phase 6 re-scoped at apply time by launch instruction, not re-sliced for size
+- Current work unit: Phase 6 (partial) — `resolve_declared_path`, the security boundary a declared path must pass before ADR-0017's authorised read ever touches it
+- Boundary: PR6 starts from PR5b's tip and ends with `resolve_declared_path` fully proven (10 real-filesystem tests, verified across Python 3.10-3.13) and the PR opened and green. No declaration parsing, byte bounding, wire section, server parsing or ingestion touched (next batch)
+- Estimated review budget impact: 392 changed lines, under the 400-line budget, no `size:exception` needed
 
 ## Status
 
-38/38 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
-Phase 4 (6/6) and Phase 5 (8/8, split PR5a/PR5b this batch). PR1, PR2, PR3
-and PR4 open and green, not merged (per instructions — the chain merges in
-order at the end). PR5a and PR5b opened this batch, also open and green.
-Ready for the next `sdd-apply` batch (Phase 6, path containment).
+32/34 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
+Phase 4 (6/6), Phase 5 (8/8) and Phase 6 (4/6 this batch: 6.1, 6.2, 6.5,
+6.6; 6.3/6.4 deferred). (Note: the prior batch's status line said "38/38"
+for Phases 1-5, which undercounts against 4+7+3+6+8=28 -- a pre-existing
+arithmetic slip in that line, not something this batch introduced; the
+28/28 for Phases 1-5 plus this batch's 4/6 for Phase 6 gives 32/34.) PR1
+through PR5b open and green, not merged (chain merges in order at the
+end). PR6 opened this batch, green pending CI. Ready for the next
+`sdd-apply` batch (Phase 6.3/6.4, then Phase 7).
