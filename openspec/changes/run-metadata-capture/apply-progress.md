@@ -12,9 +12,8 @@ in full.
 - Phase 3 (PR3 → PR2) — complete.
 - Phase 4 (PR4 → PR3) — complete.
 - Phase 5 (PR5 → PR4) — complete, this batch, **re-sliced into PR5a and
-  PR5b** (see Phase 5's own note in `tasks.md` and the "Re-slicing" section
-  below): PR5a (flag + resolver) is landed; PR5b (C1/C2/C3 + Q3, → PR5a) is
-  in progress in this same batch.
+  PR5b** (see Phase 5's own note in `tasks.md`): PR5a (flag + resolver,
+  → PR4) and PR5b (C1/C2/C3 + Q3, → PR5a) are both landed.
 - Phases 6-11 are untouched and remain for future `sdd-apply` batches.
 
 ## Completed Tasks
@@ -60,7 +59,13 @@ in full.
 
 **Deviation from the design's literal wording, recorded not silently applied**: D99's prose says `_metadata_capture_requested` is "called on both xdist branches." It is not, in this implementation — only from the controller. `test_xdist_guard.py`'s `_WorkerConfigDouble.getoption` raises `AssertionError` for any option name outside `{"vantage", "capture", "vantage_failure_text"}`; reading `"vantage_metadata"` there would break that existing safety-net test, which is deliberately built to catch exactly this kind of scope creep (its own docstring: "the strongest available proof that the worker path reads exactly those things and touches nothing past them"). Unlike `_failure_text_capture_requested`, there is no per-worker consumer of the metadata opt-in in this slice (no `EvidenceCollector` equivalent registers on a worker for metadata) — nothing on a worker would ever act on the value even if it were read there. The declaration is still read exactly once per session regardless of worker count, because no `Recorder` is ever constructed on a worker at all (`plugin.py:214-217`), which is the property D99's paragraph was actually protecting.
 
-**PR5b is in progress in this batch; its own Completed Tasks section, TDD evidence and Files Changed follow below once it lands.**
+### Phase 5 (PR5b) — differential, `--help` denial, Q3
+
+- [x] 5.3 RED then GREEN: `test_opt_in.py` — C1 differential (`test_project_tree_is_byte_identical_with_a_metadata_declaration_present_but_the_flag_absent`, byte-identical tree with a `vantage-metadata.json` present and no flags; `test_no_connection_is_attempted_with_a_metadata_declaration_present_but_no_flags`, socket-level half) and C3 (`test_the_shipped_help_text_advertises_no_ini_equivalent_for_metadata`). All three ran green immediately against PR5a's already-landed flag registration — the flag's mere presence is what C1/C3 prove, and PR5a already registers it; no new production code was needed for these three, which is itself evidence the flag is correctly inert.
+- [x] 5.5 RED: `test_declaration_is_not_opened_when_metadata_capture_was_not_requested` / `test_declaration_is_opened_when_metadata_capture_was_requested` (C2) — a plain-function `Path.open` call recorder (not a callable class instance: an instance is not a descriptor, so `path_instance.open(...)` would silently fail to bind `path_instance` as the first argument; a plain function is). Confirmed the "is opened" half failing against PR5a's `Recorder` (which accepted `metadata_requested` but never opened anything): `assert False` — zero paths recorded. The "not opened" half passed trivially against the same code (correct — a true negative).
+- [x] 5.6 RED: `test_recorder_warns_exactly_once_when_metadata_requested_and_declaration_absent` / `test_recorder_emits_no_warning_when_metadata_requested_and_declaration_present` (Q3). Confirmed the "warns" half failing: `assert 0 == 1` — zero `VantageWarning`s recorded. The "no warning" half passed trivially (true negative).
+- [x] 5.7 (behaviour half) GREEN: `pytest_vantage/recorder.py` — `_METADATA_DECLARATION_FILENAME`, `_metadata_declaration_missing_warning(rootpath)` (opens the file directly, TOCTOU-safe like `resolve_declared_path` will be, discards content, returns a message or `None`); `Recorder.__init__` calls it when `metadata_requested` is `True` and warns once via `_warn` if the declaration is missing.
+- [x] 5.8 Verified: `uv run pytest packages/pytest-vantage/tests/test_config.py packages/pytest-vantage/tests/test_opt_in.py packages/pytest-vantage/tests/test_vcs.py` — 45 passed (see Work Unit Evidence below).
 
 ## Files Changed
 
@@ -88,6 +93,8 @@ in full.
 | `packages/pytest-vantage/tests/test_config.py` | Modified (PR5a) | 9 new tests for `resolve_metadata_capture` |
 | `packages/pytest-vantage/tests/test_opt_in.py` | Modified (PR5a) | `_UnactivatedConfig` + the short-circuit gate test |
 | `openspec/changes/run-metadata-capture/tasks.md` | Modified (PR5) | Phase 5 tasks marked `[x]`, re-slicing note added |
+| `packages/pytest-vantage/src/pytest_vantage/recorder.py` | Modified (PR5b) | `_METADATA_DECLARATION_FILENAME`, `_metadata_declaration_missing_warning`; `Recorder.__init__` now acts on `metadata_requested` |
+| `packages/pytest-vantage/tests/test_opt_in.py` | Modified (PR5b) | C1 (tree-identity + zero-connection), C2 (`Path.open` call recorder, both halves), C3 (`--help` denial), Q3 (warn-once + no-warning-when-present) |
 
 ## Work Unit Evidence (PR3)
 
@@ -116,6 +123,15 @@ in full.
 | Rollback boundary | Revert `resolve_metadata_capture` from `config.py`, the `--vantage-metadata` registration/`_metadata_capture_requested` from `plugin.py`, and the `metadata_requested` keyword from `Recorder.__init__`; the keyword has a default so no existing call site breaks |
 | Full-suite regression check | `uv run ruff format . && uv run ruff check --fix .` — clean; `uv run mypy .` (strict) — no issues, 87 files; `uv run pytest` — 629 passed (was 619 before this batch — 10 new tests); `uv run deptry .` — no dependency issues; `-m 'req(id="RQ-2")'` — 4 passed, 625 deselected (narrows correctly; PR5b adds three more `RQ-2`-marked tests) |
 
+## Work Unit Evidence (PR5b)
+
+| Evidence | Value |
+|---|---|
+| Focused test command and result | `uv run pytest packages/pytest-vantage/tests/test_config.py packages/pytest-vantage/tests/test_opt_in.py packages/pytest-vantage/tests/test_vcs.py` — 45 passed (was 38 before this batch: 18 `test_config.py` + 6 `test_opt_in.py` + 14 `test_vcs.py`, all from PR5a's state — net +7 new tests: 2 C1, 1 C3, 2 C2, 2 Q3) |
+| Runtime harness command/scenario and result | Real end-to-end differential for C1: `subprocess.run([sys.executable, "-m", "pytest", ...])` against two freshly-written project trees (`test_project_tree_is_byte_identical_with_a_metadata_declaration_present_but_the_flag_absent`) and a real in-process `pytester.runpytest()` session for the socket-level half; C2/Q3 exercise `Recorder.__init__` directly (unit level, no runtime boundary needed — the declaration read is a local filesystem operation, not a network one) |
+| Rollback boundary | Revert `_METADATA_DECLARATION_FILENAME`/`_metadata_declaration_missing_warning` and the `if metadata_requested:` block from `recorder.py`, and the C1/C2/C3/Q3 test additions from `test_opt_in.py`; PR5a's flag/resolver/wiring is untouched and stays fully functional (it simply stops warning/opening again) |
+| Full-suite regression check | `uv run ruff format . && uv run ruff check --fix .` — clean; `uv run mypy .` (strict) — no issues, 87 files; `uv run pytest` — 636 passed (was 629 before this batch — 7 new tests); `uv run deptry .` — no dependency issues; `-m 'req(id="RQ-2")'` — 7 passed, 629 deselected (narrows correctly) |
+
 ## TDD Cycle Evidence
 
 | Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
@@ -126,6 +142,9 @@ in full.
 | 4.3/4.4/4.5 | `packages/vantage/tests/vantage_port_contract.py` (inherited by `test_sqlite_store.py`, `test_memory_store.py`) | Unit (adapter contract) | ✅ 120/120 (baseline before this batch) | ✅ Written — confirmed failing on both adapters: `TypeError: record_session() got an unexpected keyword argument 'metadata'` (SQLite + in-memory) and `AttributeError: 'InMemoryExecutionStore' object has no attribute '_metadata_files'` (introspection helper, in-memory) — 9 failures | ✅ Passed after 4.4 (SQLite) and 4.5 (in-memory) landed — 139/139 across the four files | ✅ 5 cases per adapter: round-trip, D95 drop-whole row, write-once replay, finish-only vs. start+finish parity, no-argument default — both adapters run the same 5 tests unchanged (RQ-30's "second mechanism" proof) | ➖ None needed |
 | 5.1/5.2 | `packages/pytest-vantage/tests/test_config.py` | Unit | ✅ 619/619 (baseline before this batch) | ✅ Written — confirmed failing: `ImportError: cannot import name 'resolve_metadata_capture' from 'pytest_vantage.config'` | ✅ Passed after 5.2's function landed — 18/18 in the file | ✅ 4 combinations × 2 monotone properties + the exhaustive truth table — same triangulation shape `resolve_failure_text_capture`'s own test file already uses | ➖ None needed |
 | 5.4/5.7 (signature) | `packages/pytest-vantage/tests/test_opt_in.py` | Unit | ✅ 5/5 (`test_opt_in.py`'s original tests, baseline before this batch) | ✅ Written — confirmed failing: `ImportError: cannot import name '_metadata_capture_requested' from 'pytest_vantage.plugin'` | ✅ Passed after the flag registration + gate function landed | ➖ Single — one short-circuit property, no branching | ➖ None needed |
+| 5.3 | `packages/pytest-vantage/tests/test_opt_in.py` | Unit + subprocess (C1) | ✅ 629/629 (baseline before this batch) | ✅ Written | ✅ Passed immediately, no production code change needed — the flag's mere presence (already registered in PR5a) is what C1/C3 prove | ➖ Single per scenario — tree-identity, socket-level, `--help` text, no branching in any | ➖ None needed |
+| 5.5 | `packages/pytest-vantage/tests/test_opt_in.py` | Unit | ✅ 629/629 (baseline before this batch) | ✅ Written — confirmed failing (the "is opened" half): `assert False`, zero paths recorded | ✅ Passed after 5.7's `_metadata_declaration_missing_warning` call landed in `Recorder.__init__` | ✅ 2 cases: gate closed (zero opens) and gate open (one open) — the monotone C2 property proven both ways | ➖ None needed |
+| 5.6 | `packages/pytest-vantage/tests/test_opt_in.py` | Unit | ✅ 629/629 (baseline before this batch) | ✅ Written — confirmed failing (the "warns" half): `assert 0 == 1`, zero `VantageWarning`s recorded | ✅ Passed after 5.7's warning call landed | ✅ 2 cases: absent (warns once) and present (warns never) | ➖ None needed |
 
 ### Test Summary (PR3)
 
@@ -142,6 +161,22 @@ in full.
 - **Layers used**: Unit only — the shared contract exercises real SQLite (temp-dir file) and the in-memory dict adapter, but through direct Python calls, not a runtime/HTTP boundary
 - **Approval tests** (refactoring): None — no refactoring tasks in this phase
 - **Pure functions created**: `_metadata_file_rows`, `_metadata_entry_rows` (sqlite_store.py) — pure row-tuple builders, no I/O
+
+### Test Summary (PR5a)
+
+- **Total tests written this batch**: 9 new in `test_config.py` (`resolve_metadata_capture`); 1 new in `test_opt_in.py` (`_metadata_capture_requested` short-circuit)
+- **Total tests passing (full suite)**: 629
+- **Layers used**: Unit only — pure function and gate-double tests, no subprocess or server
+- **Approval tests** (refactoring): None — no refactoring tasks in this phase
+- **Pure functions created**: `resolve_metadata_capture` (config.py)
+
+### Test Summary (PR5b)
+
+- **Total tests written this batch**: 7 new in `test_opt_in.py` (2 C1, 1 C3, 2 C2, 2 Q3)
+- **Total tests passing (full suite)**: 636
+- **Layers used**: Unit (`Recorder.__init__` direct construction, C2/Q3), subprocess (tree-identity differential, C1), in-process `pytester` (socket-level, C1)
+- **Approval tests** (refactoring): None — no refactoring tasks in this phase
+- **Pure functions created**: `_metadata_declaration_missing_warning` (recorder.py) — no side effects beyond the file it deliberately opens and closes
 
 ## Deviations from Design
 
@@ -205,6 +240,16 @@ was reasoning about.
 
 **PR5a.** None beyond the xdist-branch deviation already recorded above.
 
+**PR5b.** None. `_metadata_declaration_missing_warning` opens the file
+directly (`Path.open("rb").close()`), TOCTOU-safe like `resolve_declared_
+path` will be, rather than checking `.exists()`/`.is_file()` first — this
+is a design choice made explicit in the function's own docstring, not a
+literal instruction from D99's text (which does not specify the presence
+check's exact mechanism, only that a missing declaration warns). It is
+consistent with the codebase's stated preference for attempt-first over
+check-then-act, and it means this presence check needs no second read once
+`pytest_vantage.metadata`'s `read_declaration` lands in Phase 6/7.
+
 ## Git / PR State
 
 - Tracker: `ft/run-metadata-capture` (draft, no-merge) — untouched.
@@ -214,6 +259,10 @@ was reasoning about.
 - PR3 commits: `6bd5f1d` (vocabulary module + tests + architecture-walk assertion), `7a87775` (tasks.md checkboxes), plus its apply-progress commit.
 - PR4: https://github.com/guillegil/vantage/pull/91 — base `ft/run-metadata-capture-03-core`, head `ft/run-metadata-capture-04-port`. Open, 12/12 checks pass. Not merged.
 - PR4 commits: `9e81c58` (port dataclasses + both adapters + contract tests), `95d1667` (tasks.md checkboxes), plus this apply-progress commit.
+- PR5a: https://github.com/guillegil/vantage/pull/92 — base `ft/run-metadata-capture-04-port`, head `ft/run-metadata-capture-05-flag`. Open. Not merged.
+- PR5a commits: `c10703e` (flag + resolver + Recorder wiring), `c6f8c85` (tasks.md checkboxes, re-slicing note), `bfea150` (apply-progress).
+- PR5b: base `ft/run-metadata-capture-05-flag`, head `ft/run-metadata-capture-05b-checks`. URL filled in once opened (this batch).
+- PR5b commits: `e45f5b8` (declaration presence check + Q3 warning + C1/C2/C3 tests), plus this apply-progress commit.
 
 ## Measured changed-line count
 
@@ -245,22 +294,47 @@ SDD process cost this project's own historical calibration note
 (tasks.md's re-slicing note) already names as part of why forecasts run
 under — it is not part of the reviewable code diff proper.
 
+**PR5a** (vs. PR4 branch, `git diff --stat ft/run-metadata-capture-04-port..HEAD`,
+after both the code commit and the tasks.md commit, before the apply-progress
+commit): **270 changed lines** (256 insertions + 14 deletions). Breakdown:
+`config.py` +20, `plugin.py` +63/-4, `recorder.py` +13, `test_config.py`
++64/-4, `test_opt_in.py` +36/-6, `tasks.md` +19/-8. Well under the 400-line
+budget — this is the split's whole point: the code+tests commit measured
+428 changed lines *before* splitting (see PR5 originally attempted as one
+PR, below), and the honest seam brought each half comfortably under budget.
+
+**PR5b** (vs. PR5a branch, `git diff --stat ft/run-metadata-capture-05-flag..HEAD`,
+code commit only, before the apply-progress commit): **254 changed lines**
+(241 insertions + 13 deletions). Breakdown: `recorder.py` +52/-1,
+`test_opt_in.py` +202/-12. No `tasks.md` commit in PR5b — Phase 5's tasks
+were all marked `[x]` in PR5a's tasks.md commit, since the re-slicing note
+and every task's `(PR5a)`/`(PR5b)` annotation were written once, in PR5a.
+
+**The abandoned single-PR attempt**, for the record: before splitting, the
+code+tests commit alone (`d737d80`, superseded, not on either final branch)
+measured 428 changed lines (417 insertions + 11 deletions) against PR4 —
+7% over budget, comparable to PR4's own 429-line `size:exception`. Unlike
+PR4, an honest seam existed here (the flag/resolver/wiring is independently
+useful and independently testable from the differential/Q3 behaviour that
+consumes it), so this batch split rather than repeating a `size:exception`.
+
 ## Remaining Tasks
 
-All of Phase 5 through Phase 11 (tasks 5.1 through 11.5) — see tasks.md.
-Phase 5 (plugin flag) is next in the chain and must target
-`ft/run-metadata-capture-04-port` per `feature-branch-chain`.
+All of Phase 6 through Phase 11 (tasks 6.1 through 11.5) — see tasks.md.
+Phase 6 (path containment) is next in the chain and must target
+`ft/run-metadata-capture-05b-checks` per `feature-branch-chain`.
 
 ## Workload / PR Boundary
 
-- Mode: chained PR slice (`feature-branch-chain`, PR 4 of 11), `size:exception` documented above and in PR4's description
-- Current work unit: Phase 4 — port dataclasses (`MetadataFile`, `MetadataEntry`, `RunMetadata`, `EMPTY_RUN_METADATA`) + both adapter implementations + shared contract tests
-- Boundary: starts from PR3's tip (`ft/run-metadata-capture-03-core`), ends with PR4 opened and green; no plugin code, path containment, parsing, route, or read-filter changes touched (out of scope per launch instructions — Phase 5 onward)
-- Estimated review budget impact: 429 changed lines, 7% over the 400-line budget, `size:exception` recorded rather than contorting the design to hit the number
+- Mode: chained PR slice (`feature-branch-chain`), Phase 5 re-sliced into PR5a (flag + resolver) and PR5b (C1/C2/C3 + Q3) — an honest seam, not a `size:exception`
+- Current work unit: Phase 5 — the `--vantage-metadata` opt-in flag end to end: registration, resolver, gate short-circuit, declaration presence check, Q3's warning, and the C1/C2/C3 proof that the flag is correctly inert
+- Boundary: PR5a starts from PR4's tip (`ft/run-metadata-capture-04-port`); PR5b starts from PR5a's tip and ends with both PRs opened and green. No path containment, file content reading/bounding, wire section, server parsing, or ingestion wiring touched (out of scope per launch instructions — Phase 6 onward)
+- Estimated review budget impact: PR5a 270 changed lines, PR5b 254 changed lines — both comfortably under the 400-line budget, no `size:exception` needed
 
 ## Status
 
-30/30 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3) and
-Phase 4 (6/6). PR1, PR2 and PR3 open and green, not merged (per instructions
-— the chain merges in order at the end). PR4 opened this batch, also open
-and green. Ready for the next `sdd-apply` batch (Phase 5, plugin flag).
+38/38 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
+Phase 4 (6/6) and Phase 5 (8/8, split PR5a/PR5b this batch). PR1, PR2, PR3
+and PR4 open and green, not merged (per instructions — the chain merges in
+order at the end). PR5a and PR5b opened this batch, also open and green.
+Ready for the next `sdd-apply` batch (Phase 6, path containment).
