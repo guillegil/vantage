@@ -181,18 +181,26 @@ insertions(+), 3 deletions(-) — 177 changed lines. Breakdown:
 `packages/vantage/tests/test_metadata.py` +84, `test_architecture.py` +1,
 `tasks.md` +6/-3. Estimate was ~220.
 
-**PR4** (vs. PR3 branch, `git diff --stat
-ft/run-metadata-capture-03-core..HEAD`, including the tasks.md and
-apply-progress.md bookkeeping commits): **429 changed lines** (417
-insertions + 12 deletions), against the 400-line budget and this task's own
-~370 forecast — a documented `size:exception` (see PR4's description). No
-honest seam exists inside D86's binding constraint that the port and both
-adapters move together: a `Protocol` keyword the concrete adapters do not
-yet accept leaves `mypy --strict` red the moment it lands alone, so
-"dataclasses first, wire second" is not a green-at-every-commit split.
-Breakdown: `core/ports/storage.py` +53/-0, `sqlite_store.py` +52/-4,
-`memory.py` +24/-3, `test_storage_types.py` +97/-0,
-`vantage_port_contract.py` +191/-0, `tasks.md` +6/-6.
+**PR4** (vs. PR3 branch): the code+tests commit alone (`9e81c58`, before any
+bookkeeping) measured 429 changed lines (417 insertions + 12 deletions) — the
+number PR4's own description cites as its `size:exception`, since that was
+the state at PR-open time. The **full PR diff including both bookkeeping
+commits** (`git diff --stat ft/run-metadata-capture-03-core..HEAD`, after the
+tasks.md and apply-progress.md commits): **562 changed lines** (516
+insertions + 46 deletions). Breakdown: `core/ports/storage.py` +53/-0,
+`sqlite_store.py` +52/-4, `memory.py` +24/-3, `test_storage_types.py`
++97/-0, `vantage_port_contract.py` +191/-0, `tasks.md` +12/-12 (PR4's own
+Phase-4 marks, cumulative with PR1-3's), `apply-progress.md` +133/-34. Against
+the 400-line budget and this task's own ~370 forecast — a documented
+`size:exception` (see PR4's description). No honest seam exists inside D86's
+binding constraint that the port and both adapters move together: a
+`Protocol` keyword the concrete adapters do not yet accept leaves
+`mypy --strict` red the moment it lands alone, so "dataclasses first, wire
+second" is not a green-at-every-commit split. The bookkeeping/apply-progress
+overhead itself (`tasks.md` + `apply-progress.md`, ~145 lines) is the kind of
+SDD process cost this project's own historical calibration note
+(tasks.md's re-slicing note) already names as part of why forecasts run
+under — it is not part of the reviewable code diff proper.
 
 ## Remaining Tasks
 
