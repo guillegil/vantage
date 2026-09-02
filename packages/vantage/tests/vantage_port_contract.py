@@ -20,7 +20,17 @@ import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_FAILURE_MESSAGE_CHARS, project_failure
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
-from vantage.core.ports.storage import MAX_PAGE_ITEMS, ExecutionStore, ResultListEntry, UserSetting
+from vantage.core.ports.storage import (
+    MAX_PAGE_ITEMS,
+    ExecutionStore,
+    MetadataEntry,
+    MetadataFile,
+    ResultListEntry,
+    RunMetadata,
+    UserSetting,
+)
+from vantage.storage.memory import InMemoryExecutionStore
+from vantage.storage.sqlite_store import SqliteExecutionStore
 
 
 def _execution(
@@ -179,6 +189,49 @@ def _captured(
         stderr=stderr,
         stderr_truncated=stderr_truncated,
     )
+
+
+def _stored_metadata_files(store: ExecutionStore, run_id: str) -> frozenset[MetadataFile]:
+    """Adapter-agnostic introspection of `run_metadata_file` rows -- no port
+    read method exists for this table until Phase 10 (design.md D100), so
+    the contract proves the write path the only way it can this slice:
+    reading each adapter's own storage directly, mirroring
+    `test_sqlite_store.py`'s existing `store._conn.execute(...)` pattern."""
+    if isinstance(store, SqliteExecutionStore):
+        rows = store._conn.execute(  # noqa: SLF001
+            "SELECT source_file, content_type, status FROM run_metadata_file WHERE run_id = ?",
+            (run_id,),
+        ).fetchall()
+        return frozenset(
+            MetadataFile(source_file=row[0], content_type=row[1], status=row[2]) for row in rows
+        )
+    if isinstance(store, InMemoryExecutionStore):
+        return frozenset(
+            metadata_file
+            for (stored_run_id, _source_file), metadata_file in store._metadata_files.items()  # noqa: SLF001
+            if stored_run_id == run_id
+        )
+    raise NotImplementedError(f"no metadata introspection for {type(store)!r}")
+
+
+def _stored_metadata_entries(store: ExecutionStore, run_id: str) -> frozenset[MetadataEntry]:
+    """The `run_metadata` sibling of `_stored_metadata_files`."""
+    if isinstance(store, SqliteExecutionStore):
+        rows = store._conn.execute(  # noqa: SLF001
+            "SELECT key, value, source_file, status FROM run_metadata WHERE run_id = ?",
+            (run_id,),
+        ).fetchall()
+        return frozenset(
+            MetadataEntry(key=row[0], value=row[1], source_file=row[2], status=row[3])
+            for row in rows
+        )
+    if isinstance(store, InMemoryExecutionStore):
+        return frozenset(
+            entry
+            for (stored_run_id, _key), entry in store._metadata_entries.items()  # noqa: SLF001
+            if stored_run_id == run_id
+        )
+    raise NotImplementedError(f"no metadata introspection for {type(store)!r}")
 
 
 class ExecutionStoreContract:
@@ -1214,3 +1267,139 @@ class ExecutionStoreContract:
         outcomes = store.get_run_case_outcomes(execution.identity.value)
 
         assert sorted(outcomes) == sorted([("t.py", "passed"), ("t.py", "failed")])
+
+    def test_recording_metadata_persists_both_tables(self, store: ExecutionStore) -> None:
+        """design.md D91, D98: a metadata-carrying report writes one
+        `run_metadata_file` row and one `run_metadata` row."""
+        execution = _execution("1" * 32)
+        metadata = RunMetadata(
+            files=(
+                MetadataFile(
+                    source_file="config/firmware.yaml", content_type="yaml", status="captured"
+                ),
+            ),
+            entries=(
+                MetadataEntry(
+                    key="firmware_version",
+                    value="2.1",
+                    source_file="config/firmware.yaml",
+                    status="captured",
+                ),
+            ),
+        )
+
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        assert _stored_metadata_files(store, execution.identity.value) == frozenset(metadata.files)
+        assert _stored_metadata_entries(store, execution.identity.value) == frozenset(
+            metadata.entries
+        )
+
+    def test_a_declared_but_dropped_file_and_key_still_record_a_row(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D95: absence is a row, not a missing row -- a file
+        dropped for being too large and its key's `source_unavailable`
+        entry both persist, with the entry's `value` NULL."""
+        execution = _execution("2" * 32)
+        metadata = RunMetadata(
+            files=(
+                MetadataFile(
+                    source_file="build/manifest.json", content_type="json", status="too_large"
+                ),
+            ),
+            entries=(
+                MetadataEntry(
+                    key="toolchain",
+                    value=None,
+                    source_file="build/manifest.json",
+                    status="source_unavailable",
+                ),
+            ),
+        )
+
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        files = _stored_metadata_files(store, execution.identity.value)
+        entries = _stored_metadata_entries(store, execution.identity.value)
+        assert files == frozenset(metadata.files)
+        assert entries == frozenset(metadata.entries)
+        assert next(iter(entries)).value is None
+
+    def test_replaying_the_same_metadata_is_a_no_op(self, store: ExecutionStore) -> None:
+        """design.md D98: both metadata inserts are `INSERT OR IGNORE` --
+        write-once, mechanically. A second `record_session` call for the
+        same run with the identical metadata changes nothing."""
+        execution = _execution("3" * 32)
+        metadata = RunMetadata(
+            files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
+            entries=(MetadataEntry(key="k", value="v", source_file="a.yaml", status="captured"),),
+        )
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        assert _stored_metadata_files(store, execution.identity.value) == frozenset(metadata.files)
+        assert _stored_metadata_entries(store, execution.identity.value) == frozenset(
+            metadata.entries
+        )
+
+    def test_a_finish_only_session_records_the_same_rows_a_start_finish_pair_would(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D96, D98: metadata is frozen once and sent unchanged
+        on both writes. A start-write followed by a finish-write, both
+        carrying the identical `RunMetadata`, must leave the same stored
+        rows a single finish-only report would (task 4.3's third contract
+        obligation) -- proving write-once tolerates either arrival order."""
+        metadata = RunMetadata(
+            files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
+            entries=(MetadataEntry(key="k", value="v", source_file="a.yaml", status="captured"),),
+        )
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+
+        pair_identity = "6" * 32
+        start = _start_only_execution(pair_identity, started=started)
+        store.record_session(
+            start, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+        finish = _execution(pair_identity, started=started)
+        store.record_session(
+            finish, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        finish_only_identity = "7" * 32
+        finish_only = _execution(finish_only_identity, started=started)
+        store.record_session(
+            finish_only, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        assert _stored_metadata_files(store, pair_identity) == _stored_metadata_files(
+            store, finish_only_identity
+        )
+        assert _stored_metadata_entries(store, pair_identity) == _stored_metadata_entries(
+            store, finish_only_identity
+        )
+        assert _stored_metadata_files(store, pair_identity) == frozenset(metadata.files)
+        assert _stored_metadata_entries(store, pair_identity) == frozenset(metadata.entries)
+
+    def test_a_session_with_no_metadata_argument_persists_no_metadata_rows(
+        self, store: ExecutionStore
+    ) -> None:
+        """design.md D98: the defaulted keyword's whole point -- an
+        existing caller that never passes `metadata=` (the empty default,
+        `EMPTY_RUN_METADATA`) writes zero rows to either table."""
+        execution = _execution("8" * 32)
+
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        assert _stored_metadata_files(store, execution.identity.value) == frozenset()
+        assert _stored_metadata_entries(store, execution.identity.value) == frozenset()

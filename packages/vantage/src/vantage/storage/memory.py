@@ -39,12 +39,16 @@ from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.projection import project_failure, project_vcs
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
+    EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
     HistoryEntry,
+    MetadataEntry,
+    MetadataFile,
     Page,
     ResultListEntry,
     RunDetail,
     RunListEntry,
+    RunMetadata,
     UserSetting,
 )
 
@@ -85,9 +89,16 @@ class InMemoryExecutionStore:
         self._results: dict[tuple[str, str, int], Result] = {}
         self._last_contact: dict[str, datetime] = {}
         self._settings: dict[tuple[str, str], UserSetting] = {}
+        self._metadata_files: dict[tuple[str, str], MetadataFile] = {}
+        self._metadata_entries: dict[tuple[str, str], MetadataEntry] = {}
 
     def record_session(
-        self, execution: Execution, *, results: Sequence[Result], received_at: datetime
+        self,
+        execution: Execution,
+        *,
+        results: Sequence[Result],
+        received_at: datetime,
+        metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
         # `received_at` is part of the port's signature (the two-clocks point,
         # design.md D1); `get_execution` still returns only what the client
@@ -132,6 +143,15 @@ class InMemoryExecutionStore:
             key = (identity, result.identity.node_id, _ATTEMPT)
             if key not in self._results:
                 self._results[key] = result
+
+        # `setdefault` is `INSERT OR IGNORE`'s second mechanism (design.md
+        # D98): a metadata file/entry is written once, and a second
+        # `record_session` call for the same run carrying the identical
+        # metadata changes nothing, mirroring the SQLite adapter exactly.
+        for metadata_file in metadata.files:
+            self._metadata_files.setdefault((identity, metadata_file.source_file), metadata_file)
+        for metadata_entry in metadata.entries:
+            self._metadata_entries.setdefault((identity, metadata_entry.key), metadata_entry)
 
         return created
 
@@ -326,3 +346,5 @@ class InMemoryExecutionStore:
         self._results.clear()
         self._last_contact.clear()
         self._settings.clear()
+        self._metadata_files.clear()
+        self._metadata_entries.clear()

@@ -131,14 +131,61 @@ class UserSetting:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class MetadataFile:
+    """One row of `run_metadata_file` (design.md D91, D98). `source_file` is
+    the DECLARED, rootpath-relative path exactly as written (P-1) -- never
+    the resolved one, which is absolute and can carry a username."""
+
+    source_file: str
+    content_type: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataEntry:
+    """One row of `run_metadata` (design.md D91, D98). `value` is `None`
+    whenever `status` is not `'captured'` -- a declared-but-uncaptured key
+    is a row, never a missing row (design.md D95)."""
+
+    key: str
+    value: str | None
+    source_file: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunMetadata:
+    """The frozen aggregate `record_session` accepts (design.md D98): one
+    parameter rather than two collections, so a caller cannot pass entries
+    without their files -- a state D95's "every declared thing gets a row"
+    rule forbids and this shape makes unrepresentable."""
+
+    files: tuple[MetadataFile, ...] = ()
+    entries: tuple[MetadataEntry, ...] = ()
+
+
+EMPTY_RUN_METADATA = RunMetadata()
+"""`record_session`'s default (design.md D98) -- what a session with no
+metadata declaration reports. Only the two adapter implementations change to
+accept the new keyword; no existing call site is widened or broken."""
+
+
 class ExecutionStore(Protocol):
     """Persists `Execution` rows. Implementations live in `vantage.storage`."""
 
     def record_session(
-        self, execution: Execution, *, results: Sequence[Result], received_at: datetime
+        self,
+        execution: Execution,
+        *,
+        results: Sequence[Result],
+        received_at: datetime,
+        metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
-        """Store the run and its results. Return True if a row was created, False if the
-        id was already stored."""
+        """Store the run, its results and its declared metadata (design.md
+        D98). Return True if a row was created, False if the id was already
+        stored. `metadata`'s two tables are written once each -- a report
+        with metadata identical to what is already stored is a no-op."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:

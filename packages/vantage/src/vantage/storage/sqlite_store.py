@@ -78,12 +78,14 @@ from vantage.core.domain.result import (
     Result,
 )
 from vantage.core.ports.storage import (
+    EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
     HistoryEntry,
     Page,
     ResultListEntry,
     RunDetail,
     RunListEntry,
+    RunMetadata,
     UserSetting,
 )
 from vantage.storage.connection import open_database
@@ -227,6 +229,23 @@ _INSERT_RESULT = """
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
     ON CONFLICT(run_id, node_id, attempt) DO NOTHING
+"""
+
+# `INSERT OR IGNORE` on the primary key is what makes D98's "written once,
+# never updated" true mechanically, not by convention -- the same
+# idempotence `_INSERT_RESULT`'s `ON CONFLICT ... DO NOTHING` already relies
+# on. Both statements are appended after the result insert, inside the same
+# `BEGIN IMMEDIATE ... COMMIT`: `PRAGMA foreign_keys=ON` is set on every
+# connection, and both new tables reference `run(id)`, created earlier in
+# the same transaction (design.md D98).
+_INSERT_METADATA_FILE = """
+    INSERT OR IGNORE INTO run_metadata_file (run_id, source_file, content_type, status)
+    VALUES (?, ?, ?, ?)
+"""
+
+_INSERT_METADATA_ENTRY = """
+    INSERT OR IGNORE INTO run_metadata (run_id, key, value, source_file, status)
+    VALUES (?, ?, ?, ?, ?)
 """
 
 # Widened from 16 to 33 columns (design.md D80) -- the full, unbounded
@@ -792,6 +811,19 @@ def _catalogue_rows(
     ]
 
 
+def _metadata_file_rows(run_id: str, metadata: RunMetadata) -> list[tuple[str, str, str, str]]:
+    return [(run_id, file.source_file, file.content_type, file.status) for file in metadata.files]
+
+
+def _metadata_entry_rows(
+    run_id: str, metadata: RunMetadata
+) -> list[tuple[str, str, str | None, str, str]]:
+    return [
+        (run_id, entry.key, entry.value, entry.source_file, entry.status)
+        for entry in metadata.entries
+    ]
+
+
 def _failure_columns(failure: FailureEvidence | None) -> tuple[object, ...]:
     """The thirteen `FailureEvidence` `_INSERT_RESULT` parameters (design.md
     D77). `None` writes every column NULL/0, mirroring `_vcs_columns`'s
@@ -901,7 +933,12 @@ class SqliteExecutionStore:
         self._lock = threading.Lock()
 
     def record_session(
-        self, execution: Execution, *, results: Sequence[Result], received_at: datetime
+        self,
+        execution: Execution,
+        *,
+        results: Sequence[Result],
+        received_at: datetime,
+        metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
         # Five statements, one transaction, one fixed order (design.md D22,
         # extended by D26): existence probe, run upsert, catalogue upsert,
@@ -909,6 +946,8 @@ class SqliteExecutionStore:
         # tidy -- `PRAGMA foreign_keys=ON` is set on every connection, so
         # `result.run_id`, `test_case.last_seen_run_id` and
         # `result.test_case_id` each need their referent to exist first.
+        # The two metadata inserts (design.md D98) are appended after the
+        # result insert, in the same transaction, for the same reason.
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -941,6 +980,17 @@ class SqliteExecutionStore:
 
                     result_rows = _result_rows(execution, results, test_case_ids)
                     self._conn.executemany(_INSERT_RESULT, result_rows)
+
+                if metadata.files:
+                    self._conn.executemany(
+                        _INSERT_METADATA_FILE,
+                        _metadata_file_rows(execution.identity.value, metadata),
+                    )
+                if metadata.entries:
+                    self._conn.executemany(
+                        _INSERT_METADATA_ENTRY,
+                        _metadata_entry_rows(execution.identity.value, metadata),
+                    )
             except BaseException:
                 self._conn.execute("ROLLBACK")
                 raise
