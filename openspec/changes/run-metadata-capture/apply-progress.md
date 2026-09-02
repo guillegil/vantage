@@ -446,10 +446,16 @@ useful and independently testable from the differential/Q3 behaviour that
 consumes it), so this batch split rather than repeating a `size:exception`.
 
 **PR6** (vs. PR5b branch, `git diff --stat ft/run-metadata-capture-05b-checks..HEAD`,
-full PR diff including bookkeeping): **392 changed lines** (385 insertions
-+ 7 deletions) as opened. Code+tests alone: `metadata.py` +94,
-`test_metadata_containment.py` +142 — 236 lines, comfortably under this
-task's ~380 forecast even before bookkeeping. No `size:exception` needed.
+final, after every bookkeeping commit): **429 changed lines** (410
+insertions + 19 deletions) -- a documented `size:exception`, PR4's pattern
+repeated. Code+tests alone: `metadata.py` +94, `test_metadata_containment.py`
++142 -- 236 lines, comfortably under this task's ~380 forecast. The
+overshoot is entirely `tasks.md` (33) and `apply-progress.md` (160)
+bookkeeping -- documenting a real basename collision and a real
+cross-version measurement in enough detail to be checkable cost more than
+compressing it further would have preserved; each trim pass tried this
+batch reduced net content but still added its own diff lines on top of
+what it removed, the same self-referential cost PR4's note already names.
 
 ## Remaining Tasks
 
@@ -463,7 +469,7 @@ tasks.md. The rest of Phase 6 targets `ft/run-metadata-capture-06-paths`
 - Mode: chained PR slice (`feature-branch-chain`); Phase 6 re-scoped at apply time by launch instruction, not re-sliced for size
 - Current work unit: Phase 6 (partial) — `resolve_declared_path`, the security boundary a declared path must pass before ADR-0017's authorised read ever touches it
 - Boundary: PR6 starts from PR5b's tip and ends with `resolve_declared_path` fully proven (10 real-filesystem tests, verified across Python 3.10-3.13) and the PR opened and green. No declaration parsing, byte bounding, wire section, server parsing or ingestion touched (next batch)
-- Estimated review budget impact: 392 changed lines, under the 400-line budget, no `size:exception` needed
+- Estimated review budget impact: 429 changed lines, a documented `size:exception` (7% over, all bookkeeping -- code+tests alone are 236 lines, well under budget)
 
 ## Status
 
