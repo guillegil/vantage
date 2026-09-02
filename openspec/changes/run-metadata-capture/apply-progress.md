@@ -112,58 +112,41 @@ what this PR actually proves.
 - [ ] 6.3, 6.4 (next batch): `read_declaration` and its four constants.
 
 **Real basename collision found and resolved, not worked around silently.**
-`packages/vantage/tests/test_metadata.py` already exists (PR3, core
-vocabulary tests for `FILE_STATUSES`/`KEY_STATUSES`). Neither
-`packages/vantage/tests/` nor `packages/pytest-vantage/tests/` carries an
-`__init__.py`, and this workspace has exactly one `pytest.ini_options`
-section (D9, enforced by its own guard test) covering both trees in one
-run. pytest's classic import mode therefore requires every test module
-basename to be globally unique across the whole workspace, not merely
-within its own package. Naming the new plugin-side test file
-`test_metadata.py`, as `tasks.md`'s original wording said, collides and
-fails collection outright: proven by running both files together and
-reading pytest's own `import file mismatch` error before choosing a
-different name, not assumed. The plugin-side file is
-`test_metadata_containment.py` instead. **This is a task-authoring gap in
-the original `tasks.md`, not an apply-time judgment call to second-guess
-freely** -- flagged here explicitly, plus a forward note in `tasks.md`
-itself, so Phase 7's `read_declaration`/`capture_metadata` tests (which
-`tasks.md` also calls `test_metadata.py`) pick a second unique name rather
-than repeating the same collision against this PR's file.
+`packages/vantage/tests/test_metadata.py` already exists (PR3). Neither
+test tree carries an `__init__.py`, and this workspace has exactly one
+`pytest.ini_options` section (D9) covering both, so pytest's classic import
+mode requires every test basename to be globally unique across the whole
+workspace. Naming the new file `test_metadata.py`, as `tasks.md`'s original
+wording said, collides and fails collection outright -- proven by running
+both files together and reading pytest's `import file mismatch` error
+before renaming, not assumed. Used `test_metadata_containment.py` instead.
+This is a task-authoring gap in the original `tasks.md`, not a freelance
+rename -- flagged here plus a forward note in `tasks.md` itself, so
+Phase 7's `read_declaration`/`capture_metadata` tests (also called
+`test_metadata.py` there) pick a second unique name rather than repeating
+the collision.
 
 **Cross-version verification of D93's stated trap -- measured, not
-trusted.** The design's own text states: "on the interpreters in the
-supported 3.10–3.13 range that predate `resolve()`'s reimplementation over
-`os.path.realpath`, a symlink loop raises `RuntimeError`, not `OSError`."
-This was verified directly this session, against a real `os.symlink`
-cyclic pair (`a -> b -> a`) built under `tmp_path` on each of the four
-`uv`-managed interpreters (`cpython-3.10.21`, `3.11.16`, `3.12.14`,
-`3.13.15` -- this project's exact floor, ceiling, and the two versions
-between):
+trusted.** Verified against a real `os.symlink` cyclic pair (`a -> b -> a`)
+under `tmp_path` on all four `uv`-managed interpreters spanning this
+project's floor and ceiling:
 
 | Interpreter | `Path.resolve()` on a symlink loop | What rejects it |
 | --- | --- | --- |
-| 3.10.21 | Raises `RuntimeError: Symlink loop from '...'` | The `except (OSError, RuntimeError)` clause |
-| 3.11.16 | Raises the same `RuntimeError` | The same clause |
-| 3.12.14 | Raises the same `RuntimeError` | The same clause |
-| 3.13.15 | **Raises nothing** with the default `strict=False` -- silently returns the path lexically unresolved (confirmed: `resolve()` returned the literal `.../a`, unchanged) | `target.is_file()` returns `False` (a `stat` through the unresolvable loop fails internally, and `Path.is_file()` swallows that `OSError` per its own contract rather than propagating it) |
+| 3.10.21 / 3.11.16 / 3.12.14 | Raises `RuntimeError: Symlink loop from '...'` | The `except (OSError, RuntimeError)` clause |
+| 3.13.15 | **Raises nothing** with the default `strict=False` -- silently returns the path lexically unresolved | `target.is_file()` returns `False` (stat through the loop fails internally; `Path.is_file()` swallows that `OSError` rather than propagating it) |
 
-**This is a more precise finding than "catches only one of two exception
-types crashes the other version," which is what the launch brief warned
-against and what was checked for.** The actual trap is subtler: on 3.13
-`Path.resolve()` doesn't raise *at all* for a loop by default, so the
-`except (OSError, RuntimeError)` clause is not even what rejects the loop
-there -- `is_file()`'s own `False` is. The clause remains necessary anyway,
-because it is the only thing standing between a committed symlink loop and
-an uncaught `RuntimeError` crashing `pytest_sessionstart` on 3.10, 3.11 and
-3.12 -- three of the four supported interpreters, not one. The test file
-asserts the outcome (`None`) rather than which mechanism produced it, so
-the same unmodified test proves the property on all four without branching
-on `sys.version_info`. `resolve()` also accepts a `strict=True` argument
-that DOES raise `OSError` (`errno 40`, "Too many levels of symbolic
-links") for the same loop on 3.13 -- not used here, since D93's code
-sample uses the default `strict=False` throughout and this implementation
-follows it exactly.
+**A subtler trap than "catches only one exception type crashes the other
+version," which is what the launch brief warned against.** On 3.13
+`resolve()` doesn't raise at all for a loop, so `is_file()`'s `False` is
+what rejects it there, not the `except` clause. That clause remains
+necessary anyway: it is what stands between a committed symlink loop and
+an uncaught `RuntimeError` crashing `pytest_sessionstart` on three of the
+four supported interpreters. The test asserts the outcome (`None`), not
+the mechanism, so it proves the property on all four without branching on
+`sys.version_info`. (`resolve(strict=True)` does raise `OSError` errno 40
+for the same loop on 3.13 -- not used here; D93's sample uses the default
+`strict=False` throughout.)
 
 ## Files Changed
 
