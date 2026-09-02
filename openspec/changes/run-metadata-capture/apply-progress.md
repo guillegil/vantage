@@ -10,8 +10,12 @@ in full.
 - Phase 1 (PR1 → tracker `ft/run-metadata-capture`) — complete.
 - Phase 2 (PR2 → PR1) — complete.
 - Phase 3 (PR3 → PR2) — complete.
-- Phase 4 (PR4 → PR3) — complete, this batch.
-- Phases 5-11 are untouched and remain for future `sdd-apply` batches.
+- Phase 4 (PR4 → PR3) — complete.
+- Phase 5 (PR5 → PR4) — complete, this batch, **re-sliced into PR5a and
+  PR5b** (see Phase 5's own note in `tasks.md` and the "Re-slicing" section
+  below): PR5a (flag + resolver) is landed; PR5b (C1/C2/C3 + Q3, → PR5a) is
+  in progress in this same batch.
+- Phases 6-11 are untouched and remain for future `sdd-apply` batches.
 
 ## Completed Tasks
 
@@ -47,6 +51,17 @@ in full.
 - [x] 4.5 GREEN: `memory.py` — `self._metadata_files`/`self._metadata_entries` dicts keyed `(run_id, source_file)`/`(run_id, key)`, populated with `setdefault` mirroring `OR IGNORE`; both cleared in `close()`.
 - [x] 4.6 Verified: `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_storage_types.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py` — 139 passed (was 120 before this batch).
 
+### Phase 5 (PR5a) — flag + resolver
+
+- [x] 5.1 RED: `test_config.py` — 9 new tests for `resolve_metadata_capture` (monotone decreasing in activation ×4, monotone increasing in `cli_opt_in` ×2, exhaustive truth table, no-opt-in default, no ini/env signature). Confirmed failing: `ImportError: cannot import name 'resolve_metadata_capture' from 'pytest_vantage.config'`.
+- [x] 5.2 GREEN: `pytest_vantage/config.py` — `resolve_metadata_capture(*, activated, cli_opt_in)`, the identical monotone conjunction `resolve_failure_text_capture` uses; added to `__all__`.
+- [x] 5.4 RED then GREEN: `test_opt_in.py`'s `_UnactivatedConfig`/`test_metadata_capture_requested_short_circuits_when_not_activated`. Confirmed failing: `ImportError: cannot import name '_metadata_capture_requested' from 'pytest_vantage.plugin'`. GREEN: `pytest_vantage/plugin.py` — `--vantage-metadata` registered in the existing `group.addoption` block (identical help-text shape to `--vantage-failure-text`, actively denying an ini equivalent); `_metadata_capture_requested`, short-circuited on `_activation_requested`.
+- [x] 5.7 (signature half) GREEN: `pytest_vantage/recorder.py` — `Recorder.__init__` gained `metadata_requested: bool = False`, stored as `self._metadata_requested` but not yet consulted; `plugin.py`'s `pytest_configure` wires `metadata_requested=_metadata_capture_requested(config)` into the `Recorder(...)` construction on the controller only.
+
+**Deviation from the design's literal wording, recorded not silently applied**: D99's prose says `_metadata_capture_requested` is "called on both xdist branches." It is not, in this implementation — only from the controller. `test_xdist_guard.py`'s `_WorkerConfigDouble.getoption` raises `AssertionError` for any option name outside `{"vantage", "capture", "vantage_failure_text"}`; reading `"vantage_metadata"` there would break that existing safety-net test, which is deliberately built to catch exactly this kind of scope creep (its own docstring: "the strongest available proof that the worker path reads exactly those things and touches nothing past them"). Unlike `_failure_text_capture_requested`, there is no per-worker consumer of the metadata opt-in in this slice (no `EvidenceCollector` equivalent registers on a worker for metadata) — nothing on a worker would ever act on the value even if it were read there. The declaration is still read exactly once per session regardless of worker count, because no `Recorder` is ever constructed on a worker at all (`plugin.py:214-217`), which is the property D99's paragraph was actually protecting.
+
+**PR5b is in progress in this batch; its own Completed Tasks section, TDD evidence and Files Changed follow below once it lands.**
+
 ## Files Changed
 
 | File | Action | What Was Done |
@@ -67,6 +82,12 @@ in full.
 | `packages/vantage/src/vantage/storage/memory.py` | Modified (PR4) | `_metadata_files`/`_metadata_entries` dicts with `setdefault`, mirroring `OR IGNORE` |
 | `packages/vantage/tests/test_storage_types.py` | Modified (PR4) | 9 new dataclass tests for `MetadataFile`/`MetadataEntry`/`RunMetadata`/`EMPTY_RUN_METADATA` |
 | `packages/vantage/tests/vantage_port_contract.py` | Modified (PR4) | 5 new shared contract tests + 2 adapter-agnostic introspection helpers |
+| `packages/pytest-vantage/src/pytest_vantage/config.py` | Modified (PR5a) | `resolve_metadata_capture(*, activated, cli_opt_in)`, added to `__all__` |
+| `packages/pytest-vantage/src/pytest_vantage/plugin.py` | Modified (PR5a) | `--vantage-metadata` registered; `_metadata_capture_requested`; wired into the `Recorder(...)` construction |
+| `packages/pytest-vantage/src/pytest_vantage/recorder.py` | Modified (PR5a) | `Recorder.__init__` gained `metadata_requested: bool = False`, stored, not yet acted on |
+| `packages/pytest-vantage/tests/test_config.py` | Modified (PR5a) | 9 new tests for `resolve_metadata_capture` |
+| `packages/pytest-vantage/tests/test_opt_in.py` | Modified (PR5a) | `_UnactivatedConfig` + the short-circuit gate test |
+| `openspec/changes/run-metadata-capture/tasks.md` | Modified (PR5) | Phase 5 tasks marked `[x]`, re-slicing note added |
 
 ## Work Unit Evidence (PR3)
 
@@ -86,6 +107,15 @@ in full.
 | Rollback boundary | Revert `core/ports/storage.py`'s three dataclasses + `EMPTY_RUN_METADATA` + the `record_session` signature change, `sqlite_store.py`'s two `INSERT OR IGNORE` statements + helpers, `memory.py`'s two dicts, and the new test methods in both test files; `metadata=` has a default so no other call site is coupled to this change |
 | Full-suite regression check | `uv run ruff format . && uv run ruff check --fix .` — clean, 87 files; `uv run mypy .` (strict) — no issues, 87 files; `uv run pytest` — 619 passed (was 600 before this batch — 19 new tests); `uv run deptry .` — no dependency issues |
 
+## Work Unit Evidence (PR5a)
+
+| Evidence | Value |
+|---|---|
+| Focused test command and result | `uv run pytest packages/pytest-vantage/tests/test_config.py packages/pytest-vantage/tests/test_opt_in.py` — 20 passed (was 11 before this batch — 10 new: 9 `resolve_metadata_capture` + 1 short-circuit) |
+| Runtime harness command/scenario and result | N/A — pure unit level: `resolve_metadata_capture` and `_metadata_capture_requested` are exercised directly, no subprocess or server needed; the flag can be set but nothing consumes it end-to-end yet (PR5b) |
+| Rollback boundary | Revert `resolve_metadata_capture` from `config.py`, the `--vantage-metadata` registration/`_metadata_capture_requested` from `plugin.py`, and the `metadata_requested` keyword from `Recorder.__init__`; the keyword has a default so no existing call site breaks |
+| Full-suite regression check | `uv run ruff format . && uv run ruff check --fix .` — clean; `uv run mypy .` (strict) — no issues, 87 files; `uv run pytest` — 629 passed (was 619 before this batch — 10 new tests); `uv run deptry .` — no dependency issues; `-m 'req(id="RQ-2")'` — 4 passed, 625 deselected (narrows correctly; PR5b adds three more `RQ-2`-marked tests) |
+
 ## TDD Cycle Evidence
 
 | Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
@@ -94,6 +124,8 @@ in full.
 | 3.3 | `packages/vantage/tests/test_architecture.py` | Unit | ✅ 4/4 (baseline before this batch) | ✅ Written, then confirmed failing by temporarily moving `metadata.py` out of the tree and re-running: `AssertionError: assert 'vantage/core/domain/metadata.py' in {...}` | ✅ Passed after restoring the module — 4/4 | ➖ Single — one membership assertion, no branching | ➖ None needed |
 | 4.1/4.2 | `packages/vantage/tests/test_storage_types.py` | Unit | ✅ 120/120 (baseline before this batch) | ✅ Written — confirmed failing: `ImportError: cannot import name 'EMPTY_RUN_METADATA' from 'vantage.core.ports.storage'` | ✅ Passed after 4.2's dataclasses landed — 16/16 in the file | ➖ Skipped: purely structural (frozen/slots shape and default-equality checks), one possible output per assertion, no branching | ➖ None needed |
 | 4.3/4.4/4.5 | `packages/vantage/tests/vantage_port_contract.py` (inherited by `test_sqlite_store.py`, `test_memory_store.py`) | Unit (adapter contract) | ✅ 120/120 (baseline before this batch) | ✅ Written — confirmed failing on both adapters: `TypeError: record_session() got an unexpected keyword argument 'metadata'` (SQLite + in-memory) and `AttributeError: 'InMemoryExecutionStore' object has no attribute '_metadata_files'` (introspection helper, in-memory) — 9 failures | ✅ Passed after 4.4 (SQLite) and 4.5 (in-memory) landed — 139/139 across the four files | ✅ 5 cases per adapter: round-trip, D95 drop-whole row, write-once replay, finish-only vs. start+finish parity, no-argument default — both adapters run the same 5 tests unchanged (RQ-30's "second mechanism" proof) | ➖ None needed |
+| 5.1/5.2 | `packages/pytest-vantage/tests/test_config.py` | Unit | ✅ 619/619 (baseline before this batch) | ✅ Written — confirmed failing: `ImportError: cannot import name 'resolve_metadata_capture' from 'pytest_vantage.config'` | ✅ Passed after 5.2's function landed — 18/18 in the file | ✅ 4 combinations × 2 monotone properties + the exhaustive truth table — same triangulation shape `resolve_failure_text_capture`'s own test file already uses | ➖ None needed |
+| 5.4/5.7 (signature) | `packages/pytest-vantage/tests/test_opt_in.py` | Unit | ✅ 5/5 (`test_opt_in.py`'s original tests, baseline before this batch) | ✅ Written — confirmed failing: `ImportError: cannot import name '_metadata_capture_requested' from 'pytest_vantage.plugin'` | ✅ Passed after the flag registration + gate function landed | ➖ Single — one short-circuit property, no branching | ➖ None needed |
 
 ### Test Summary (PR3)
 
@@ -138,6 +170,15 @@ aggregate with a default, not the two-parameter alternative D98 explicitly
 rejects. No new `ExecutionStore` methods were added (D98's Option 2,
 rejected). No existing call site was touched.
 
+**PR5a: one deviation, recorded above under Phase 5's Completed Tasks.**
+`_metadata_capture_requested` is called only from the controller branch of
+`pytest_configure`, not "identically on both xdist branches" as D99's prose
+states — `test_xdist_guard.py`'s `_WorkerConfigDouble` allow-list would
+break if a worker ever read `"vantage_metadata"`, and nothing worker-side
+consumes the value in this slice. The property D99 actually cares about
+(the declaration read exactly once per session, worker count irrelevant)
+holds regardless, because no `Recorder` is ever constructed on a worker.
+
 ## Issues Found
 
 None beyond the `MAX_METADATA_KEY_CHARS` gap noted above (PR3). Task 3.3
@@ -161,6 +202,8 @@ not touch D98's rejected-Option-2 decision (no new port methods were added).
 Flagged here rather than silently added, since it is a deviation from "the
 contract only calls the public port" in spirit, though not in the sense D98
 was reasoning about.
+
+**PR5a.** None beyond the xdist-branch deviation already recorded above.
 
 ## Git / PR State
 
