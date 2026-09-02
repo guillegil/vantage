@@ -384,7 +384,7 @@ in the chain and already open/reviewed.
 - PR5a commits: `c10703e` (flag + resolver + Recorder wiring), `c6f8c85` (tasks.md checkboxes, re-slicing note), `bfea150` (apply-progress).
 - PR5b: https://github.com/guillegil/vantage/pull/93 — base `ft/run-metadata-capture-05-flag`, head `ft/run-metadata-capture-05b-checks`. Open. Not merged.
 - PR5b commits: `e45f5b8` (declaration presence check + Q3 warning + C1/C2/C3 tests), `2e6216e` (apply-progress).
-- PR6: https://github.com/guillegil/vantage/pull/94 — base `ft/run-metadata-capture-05b-checks`, head `ft/run-metadata-capture-06-paths`. Open, pending CI. Not merged.
+- PR6: https://github.com/guillegil/vantage/pull/94 — base `ft/run-metadata-capture-05b-checks`, head `ft/run-metadata-capture-06-paths`. Open, 12/12 checks pass. Not merged.
 - PR6 commits: `7d58af1` (`resolve_declared_path` + tests), `776407a` (tasks.md re-scope), `dad4579`+`8d39c0a` (apply-progress, written then trimmed).
 
 ## Measured changed-line count
@@ -480,5 +480,5 @@ for Phases 1-5, which undercounts against 4+7+3+6+8=28 -- a pre-existing
 arithmetic slip in that line, not something this batch introduced; the
 28/28 for Phases 1-5 plus this batch's 4/6 for Phase 6 gives 32/34.) PR1
 through PR5b open and green, not merged (chain merges in order at the
-end). PR6 opened this batch, green pending CI. Ready for the next
+end). PR6 opened this batch, 12/12 checks green. Ready for the next
 `sdd-apply` batch (Phase 6.3/6.4, then Phase 7).
