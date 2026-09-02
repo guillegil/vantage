@@ -261,8 +261,8 @@ check-then-act, and it means this presence check needs no second read once
 - PR4 commits: `9e81c58` (port dataclasses + both adapters + contract tests), `95d1667` (tasks.md checkboxes), plus this apply-progress commit.
 - PR5a: https://github.com/guillegil/vantage/pull/92 — base `ft/run-metadata-capture-04-port`, head `ft/run-metadata-capture-05-flag`. Open. Not merged.
 - PR5a commits: `c10703e` (flag + resolver + Recorder wiring), `c6f8c85` (tasks.md checkboxes, re-slicing note), `bfea150` (apply-progress).
-- PR5b: base `ft/run-metadata-capture-05-flag`, head `ft/run-metadata-capture-05b-checks`. URL filled in once opened (this batch).
-- PR5b commits: `e45f5b8` (declaration presence check + Q3 warning + C1/C2/C3 tests), plus this apply-progress commit.
+- PR5b: https://github.com/guillegil/vantage/pull/93 — base `ft/run-metadata-capture-05-flag`, head `ft/run-metadata-capture-05b-checks`. Open. Not merged.
+- PR5b commits: `e45f5b8` (declaration presence check + Q3 warning + C1/C2/C3 tests), `2e6216e` (apply-progress).
 
 ## Measured changed-line count
 
