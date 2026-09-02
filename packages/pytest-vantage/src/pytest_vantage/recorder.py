@@ -86,6 +86,41 @@ def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
         return vcs.VcsSnapshot(warning=_VCS_CAPTURE_ESCAPED_WARNING)
 
 
+# design.md D92: the declaration's one fixed, well-known name, at the test
+# repository root. Not yet imported from `pytest_vantage.metadata` -- that
+# module, and the containment/parsing machinery around this filename, is a
+# later slice (design.md D93/D94); this constant exists here only so the
+# presence check below and its warning agree on one spelling.
+_METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
+
+
+def _metadata_declaration_missing_warning(rootpath: Path) -> str | None:
+    """`None` if `vantage-metadata.json` exists at `rootpath`; otherwise
+    the message Q3 (design.md D92) requires: setting `--vantage-metadata`
+    is a deliberate act, so a missing declaration warns once instead of
+    silently capturing nothing -- unlike a malformed *declared document*,
+    which never warns and never fails ingestion (D97), a different thing
+    entirely.
+
+    Opens the file directly, rather than checking existence and opening
+    separately, so this presence check needs no second read once a later
+    slice adds the real one -- the same attempt-first shape
+    `resolve_declared_path` will use for the files a declaration names
+    (design.md D93). Discards anything read: this proves presence, it does
+    not capture content -- reading and parsing the declaration is
+    `pytest_vantage.metadata`'s job, added in a later slice.
+    """
+    declaration_path = rootpath / _METADATA_DECLARATION_FILENAME
+    try:
+        declaration_path.open("rb").close()
+    except OSError:
+        return (
+            f"no {_METADATA_DECLARATION_FILENAME} found at {rootpath}, "
+            "metadata will not be captured"
+        )
+    return None
+
+
 # design.md D30: activity-driven, not a timer thread -- a beat is only ever
 # attempted from inside `pytest_runtest_logreport`, at most this often.
 # RQ-25's measured profile (1,000 tests at ~10 ms, a ~10-second suite) never
@@ -165,10 +200,12 @@ class Recorder:
     (design.md D99) -- both the base activation gate and the
     `--vantage-metadata` opt-in have already passed by the time this
     constructor runs, since a `Recorder` is never constructed at all
-    otherwise. Accepted here so the call site that constructs a `Recorder`
-    is already stable; consulting the declaration itself -- exactly once
-    per session, mirroring `_vcs` above -- lands in the next slice, which
-    is also where a missing declaration starts to warn (Q3, design.md D92).
+    otherwise. When `True`, `_metadata_declaration_missing_warning` checks
+    the declaration's presence once here, exactly like `_vcs` above, so the
+    declaration is consulted exactly once per session regardless of worker
+    count -- no `Recorder` is ever constructed on an xdist worker. This
+    slice only proves the declaration is there; reading and parsing its
+    content is `pytest_vantage.metadata`'s job, added in a later slice.
     """
 
     def __init__(
@@ -194,9 +231,10 @@ class Recorder:
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
             _warn(config, f"vantage: {self._vcs.warning}")
-        # Accepted, not yet acted on: the declaration presence check and its
-        # Q3 warning land in the next slice (design.md D92, D99).
-        self._metadata_requested = metadata_requested
+        if metadata_requested:
+            missing_warning = _metadata_declaration_missing_warning(Path(str(config.rootpath)))
+            if missing_warning is not None:
+                _warn(config, f"vantage: {missing_warning}")
 
     def _vcs_section(self) -> dict[str, object]:
         """Serialises the snapshot held since `__init__` (design.md D51) --
