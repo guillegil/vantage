@@ -66,12 +66,12 @@ Chain strategy: feature-branch-chain
 
 ## Phase 4 (PR4 → PR3): Port dataclasses + both adapters + contract
 
-- [ ] 4.1 RED: `test_storage_types.py` — `MetadataFile`, `MetadataEntry`, `RunMetadata`, `EMPTY_RUN_METADATA` are frozen, `slots=True`, and `RunMetadata()` equals `EMPTY_RUN_METADATA`.
-- [ ] 4.2 GREEN: `core/ports/storage.py` — add the three dataclasses + `EMPTY_RUN_METADATA`; `ExecutionStore.record_session` gains `metadata: RunMetadata = EMPTY_RUN_METADATA` (D98). No existing call site changes.
-- [ ] 4.3 RED: `vantage_port_contract.py` — metadata round-trip persists both tables; `INSERT OR IGNORE`/`setdefault` makes a second `record_session` call for the same run a no-op (write-once, D-b); a finish-only session (no prior start-write) records the same rows a start+finish pair would.
-- [ ] 4.4 GREEN: `sqlite_store.py` — two `INSERT OR IGNORE` statements appended inside the existing `BEGIN IMMEDIATE … COMMIT` transaction, after the result insert, referencing `run(id)` (D98).
-- [ ] 4.5 GREEN: `memory.py` — mirror with two `dict[tuple[str, str], …]` using `setdefault` (second-mechanism discipline, D98).
-- [ ] 4.6 Verify 4.1/4.3 pass on both adapters: `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_storage_types.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py`.
+- [x] 4.1 RED: `test_storage_types.py` — `MetadataFile`, `MetadataEntry`, `RunMetadata`, `EMPTY_RUN_METADATA` are frozen, `slots=True`, and `RunMetadata()` equals `EMPTY_RUN_METADATA`.
+- [x] 4.2 GREEN: `core/ports/storage.py` — add the three dataclasses + `EMPTY_RUN_METADATA`; `ExecutionStore.record_session` gains `metadata: RunMetadata = EMPTY_RUN_METADATA` (D98). No existing call site changes.
+- [x] 4.3 RED: `vantage_port_contract.py` — metadata round-trip persists both tables; `INSERT OR IGNORE`/`setdefault` makes a second `record_session` call for the same run a no-op (write-once, D-b); a finish-only session (no prior start-write) records the same rows a start+finish pair would.
+- [x] 4.4 GREEN: `sqlite_store.py` — two `INSERT OR IGNORE` statements appended inside the existing `BEGIN IMMEDIATE … COMMIT` transaction, after the result insert, referencing `run(id)` (D98).
+- [x] 4.5 GREEN: `memory.py` — mirror with two `dict[tuple[str, str], …]` using `setdefault` (second-mechanism discipline, D98).
+- [x] 4.6 Verify 4.1/4.3 pass on both adapters: `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_storage_types.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py`.
 
 ## Phase 5 (PR5 → PR4): Plugin flag
 
