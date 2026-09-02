@@ -97,12 +97,33 @@ full `uv run pytest`.
 
 ## Phase 6 (PR6 → PR5): Path containment
 
-- [ ] 6.1 RED: `test_metadata.py` (plugin) — `resolve_declared_path` rejects: absolute path, `..` escape, a real symlink pointing outside `rootpath`, a symlink loop (`RuntimeError` caught), a directory, a real FIFO (`os.mkfifo`, skip where unsupported), a path equal to `rootpath` itself — each **rejected, never clamped**. Accepts a legitimate nested path, and a root reached through a symlink still accepts its own children.
-- [ ] 6.2 GREEN: create `packages/pytest-vantage/src/pytest_vantage/metadata.py` — `resolve_declared_path` exactly as D93: resolve both `rootpath` and candidate, `is_relative_to`, `is_file`, catch `OSError`/`RuntimeError`.
-- [ ] 6.3 RED: `read_declaration` — absent file, non-JSON, non-object, `version != 1`, missing `path`/`format`/`keys`, unknown `format`, duplicate stored key, over `MAX_DECLARED_FILES` — each captures nothing and warns **exactly once** via `_warn`.
-- [ ] 6.4 GREEN: `read_declaration` in `metadata.py`; constants `DECLARATION_FILENAME`, `MAX_DECLARED_FILES=16`, `MAX_DECLARED_PATH_CHARS=1024` (D94).
-- [ ] 6.5 Threat-matrix RED: blocking-open guard — a real FIFO at a declared path must not hang `pytest_sessionstart` (bounded-wall-time assertion, not just outcome).
-- [ ] 6.6 Verify: `uv run pytest packages/pytest-vantage/tests/test_metadata.py`.
+**Re-scoped at apply time.** The launch instructions for this batch narrowed
+Phase 6 explicitly to "path containment (`resolve_declared_path`, and the
+symlink / loop / FIFO / absolute / `..` cases)" and listed "no file reading,
+no bounding" among the out-of-scope items for this PR. `read_declaration`
+(6.3/6.4) parses and validates the declaration file's own JSON content --
+that is exactly the "file reading" the launch instructions excluded, so 6.3
+and 6.4 are deferred to the next `sdd-apply` batch rather than implemented
+here. 6.1 and 6.2 land in this PR; 6.5 and 6.6 are re-worded below to match
+what this PR actually proves, with the rest of Phase 6's original text still
+tracked as the next batch's starting point.
+
+**Filename collision found and resolved.** `packages/vantage/tests/test_
+metadata.py` already exists (PR3, core vocabulary). Neither test tree
+carries an `__init__.py`, so pytest's classic import mode requires globally
+unique basenames across the whole workspace -- `test_metadata.py` (plugin)
+as tasks.md originally named it collides and fails collection with `import
+file mismatch`, proven by running both files together. The plugin-side file
+is `packages/pytest-vantage/tests/test_metadata_containment.py` instead.
+Phase 7 must either continue that name or pick a second, equally unique one
+for `read_declaration`/`capture_metadata` -- not reintroduce `test_metadata.py`.
+
+- [x] 6.1 RED: `test_metadata_containment.py` (plugin) — `resolve_declared_path` rejects: absolute path, `..` escape, a real symlink pointing outside `rootpath`, a symlink loop, a directory, a real FIFO (`os.mkfifo`, skipped where unsupported), a path equal to `rootpath` itself, a missing path — each **rejected, never clamped**. Accepts a legitimate nested path, and a root reached through a symlink still accepts its own children.
+- [x] 6.2 GREEN: created `packages/pytest-vantage/src/pytest_vantage/metadata.py` — `resolve_declared_path` exactly as D93: resolve both `rootpath` and candidate, `is_relative_to`, `is_file`, catch `OSError`/`RuntimeError`.
+- [ ] 6.3 RED (next batch): `read_declaration` — absent file, non-JSON, non-object, `version != 1`, missing `path`/`format`/`keys`, unknown `format`, duplicate stored key, over `MAX_DECLARED_FILES` — each captures nothing and warns **exactly once** via `_warn`.
+- [ ] 6.4 GREEN (next batch): `read_declaration` in `metadata.py`; constants `DECLARATION_FILENAME`, `MAX_DECLARED_FILES=16`, `MAX_DECLARED_PATH_CHARS=1024` (D94).
+- [x] 6.5 Threat-matrix RED, scoped to `resolve_declared_path`: a real FIFO at a declared path is rejected via `is_file()` alone (a `stat`, never an `open()`) with a bounded-wall-time assertion (< 1s), not just an outcome assertion — proven on `resolve_declared_path` directly, since no production code calls it from `pytest_sessionstart` yet (that wiring is Phase 7). The equivalent guard against the real `pytest_sessionstart` path is the next batch's obligation once `read_declaration`/`capture_metadata` are wired in.
+- [x] 6.6 Verify (this batch's scope only): `uv run pytest packages/pytest-vantage/tests/test_metadata_containment.py` — 10 passed, run individually across Python 3.10/3.11/3.12/3.13 (`uv run --python <ver> pytest ...`) to prove the `OSError`/`RuntimeError` cross-version claim empirically, not just on the default interpreter. Re-verify once 6.3/6.4 land in the next batch, at whatever filename Phase 7 settles on.
 
 ## Phase 7 (PR7 → PR6): Read, bound, ship
 
