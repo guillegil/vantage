@@ -303,12 +303,16 @@ budget — this is the split's whole point: the code+tests commit measured
 428 changed lines *before* splitting (see PR5 originally attempted as one
 PR, below), and the honest seam brought each half comfortably under budget.
 
-**PR5b** (vs. PR5a branch, `git diff --stat ft/run-metadata-capture-05-flag..HEAD`,
-code commit only, before the apply-progress commit): **254 changed lines**
-(241 insertions + 13 deletions). Breakdown: `recorder.py` +52/-1,
-`test_opt_in.py` +202/-12. No `tasks.md` commit in PR5b — Phase 5's tasks
-were all marked `[x]` in PR5a's tasks.md commit, since the re-slicing note
-and every task's `(PR5a)`/`(PR5b)` annotation were written once, in PR5a.
+**PR5b**: the code commit alone (`e45f5b8`, before any bookkeeping) measured
+254 changed lines (241 insertions + 13 deletions) against PR5a. Breakdown:
+`recorder.py` +52/-1, `test_opt_in.py` +202/-12. No `tasks.md` commit in
+PR5b — Phase 5's tasks were all marked `[x]` in PR5a's tasks.md commit,
+since the re-slicing note and every task's `(PR5a)`/`(PR5b)` annotation
+were written once, in PR5a. The **full PR diff including both
+apply-progress commits** (`git diff --stat ft/run-metadata-capture-05-flag..HEAD`,
+measured after this note was written) is reported in the return summary —
+comfortably under the 400-line budget even with bookkeeping included; see
+the apply return envelope for the exact final count.
 
 **The abandoned single-PR attempt**, for the record: before splitting, the
 code+tests commit alone (`d737d80`, superseded, not on either final branch)
