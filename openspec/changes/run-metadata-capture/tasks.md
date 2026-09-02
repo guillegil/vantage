@@ -60,9 +60,9 @@ Chain strategy: feature-branch-chain
 
 ## Phase 3 (PR3 → PR2): Core vocabulary
 
-- [ ] 3.1 RED: `packages/vantage/tests/test_metadata.py` — `FILE_STATUSES`/`KEY_STATUSES` are plain-`str` `frozenset`s (never `Enum`, per `liveness.py`'s 3.10-vs-3.13 `__format__` precedent); membership covers exactly D91's SQL `CHECK` lists.
-- [ ] 3.2 GREEN: create `packages/vantage/src/vantage/core/domain/metadata.py` — `FILE_STATUSES`, `KEY_STATUSES`, `MAX_METADATA_VALUE_BYTES`, `MAX_METADATA_KEY_CHARS`, `MAX_METADATA_ENTRIES` (D94, D95). No logic beyond vocabulary (RQ-26).
-- [ ] 3.3 RED+GREEN: extend `test_architecture.py`'s RQ-26 purity walk to include `metadata.py` importing nothing outside stdlib.
+- [x] 3.1 RED: `packages/vantage/tests/test_metadata.py` — `FILE_STATUSES`/`KEY_STATUSES` are plain-`str` `frozenset`s (never `Enum`, per `liveness.py`'s 3.10-vs-3.13 `__format__` precedent); membership covers exactly D91's SQL `CHECK` lists.
+- [x] 3.2 GREEN: create `packages/vantage/src/vantage/core/domain/metadata.py` — `FILE_STATUSES`, `KEY_STATUSES`, `MAX_METADATA_VALUE_BYTES`, `MAX_METADATA_KEY_CHARS`, `MAX_METADATA_ENTRIES` (D94, D95). No logic beyond vocabulary (RQ-26).
+- [x] 3.3 RED+GREEN: extend `test_architecture.py`'s RQ-26 purity walk to include `metadata.py` importing nothing outside stdlib.
 
 ## Phase 4 (PR4 → PR3): Port dataclasses + both adapters + contract
 
