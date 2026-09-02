@@ -2,15 +2,16 @@
 
 **Mode**: Strict TDD from Phase 2 onward (Phase 1 was the documented
 Strict-TDD exception — doc-only, no code path existed yet, per tasks.md's
-own work-unit table). Phase 2 and Phase 3 are implemented under Strict TDD
+own work-unit table). Phases 2, 3 and 4 are implemented under Strict TDD
 in full.
 
 ## Scope covered so far
 
 - Phase 1 (PR1 → tracker `ft/run-metadata-capture`) — complete.
 - Phase 2 (PR2 → PR1) — complete.
-- Phase 3 (PR3 → PR2) — complete, this batch.
-- Phases 4-11 are untouched and remain for future `sdd-apply` batches.
+- Phase 3 (PR3 → PR2) — complete.
+- Phase 4 (PR4 → PR3) — complete, this batch.
+- Phases 5-11 are untouched and remain for future `sdd-apply` batches.
 
 ## Completed Tasks
 
@@ -37,6 +38,15 @@ in full.
 - [x] 3.2 GREEN: created `packages/vantage/src/vantage/core/domain/metadata.py` — `FILE_STATUSES` (8 values), `KEY_STATUSES` (5 values), `MAX_METADATA_VALUE_BYTES=1024`, `MAX_METADATA_KEY_CHARS=1024`, `MAX_METADATA_ENTRIES=200` (D94, D95). No logic beyond vocabulary (RQ-26).
 - [x] 3.3 RED+GREEN: extended `test_architecture.py::test_the_walk_is_not_vacuous` with an assertion that `vantage/core/domain/metadata.py` is examined by the RQ-26 purity walk. Confirmed RED by temporarily removing the module and re-running the test (failed as expected); confirmed GREEN with the module restored.
 
+### Phase 4 (PR4)
+
+- [x] 4.1 RED: `test_storage_types.py` — `MetadataFile`, `MetadataEntry`, `RunMetadata`, `EMPTY_RUN_METADATA` asserted frozen, `slots=True`, and `RunMetadata() == EMPTY_RUN_METADATA`. Confirmed failing: `ImportError: cannot import name 'EMPTY_RUN_METADATA' from 'vantage.core.ports.storage'`.
+- [x] 4.2 GREEN: `core/ports/storage.py` — added `MetadataFile`, `MetadataEntry`, `RunMetadata`, `EMPTY_RUN_METADATA`; `ExecutionStore.record_session` gained `metadata: RunMetadata = EMPTY_RUN_METADATA` (D98). No existing call site changed — verified by `mypy --strict` passing unchanged and no edits to `routes/runs.py` or `scripts/measure_history_latency.py`.
+- [x] 4.3 RED: `vantage_port_contract.py` — 5 new shared contract tests (round-trip persists both tables; D95 declared-but-dropped row with `value IS NULL`; replay is a no-op; finish-only session matches a start+finish pair; no-`metadata=` argument writes zero rows) plus two adapter-agnostic introspection helpers (`_stored_metadata_files`, `_stored_metadata_entries` — no port read method for these tables exists until Phase 10, D100). Confirmed failing on both adapters: `TypeError: record_session() got an unexpected keyword argument 'metadata'` / `AttributeError: 'InMemoryExecutionStore' object has no attribute '_metadata_files'` — 9 failures total (5 tests × 2 adapters minus the no-argument test on SQLite, which passed trivially against SQLite's already-created empty tables).
+- [x] 4.4 GREEN: `sqlite_store.py` — `_INSERT_METADATA_FILE`/`_INSERT_METADATA_ENTRY` (`INSERT OR IGNORE`) plus `_metadata_file_rows`/`_metadata_entry_rows` helpers, appended inside the existing `BEGIN IMMEDIATE … COMMIT` after the result insert (D98).
+- [x] 4.5 GREEN: `memory.py` — `self._metadata_files`/`self._metadata_entries` dicts keyed `(run_id, source_file)`/`(run_id, key)`, populated with `setdefault` mirroring `OR IGNORE`; both cleared in `close()`.
+- [x] 4.6 Verified: `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_storage_types.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py` — 139 passed (was 120 before this batch).
+
 ## Files Changed
 
 | File | Action | What Was Done |
@@ -50,8 +60,13 @@ in full.
 | `packages/vantage/src/vantage/core/domain/metadata.py` | Created (PR3) | `FILE_STATUSES`, `KEY_STATUSES`, `MAX_METADATA_VALUE_BYTES`, `MAX_METADATA_KEY_CHARS`, `MAX_METADATA_ENTRIES` — pure vocabulary, stdlib only |
 | `packages/vantage/tests/test_metadata.py` | Created (PR3) | 7 tests: two CHECK-mirroring membership tests, two `frozenset`-of-`str`-never-`Enum` tests, three bound-value tests |
 | `packages/vantage/tests/test_architecture.py` | Modified (PR3) | Added assertion that `vantage/core/domain/metadata.py` is examined by the RQ-26 purity walk |
-| `openspec/changes/run-metadata-capture/tasks.md` | Modified (PR1 + PR2 + PR3) | Phase 1/2/3 tasks marked `[x]` |
+| `openspec/changes/run-metadata-capture/tasks.md` | Modified (PR1 + PR2 + PR3 + PR4) | Phase 1/2/3/4 tasks marked `[x]` |
 | `openspec/changes/run-metadata-capture/apply-progress.md` | Modified (each batch) | This artifact, mirrored on disk (hybrid store) |
+| `packages/vantage/src/vantage/core/ports/storage.py` | Modified (PR4) | `MetadataFile`, `MetadataEntry`, `RunMetadata`, `EMPTY_RUN_METADATA`; `record_session`'s defaulted `metadata=` keyword |
+| `packages/vantage/src/vantage/storage/sqlite_store.py` | Modified (PR4) | `_INSERT_METADATA_FILE`/`_INSERT_METADATA_ENTRY` + row-builder helpers, appended inside the existing transaction |
+| `packages/vantage/src/vantage/storage/memory.py` | Modified (PR4) | `_metadata_files`/`_metadata_entries` dicts with `setdefault`, mirroring `OR IGNORE` |
+| `packages/vantage/tests/test_storage_types.py` | Modified (PR4) | 9 new dataclass tests for `MetadataFile`/`MetadataEntry`/`RunMetadata`/`EMPTY_RUN_METADATA` |
+| `packages/vantage/tests/vantage_port_contract.py` | Modified (PR4) | 5 new shared contract tests + 2 adapter-agnostic introspection helpers |
 
 ## Work Unit Evidence (PR3)
 
@@ -62,12 +77,23 @@ in full.
 | Rollback boundary | Revert `core/domain/metadata.py` and `test_metadata.py`; nothing else in the tree imports the module yet (RQ-26 purity walk assertion is the only coupling, and it reverts with the same commit) |
 | Full-suite regression check | `uv run ruff format . && uv run ruff check --fix .` — clean, 87 files unchanged; `uv run mypy .` (strict) — no issues, 87 files; `uv run pytest` — 600 passed (was 593 before this batch — 7 new tests); `uv run deptry .` — no dependency issues |
 
+## Work Unit Evidence (PR4)
+
+| Evidence | Value |
+|---|---|
+| Focused test command and result | `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_storage_types.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py` — 139 passed (was 120 before this batch) |
+| Runtime harness command/scenario and result | N/A — no runtime boundary: `record_session` is exercised directly by the shared adapter contract against both real SQLite (a temp-dir file, `test_sqlite_store.py`'s existing fixture) and the in-memory adapter; the plugin/HTTP wire path this feeds does not exist until PR9 wires `routes/runs.py` |
+| Rollback boundary | Revert `core/ports/storage.py`'s three dataclasses + `EMPTY_RUN_METADATA` + the `record_session` signature change, `sqlite_store.py`'s two `INSERT OR IGNORE` statements + helpers, `memory.py`'s two dicts, and the new test methods in both test files; `metadata=` has a default so no other call site is coupled to this change |
+| Full-suite regression check | `uv run ruff format . && uv run ruff check --fix .` — clean, 87 files; `uv run mypy .` (strict) — no issues, 87 files; `uv run pytest` — 619 passed (was 600 before this batch — 19 new tests); `uv run deptry .` — no dependency issues |
+
 ## TDD Cycle Evidence
 
 | Task | Test File | Layer | Safety Net | RED | GREEN | TRIANGULATE | REFACTOR |
 |------|-----------|-------|------------|-----|-------|-------------|----------|
 | 3.1/3.2 | `packages/vantage/tests/test_metadata.py` | Unit | ✅ 593/593 (baseline before this batch) | ✅ Written — confirmed failing: `ModuleNotFoundError: No module named 'vantage.core.domain.metadata'` | ✅ Passed after 3.2's module creation — 7/7 | ➖ Skipped: purely structural (frozenset literals and constant definitions, D94/D95's own values), exactly one possible output per assertion, no branching — noted per strict-tdd's explicit skip condition | ➖ None needed |
 | 3.3 | `packages/vantage/tests/test_architecture.py` | Unit | ✅ 4/4 (baseline before this batch) | ✅ Written, then confirmed failing by temporarily moving `metadata.py` out of the tree and re-running: `AssertionError: assert 'vantage/core/domain/metadata.py' in {...}` | ✅ Passed after restoring the module — 4/4 | ➖ Single — one membership assertion, no branching | ➖ None needed |
+| 4.1/4.2 | `packages/vantage/tests/test_storage_types.py` | Unit | ✅ 120/120 (baseline before this batch) | ✅ Written — confirmed failing: `ImportError: cannot import name 'EMPTY_RUN_METADATA' from 'vantage.core.ports.storage'` | ✅ Passed after 4.2's dataclasses landed — 16/16 in the file | ➖ Skipped: purely structural (frozen/slots shape and default-equality checks), one possible output per assertion, no branching | ➖ None needed |
+| 4.3/4.4/4.5 | `packages/vantage/tests/vantage_port_contract.py` (inherited by `test_sqlite_store.py`, `test_memory_store.py`) | Unit (adapter contract) | ✅ 120/120 (baseline before this batch) | ✅ Written — confirmed failing on both adapters: `TypeError: record_session() got an unexpected keyword argument 'metadata'` (SQLite + in-memory) and `AttributeError: 'InMemoryExecutionStore' object has no attribute '_metadata_files'` (introspection helper, in-memory) — 9 failures | ✅ Passed after 4.4 (SQLite) and 4.5 (in-memory) landed — 139/139 across the four files | ✅ 5 cases per adapter: round-trip, D95 drop-whole row, write-once replay, finish-only vs. start+finish parity, no-argument default — both adapters run the same 5 tests unchanged (RQ-30's "second mechanism" proof) | ➖ None needed |
 
 ### Test Summary (PR3)
 
@@ -76,6 +102,14 @@ in full.
 - **Layers used**: Unit only — pure vocabulary module, no I/O boundary exists
 - **Approval tests** (refactoring): None — no refactoring tasks in this phase
 - **Pure functions created**: 0 — vocabulary and constants only, no logic (RQ-26, by design)
+
+### Test Summary (PR4)
+
+- **Total tests written this batch**: 9 new in `test_storage_types.py`; 5 new shared contract methods in `vantage_port_contract.py`, each inherited by both `TestSqliteExecutionStore` and `TestInMemoryExecutionStore` (10 test executions)
+- **Total tests passing (full suite)**: 619
+- **Layers used**: Unit only — the shared contract exercises real SQLite (temp-dir file) and the in-memory dict adapter, but through direct Python calls, not a runtime/HTTP boundary
+- **Approval tests** (refactoring): None — no refactoring tasks in this phase
+- **Pure functions created**: `_metadata_file_rows`, `_metadata_entry_rows` (sqlite_store.py) — pure row-tuple builders, no I/O
 
 ## Deviations from Design
 
@@ -99,52 +133,83 @@ lists exactly (verified against `schema.sql`'s literal text, not just the
 design summary), `MAX_METADATA_VALUE_BYTES=1024` and `MAX_METADATA_ENTRIES=200`
 match D94's table exactly.
 
+**PR4: none.** Implemented exactly D98's chosen shape — one frozen `RunMetadata`
+aggregate with a default, not the two-parameter alternative D98 explicitly
+rejects. No new `ExecutionStore` methods were added (D98's Option 2,
+rejected). No existing call site was touched.
+
 ## Issues Found
 
-None beyond the `MAX_METADATA_KEY_CHARS` gap noted above. Task 3.3 required
-a non-linear RED: `metadata.py` already existed (from task 3.2, which
-necessarily precedes 3.3 in the phase's own numbering) by the time the new
-`test_architecture.py` assertion was written, so genuine RED was proven by
-temporarily moving the module out of the source tree, confirming the
+None beyond the `MAX_METADATA_KEY_CHARS` gap noted above (PR3). Task 3.3
+required a non-linear RED: `metadata.py` already existed (from task 3.2,
+which necessarily precedes 3.3 in the phase's own numbering) by the time the
+new `test_architecture.py` assertion was written, so genuine RED was proven
+by temporarily moving the module out of the source tree, confirming the
 assertion failed, then restoring it — not by reverting to before task 3.2.
 This is recorded rather than silently treated as "trivially green."
+
+**PR4.** No port read method exists yet for `run_metadata`/`run_metadata_file`
+(that lands in Phase 10, D100), so the shared contract tests cannot assert
+through the public `ExecutionStore` interface alone. Resolved by adding two
+adapter-agnostic introspection helpers (`_stored_metadata_files`,
+`_stored_metadata_entries`) to `vantage_port_contract.py` that dispatch on
+`isinstance(store, SqliteExecutionStore | InMemoryExecutionStore)` and read
+each adapter's private storage directly — the same pattern
+`test_sqlite_store.py` already uses (`store._conn.execute(...)  # noqa: SLF001`).
+This is test-only introspection, not a new production API surface, and does
+not touch D98's rejected-Option-2 decision (no new port methods were added).
+Flagged here rather than silently added, since it is a deviation from "the
+contract only calls the public port" in spirit, though not in the sense D98
+was reasoning about.
 
 ## Git / PR State
 
 - Tracker: `ft/run-metadata-capture` (draft, no-merge) — untouched.
 - PR1: https://github.com/guillegil/vantage/pull/88 — base tracker, head `ft/run-metadata-capture-01-adr`. Open, 12/12 checks pass. Not merged.
 - PR2: https://github.com/guillegil/vantage/pull/89 — base `ft/run-metadata-capture-01-adr`, head `ft/run-metadata-capture-02-schema`. Open, 12/12 checks pass. Not merged.
-- PR3: opened this batch, base `ft/run-metadata-capture-02-schema`, head `ft/run-metadata-capture-03-core`. See PR URL in the return summary.
-- PR3 commits: `6bd5f1d` (vocabulary module + tests + architecture-walk assertion), `7a87775` (tasks.md checkboxes), plus this apply-progress commit.
+- PR3: https://github.com/guillegil/vantage/pull/90 — base `ft/run-metadata-capture-02-schema`, head `ft/run-metadata-capture-03-core`. Open, 12/12 checks pass. Not merged.
+- PR3 commits: `6bd5f1d` (vocabulary module + tests + architecture-walk assertion), `7a87775` (tasks.md checkboxes), plus its apply-progress commit.
+- PR4: https://github.com/guillegil/vantage/pull/91 — base `ft/run-metadata-capture-03-core`, head `ft/run-metadata-capture-04-port`. Open, 12/12 checks pass. Not merged.
+- PR4 commits: `9e81c58` (port dataclasses + both adapters + contract tests), `95d1667` (tasks.md checkboxes), plus this apply-progress commit.
 
-## Measured changed-line count (PR3 vs. PR2 branch, full PR diff)
+## Measured changed-line count
 
-`git diff --stat ft/run-metadata-capture-02-schema..HEAD` before the
-apply-progress.md commit: **174 insertions(+), 3 deletions(-) — 177 changed
-lines.** Breakdown: `packages/vantage/src/vantage/core/domain/metadata.py`
-+86, `packages/vantage/tests/test_metadata.py` +84, `test_architecture.py`
-+1, `tasks.md` +6/-3.
+**PR3** (vs. PR2 branch, before the apply-progress.md commit):
+`git diff --stat ft/run-metadata-capture-02-schema..HEAD` — 174
+insertions(+), 3 deletions(-) — 177 changed lines. Breakdown:
+`packages/vantage/src/vantage/core/domain/metadata.py` +86,
+`packages/vantage/tests/test_metadata.py` +84, `test_architecture.py` +1,
+`tasks.md` +6/-3. Estimate was ~220.
 
-Estimate was ~220. See the return summary for the final number including
-this apply-progress commit.
+**PR4** (vs. PR3 branch, `git diff --stat
+ft/run-metadata-capture-03-core..HEAD`, including the tasks.md and
+apply-progress.md bookkeeping commits): **429 changed lines** (417
+insertions + 12 deletions), against the 400-line budget and this task's own
+~370 forecast — a documented `size:exception` (see PR4's description). No
+honest seam exists inside D86's binding constraint that the port and both
+adapters move together: a `Protocol` keyword the concrete adapters do not
+yet accept leaves `mypy --strict` red the moment it lands alone, so
+"dataclasses first, wire second" is not a green-at-every-commit split.
+Breakdown: `core/ports/storage.py` +53/-0, `sqlite_store.py` +52/-4,
+`memory.py` +24/-3, `test_storage_types.py` +97/-0,
+`vantage_port_contract.py` +191/-0, `tasks.md` +6/-6.
 
 ## Remaining Tasks
 
-All of Phase 4 through Phase 11 (tasks 4.1 through 11.5) — see tasks.md.
-Phase 4 (port dataclasses + both adapters + contract tests) is next in the
-chain and must target `ft/run-metadata-capture-03-core` per
-`feature-branch-chain`.
+All of Phase 5 through Phase 11 (tasks 5.1 through 11.5) — see tasks.md.
+Phase 5 (plugin flag) is next in the chain and must target
+`ft/run-metadata-capture-04-port` per `feature-branch-chain`.
 
 ## Workload / PR Boundary
 
-- Mode: chained PR slice (`feature-branch-chain`, PR 3 of 11)
-- Current work unit: Phase 3 — core vocabulary only (`core/domain/metadata.py`, pure, no I/O, nothing imports it yet)
-- Boundary: starts from PR2's tip (`ft/run-metadata-capture-02-schema`), ends with PR3 opened and green; no port dataclasses, adapters, plugin code, parsing, or route changes touched (explicitly out of scope per launch instructions)
-- Estimated review budget impact: well under the 400-line budget
+- Mode: chained PR slice (`feature-branch-chain`, PR 4 of 11), `size:exception` documented above and in PR4's description
+- Current work unit: Phase 4 — port dataclasses (`MetadataFile`, `MetadataEntry`, `RunMetadata`, `EMPTY_RUN_METADATA`) + both adapter implementations + shared contract tests
+- Boundary: starts from PR3's tip (`ft/run-metadata-capture-03-core`), ends with PR4 opened and green; no plugin code, path containment, parsing, route, or read-filter changes touched (out of scope per launch instructions — Phase 5 onward)
+- Estimated review budget impact: 429 changed lines, 7% over the 400-line budget, `size:exception` recorded rather than contorting the design to hit the number
 
 ## Status
 
-18/18 tasks complete across Phase 1 (4/4), Phase 2 (7/7) and Phase 3 (3/3).
-PR1 and PR2 open and green, not merged (per instructions — the chain merges
-in order at the end). PR3 opened this batch. Ready for the next `sdd-apply`
-batch (Phase 4, port dataclasses + both adapters + contract tests).
+30/30 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3) and
+Phase 4 (6/6). PR1, PR2 and PR3 open and green, not merged (per instructions
+— the chain merges in order at the end). PR4 opened this batch, also open
+and green. Ready for the next `sdd-apply` batch (Phase 5, plugin flag).
