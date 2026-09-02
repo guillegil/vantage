@@ -160,6 +160,15 @@ class Recorder:
     `pytest_configure` and is not itself hook-wrapped, only because
     `_capture_vcs` cannot raise. A non-`None` warning is emitted at most
     once, through the same `_warn` the preflight and every hook already use.
+
+    `metadata_requested` is `plugin.py`'s `_metadata_capture_requested(config)`
+    (design.md D99) -- both the base activation gate and the
+    `--vantage-metadata` opt-in have already passed by the time this
+    constructor runs, since a `Recorder` is never constructed at all
+    otherwise. Accepted here so the call site that constructs a `Recorder`
+    is already stable; consulting the declaration itself -- exactly once
+    per session, mirroring `_vcs` above -- lands in the next slice, which
+    is also where a missing declaration starts to warn (Q3, design.md D92).
     """
 
     def __init__(
@@ -169,6 +178,7 @@ class Recorder:
         timeout: float,
         *,
         lifecycle_available: bool = False,
+        metadata_requested: bool = False,
     ) -> None:
         self._config = config
         self._address = address
@@ -184,6 +194,9 @@ class Recorder:
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
             _warn(config, f"vantage: {self._vcs.warning}")
+        # Accepted, not yet acted on: the declaration presence check and its
+        # Q3 warning land in the next slice (design.md D92, D99).
+        self._metadata_requested = metadata_requested
 
     def _vcs_section(self) -> dict[str, object]:
         """Serialises the snapshot held since `__init__` (design.md D51) --

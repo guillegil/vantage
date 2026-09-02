@@ -20,7 +20,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from pytest_vantage.plugin import _failure_text_capture_requested
+from pytest_vantage.plugin import _failure_text_capture_requested, _metadata_capture_requested
 
 _SAMPLE_TEST = "def test_it():\n    assert True\n"
 
@@ -218,3 +218,37 @@ def test_the_shipped_help_text_advertises_no_ini_equivalent(tmp_path: Path) -> N
         "--help must actively deny an ini equivalent rather than merely omit it: "
         "silence invites someone to commit a file that would then do nothing"
     )
+
+
+# --- Metadata capture flag inertness (opt-in-activation, RQ-2 extended, ------
+# --- design.md D99, task 5.4) ------------------------------------------------
+#
+# `--vantage-metadata` is its own invocation flag, gated identically to
+# `--vantage` and `--vantage-failure-text`. This slice proves the gate's
+# short-circuit: `_metadata_capture_requested` must never touch the opt-in
+# surface at all when the session was never activated. The differential
+# (C1), the declaration-opened proof (C2), the `--help` denial (C3) and Q3's
+# warning land in the next slice, once the declaration itself is consulted.
+
+
+class _UnactivatedConfig:
+    """A config whose invocation never activated recording at all. Reading
+    ``vantage_metadata`` here at all is what this double is built to catch
+    -- `_metadata_capture_requested` must short-circuit on
+    `_activation_requested` before touching the opt-in surface (design.md
+    D99, mirroring `plugin.py:157-158`), the same guarantee that keeps
+    `test_xdist_guard.py`'s `_WorkerConfigDouble` (whose allow-list does not
+    include ``vantage_metadata``) from ever seeing that option read.
+    """
+
+    def getoption(self, name: str) -> object:
+        if name == "vantage":
+            return False
+        raise AssertionError(f"unexpected option read: {name}")
+
+
+def test_metadata_capture_requested_short_circuits_when_not_activated() -> None:
+    """design.md D99: an unactivated session reads `"vantage"` alone,
+    exactly as `_failure_text_capture_requested` already does -- proves the
+    gate is structural, not merely a happy-path default."""
+    assert _metadata_capture_requested(_UnactivatedConfig()) is False  # type: ignore[arg-type]
