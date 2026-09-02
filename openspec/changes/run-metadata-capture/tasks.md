@@ -50,13 +50,13 @@ Chain strategy: feature-branch-chain
 
 ## Phase 2 (PR2 → PR1): Schema bump — the irreversible point
 
-- [ ] 2.1 RED: extend `test_connection.py` — opening a database stamped `meta.schema_version='3'` with this build is refused, naming both versions and the path (ADR-0013 proven).
-- [ ] 2.2 RED: update `test_schema_manifest.py:216-221` literals 11/130/14 → 13/139/15 (fails until 2.3).
-- [ ] 2.3 GREEN: `schema.sql` — add `run_metadata_file`, `run_metadata`, `idx_run_metadata_key_value` (D91) between `user_setting` and `-- Indexes`; update header counts and the "fourteen in total" comment; stamp `'4'`.
-- [ ] 2.4 GREEN: `connection.py` — `_SCHEMA_VERSION = 4`.
-- [ ] 2.5 GREEN: `docs/schema-manifest.md` — two new `###` sections (`run_metadata_file`, `run_metadata`, column-for-column) and corrected header counts (D91).
-- [ ] 2.6 Verify 2.1–2.2 pass; run `uv run pytest packages/vantage/tests/test_schema_manifest.py packages/vantage/tests/test_connection.py`.
-- [ ] 2.7 PR description: flag `docs/schema-manifest.md:364-403`'s pre-existing "Table count 10"/"Index count 13" drift (2026-08-15) as NOT this PR's obligation, so a reviewer does not misattribute it.
+- [x] 2.1 RED: extend `test_connection.py` — opening a database stamped `meta.schema_version='3'` with this build is refused, naming both versions and the path (ADR-0013 proven).
+- [x] 2.2 RED: update `test_schema_manifest.py:216-221` literals 11/130/14 → 13/139/15 (fails until 2.3).
+- [x] 2.3 GREEN: `schema.sql` — add `run_metadata_file`, `run_metadata`, `idx_run_metadata_key_value` (D91) between `user_setting` and `-- Indexes`; update header counts and the "fourteen in total" comment; stamp `'4'`.
+- [x] 2.4 GREEN: `connection.py` — `_SCHEMA_VERSION = 4`.
+- [x] 2.5 GREEN: `docs/schema-manifest.md` — two new `###` sections (`run_metadata_file`, `run_metadata`, column-for-column) and corrected header counts (D91).
+- [x] 2.6 Verify 2.1–2.2 pass; run `uv run pytest packages/vantage/tests/test_schema_manifest.py packages/vantage/tests/test_connection.py`.
+- [x] 2.7 PR description: flag `docs/schema-manifest.md:364-403`'s pre-existing "Table count 10"/"Index count 13" drift (2026-08-15) as NOT this PR's obligation, so a reviewer does not misattribute it.
 
 ## Phase 3 (PR3 → PR2): Core vocabulary
 
