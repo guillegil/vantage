@@ -75,14 +75,25 @@ Chain strategy: feature-branch-chain
 
 ## Phase 5 (PR5 → PR4): Plugin flag
 
-- [ ] 5.1 RED: `test_config.py` — `resolve_metadata_capture(activated, cli_opt_in)` signature carries **no** ini/env parameter; monotone conjunction table (T/T→T, else F).
-- [ ] 5.2 GREEN: `pytest_vantage/config.py` — `resolve_metadata_capture`.
-- [ ] 5.3 RED: `test_opt_in.py` — **C1** differential: `vantage-metadata.json` present, flag absent → byte-identical tree vs `-p no:vantage`, zero connections. **C3**: shipped `--help` contains "there is no ini equivalent" and never "or the ini equivalent is given" for `--vantage-metadata`.
-- [ ] 5.4 GREEN: `pytest_vantage/plugin.py` — register `--vantage-metadata` in the existing `group.addoption` block; `_metadata_capture_requested`, short-circuited on `_activation_requested` (mirrors `plugin.py:157-158`); called identically on both xdist branches.
-- [ ] 5.5 RED: **C2** — a `_CallRecorder`-wrapped `open` asserts the declaration is opened zero times when either gate is closed (`test_vcs.py`'s shape).
-- [ ] 5.6 RED: Q3 scenario — flag set, no `vantage-metadata.json` present → exactly one pytest warning, run otherwise unaffected; a declaration present emits none.
-- [ ] 5.7 GREEN: wire `metadata_requested=_metadata_capture_requested(config)` into the `Recorder(...)` construction on the controller only (no `Recorder` on an xdist worker, D99).
-- [ ] 5.8 Verify: `uv run pytest packages/pytest-vantage/tests/test_config.py packages/pytest-vantage/tests/test_opt_in.py packages/pytest-vantage/tests/test_vcs.py`.
+**Re-sliced into PR5a and PR5b at apply time** (`auto-chain`'s authorised
+honest seam): the code+tests commit alone measured 428 changed lines, over
+the 400-line budget, and "the flag and resolver first, then the C1/C2/C3
+differential tests and the Q3 warning" is exactly the seam the launch
+instructions suggested. PR5a lands `resolve_metadata_capture`, the flag's
+registration, `_metadata_capture_requested` and its short-circuit, and
+threads `metadata_requested` through to `Recorder.__init__` where it is
+accepted but not yet acted on. PR5b (→ PR5a) lands C1/C2/C3 and Q3 on top.
+Every intermediate state (PR5a alone) is green under `mypy --strict` and a
+full `uv run pytest`.
+
+- [x] 5.1 RED (PR5a): `test_config.py` — `resolve_metadata_capture(activated, cli_opt_in)` signature carries **no** ini/env parameter; monotone conjunction table (T/T→T, else F).
+- [x] 5.2 GREEN (PR5a): `pytest_vantage/config.py` — `resolve_metadata_capture`.
+- [x] 5.3 RED (PR5b): `test_opt_in.py` — **C1** differential: `vantage-metadata.json` present, flag absent → byte-identical tree vs `-p no:vantage`, zero connections. **C3**: shipped `--help` contains "there is no ini equivalent" and never "or the ini equivalent is given" for `--vantage-metadata`.
+- [x] 5.4 GREEN (PR5a): `pytest_vantage/plugin.py` — register `--vantage-metadata` in the existing `group.addoption` block; `_metadata_capture_requested`, short-circuited on `_activation_requested` (mirrors `plugin.py:157-158`). **Deviation**: called only from the controller, not "identically on both xdist branches" as originally worded — `test_xdist_guard.py`'s `_WorkerConfigDouble` allow-list forbids reading `vantage_metadata` on a worker, and nothing worker-side consumes it in this slice (no `EvidenceCollector`-equivalent for metadata exists). The declaration is still read exactly once per session regardless of worker count, since no `Recorder` is ever constructed on a worker.
+- [x] 5.5 RED (PR5b): **C2** — a `Path.open`-wrapped call recorder (a plain function, not a callable class instance, so the descriptor protocol still binds the `Path` instance) asserts the declaration is opened zero times when either gate is closed, and once both gates pass (`test_vcs.py`'s `_CallRecorder` shape, adapted).
+- [x] 5.6 RED (PR5b): Q3 scenario — flag set, no `vantage-metadata.json` present → exactly one pytest warning, run otherwise unaffected; a declaration present emits none.
+- [x] 5.7 GREEN (PR5a signature, PR5b behaviour): wire `metadata_requested=_metadata_capture_requested(config)` into the `Recorder(...)` construction on the controller only (no `Recorder` on an xdist worker, D99). `Recorder.__init__` accepts the keyword in PR5a; the presence check and Q3's warning that act on it land in PR5b.
+- [x] 5.8 Verify (PR5b): `uv run pytest packages/pytest-vantage/tests/test_config.py packages/pytest-vantage/tests/test_opt_in.py packages/pytest-vantage/tests/test_vcs.py`.
 
 ## Phase 6 (PR6 → PR5): Path containment
 
