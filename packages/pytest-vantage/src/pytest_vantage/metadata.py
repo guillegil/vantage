@@ -60,7 +60,170 @@ run afterwards) answer, not this function.
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass
 from pathlib import Path, PurePath
+
+import pytest
+
+from pytest_vantage.boundary import _warn
+
+DECLARATION_FILENAME = "vantage-metadata.json"
+"""The declaration's one fixed, well-known name, at the test repository
+root (design.md D92). Formerly a private constant of the same name and
+value in `recorder.py`; that copy is gone once this module is wired in
+(design.md D99's presence check and this module's own read now agree on
+one spelling, by construction rather than by two literals kept in step)."""
+
+MAX_DECLARED_FILES = 16
+"""design.md D94: a bound on the declaration's *read surface* -- the
+`stat`+`open` syscall count this design commits to at session start
+(D99) -- independent of the byte budget a later slice adds, which already
+bounds bytes."""
+
+MAX_DECLARED_PATH_CHARS = 1024
+"""design.md D94: `MAX_IDENTITY_CHARS` -- a path-shaped, client-supplied
+value, the same bound D89 already argued for one of these."""
+
+MAX_METADATA_ENTRIES = 200
+"""Mirrors `vantage.core.domain.metadata.MAX_METADATA_ENTRIES` across the
+RQ-24 boundary this plugin cannot import across directly -- the same shape
+`pytest_vantage.budget._REPORT_BYTES_CAP` already uses to mirror
+`vantage.service.errors.MAX_REPORT_BYTES`. Pinned by a test-only
+cross-package import (`test_metadata_declaration.py`), never trusted to
+stay in sync by convention alone."""
+
+_ADMISSIBLE_FORMATS = frozenset({"json", "yaml"})
+"""design.md D92: `format` is required and explicit, never inferred from
+the file extension. `"toml"` is a one-value widening of this set later,
+with no other change."""
+
+
+@dataclass(frozen=True, slots=True)
+class DeclaredFile:
+    """One validated entry from `vantage-metadata.json` (design.md D92)."""
+
+    path: str
+    format: str
+    keys: tuple[str, ...]
+
+
+def _reject(config: pytest.Config, message: str) -> None:
+    """Warn once, through `_warn` -- every one of `read_declaration`'s
+    rejection conditions is the plugin's own file, so it may be refused
+    outright (design.md D92). `-> None` is deliberate; callers use
+    `_reject(...); return None` as two statements, never `return
+    _reject(...)`, so mypy's `func-returns-value` check does not treat a
+    `None`-returning helper's result as a value being threaded through.
+    """
+    _warn(config, f"vantage: {message}")
+
+
+def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFile, ...] | None:
+    """Parse and validate `vantage-metadata.json` at `rootpath` (design.md
+    D92).
+
+    The declaration is the plugin's own file, so -- unlike a *declared
+    document*, which never warns and never fails ingestion (D97) -- it may
+    be refused outright: refusing captures nothing, exactly what the
+    flag-absent path already does. Every rejection below warns **exactly
+    once**, through `_warn`, and returns `None`. A valid declaration
+    returns its ordered file list, which may be empty.
+
+    Never opens or reads any file the declaration *names* -- only the
+    declaration itself. Reading the files it names is `capture_metadata`'s
+    job, added in a later slice.
+    """
+    declaration_path = rootpath / DECLARATION_FILENAME
+    try:
+        raw = declaration_path.read_bytes()
+    except OSError:
+        _reject(
+            config, f"no {DECLARATION_FILENAME} found at {rootpath}, metadata will not be captured"
+        )
+        return None
+    try:
+        text = raw.decode("utf-8")
+        document = json.loads(text)
+    except (UnicodeDecodeError, RecursionError, json.JSONDecodeError):
+        _reject(config, f"{DECLARATION_FILENAME} is not valid JSON, metadata will not be captured")
+        return None
+    if not isinstance(document, dict):
+        _reject(
+            config, f"{DECLARATION_FILENAME} must be a JSON object, metadata will not be captured"
+        )
+        return None
+    if document.get("version") != 1:
+        _reject(
+            config,
+            f"{DECLARATION_FILENAME} declares no supported version, metadata will not be captured",
+        )
+        return None
+    files = document.get("files")
+    if not isinstance(files, list) or len(files) > MAX_DECLARED_FILES:
+        _reject(
+            config,
+            f'{DECLARATION_FILENAME}\'s "files" must be a list of at most '
+            f"{MAX_DECLARED_FILES} entries, metadata will not be captured",
+        )
+        return None
+    declared: list[DeclaredFile] = []
+    seen_keys: set[str] = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares a malformed file entry, "
+                "metadata will not be captured",
+            )
+            return None
+        path = entry.get("path")
+        fmt = entry.get("format")
+        keys = entry.get("keys")
+        if (
+            not isinstance(path, str)
+            or not isinstance(fmt, str)
+            or not isinstance(keys, list)
+            or not all(isinstance(key, str) for key in keys)
+        ):
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares a malformed file entry, "
+                "metadata will not be captured",
+            )
+            return None
+        if fmt not in _ADMISSIBLE_FORMATS:
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares an unsupported format {fmt!r}, "
+                "metadata will not be captured",
+            )
+            return None
+        if len(path) > MAX_DECLARED_PATH_CHARS:
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares a path longer than "
+                f"{MAX_DECLARED_PATH_CHARS} characters, metadata will not be captured",
+            )
+            return None
+        for key in keys:
+            if key in seen_keys:
+                _reject(
+                    config,
+                    f"{DECLARATION_FILENAME} declares the key {key!r} more than once, "
+                    "metadata will not be captured",
+                )
+                return None
+            seen_keys.add(key)
+        if len(seen_keys) > MAX_METADATA_ENTRIES:
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares more than {MAX_METADATA_ENTRIES} keys "
+                "in total, metadata will not be captured",
+            )
+            return None
+        declared.append(DeclaredFile(path=path, format=fmt, keys=tuple(keys)))
+    return tuple(declared)
 
 
 def resolve_declared_path(rootpath: Path, declared: str) -> Path | None:
@@ -91,4 +254,12 @@ def resolve_declared_path(rootpath: Path, declared: str) -> Path | None:
     return target
 
 
-__all__ = ["resolve_declared_path"]
+__all__ = [
+    "DECLARATION_FILENAME",
+    "MAX_DECLARED_FILES",
+    "MAX_DECLARED_PATH_CHARS",
+    "MAX_METADATA_ENTRIES",
+    "DeclaredFile",
+    "read_declaration",
+    "resolve_declared_path",
+]
