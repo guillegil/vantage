@@ -67,6 +67,7 @@ from pathlib import Path, PurePath
 import pytest
 
 from pytest_vantage.boundary import _warn
+from pytest_vantage.budget import _encoded_cost
 
 DECLARATION_FILENAME = "vantage-metadata.json"
 """The declaration's one fixed, well-known name, at the test repository
@@ -93,6 +94,16 @@ RQ-24 boundary this plugin cannot import across directly -- the same shape
 cross-package import (`test_metadata_declaration.py`), never trusted to
 stay in sync by convention alone."""
 
+MAX_DECLARED_FILE_BYTES = 8 * 1024
+"""design.md D94: the largest a declared file may be such that four of
+them at full size still fit `MAX_METADATA_SECTION_BYTES` -- keeps the two
+bounds coherent rather than one admitting what the other always rejects."""
+
+MAX_METADATA_SECTION_BYTES = 32 * 1024
+"""design.md D94: `4 * MAX_DECLARED_FILE_BYTES`, and `MAX_REPORT_BYTES //
+32`. Spent on JSON-encoded bytes, via `budget._encoded_cost`'s exact rule
+(no `ensure_ascii=False` -- see that function's own docstring for why)."""
+
 _ADMISSIBLE_FORMATS = frozenset({"json", "yaml"})
 """design.md D92: `format` is required and explicit, never inferred from
 the file extension. `"toml"` is a one-value widening of this set later,
@@ -106,6 +117,29 @@ class DeclaredFile:
     path: str
     format: str
     keys: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedFile:
+    """One entry of the wire `metadata.files` array (design.md D96):
+    `content` is `None` whenever `status` is not `"captured"` -- the same
+    "declared-but-dropped is a row, not an absence" contract D95 states
+    for the storage side, kept on the wire too."""
+
+    path: str
+    format: str
+    status: str
+    keys: tuple[str, ...]
+    content: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataSection:
+    """The wire `metadata` section (design.md D96): the declaration's own
+    name, and the outcome recorded for every file it named."""
+
+    declaration: str
+    files: tuple[CapturedFile, ...]
 
 
 def _reject(config: pytest.Config, message: str) -> None:
@@ -226,6 +260,101 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
     return tuple(declared)
 
 
+def _rejected_file_status(rootpath: Path, declared_path: str) -> str:
+    """Best-effort, non-security label for *why* `resolve_declared_path`
+    rejected `declared_path` (design.md D97 classes 1 and 2): `not_found`
+    when nothing exists at that path at all, `path_rejected` for every
+    other reason (absolute, `..`, escape, not a regular file). Advisory
+    only -- the security decision was already made by `resolve_declared_
+    path` returning `None`; this only recovers a friendlier reason for the
+    wire and the reader's three-state contract (D95).
+    """
+    candidate = PurePath(declared_path)
+    if candidate.is_absolute() or candidate.drive or candidate.anchor:
+        return "path_rejected"
+    if ".." in candidate.parts:
+        return "path_rejected"
+    try:
+        exists = (rootpath / candidate).exists()
+    except OSError:
+        return "path_rejected"
+    return "not_found" if not exists else "path_rejected"
+
+
+def _read_declared_file(rootpath: Path, declared_path: str) -> tuple[str, str | None]:
+    """Read one declared file, bounded to `MAX_DECLARED_FILE_BYTES` bytes
+    (design.md D97 classes 1-5). Never opens a path `resolve_declared_path`
+    rejects, and never raises: every failure returns a status and `None`.
+    """
+    target = resolve_declared_path(rootpath, declared_path)
+    if target is None:
+        return _rejected_file_status(rootpath, declared_path), None
+    try:
+        with target.open("rb") as handle:
+            raw = handle.read(MAX_DECLARED_FILE_BYTES + 1)
+    except OSError:
+        return "unreadable", None
+    if len(raw) > MAX_DECLARED_FILE_BYTES:
+        return "too_large", None
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return "not_text", None
+    return "captured", content
+
+
+def capture_metadata(config: pytest.Config, rootpath: Path) -> MetadataSection | None:
+    """Read, bound and ship every file `vantage-metadata.json` declares
+    (design.md D93-D97, D94's section budget). `None` only when the
+    declaration itself could not be read or validated -- `read_declaration`
+    has already warned exactly once for that case. Otherwise always a
+    `MetadataSection`, even when every file it names ends up dropped:
+    D95's "every declared thing gets a row" contract holds whether or not
+    capture succeeded.
+
+    The section budget is spent in declaration order (D97 class 6): once
+    one file's encoded cost does not fit the remainder, every file from
+    that point on -- not just the one that overflowed -- is dropped whole
+    and marked `over_budget`, without being opened.
+    """
+    declared_files = read_declaration(config, rootpath)
+    if declared_files is None:
+        return None
+    remaining_budget = MAX_METADATA_SECTION_BYTES
+    budget_exhausted = False
+    captured: list[CapturedFile] = []
+    for declared in declared_files:
+        if budget_exhausted:
+            captured.append(
+                CapturedFile(
+                    path=declared.path,
+                    format=declared.format,
+                    status="over_budget",
+                    keys=declared.keys,
+                    content=None,
+                )
+            )
+            continue
+        status, content = _read_declared_file(rootpath, declared.path)
+        if status == "captured" and content is not None:
+            cost = _encoded_cost(content)
+            if cost > remaining_budget:
+                status, content = "over_budget", None
+                budget_exhausted = True
+            else:
+                remaining_budget -= cost
+        captured.append(
+            CapturedFile(
+                path=declared.path,
+                format=declared.format,
+                status=status,
+                keys=declared.keys,
+                content=content,
+            )
+        )
+    return MetadataSection(declaration=DECLARATION_FILENAME, files=tuple(captured))
+
+
 def resolve_declared_path(rootpath: Path, declared: str) -> Path | None:
     """Return the resolved target for `declared`, or `None` if rejected.
 
@@ -256,10 +385,15 @@ def resolve_declared_path(rootpath: Path, declared: str) -> Path | None:
 
 __all__ = [
     "DECLARATION_FILENAME",
+    "MAX_DECLARED_FILE_BYTES",
     "MAX_DECLARED_FILES",
     "MAX_DECLARED_PATH_CHARS",
     "MAX_METADATA_ENTRIES",
+    "MAX_METADATA_SECTION_BYTES",
+    "CapturedFile",
     "DeclaredFile",
+    "MetadataSection",
+    "capture_metadata",
     "read_declaration",
     "resolve_declared_path",
 ]
