@@ -120,16 +120,36 @@ for `read_declaration`/`capture_metadata` -- not reintroduce `test_metadata.py`.
 
 - [x] 6.1 RED: `test_metadata_containment.py` (plugin) — `resolve_declared_path` rejects: absolute path, `..` escape, a real symlink pointing outside `rootpath`, a symlink loop, a directory, a real FIFO (`os.mkfifo`, skipped where unsupported), a path equal to `rootpath` itself, a missing path — each **rejected, never clamped**. Accepts a legitimate nested path, and a root reached through a symlink still accepts its own children.
 - [x] 6.2 GREEN: created `packages/pytest-vantage/src/pytest_vantage/metadata.py` — `resolve_declared_path` exactly as D93: resolve both `rootpath` and candidate, `is_relative_to`, `is_file`, catch `OSError`/`RuntimeError`.
-- [ ] 6.3 RED (next batch): `read_declaration` — absent file, non-JSON, non-object, `version != 1`, missing `path`/`format`/`keys`, unknown `format`, duplicate stored key, over `MAX_DECLARED_FILES` — each captures nothing and warns **exactly once** via `_warn`.
-- [ ] 6.4 GREEN (next batch): `read_declaration` in `metadata.py`; constants `DECLARATION_FILENAME`, `MAX_DECLARED_FILES=16`, `MAX_DECLARED_PATH_CHARS=1024` (D94).
+- [x] 6.3 RED (PR7a, `ft/run-metadata-capture-07a-declaration` → PR6): `read_declaration` — absent file, non-JSON, non-object, `version != 1`, missing `path`/`format`/`keys`, unknown `format`, duplicate stored key, over `MAX_DECLARED_FILES` — each captures nothing and warns **exactly once** via `_warn`. **Completeness addition, not in this task's literal list but required by D92's full 8-row table** (this task's own 6.4 already names both bounds as constants to define, so leaving either untested would ship an unused bound): a path over `MAX_DECLARED_PATH_CHARS`, and more than `MAX_METADATA_ENTRIES` total keys, are also RED-tested and rejected. Test file: `test_metadata_declaration.py` (see the basename note below — not `test_metadata.py`, which collides with PR3's).
+- [x] 6.4 GREEN (PR7a): `read_declaration` in `metadata.py`; constants `DECLARATION_FILENAME`, `MAX_DECLARED_FILES=16`, `MAX_DECLARED_PATH_CHARS=1024`, `MAX_METADATA_ENTRIES=200` (D94; the fourth mirrors `vantage.core.domain.metadata.MAX_METADATA_ENTRIES` across the RQ-24 boundary, pinned by a test-only cross-package import, the same shape `budget.py`'s `_REPORT_BYTES_CAP` already uses for its own server mirror).
 - [x] 6.5 Threat-matrix RED, scoped to `resolve_declared_path`: a real FIFO at a declared path is rejected via `is_file()` alone (a `stat`, never an `open()`) with a bounded-wall-time assertion (< 1s), not just an outcome assertion — proven on `resolve_declared_path` directly, since no production code calls it from `pytest_sessionstart` yet (that wiring is Phase 7). The equivalent guard against the real `pytest_sessionstart` path is the next batch's obligation once `read_declaration`/`capture_metadata` are wired in.
 - [x] 6.6 Verify (this batch's scope only): `uv run pytest packages/pytest-vantage/tests/test_metadata_containment.py` — 10 passed, run individually across Python 3.10/3.11/3.12/3.13 (`uv run --python <ver> pytest ...`) to prove the `OSError`/`RuntimeError` cross-version claim empirically, not just on the default interpreter. Re-verify once 6.3/6.4 land in the next batch, at whatever filename Phase 7 settles on.
 
 ## Phase 7 (PR7 → PR6): Read, bound, ship
 
-- [ ] 7.1 RED: `test_metadata.py` — a file at `MAX_DECLARED_FILE_BYTES` (8,192) is kept; one byte over is dropped whole, marked `too_large`; files past `MAX_METADATA_SECTION_BYTES` (32,768) are marked `over_budget` in declaration order; a non-UTF-8 file is marked `not_text` before JSON encoding; a permission-denied open is marked `unreadable` (class 5, the eighth plugin-side class).
-- [ ] 7.2 GREEN: `metadata.py` — `capture_metadata`: per-file read ≤8,192 bytes, UTF-8 decode, `_encoded_cost` charge against 32,768 bytes reusing `budget.py`'s exact `_encoded_cost` rule (no `ensure_ascii=False`); every failure sets a status, content=`None`, never raises (D97).
-- [ ] 7.3 GREEN: `budget.py` — docstring-only addition recording the finish-write headroom drop from ~1,038 to ~973 results (D94).
+**Re-sliced at apply time into three PRs**, not two — the combined 6.3/6.4 +
+7.1/7.2 diff measured 759 changed lines against PR6, 90% over the 400-line
+budget even before this note, so `auto-chain`'s authorised seam was cut a
+second time rather than accepting a `size:exception` where an honest seam
+existed: `read_declaration` (6.3/6.4) does not need `capture_metadata`
+(7.1/7.2) to be independently useful and independently tested, only the
+reverse. Chain: `ft/run-metadata-capture-07a-declaration` (6.3/6.4 → PR6),
+`ft/run-metadata-capture-07b-capture` (7.1/7.2 → PR7a),
+`ft/run-metadata-capture-07c-wire` (7.3/7.4/7.5/7.6 → PR7b).
+
+**Basename note, continuing Phase 6's own forward pointer.**
+`packages/vantage/tests/test_metadata.py` (PR3) and
+`packages/pytest-vantage/tests/test_metadata_containment.py` (PR6) already
+exist; this task's original wording (`test_metadata.py`) would collide with
+the first. `read_declaration`'s tests are in
+`packages/pytest-vantage/tests/test_metadata_declaration.py` (PR7a);
+`capture_metadata`'s are in `test_metadata_capture.py` (PR7b) — two files,
+not one, matching the two-PR split rather than sharing a name across a PR
+boundary.
+
+- [x] 7.1 RED (PR7b, `ft/run-metadata-capture-07b-capture` → PR7a): `test_metadata_capture.py` — a file at `MAX_DECLARED_FILE_BYTES` (8,192) is kept; one byte over is dropped whole, marked `too_large`; files past `MAX_METADATA_SECTION_BYTES` (32,768) are marked `over_budget` in declaration order; a non-UTF-8 file is marked `not_text` before JSON encoding; a permission-denied open is marked `unreadable` (class 5, the eighth plugin-side class). **Completeness addition**: a missing declared path is marked `not_found`, and a rejected-but-existing path (e.g. a real absolute file outside rootpath) is marked `path_rejected` — D97 classes 1/2, distinguished by a small advisory-only classifier since `resolve_declared_path` itself intentionally collapses both to `None` for the security decision alone.
+- [x] 7.2 GREEN (PR7b): `metadata.py` — `capture_metadata`: per-file read ≤8,192 bytes (bounded via `handle.read(MAX_DECLARED_FILE_BYTES + 1)`, never the whole file), UTF-8 decode, `_encoded_cost` charge against 32,768 bytes by importing `budget.py`'s exact `_encoded_cost` function directly — not a second, subtly different cost function; every failure sets a status, content=`None`, never raises (D97).
+- [ ] 7.3 GREEN (PR7c): `budget.py` — docstring-only addition recording the finish-write headroom drop from ~1,038 to ~973 results (D94).
 - [ ] 7.4 RED: `recorder.py` — identical serialized `metadata` bytes appear on the start report and the finish report (D51 freeze rule extended, D96).
 - [ ] 7.5 GREEN: `recorder.py` — `self._metadata` captured once in `__init__` beside `self._vcs`; `_metadata_section()` mirroring `_vcs_section()`; wired into both report builds.
 - [ ] 7.6 Verify: `uv run pytest packages/pytest-vantage/tests/test_metadata.py packages/pytest-vantage/tests/test_report_budget.py packages/pytest-vantage/tests/test_run_report.py`.
