@@ -457,28 +457,113 @@ compressing it further would have preserved; each trim pass tried this
 batch reduced net content but still added its own diff lines on top of
 what it removed, the same self-referential cost PR4's note already names.
 
-## Remaining Tasks
+## Batch: Phase 6.3/6.4 + Phase 7 (PR7a/PR7b/PR7c)
 
-Phase 6.3-6.4 (`read_declaration` + its constants, deferred this batch,
-out of this launch's scope) through Phase 11 (tasks 11.1-11.5) — see
-tasks.md. The rest of Phase 6 targets `ft/run-metadata-capture-06-paths`
-(this PR's branch) per `feature-branch-chain`.
+**Scope**: tasks 6.3, 6.4 (deferred from PR6), and all of Phase 7 (7.1-7.6).
+Phase 8 not started, per this launch's explicit scope narrowing.
+
+**Re-sliced into three PRs, not the planned two.** The combined 6.3/6.4 +
+7.1/7.2 diff measured 759 changed lines against PR6 (90% over budget) before
+any bookkeeping. An honest seam existed — `read_declaration` (6.3/6.4) does
+not need `capture_metadata` (7.1/7.2), only the reverse — so it was cut a
+second time instead of taking a `size:exception`. Chain:
+`ft/run-metadata-capture-07a-declaration` (6.3/6.4 → PR6, #95),
+`ft/run-metadata-capture-07b-capture` (7.1/7.2 → PR7a, #96),
+`ft/run-metadata-capture-07c-wire` (7.3-7.6 → PR7b, #97).
+
+**Basename collisions, again.** `test_metadata.py` (PR3) and
+`test_metadata_containment.py` (PR6) already existed; this batch adds two
+more uniquely-named files: `test_metadata_declaration.py` (PR7a,
+`read_declaration`) and `test_metadata_capture.py` (PR7b,
+`capture_metadata`) — one per PR, never shared across a PR boundary.
+
+### Tasks completed
+
+- [x] 6.3 RED / 6.4 GREEN (PR7a): `read_declaration` — 8 declaration-level
+  rejection conditions (D92), each warns exactly once via `_warn` and
+  captures nothing. **Completeness addition beyond the task's literal
+  list**: path-length and total-key-count bounds are also RED-tested (both
+  constants task 6.4 already required defining). Confirmed RED:
+  `AttributeError: module 'pytest_vantage.metadata' has no attribute
+  'read_declaration'`. GREEN: 19 tests passing.
+- [x] 7.1 RED / 7.2 GREEN (PR7b): `capture_metadata` — bounded per-file read
+  (`handle.read(MAX_DECLARED_FILE_BYTES + 1)`, never the whole file),
+  section-budget spend in declaration order reusing `budget.py`'s exact
+  `_encoded_cost` (imported directly, not reimplemented), every D97
+  plugin-side failure class covered. **Completeness addition**: `not_found`
+  vs `path_rejected` distinguished via a small advisory-only classifier,
+  since `resolve_declared_path` intentionally collapses both to `None` for
+  the security decision alone. Confirmed RED: `AttributeError: module
+  'pytest_vantage.metadata' has no attribute 'capture_metadata'`. GREEN: 10
+  tests passing.
+- [x] 7.3 GREEN (PR7c): `budget.py` docstring-only addition, ~1,038 → ~973
+  result headroom. No behaviour change.
+- [x] 7.4 RED / 7.5 GREEN (PR7c): `recorder.py` — `self._metadata` captured
+  once in `__init__`; `_metadata_section()` mirrors `_vcs_section()`'s D51
+  freeze rule; wired into both report builds. Confirmed RED via the same
+  proof technique as the existing `test_vcs_section_is_identical_on_both_
+  reports`: `capture_metadata` patched to return a different section per
+  call; failed before the wiring landed with `ImportError: No module named
+  'pytest_vantage.recorder.metadata'`. Removed PR5b's now-superseded
+  `_metadata_declaration_missing_warning` — PR5b's C2/Q3 tests pass
+  **unmodified**, since `capture_metadata`'s `read_declaration` call
+  reaches the same file and emits the same warning text.
+- [x] 7.6 Verify (PR7c): `uv run pytest packages/pytest-vantage/tests/test_metadata_declaration.py packages/pytest-vantage/tests/test_metadata_capture.py packages/pytest-vantage/tests/test_report_budget.py packages/pytest-vantage/tests/test_run_report.py` — 61 passed.
+
+### Full-suite regression per PR
+
+| PR | Full `uv run pytest` | mypy strict | deptry |
+|---|---|---|---|
+| PR7a | 665 passed (was 646) | clean, 90 files | clean |
+| PR7b | 675 passed (was 665) | clean, 91 files | clean |
+| PR7c | 677 passed (was 675) | clean, 91 files | clean |
+
+### Measured changed lines
+
+- **PR7a** (vs PR6 branch, full diff incl. bookkeeping): 465 changed lines
+  (25 tasks.md + 172 metadata.py + 262 test file, one deletion in
+  metadata.py, 1 in tasks.md). Code+tests alone: 434 (172+262), a documented
+  `size:exception`, 8.75% over — identical percentage to PR6's own
+  precedent, for the same reason (one cohesive validation function, 8
+  independent D92 conditions each needing its own RED test).
+- **PR7b** (vs PR7a branch): 362 changed lines (134 metadata.py + 228 test
+  file) — under budget, no bookkeeping commit needed (tasks.md already
+  updated in PR7a).
+- **PR7c** (vs PR7b branch, full diff incl. bookkeeping): 192 changed lines
+  (8 tasks.md + 11 budget.py + 92 recorder.py + 81 test file) — well under
+  budget.
+
+### Git / PR state (this batch)
+
+- PR7a: https://github.com/guillegil/vantage/pull/95 — base
+  `ft/run-metadata-capture-06-paths`, head
+  `ft/run-metadata-capture-07a-declaration`. Open, 12/12 checks green.
+- PR7b: https://github.com/guillegil/vantage/pull/96 — base PR7a's branch,
+  head `ft/run-metadata-capture-07b-capture`. Open, 12/12 checks green.
+- PR7c: https://github.com/guillegil/vantage/pull/97 — base PR7b's branch,
+  head `ft/run-metadata-capture-07c-wire`. Open, 12/12 checks green.
+- None merged yet — chain merges in order once every slice up to this one
+  is reviewed, per `feature-branch-chain`.
 
 ## Workload / PR Boundary
 
-- Mode: chained PR slice (`feature-branch-chain`); Phase 6 re-scoped at apply time by launch instruction, not re-sliced for size
-- Current work unit: Phase 6 (partial) — `resolve_declared_path`, the security boundary a declared path must pass before ADR-0017's authorised read ever touches it
-- Boundary: PR6 starts from PR5b's tip and ends with `resolve_declared_path` fully proven (10 real-filesystem tests, verified across Python 3.10-3.13) and the PR opened and green. No declaration parsing, byte bounding, wire section, server parsing or ingestion touched (next batch)
-- Estimated review budget impact: 429 changed lines, a documented `size:exception` (7% over, all bookkeeping -- code+tests alone are 236 lines, well under budget)
+- Mode: chained PR slices (`feature-branch-chain`); Phase 7 re-sliced from 2 planned PRs into 3 for size, not by launch instruction
+- Current work unit: Phase 6.3/6.4 + Phase 7, complete
+- Boundary: starts from PR6's tip (`resolve_declared_path` already landed) and ends with the full declaration-read → bound → wire pipeline proven and wired into both session writes. Server-side parsing/ingestion (Phase 8) untouched
+- Estimated review budget impact: PR7a is a documented `size:exception` (8.75% over, matching PR6's own precedent); PR7b and PR7c are both comfortably under budget
+
+## Remaining Tasks
+
+Phase 8 (server parse engine) through Phase 11 (RQ-25 measurement + docs)
+— see tasks.md. The next PR (`ft/run-metadata-capture-08-...` or similar)
+targets `ft/run-metadata-capture-07c-wire` (this batch's last branch) for
+Phase 8's schema/parse dependency, or PR2/PR3 per the dependency table —
+follow `tasks.md`'s own base-branch column.
 
 ## Status
 
-32/34 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
-Phase 4 (6/6), Phase 5 (8/8) and Phase 6 (4/6 this batch: 6.1, 6.2, 6.5,
-6.6; 6.3/6.4 deferred). (Note: the prior batch's status line said "38/38"
-for Phases 1-5, which undercounts against 4+7+3+6+8=28 -- a pre-existing
-arithmetic slip in that line, not something this batch introduced; the
-28/28 for Phases 1-5 plus this batch's 4/6 for Phase 6 gives 32/34.) PR1
-through PR5b open and green, not merged (chain merges in order at the
-end). PR6 opened this batch, 12/12 checks green. Ready for the next
-`sdd-apply` batch (Phase 6.3/6.4, then Phase 7).
+40/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
+Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6, 6.3/6.4 landed this batch) and
+Phase 7 (6/6, all this batch). PR1 through PR7c open and green, not merged
+(chain merges in order at the end). Ready for the next `sdd-apply` batch
+(Phase 8: server parse engine).
