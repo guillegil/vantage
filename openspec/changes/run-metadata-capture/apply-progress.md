@@ -609,24 +609,170 @@ under budget on their own.
 - PR URLs and CI status recorded once opened (see the apply-phase return
   summary for this batch).
 
+## Batch: Phase 9 (PR9a/PR9b/PR9c)
+
+**Scope**: all of Phase 9 (server ingest wiring, tasks 9.1-9.8). Phase 10
+(read filter) and Phase 11 (RQ-25 measurement) not started, per this
+launch's explicit scope narrowing to Phase 9 only.
+
+### Re-slicing rationale
+
+The combined 9.1-9.8 diff measured 682 changed lines against
+`ft/run-metadata-capture-08b-parse` (128+1 `routes/runs.py`, 135+2
+`test_routes_runs.py`, 416+0 `test_ingestion.py`), 70% over the 400-line
+budget, before any bookkeeping — matching this project's own ~1.9x
+historical under-forecast note almost exactly (this task's own ~350
+forecast × 1.9 ≈ 665). An honest seam existed, the same shape Phase 7 and
+Phase 8 already used: `_to_run_metadata` and its own unit-level proof
+(`test_routes_runs.py`) do not need any endpoint-level test to be complete
+and independently verifiable, only the reverse; and within the
+endpoint-level tests, the D97 taxonomy proof does not need the remaining
+scenario-coverage/threat-matrix tests, only the reverse. Cut into three
+PRs rather than accepting a `size:exception`:
+
+- `ft/run-metadata-capture-09a-normalizer` (9.1-9.3 → PR8b, #100)
+- `ft/run-metadata-capture-09b-taxonomy` (9.4-9.6 → PR9a, #101)
+- `ft/run-metadata-capture-09c-threat-matrix` (9.7-9.8 → PR9b)
+
+### Tasks completed
+
+- [x] 9.1 RED (PR9a): `test_routes_runs.py` — 9 unit tests for
+  `_to_run_metadata`: the happy path, three shape-reject cases
+  (absolute/`..`/oversized `source_file`), an unrecognised `status`, an
+  unrecognised `format`, non-captured-file marking, and malformed-document
+  marking. Confirmed RED: `ImportError: cannot import name
+  '_to_run_metadata' from 'vantage.service.routes.runs'`.
+- [x] 9.2 GREEN (PR9a): `routes/runs.py` — `_declared_path_shape_is_valid`
+  (D93's server-side re-check: length, absolute, `..`) and
+  `_to_run_metadata`, following `_to_vcs_context`'s shape. Drop-whole
+  everywhere (D95, D97), `truncate()` never called, the function never
+  raises. **Completeness addition beyond the task's literal wording**:
+  `MetadataFileReport.status`/`.format` carry no Pydantic constraint at all
+  (D96's trap), so a garbage value from either is validated against
+  `FILE_STATUSES`/a local content-type allow-list (mirroring
+  `run_metadata_file.content_type`'s own SQL `CHECK`: `json`/`yaml`/`toml`)
+  and dropped whole on failure — the same D97-class-11 bucket the
+  `source_file` shape check already uses. Without this, a hostile or buggy
+  client's garbage `status`/`format` value would reach `record_session`
+  and raise the SQL `CHECK` mid-transaction, rolling back the run row with
+  it: exactly the outcome D97's governing rule forbids, and a real gap the
+  task's literal wording (only naming `source_file`) did not cover.
+- [x] 9.3 GREEN (PR9a): `metadata=_to_run_metadata(payload.metadata)`
+  wired into the `store.record_session(...)` call.
+- [x] 9.4 RED (PR9b, RQ-44): `test_ingestion.py` —
+  `test_a_report_whose_metadata_is_entirely_garbage_still_records_the_run`.
+  Confirmed RED (production code temporarily reverted via `git stash`):
+  the assertion on stored metadata rows failed (`frozenset() ==
+  frozenset({MetadataFile(...)})`) — the run itself was already stored
+  before Phase 9 (D15/D47's pre-existing skew tolerance), so only the
+  metadata-specific assertions are the genuine RED signal here, recorded
+  rather than silently treated as "the whole test was red."
+- [x] 9.5 RED (PR9b): one parametrized test per D97 row (11 cases:
+  `not_found`, `path_rejected`, `too_large`, `not_text`, `unreadable`,
+  `over_budget`, `malformed`, `absent`, `not_scalar`, `value_too_large`,
+  `server_side_shape_reject`), each asserting the exact `(file.status,
+  key.status)` pair via `vantage_port_contract`'s adapter-agnostic
+  `_stored_metadata_files`/`_stored_metadata_entries` introspection.
+  Confirmed RED against the same reverted production code: 11/11 taxonomy
+  cases failed except `server_side_shape_reject`, which passed trivially
+  (with `_to_run_metadata` not called at all, metadata is simply ignored,
+  so the "no rows" expectation happened to hold anyway) — the same
+  "trivial RED" shape this project's Phase 5 C1/C3 tests already
+  documented, recorded rather than silently treated as a gap.
+- [x] 9.6 GREEN (PR9a/PR9b): 9.2's classification already covers every row
+  9.5 exercises — confirmed by running 9.4/9.5 directly against PR9a's
+  already-landed code with zero further production changes needed.
+- [x] 9.7 RED (PR9c): `test_a_quoting_shaped_declared_key_round_trips_
+  byte_identically` (bound-parameters proof, mirroring
+  `test_routes_sections.py`'s own section-name proof) and
+  `test_a_crlf_shaped_metadata_key_never_appears_unescaped_in_a_rejection_
+  body` (an unknown field inside the `metadata` section's own
+  `extra="forbid"` model, routed through `errors.py`'s pre-existing
+  `safe_segment` allow-list). The round-trip test is a genuine RED against
+  reverted code (metadata ignored entirely, no entries stored); the CR/LF
+  test passes against both reverted and current code, since it exercises
+  Pydantic's pre-existing rejection path, not new Phase 9 production code
+  — recorded as a confirmation test, not a RED/GREEN pair.
+- [x] 9.8 Verify (PR9c): `uv run pytest packages/vantage/tests/test_
+  routes_runs.py packages/vantage/tests/test_ingestion.py` — 73 passed.
+
+### Full-suite regression per PR
+
+| PR | Full `uv run pytest` | mypy strict | deptry |
+|---|---|---|---|
+| PR9a | 707 passed (was 698) | clean, 93 files | clean |
+| PR9b | 719 passed (was 707) | clean, 93 files | clean |
+| PR9c | 725 passed (was 719) | clean, 93 files | clean |
+
+### Measured changed lines
+
+- **PR9a** (vs `ft/run-metadata-capture-08b-parse`): 266 changed lines
+  code+tests (128+1 `routes/runs.py`, 135+2 `test_routes_runs.py`) + 28
+  lines `tasks.md` bookkeeping (two commits) — well under budget.
+- **PR9b** (vs PR9a's branch): 269 changed lines (`test_ingestion.py`
+  only) — well under budget.
+- **PR9c** (vs PR9b's branch): 147 changed lines (`test_ingestion.py`
+  only) — well under budget.
+- **Total**: 682 code+tests + 28 bookkeeping = 710 changed lines across
+  three PRs, none individually over budget.
+
+### Deviations from Design
+
+**Two completeness additions beyond the task list's literal text**,
+both already recorded inline above: (1) task 9.1's wording names only
+`source_file`'s shape as the drop-whole trigger; this batch also drops
+whole for an unrecognised `status`/`format`, since D96 explicitly forbids
+any Pydantic constraint on either field and the SQL `CHECK` on both
+columns would otherwise be reachable from client-controlled wire content.
+(2) Task 9.7's CR/LF half is a **confirmation** test proving Phase 9's new
+`MetadataReport`/`MetadataFileReport` schemas inherit `errors.py`'s
+pre-existing `safe_segment` protection, not a RED-then-GREEN pair — no new
+production code was needed or written for it, which is itself the
+evidence the models are wired correctly into the existing rejection path.
+
+### Issues Found
+
+None beyond the two completeness additions above.
+
+### Git / PR state (this batch)
+
+- PR9a: https://github.com/guillegil/vantage/pull/100 — base
+  `ft/run-metadata-capture-08b-parse`, head
+  `ft/run-metadata-capture-09a-normalizer`. Open.
+- PR9b: https://github.com/guillegil/vantage/pull/101 — base PR9a's
+  branch, head `ft/run-metadata-capture-09b-taxonomy`. Open.
+- PR9c: base PR9b's branch, head `ft/run-metadata-capture-09c-threat-
+  matrix`. Opened this batch (see the apply-phase return summary for the
+  URL).
+- None merged yet — chain merges in order once every slice up to this one
+  is reviewed, per `feature-branch-chain`.
+
 ## Workload / PR Boundary
 
-- Mode: chained PR slices (`feature-branch-chain`); Phase 8 re-sliced from 1 planned PR into 2 for size, not by launch instruction
-- Current work unit: Phase 8 (server parse engine), complete
-- Boundary: starts from PR7c's tip (declared metadata read, bound and wired into both session writes) and ends with the server-side schemas and standalone parse module proven in isolation. Nothing calls `metadata_parse.parse` yet — route wiring, `_to_run_metadata` and ingestion are Phase 9
-- Estimated review budget impact: PR8a (190 lines) and PR8b (372 lines) are both comfortably under budget; no `size:exception` needed this batch
+- Mode: chained PR slices (`feature-branch-chain`); Phase 9 re-sliced from
+  1 planned PR into 3 for size, not by launch instruction
+- Current work unit: Phase 9 (server ingest wiring), complete
+- Boundary: starts from PR8b's tip (server-side schemas and standalone
+  parse module, proven in isolation, nothing calling them yet) and ends
+  with `_to_run_metadata` wired into `record_session`, every D97 taxonomy
+  row proven end-to-end, RQ-44 proven, and the D96 quoting/CRLF threat
+  matrix closed. Phase 10 (read filter) and Phase 11 (RQ-25 measurement)
+  are explicitly out of scope for this batch
+- Estimated review budget impact: PR9a (266 lines), PR9b (269 lines) and
+  PR9c (147 lines) are all comfortably under budget; no `size:exception`
+  needed this batch
 
 ## Remaining Tasks
 
-Phase 9 (server ingest wiring) through Phase 11 (RQ-25 measurement + docs)
-— see tasks.md. The next PR targets `ft/run-metadata-capture-08b-parse`
-(this batch's last branch) for Phase 9, which needs PR4's port, PR7's wire
-section and PR8's schemas/parser — all satisfied transitively by the chain.
+Phase 10 (read filter) and Phase 11 (RQ-25 measurement + docs) — see
+tasks.md. The next PR targets `ft/run-metadata-capture-09c-threat-matrix`
+(this batch's last branch) for Phase 10, which needs PR2's schema and
+PR9's wiring — both satisfied transitively by the chain.
 
 ## Status
 
-46/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
-Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6) and Phase 8
-(6/6, this batch). PR1 through PR8b open and green, not merged (chain
-merges in order at the end). Ready for the next `sdd-apply` batch (Phase 9:
-server ingest wiring).
+54/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
+Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6), Phase 8 (6/6)
+and Phase 9 (8/8, this batch). PR1 through PR9c open and green, not merged
+(chain merges in order at the end). Ready for the next `sdd-apply` batch
+(Phase 10: read filter).
