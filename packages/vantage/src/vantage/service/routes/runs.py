@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from pathlib import PurePath
 from typing import overload
 
 from fastapi import APIRouter, Path, Request
@@ -52,7 +53,10 @@ from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
 from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.domain.metadata import FILE_STATUSES
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
+from vantage.core.ports.storage import EMPTY_RUN_METADATA, MetadataEntry, MetadataFile, RunMetadata
+from vantage.service import metadata_parse
 from vantage.service.errors import (
     MAX_REPORT_BYTES,
     IncompleteBodyError,
@@ -66,6 +70,7 @@ from vantage.service.errors import (
 from vantage.service.schemas import (
     Acknowledgement,
     HeartbeatAcknowledgement,
+    MetadataReport,
     ResultReport,
     RunReport,
     SessionReport,
@@ -77,6 +82,23 @@ router = APIRouter()
 
 _JSON_MEDIA_TYPE = "application/json"
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
+
+_KNOWN_METADATA_CONTENT_TYPES = frozenset({"json", "yaml", "toml"})
+"""Mirrors `run_metadata_file.content_type`'s SQL `CHECK` exactly
+(schema.sql). `MetadataFileReport.format` carries no Pydantic constraint
+(design.md D96's trap), so a value outside this set can never be written --
+rather than let it reach `record_session` and raise a
+`sqlite3.IntegrityError` mid-transaction (rolling back the run row with it,
+the exact outcome D97's governing rule forbids), the whole file entry is
+dropped: the same "well-behaved plugin cannot produce this" bucket D97
+class 11 already uses for a rejected `source_file`."""
+
+_MAX_DECLARED_PATH_CHARS = 1024
+"""Mirrors `pytest_vantage.metadata.MAX_DECLARED_PATH_CHARS` (design.md D94)
+across the RQ-24/ADR-4 package boundary -- `vantage` cannot import
+`pytest-vantage`, so the two distributions each carry their own copy of this
+bound, the same second-mechanism discipline the two storage adapters already
+use for each other (design.md D98)."""
 
 
 @overload
@@ -133,6 +155,110 @@ def _to_vcs_context(vcs: VcsReport | None) -> VcsContext | None:
         dirty=vcs.dirty,
         root=vcs.root,
     )
+
+
+def _declared_path_shape_is_valid(path: str) -> bool:
+    """D93's server-side re-check: the server has no access to the client's
+    filesystem, so containment itself cannot be re-verified here -- only
+    shape. `source_file` must be short, relative, and free of `..`, the
+    three properties `pytest_vantage.metadata.resolve_declared_path` also
+    checks before ever touching a disk. A path failing this is dropped
+    whole (D97 class 11), never rejected."""
+    if len(path) > _MAX_DECLARED_PATH_CHARS:
+        return False
+    candidate = PurePath(path)
+    if candidate.is_absolute() or candidate.drive or candidate.anchor:
+        return False
+    return ".." not in candidate.parts
+
+
+def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
+    """Normalises the `metadata` section (design.md D96, D97, D98),
+    following `_to_vcs_context`'s shape: `None` when the section is absent.
+
+    Every declared file becomes exactly one `MetadataFile` row and every one
+    of its declared keys becomes exactly one `MetadataEntry` row, whether or
+    not either was captured (D95) -- drop-whole everywhere, `truncate()` is
+    never called, and this function never raises. A file whose `source_file`
+    fails the server's own shape re-check, or whose unconstrained `status`/
+    `format` fields (D96's trap) are not values this server can ever write,
+    is dropped in its entirety: neither it nor its keys produce a row (D97
+    class 11 and its two wire-shape siblings) -- a well-behaved plugin
+    cannot produce any of these.
+    """
+    if metadata is None:
+        return EMPTY_RUN_METADATA
+
+    files: list[MetadataFile] = []
+    entries: list[MetadataEntry] = []
+
+    for file_report in metadata.files:
+        if (
+            not _declared_path_shape_is_valid(file_report.path)
+            or file_report.format not in _KNOWN_METADATA_CONTENT_TYPES
+            or file_report.status not in FILE_STATUSES
+        ):
+            continue
+
+        if file_report.status != "captured" or file_report.content is None:
+            # D97 classes 1-6: the plugin's own status is trusted verbatim
+            # -- the server has no way to verify it independently.
+            files.append(
+                MetadataFile(
+                    source_file=file_report.path,
+                    content_type=file_report.format,
+                    status=file_report.status,
+                )
+            )
+            entries.extend(
+                MetadataEntry(
+                    key=key,
+                    value=None,
+                    source_file=file_report.path,
+                    status="source_unavailable",
+                )
+                for key in file_report.keys
+            )
+            continue
+
+        parsed = metadata_parse.parse(file_report.content, file_report.format, file_report.keys)
+        if parsed is None:
+            # D97 class 7: server-detected parse failure.
+            files.append(
+                MetadataFile(
+                    source_file=file_report.path,
+                    content_type=file_report.format,
+                    status="malformed",
+                )
+            )
+            entries.extend(
+                MetadataEntry(
+                    key=key,
+                    value=None,
+                    source_file=file_report.path,
+                    status="source_unavailable",
+                )
+                for key in file_report.keys
+            )
+            continue
+
+        # D97 classes 8-10, plus the `captured` case: `metadata_parse.parse`
+        # already classified every declared key against the document.
+        files.append(
+            MetadataFile(
+                source_file=file_report.path,
+                content_type=file_report.format,
+                status="captured",
+            )
+        )
+        entries.extend(
+            MetadataEntry(
+                key=key, value=result.value, source_file=file_report.path, status=result.status
+            )
+            for key, result in parsed.items()
+        )
+
+    return RunMetadata(files=tuple(files), entries=tuple(entries))
 
 
 def _to_execution(run: RunReport, vcs: VcsReport | None) -> Execution:
@@ -333,9 +459,10 @@ async def create_run(request: Request) -> JSONResponse:
     execution = _to_execution(payload.run, payload.vcs)
     reported_results = payload.results or []
     results = [_to_result(item) for item in reported_results]
+    metadata = _to_run_metadata(payload.metadata)
 
     created = store.record_session(
-        execution, results=results, received_at=datetime.now(timezone.utc)
+        execution, results=results, received_at=datetime.now(timezone.utc), metadata=metadata
     )
 
     acknowledgement = Acknowledgement(
