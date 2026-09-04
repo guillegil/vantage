@@ -156,12 +156,25 @@ boundary.
 
 ## Phase 8 (PR8 → PR2, PR3): Server parse engine
 
-- [ ] 8.1 RED: `test_schemas.py` — `MetadataFileReport`/`MetadataReport` accept a declared value of arbitrary length and content without raising; **no `max_length`, no pattern, no constraint of any kind** on any field in the metadata section (the D96 trap, made a falsifier before it can be committed by accident).
-- [ ] 8.2 GREEN: `service/schemas.py` — `MetadataFileReport`, `MetadataReport` (`extra="forbid"`, matching `VcsReport`), `SessionReport.metadata: MetadataReport | None` (envelope stays `extra="ignore"`, D96).
-- [ ] 8.3 RED: `test_metadata_parse.py` (new) — malformed YAML, malformed JSON, 1,000-deep JSON nesting (`RecursionError`, not `JSONDecodeError`), a YAML alias-expansion bomb that `safe_load` would expand and `compose` does not (bounded wall-time asserted), a `!!python/object/apply` document yields `malformed` and executes nothing, a non-scalar value, an absent key, a value over `MAX_METADATA_VALUE_BYTES`.
-- [ ] 8.4 GREEN: create `packages/vantage/src/vantage/service/metadata_parse.py` — the **only** module importing `yaml`; `yaml.compose()` + walk top-level `ScalarNode`s only (never `safe_load`/`load`); `json.loads`; catch `YAMLError`, `JSONDecodeError`, `RecursionError` → all become class 7 `malformed` (D97).
-- [ ] 8.5 GREEN: `packages/vantage/pyproject.toml` — add `PyYAML` to `vantage.service`'s dependencies only.
-- [ ] 8.6 Verify: `uv run pytest packages/vantage/tests/test_metadata_parse.py packages/vantage/tests/test_schemas.py`; `uv run deptry .` — PyYAML declared and used in `vantage` only, never in `pytest-vantage`.
+**Re-sliced at apply time into two PRs**, not one — the combined 8.1-8.6
+diff measured 562 changed lines against `ft/run-metadata-capture-07c-wire`,
+40% over the 400-line budget, before any bookkeeping. An honest seam
+existed — `metadata_parse.py` does not import or depend on
+`MetadataFileReport`/`MetadataReport` at all, and the schemas do not depend
+on the parser either — so it was cut once rather than accepting a
+`size:exception` where a real seam was available (the same reasoning
+Phase 7 used to cut its own oversized combined diff). Chain:
+`ft/run-metadata-capture-08a-schemas` (8.1/8.2 → PR7c/`ft/run-metadata-
+capture-07c-wire`), `ft/run-metadata-capture-08b-parse` (8.3/8.4/8.5/8.6 →
+PR8a). Both land comfortably under budget on their own (190 and 372
+changed lines respectively).
+
+- [x] 8.1 RED (PR8a): `test_schemas.py` — `MetadataFileReport`/`MetadataReport` accept a declared value of arbitrary length and content without raising; **no `max_length`, no pattern, no constraint of any kind** on any field in the metadata section (the D96 trap, made a falsifier before it can be committed by accident).
+- [x] 8.2 GREEN (PR8a): `service/schemas.py` — `MetadataFileReport`, `MetadataReport` (`extra="forbid"`, matching `VcsReport`), `SessionReport.metadata: MetadataReport | None` (envelope stays `extra="ignore"`, D96). `service/openapi/v1.yaml`'s `SessionReport` schema gains the same `metadata` property in the same commit — required by the existing schema-binding drift check, not a scope addition.
+- [ ] 8.3 RED (PR8b): `test_metadata_parse.py` (new) — malformed YAML, malformed JSON, 1,000-deep JSON nesting (`RecursionError`, not `JSONDecodeError`), a YAML alias-expansion bomb that `safe_load` would expand and `compose` does not (bounded wall-time asserted), a `!!python/object/apply` document yields `malformed` and executes nothing, a non-scalar value, an absent key, a value over `MAX_METADATA_VALUE_BYTES`.
+- [ ] 8.4 GREEN (PR8b): create `packages/vantage/src/vantage/service/metadata_parse.py` — the **only** module importing `yaml`; `yaml.compose()` + walk top-level `ScalarNode`s only (never `safe_load`/`load`); `json.loads`; catch `YAMLError`, `JSONDecodeError`, `RecursionError` → all become class 7 `malformed` (D97).
+- [ ] 8.5 GREEN (PR8b): `packages/vantage/pyproject.toml` — add `PyYAML` to `vantage.service`'s dependencies only.
+- [ ] 8.6 Verify (PR8b): `uv run pytest packages/vantage/tests/test_metadata_parse.py packages/vantage/tests/test_schemas.py`; `uv run deptry .` — PyYAML declared and used in `vantage` only, never in `pytest-vantage`.
 
 ## Phase 9 (PR9 → PR4, PR7, PR8): Server ingest wiring
 
