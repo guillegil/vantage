@@ -885,3 +885,150 @@ def test_metadata_taxonomy_class_produces_the_exact_status_pair(
         frozenset({expected_file}) if expected_file is not None else frozenset()
     )
     assert _stored_metadata_entries(store, run_id) == expected_entries
+
+
+def test_a_declared_key_within_bound_is_captured_whole(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Scenario: A value within bound is stored whole, `session-ingestion`)*."""
+    run_id = "9" + "5" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content=json.dumps({"firmware_version": "2.1"}), keys=["firmware_version"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_entries(store, run_id) == frozenset(
+        {
+            MetadataEntry(
+                key="firmware_version",
+                value="2.1",
+                source_file="config/firmware.json",
+                status="captured",
+            )
+        }
+    )
+
+
+def test_a_report_with_no_metadata_section_still_records_its_run(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Scenario: A report with no metadata section still records its run,
+    `session-ingestion`)*."""
+    run_id = "9" + "6" * 31
+    report = _well_formed_report(run_id)
+    assert "metadata" not in report
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert store.get_execution(run_id) is not None
+    assert _stored_metadata_files(store, run_id) == frozenset()
+    assert _stored_metadata_entries(store, run_id) == frozenset()
+
+
+def test_a_yaml_declared_document_is_parsed(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Scenario: A YAML declared document is parsed, `session-ingestion`)*."""
+    run_id = "9" + "7" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(
+            path="config/firmware.yaml",
+            format="yaml",
+            content='firmware_version: "2.1"\n',
+            keys=["firmware_version"],
+        )
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_entries(store, run_id) == frozenset(
+        {
+            MetadataEntry(
+                key="firmware_version",
+                value="2.1",
+                source_file="config/firmware.yaml",
+                status="captured",
+            )
+        }
+    )
+
+
+def test_an_unsupported_format_is_treated_as_malformed(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Scenario: An unsupported format is treated as malformed,
+    `session-ingestion`)*. `toml` is a valid `run_metadata_file.content_type`
+    (schema.sql's own `CHECK`) that `metadata_parse.parse` does not
+    implement -- the same "server does not parse it" outcome D97 class 7
+    covers for a genuinely broken document."""
+    run_id = "9" + "8" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(format="toml", content="firmware_version = 2.1", keys=["firmware_version"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_files(store, run_id) == frozenset(
+        {MetadataFile(source_file="config/firmware.json", content_type="toml", status="malformed")}
+    )
+
+
+# --- Phase 9: threat matrix (design.md, task 9.7) ---------------------------
+
+
+def test_a_quoting_shaped_declared_key_round_trips_byte_identically(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Threat matrix: "Client-chosen text reaching SQL" -- bound parameters
+    only, mirroring `test_routes_sections.py`'s own proof for section names.
+    A declared key containing quote characters is stored and read back
+    through the port intact, never escaped or normalised."""
+    run_id = "8" + "0" * 31
+    key = 'He said "hi", didn\'t he?'
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content=json.dumps({key: "value"}), keys=[key])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_entries(store, run_id) == frozenset(
+        {
+            MetadataEntry(
+                key=key, value="value", source_file="config/firmware.json", status="captured"
+            )
+        }
+    )
+
+
+def test_a_crlf_shaped_metadata_key_never_appears_unescaped_in_a_rejection_body(
+    client: TestClient,
+) -> None:
+    """Threat matrix: "Client-chosen text reaching a rejection body" -- an
+    unknown field within the `metadata` section (`extra="forbid"`,
+    design.md D96) is client-chosen text of the same shape a declared key
+    could carry. `errors.py`'s pre-existing `safe_segment` allow-list, not
+    new code in this phase, is what keeps it out of the response body."""
+    run_id = "8" + "1" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = {
+        "declaration": "vantage-metadata.json",
+        "files": [],
+        "\r\n</script>\r\nX-Injected: 1": "hostile",
+    }
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 422
+    body = response.text
+    assert "\r\n</script>" not in body
+    assert "X-Injected" not in body
