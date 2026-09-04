@@ -27,12 +27,15 @@ paths:
       operationId: list_runs
       tags: [read]
       summary: Page through recorded runs, newest first.
+      description: metadata_key and metadata_value together filter to runs holding that declared key=value pair (design.md D100) -- both or neither, one without the other is 422. A run recorded before the key was ever declared has no value for it and is excluded.
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
+        - {name: metadata_key, in: query, required: false, schema: {type: string}}
+        - {name: metadata_value, in: query, required: false, schema: {type: string}}
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
-        "422": {description: limit below 1 or offset below 0 -- not a page.}
+        "422": {description: "limit below 1 or offset below 0 -- not a page; or metadata_key/metadata_value supplied without its pair."}
   /runs/{run_id}:
     get:
       operationId: get_run_detail

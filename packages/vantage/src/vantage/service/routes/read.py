@@ -33,6 +33,17 @@ outcome, timings and a lean `FailureProjection`, never the full
 `FailureEvidence` or captured output. The new route reads the whole stored
 `Result` via `store.get_result` and returns every field, unbounded,
 matching `node_id`'s existing query-value treatment on `/tests/history`.
+
+**Phase 10** widens `GET /api/v1/runs` with `metadata_key`/`metadata_value`
+(design.md D100) -- the product this whole change exists for: "every run
+where `firmware_version` is 2.1." Two query parameters, never one
+`key=value` string, because a value may itself contain `=` (D54/D87); both
+or neither, one without the other is `InvalidMetadataFilterError`, the read
+path's only new rejection kind. `store.list_runs` is *extended* with the
+filter, not joined by a second method, so it stays the one page over the
+one total order D61 already settled. Q2's horizon -- how many runs predate
+the filtered key -- is a follow-on slice on top of this one (design.md D100
+still governs both).
 """
 
 from __future__ import annotations
@@ -54,7 +65,7 @@ from vantage.core.ports.storage import (
     RunDetail,
     RunListEntry,
 )
-from vantage.service.errors import UnknownResultError, UnknownRunError
+from vantage.service.errors import InvalidMetadataFilterError, UnknownResultError, UnknownRunError
 from vantage.service.schemas import (
     FailureProjectionResponse,
     HistoryEntryResponse,
@@ -239,14 +250,28 @@ async def list_runs(
     request: Request,
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0),
+    metadata_key: str | None = Query(default=None),
+    metadata_value: str | None = Query(default=None),
 ) -> RunListResponse:
-    """`GET /api/v1/runs` (design.md D57, D61). `limit`/`offset` are shape-
-    validated here (`limit <= 0` is `422`, "not a page size" -- D61); the
-    200-item cap itself is enforced by `store.list_runs`, not re-clamped
+    """`GET /api/v1/runs` (design.md D57, D61, D100). `limit`/`offset` are
+    shape-validated here (`limit <= 0` is `422`, "not a page size" -- D61);
+    the 200-item cap itself is enforced by `store.list_runs`, not re-clamped
     here, but the default `limit` already keeps the cap holding through the
-    HTTP layer even when a caller sends none."""
+    HTTP layer even when a caller sends none.
+
+    `metadata_key`/`metadata_value` (design.md D100) are both-or-neither --
+    checked here, before either reaches the store, since it is a cross-field
+    rule FastAPI's own parameter binding cannot express for two independently
+    optional query values. Q2's horizon is a follow-on slice on top of this
+    one (module docstring)."""
+    if (metadata_key is None) != (metadata_value is None):
+        raise InvalidMetadataFilterError(
+            "metadata_value" if metadata_key is not None else "metadata_key"
+        )
     store = request.app.state.store
-    page = store.list_runs(limit=limit, offset=offset)
+    page = store.list_runs(
+        limit=limit, offset=offset, metadata_key=metadata_key, metadata_value=metadata_value
+    )
     now = datetime.now(timezone.utc)
     grace = timedelta(seconds=request.app.state.grace_period)
     items = [_run_list_item(entry, now=now, grace=grace) for entry in page.items]

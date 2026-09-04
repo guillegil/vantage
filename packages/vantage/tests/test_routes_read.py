@@ -37,7 +37,15 @@ from fastapi.testclient import TestClient
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, LIST_FAILURE_MESSAGE_CHARS
 from vantage.core.domain.result import CaseIdentity, Result
-from vantage.core.ports.storage import MAX_IDENTITY_CHARS, ExecutionStore, HistoryEntry, Page
+from vantage.core.ports.storage import (
+    MAX_IDENTITY_CHARS,
+    ExecutionStore,
+    HistoryEntry,
+    MetadataEntry,
+    MetadataFile,
+    Page,
+    RunMetadata,
+)
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -109,6 +117,19 @@ def _vcs(
         commit_subject_truncated=commit_subject_truncated,
         dirty=dirty,
         root=root,
+    )
+
+
+def _captured_metadata(
+    key: str, value: str, *, source_file: str = "config/firmware.yaml"
+) -> RunMetadata:
+    """One declared, captured `key=value` pair, plus the file row D95
+    requires alongside it (design.md D91, D98) -- the shape `store.list_runs`'
+    `metadata_key`/`metadata_value` filter and its horizon count are read
+    through (design.md D100)."""
+    return RunMetadata(
+        files=(MetadataFile(source_file=source_file, content_type="yaml", status="captured"),),
+        entries=(MetadataEntry(key=key, value=value, source_file=source_file, status="captured"),),
     )
 
 
@@ -1360,3 +1381,72 @@ def test_list_response_carries_the_truncation_flag_beside_its_subject(
     capture_truncated = items[capture_truncated_run]["vcs"]
     assert capture_truncated["commit_subject"] == short_subject
     assert capture_truncated["commit_subject_truncated"] is True
+
+
+# --- 10.1 -----------------------------------------------------------------
+
+
+def test_run_list_metadata_filter_returns_only_matching_runs(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(history-read-api -> Exact key=value equality filter -> A key=value
+    filter returns matching runs)*. Served by `idx_run_metadata_key_value`,
+    left-anchored on `key` (design.md D100) -- a run declaring the same key
+    at a different value must not match."""
+    now = datetime.now(timezone.utc)
+    matching_run = _run_id(100)
+    other_value_run = _run_id(101)
+    store.record_session(
+        _execution(matching_run, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+        metadata=_captured_metadata("firmware_version", "2.1"),
+    )
+    store.record_session(
+        _execution(other_value_run, started_at=now - timedelta(minutes=30), finished_at=now),
+        results=[],
+        received_at=now - timedelta(minutes=30),
+        metadata=_captured_metadata("firmware_version", "3.0"),
+    )
+
+    response = client.get(
+        "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
+    )
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [matching_run]
+
+
+def test_run_list_metadata_filter_requires_both_params_together(client: TestClient) -> None:
+    """*(design.md D100 -- two query parameters, never one `key=value`
+    string: a value may itself contain `=`, D54/D87. Both or neither -- one
+    without the other is `422 invalid_metadata_filter`.)*."""
+    key_only = client.get("/api/v1/runs", params={"metadata_key": "firmware_version"})
+    value_only = client.get("/api/v1/runs", params={"metadata_value": "2.1"})
+
+    assert key_only.status_code == 422
+    assert key_only.json()["error"] == "invalid_metadata_filter"
+    assert key_only.json()["fields"] == ["metadata_value"]
+    assert value_only.status_code == 422
+    assert value_only.json()["error"] == "invalid_metadata_filter"
+    assert value_only.json()["fields"] == ["metadata_key"]
+
+
+def test_run_list_unknown_metadata_key_yields_empty_match_not_an_error(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(history-read-api -> Exact key=value equality filter -> An unknown
+    key or value yields an empty match, not an error)*."""
+    now = datetime.now(timezone.utc)
+    store.record_session(
+        _execution(_run_id(102), started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(
+        "/api/v1/runs", params={"metadata_key": "never_declared", "metadata_value": "anything"}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["items"] == []

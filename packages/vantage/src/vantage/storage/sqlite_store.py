@@ -187,6 +187,33 @@ _LIST_RUNS = """
     LIMIT ? OFFSET ?
 """
 
+# The `metadata_key`/`metadata_value`-filtered sibling of `_LIST_RUNS`
+# (design.md D100) -- same columns, same total order, one `WHERE EXISTS`
+# added rather than a second, diverging query. The subquery is served by
+# `idx_run_metadata_key_value`: SQLite can seek `rm.key = ?` and, within that,
+# `rm.value = ?` directly off the index without touching `run_metadata`'s
+# table rows at all. `rm.value = ?` also does the status filtering for free
+# -- `value` is NULL for any non-`'captured'` row (schema.sql), and SQL NULL
+# never equals a bound string, so a declared-but-dropped entry can never
+# satisfy this filter by accident.
+_LIST_RUNS_BY_METADATA = """
+    SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
+           last_contact_at,
+           vcs_commit, vcs_branch,
+           substr(vcs_commit_subject, 1, ?)                             AS commit_subject,
+           CASE WHEN vcs_commit_subject_truncated = 1
+                  OR COALESCE(length(vcs_commit_subject) > ?, 0) = 1
+                THEN 1 ELSE 0 END                                       AS commit_subject_truncated,
+           vcs_dirty, vcs_root
+    FROM run
+    WHERE EXISTS (
+        SELECT 1 FROM run_metadata rm
+        WHERE rm.run_id = run.id AND rm.key = ? AND rm.value = ?
+    )
+    ORDER BY started_at DESC, id DESC
+    LIMIT ? OFFSET ?
+"""
+
 # Conflict target is `node_id` -- the Phase 1 identity key (schema.sql
 # comment). `stable_id` carries the identical string in Phase 1, so its own
 # UNIQUE index cannot be violated by the row this statement updates.
@@ -1027,20 +1054,40 @@ class SqliteExecutionStore:
             return None
         return _row_to_catalogue_entry(row)
 
-    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+    def list_runs(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        metadata_key: str | None = None,
+        metadata_value: str | None = None,
+    ) -> Page[RunListEntry]:
         # Fetch `min(limit, 200) + 1` rows (design.md D61): the extra row is
         # what distinguishes a truncated page from an exhausted one without
         # a second `COUNT` query that could race the first.
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        rows = self._conn.execute(
-            _LIST_RUNS,
-            (
-                LIST_COMMIT_SUBJECT_CHARS,
-                LIST_COMMIT_SUBJECT_CHARS,
-                page_limit + 1,
-                offset,
-            ),
-        ).fetchall()
+        if metadata_key is not None and metadata_value is not None:
+            rows = self._conn.execute(
+                _LIST_RUNS_BY_METADATA,
+                (
+                    LIST_COMMIT_SUBJECT_CHARS,
+                    LIST_COMMIT_SUBJECT_CHARS,
+                    metadata_key,
+                    metadata_value,
+                    page_limit + 1,
+                    offset,
+                ),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                _LIST_RUNS,
+                (
+                    LIST_COMMIT_SUBJECT_CHARS,
+                    LIST_COMMIT_SUBJECT_CHARS,
+                    page_limit + 1,
+                    offset,
+                ),
+            ).fetchall()
         has_more = len(rows) > page_limit
         items = tuple(_row_to_run_list_entry(row) for row in rows[:page_limit])
         return Page(items=items, has_more=has_more)
