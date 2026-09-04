@@ -214,6 +214,23 @@ _LIST_RUNS_BY_METADATA = """
     LIMIT ? OFFSET ?
 """
 
+# Q2's horizon, first half (design.md D100): the earliest `started_at` among
+# runs holding ANY `run_metadata` row for `key`, of any status -- left-
+# anchored on `key` alone, so this is the same `idx_run_metadata_key_value`
+# seeked on its leading column only, not the two-column point lookup
+# `_LIST_RUNS_BY_METADATA` performs.
+_METADATA_KEY_FIRST_SEEN = """
+    SELECT MIN(run.started_at)
+    FROM run_metadata rm
+    JOIN run ON run.id = rm.run_id
+    WHERE rm.key = ?
+"""
+
+# Q2's horizon, second half: how many runs are strictly older than
+# `first_seen` -- served by `idx_run_started_at`, the same index `_LIST_RUNS`
+# already orders by.
+_COUNT_RUNS_BEFORE = "SELECT COUNT(*) FROM run WHERE started_at < ?"
+
 # Conflict target is `node_id` -- the Phase 1 identity key (schema.sql
 # comment). `stable_id` carries the identical string in Phase 1, so its own
 # UNIQUE index cannot be violated by the row this statement updates.
@@ -1091,6 +1108,14 @@ class SqliteExecutionStore:
         has_more = len(rows) > page_limit
         items = tuple(_row_to_run_list_entry(row) for row in rows[:page_limit])
         return Page(items=items, has_more=has_more)
+
+    def count_runs_predating_metadata_key(self, key: str) -> int:
+        row = self._conn.execute(_METADATA_KEY_FIRST_SEEN, (key,)).fetchone()
+        first_seen = row[0] if row else None
+        if first_seen is None:
+            return self.count_executions()
+        before = self._conn.execute(_COUNT_RUNS_BEFORE, (first_seen,)).fetchone()
+        return int(before[0])
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         row = self._conn.execute(_SELECT_RUN_DETAIL, (execution_id,)).fetchone()

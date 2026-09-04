@@ -254,6 +254,24 @@ class InMemoryExecutionStore:
         )
         return Page(items=items, has_more=has_more)
 
+    def count_runs_predating_metadata_key(self, key: str) -> int:
+        # Q2's horizon (design.md D100): ANY row for `key`, of any status,
+        # counts towards `first_seen` -- mirroring the SQLite adapter's
+        # `run_metadata` join, which does not filter on `value` either.
+        run_ids_with_key = {
+            run_id for (run_id, entry_key) in self._metadata_entries if entry_key == key
+        }
+        if not run_ids_with_key:
+            return len(self._executions)
+        first_seen = min(
+            self._executions[run_id].started_at
+            for run_id in run_ids_with_key
+            if run_id in self._executions
+        )
+        return sum(
+            1 for execution in self._executions.values() if execution.started_at < first_seen
+        )
+
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         execution = self._executions.get(execution_id)
         if execution is None:

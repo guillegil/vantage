@@ -348,12 +348,25 @@ class RunListItemResponse(BaseModel):
     vcs: RunVcsResponse | None
 
 
+class MetadataHorizonResponse(BaseModel):
+    """`RunListResponse.metadata_horizon`'s populated shape (design.md D100,
+    Q2) -- present only when a metadata filter was supplied. `predating` is
+    the count of runs recorded before `key` was ever declared, which equals
+    the total run count when `key` was never declared at all: "every run
+    predates this key; it has never been declared.\""""
+
+    key: str
+    predating: int
+
+
 class RunListResponse(BaseModel):
     """The response body for `GET /api/v1/runs` (design.md D58 -- no
-    `total`)."""
+    `total`; D100 -- `metadata_horizon`, `None` when no metadata filter was
+    given: a query with no metadata filter has no horizon to report)."""
 
     items: list[RunListItemResponse]
     has_more: bool
+    metadata_horizon: MetadataHorizonResponse | None
 
 
 class RunDetailResponse(BaseModel):
