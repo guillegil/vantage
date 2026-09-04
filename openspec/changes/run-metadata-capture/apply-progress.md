@@ -842,30 +842,150 @@ defer it to `sdd-verify`.
 - None merged yet — chain merges in order once every slice up to this one
   is reviewed, per `feature-branch-chain`.
 
+## Batch: Phase 11 (PR11a/PR11b) — RQ-25 measurement + docs, final phase
+
+**Scope**: all of Phase 11 (tasks 11.1-11.5), per this launch's explicit
+scope narrowing to Phase 11 only. **This is the last phase of the change.**
+
+### Re-slicing rationale
+
+The combined diff (harness script + measured numbers + spec paragraph +
+README + test marker) measured 459 changed lines against PR10b, 15% over
+the 400-line budget. An honest seam existed, the same shape Phases 7-10
+already used: the harness script is independently complete and runnable
+without the docs that transcribe its output, only the reverse. Cut into
+two PRs rather than accepting a `size:exception`:
+
+- `ft/run-metadata-capture-11a-measurement-script` (script alone → PR10b,
+  #104) — 355 changed lines
+- `ft/run-metadata-capture-11b-docs` (measured numbers + spec + README +
+  test marker → PR11a) — 104 changed lines
+
+### Tasks completed
+
+- [x] 11.1 (PR11a): `scripts/measure_metadata_overhead.py`, copying
+  `measure_vcs_overhead.py`'s shape. Three arms: A = `--vantage` alone;
+  B = `--vantage --vantage-metadata` against the worst legitimate
+  declaration (`MAX_DECLARED_FILES`=16 files at `MAX_DECLARED_FILE_BYTES`
+  =8 KiB each), interleaved with A (5 pairs) to isolate this change's own
+  added cost; C = the flag alone with nothing declared (Q3's warn path),
+  measured separately afterward since it needs the declaration file
+  absent rather than present — cannot share the same interleaved pass as
+  B without swapping declaration state on every single run.
+  **Verified end to end, not just "subprocess exits 0"**: before trusting
+  the harness, ran a one-off `--vantage --vantage-metadata` session
+  against a real in-process server and inspected the store directly —
+  `MetadataFile`/`MetadataEntry` rows for all 3 smoke-test files landed
+  with `status="captured"`, confirming the worst-case declaration is
+  genuinely read and its keys genuinely persisted before benchmarking it.
+- [x] 11.2 Ran the script for real. **Result, not tuned to be
+  favourable** (explicit launch instruction, honored): the four B-A
+  deltas are -20.5ms (-0.18%, this-repo/10ms), -14.2ms (-0.85%,
+  this-repo/1ms), -26.5ms (-0.23%, synthetic/10ms), +29.4ms (+1.71%,
+  synthetic/1ms). Three of four negative — metadata capture cannot make
+  a session faster, so this is process-spawn noise, not a real effect,
+  consistent with D102's own <2ms forecast sitting an order of magnitude
+  below what a 5-pair subprocess benchmark can resolve. No re-runs were
+  made to chase a cleaner number.
+- [x] 11.3 (PR11b): `run-metadata/spec.md`'s Measurements paragraph,
+  matching `version-control-context`'s house style — full table, the
+  "neither falsified nor confirmed" framing, the standing re-measure
+  sentence. `@pytest.mark.req(id="RQ-25")` added to
+  `test_metadata_section_is_identical_on_both_reports`
+  (`test_run_report.py`) instead of a new assertion — its
+  `assert call_count[0] == 1` already proves the O(1)-per-session shape
+  claim D102 depends on, no test asserts a raw percentage (RQ-25 is
+  Analysis, not Test, per CLAUDE.md's own taxonomy), and this mirrors
+  exactly how `test_git_invocation_count_does_not_scale_with_test_count`
+  carries the marker for `vcs`.
+- [x] 11.4 (PR11b): README — `--vantage-metadata` in the usage block, a
+  new paragraph describing the declaration file, its JSON shape, path
+  containment, and the "reads and uploads a file a co-worker named"
+  disclosure, alongside the existing `--vantage-failure-text` one.
+- [x] 11.5 (PR11b): Recorded the number regardless of the budget verdict.
+  **Also recorded, unprompted by the task's own literal wording**: RQ-25's
+  normative 2% budget text does not exist anywhere in this repository —
+  verified by inspection before writing anything, not assumed from the
+  launch prompt. `openspec/specs/version-control-context/spec.md:154-158`
+  reads its own 4.11%/4.17% (1ms profile) results as "still inside RQ-25's
+  2% budget," arithmetically false for those two rows;
+  `docs/open-questions.md:133-141` reads the identical numbers as a
+  breach and computes ~55ms of headroom from that reading. **Neither
+  document was touched.** The new Measurements paragraph names the
+  contradiction explicitly and states this change's own cost rides atop
+  an already-breached 1ms-profile baseline — a human decision, not one
+  made silently inside this batch.
+
+### Full-suite regression per PR
+
+| PR | Full `uv run pytest` | mypy strict | deptry | `req(id="RQ-25")` |
+|---|---|---|---|---|
+| PR11a | 739 passed (unchanged from PR10b — no production code) | clean, 94 files | clean | 4 (unchanged) |
+| PR11b | 739 passed (marker only, no behavior change) | clean, 94 files | clean | 5 (new marker collects) |
+
+### Measured changed lines
+
+- **PR11a** (vs `ft/run-metadata-capture-10b-horizon`): 355 insertions,
+  1 deletion (tasks.md checkbox) = 355 changed lines — under budget.
+- **PR11b** (vs PR11a's branch): 104 insertions, 4 deletions = 104 changed
+  lines — under budget, no `size:exception` needed.
+- **Total**: 459 changed lines across two PRs, neither individually over
+  budget.
+
+### Deviations from Design
+
+Arm labeling in task 11.1's literal wording ("arm B = `--vantage
+--vantage-metadata`; arm C = worst legitimate declaration") is read here
+as the reverse pairing: B carries the worst-case declaration (interleaved
+with A, since D102's own reasoning for the three-arm design is to isolate
+this change's cost against a shared baseline) and C is the flag alone
+with nothing declared (measured separately, since it needs the opposite
+filesystem state from B). No other deviation — the harness shape, the two
+RQ-25 profiles, the five-pair interleaving and the medians-not-means rule
+all match `measure_vcs_overhead.py` and design.md D102 exactly.
+
+### Issues Found
+
+None new. `MAX_METADATA_KEY_CHARS` remains unenforced (flagged in the
+Phase 9 batch record above) — left alone per this batch's explicit
+instruction to defer it to `sdd-verify`. The RQ-25 budget-text
+contradiction (see 11.5 above) is named, not fixed, per explicit
+instruction — a human decision for `sdd-verify` or later, not this batch.
+
+### Git / PR state (this batch)
+
+- PR11a: https://github.com/guillegil/vantage/pull/105 — base
+  `ft/run-metadata-capture-10b-horizon`, head
+  `ft/run-metadata-capture-11a-measurement-script`. Open, 12/12 CI green.
+- PR11b: https://github.com/guillegil/vantage/pull/106 — base PR11a's
+  branch, head `ft/run-metadata-capture-11b-docs`. Open, 12/12 CI green.
+- None merged yet — chain merges in order once every slice (#88-#106) is
+  reviewed, per `feature-branch-chain`. Tracker `ft/run-metadata-capture`
+  then aggregates the whole feature into `main`.
+
 ## Workload / PR Boundary
 
-- Mode: chained PR slices (`feature-branch-chain`); Phase 10 re-sliced
+- Mode: chained PR slices (`feature-branch-chain`); Phase 11 re-sliced
   from 1 planned PR into 2 for size, not by launch instruction
-- Current work unit: Phase 10 (read filter), complete
-- Boundary: starts from PR9c's tip (metadata captured and stored, nothing
-  reading it back yet) and ends with the `key=value` filter and Q2's
-  horizon both live on `GET /api/v1/runs`, the interface document moved
-  with it, and the read-only surface proof covering the widened path.
-  Phase 11 (RQ-25 measurement) is explicitly out of scope for this batch
-- Estimated review budget impact: PR10a (277 lines) and PR10b (252 lines)
+- Current work unit: Phase 11 (RQ-25 measurement + docs), complete —
+  **this was the last work unit of the change**
+- Boundary: starts from PR10b's tip (metadata fully captured, stored,
+  filterable and horizon-counted) and ends with a real, committed RQ-25
+  measurement, the capability spec's own Measurements paragraph, the
+  README documenting the feature end-to-end, and the RQ-25 marker on the
+  test proving the shape claim the measurement depends on
+- Estimated review budget impact: PR11a (355 lines) and PR11b (104 lines)
   are both comfortably under budget; no `size:exception` needed this batch
 
 ## Remaining Tasks
 
-Phase 11 (RQ-25 measurement + docs) — see tasks.md. The next PR targets
-`ft/run-metadata-capture-10b-horizon` (this batch's last branch) for
-Phase 11, which needs PR7's wire section — satisfied transitively by the
-chain.
+None. All 67 tasks across all 11 phases are complete.
 
 ## Status
 
-62/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
+67/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
 Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6), Phase 8 (6/6),
-Phase 9 (8/8) and Phase 10 (8/8, this batch). PR1 through PR10b open and
-green, not merged (chain merges in order at the end). Ready for the next
-`sdd-apply` batch (Phase 11: RQ-25 measurement + docs).
+Phase 9 (8/8), Phase 10 (8/8) and Phase 11 (5/5, this batch — final).
+PR1 through PR11b (#88-#106) open and green, not merged (chain merges in
+order at the end, then the tracker aggregates to `main`). Ready for
+`sdd-verify`.
