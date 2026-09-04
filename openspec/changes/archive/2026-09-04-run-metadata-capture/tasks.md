@@ -225,11 +225,80 @@ changed lines respectively).
 
 ## Phase 11 (PR11 → PR7): RQ-25 measurement + docs
 
-- [ ] 11.1 Create `scripts/measure_metadata_overhead.py` by copying `scripts/measure_vcs_overhead.py`'s harness: same two RQ-25 profiles, five interleaved A/B/A/B pairs, medians reported never means, same in-process `_LiveServer` over `InMemoryExecutionStore`. Arm A = `--vantage`; arm B = `--vantage --vantage-metadata`; arm C = worst legitimate declaration (16 files × 8 KiB).
-- [ ] 11.2 Run the script; record the four measured medians (this-repo/synthetic × 10ms/1ms profiles) — a real deliverable, a committed number, not an assertion.
-- [ ] 11.3 Add the `run-metadata` capability spec's own Measurements paragraph with the medians and the standing re-measure sentence, `@pytest.mark.req(id="RQ-25")` cross-reference in whichever test asserts the budget comparison.
-- [ ] 11.4 Update `README` with the new flag and declaration file.
-- [ ] 11.5 Whether or not the 2% budget holds, record the number anyway — the 1ms profile is already breached before this change starts (D102); state that explicitly, not silently.
+- [x] 11.1 Create `scripts/measure_metadata_overhead.py` by copying `scripts/measure_vcs_overhead.py`'s harness: same two RQ-25 profiles, five interleaved A/B/A/B pairs, medians reported never means, same in-process `_LiveServer` over `InMemoryExecutionStore`. Arm A = `--vantage`; arm B = `--vantage --vantage-metadata`; arm C = worst legitimate declaration (16 files × 8 KiB). **Deviation, stated**: arm B is the worst-case declaration (16 files × 8 KiB, `MAX_DECLARED_FILES`/`MAX_DECLARED_FILE_BYTES`) and arm C is the flag alone with no declaration present — the reverse pairing of the task's literal wording, chosen because B needs to be interleaved with A to isolate this change's added cost (D102's own reason for the three-arm design), while C (the near-zero warn-only path) is measured separately since it needs the declaration file *absent*, which cannot be interleaved with B's declaration being *present* in the same repository root without swapping files between every single run. **Re-sliced at apply time into PR11a and PR11b**: the combined diff (script + docs) measured 459 changed lines against PR10b, over the 400-line budget. Honest seam: the script is independently complete and testable (it runs and produces numbers) without the docs that transcribe its output, only the reverse. PR11a lands the script alone (354 lines); PR11b (→ PR11a) lands the measured numbers, the spec's Measurements paragraph, the README update and the RQ-25 test marker.
+- [x] 11.2 Run the script; record the four measured medians (this-repo/synthetic × 10ms/1ms profiles) — a real deliverable, a committed number, not an assertion. **Result, not tuned to be favourable**: the measured B−A deltas (−20.5ms, −14.2ms, −26.5ms, +29.4ms) straddle zero and are indistinguishable from process-spawn noise at this sample size — three of four are negative, which a real added cost cannot produce. This is read as "unresolvable against the noise floor," not as "confirmed zero cost" or "confirmed under budget." See the spec's own Measurements paragraph for the full table and reasoning.
+- [x] 11.3 Add the `run-metadata` capability spec's own Measurements paragraph with the medians and the standing re-measure sentence, `@pytest.mark.req(id="RQ-25")` cross-reference in whichever test asserts the budget comparison. **No test asserts a budget percentage** (Analysis, not Test, per this project's own verification-method taxonomy) — the marker was added instead to `test_metadata_section_is_identical_on_both_reports` (`test_run_report.py`), whose `assert call_count[0] == 1` proves the O(1)-per-session shape claim D102's forecast depends on, the same role `test_git_invocation_count_does_not_scale_with_test_count` already plays for `vcs`.
+- [x] 11.4 Update `README` with the new flag and declaration file.
+- [x] 11.5 Whether or not the 2% budget holds, record the number anyway — the 1ms profile is already breached before this change starts (D102); state that explicitly, not silently. **Also recorded, unprompted by the task's own wording**: RQ-25's normative 2% budget text does not exist anywhere in this repository (never migrated from Notion), and `version-control-context/spec.md` and `docs/open-questions.md` currently draw opposite conclusions from the same 4.11%/4.17% numbers. Named in the new Measurements paragraph as a human decision, not resolved there or anywhere in this batch.
+
+## Phase 12 (PR12 → ft/run-metadata-capture-11b-docs): sdd-verify remediation
+
+`sdd-verify` (2026-09-04) FAILed the chain tip on two requirement-level MUSTs no
+scenario exercised, plus one unenforced constant, and routed all three back here
+as one slice. One PR (`ft/run-metadata-capture-12-verify-fixups`), 287 changed
+lines, well under budget — no re-slicing needed.
+
+- [x] 12.1 RED/GREEN (CRITICAL-1): `resolve_declared_path` (`pytest_vantage/metadata.py`)
+  caught `(OSError, RuntimeError)` only; `Path.resolve()` raises `ValueError` for a
+  NUL byte in the path on every supported interpreter (confirmed 3.10.21, 3.13.15),
+  uncaught anywhere on the `pytest_configure` -> `capture_metadata` chain, crashing
+  the whole session (`INTERNALERROR`, zero tests run). Changed to `except Exception`
+  — fail closed on any exception, not an enumerated tuple a third mechanism has now
+  slipped past twice — and generalised the module docstring's lesson. Also rejects a
+  NUL byte in `read_declaration`'s per-entry path validation, loudly, before
+  `resolve_declared_path` ever sees it. RED confirmed both ways (reverted the
+  `except` clause and the `read_declaration` check independently, each crashed/failed
+  as expected, then restored).
+- [x] 12.2 RED/GREEN (WARNING-1): `MAX_METADATA_KEY_CHARS` was defined, exported and
+  pinned by a tautological test, but enforced nowhere. Per the user's resolution,
+  enforced in `read_declaration` beside `MAX_DECLARED_PATH_CHARS` — a key over the
+  bound refuses the whole declaration, with a warning. No new status class, no
+  schema change (declaration refused before any row exists). Mirrored as
+  `pytest_vantage.metadata.MAX_DECLARED_KEY_CHARS`, pinned against the server
+  constant the same way `MAX_METADATA_ENTRIES` already is. `test_metadata.py:78`'s
+  assertion is no longer a tautology — real behaviour now depends on the value.
+- [x] 12.3 RED/GREEN (CRITICAL-2): `_LIST_RUNS_BY_METADATA`'s `WHERE EXISTS`
+  correlated on `rm.run_id = run.id`, so the planner anchored there and preferred
+  `run_metadata`'s own `PRIMARY KEY (run_id, key)` autoindex over
+  `idx_run_metadata_key_value` — confirmed by `EXPLAIN QUERY PLAN`, cost O(total
+  runs) not O(matching runs). Rewritten as `WHERE id IN (SELECT run_id FROM
+  run_metadata WHERE key = ? AND value = ?)`; measured plan now
+  `SEARCH rm USING INDEX idx_run_metadata_key_value (key=? AND value=?)` +
+  `SEARCH run USING INDEX sqlite_autoindex_run_1 (id=?)`. Returned rows unchanged.
+  Added `test_list_runs_by_metadata_uses_the_key_value_index`
+  (`test_sqlite_store.py`) asserting the index name appears (and the PK autoindex
+  does not) in the plan — RED confirmed against the un-rewritten query, reproducing
+  the exact bad plan from the verify report.
+- [x] 12.4 Corrected the six false prose claims naming the filter's index usage.
+  Rewrote: `sqlite_store.py`'s `_LIST_RUNS_BY_METADATA` comment,
+  `docs/schema-manifest.md:380`, `design.md:650` (distinguishes the filter's full
+  `(key, value)` seek from the horizon count's `key`-only seek — both are now
+  true, but were not the same claim), `test_routes_read.py:1394`'s docstring.
+  Verified `core/ports/storage.py:241` and `storage/memory.py:226` already state
+  the true thing (they distinguish the filter's `(key, value)` lookup from the
+  horizon's `key`-only one correctly) and needed no edit.
+- [x] 12.5 SUGGESTION-1: `test_replaying_the_same_metadata_is_a_no_op`
+  (`vantage_port_contract.py`) only replays identical metadata, proving
+  idempotence, not `run-metadata` R7's actual "unchanged from ingestion" promise.
+  Added `test_replaying_metadata_with_a_different_value_does_not_backfill` —
+  second write carries a genuinely different value, asserts the first value still
+  reads back.
+- [x] 12.6 SUGGESTION-2: `_ADMISSIBLE_CONTENT_TYPES` (`metadata_parse.py`) was
+  defined, exported and referenced nowhere. Revived: `parse()` checks membership
+  once instead of an `if`/`elif`/`else` chain. Deliberately NOT widened to match
+  `routes/runs.py`'s `_KNOWN_METADATA_CONTENT_TYPES` (which also admits `"toml"`)
+  — that asymmetry is correct and load-bearing, documented in a docstring note.
+- [x] 12.7 Verify: `uv run pytest` — 746 passed (was 739; +7 new tests).
+  `uv run ruff format . && uv run ruff check --fix .` — clean, no changes.
+  `uv run mypy .` (strict) — clean, 94 files. `uv run deptry .` — clean.
+- [x] 12.8 Explicitly out of scope, left untouched per `sdd-verify`'s own routing:
+  WARNING-2 (`docs/schema-manifest.md`'s stale narrative block, pre-existing),
+  WARNING-3 (RQ-25 budget contradiction, human decision), WARNING-4 (`_StubServer`
+  flake, pre-existing).
+
+**Review Workload**: 287 changed lines (code+tests: ~226; bookkeeping/docs: ~61)
+in one PR against the chain tip — comfortably under the 400-line budget, no
+`size:exception`, no re-slicing.
 
 ## Cross-cutting rules (apply throughout)
 

@@ -32,10 +32,33 @@ NOTHING for a loop at all -- it silently returns the path lexically
 unresolved, and the rejection then comes from `is_file()` below returning
 `False` (stat-ing through an unresolvable loop fails, and `Path.is_file()`
 swallows that `OSError` per its own contract, rather than propagating it).
-Both `OSError` and `RuntimeError` are caught here so that whichever
-mechanism a given interpreter uses, the result is the same `None` --
-catching only one of the two would leave the interpreters that use the
-other one able to crash `pytest_sessionstart` on a committed symlink loop.
+
+**A third exception mechanism arrived after the first two were already
+enumerated and verified** (2026-09-04, `sdd-verify`, confirmed on 3.10.21
+and 3.13.15): a declared path containing a NUL byte makes `Path.resolve()`
+raise `ValueError`, on every supported interpreter, not `OSError` or
+`RuntimeError`. `isinstance(e, (OSError, RuntimeError))` is `False` for it
+on both ends of the supported range, so the enumerated tuple this
+docstring used to stop at let it through uncaught -- straight into
+`pytest_configure`, with nothing on the call chain above to catch it, and
+`INTERNALERROR` for the whole session. **The lesson generalises past this
+one addition: this boundary must fail closed on any exception a path
+operation can raise, not on a list of the ones observed so far.** A list
+is a claim about which failure modes exist, and this module has now
+disproved that claim twice from the standard library alone -- once across
+CPython minor versions, once across argument content -- with the second
+one being fatal precisely because the first one had already been "fixed"
+by naming its cause instead of its shape. `except Exception` below is
+deliberately broader than a tuple for that reason: the two statements
+after the `try` (`is_relative_to`, `is_file`) do no I/O this function
+cannot already tolerate failing, hold no resource that broad catching
+could leak, and have exactly one safe outcome on any error -- return
+`None`, the same rejection every other branch of this function already
+returns for a hostile or malformed path. Broad catching is usually
+the wrong call because it can hide a bug the caller needed to see; here
+there is no caller-visible invariant left to hide, only a security
+boundary whose only two exits are "resolved and contained" or "rejected,"
+and every exception belongs on the rejected side.
 
 **TOCTOU between this resolve and a later `open()` is accepted, not
 closed.** A path component can be replaced by a symlink after this function
@@ -93,6 +116,17 @@ RQ-24 boundary this plugin cannot import across directly -- the same shape
 `vantage.service.errors.MAX_REPORT_BYTES`. Pinned by a test-only
 cross-package import (`test_metadata_declaration.py`), never trusted to
 stay in sync by convention alone."""
+
+MAX_DECLARED_KEY_CHARS = 1024
+"""Mirrors `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS` across the
+same RQ-24 boundary `MAX_METADATA_ENTRIES` above already mirrors, for the
+same reason: a declared key is refused here, in `read_declaration`, before
+any `run_metadata` row exists, so no server-side status class or schema
+change is needed for it (`sdd-verify` WARNING-1) -- the whole declaration
+is refused outright, exactly like `MAX_DECLARED_PATH_CHARS` beside it.
+Pinned by the same test-only cross-package import as `MAX_METADATA_ENTRIES`
+(`test_metadata_declaration.py`), never trusted to stay in sync by
+convention alone."""
 
 MAX_DECLARED_FILE_BYTES = 8 * 1024
 """design.md D94: the largest a declared file may be such that four of
@@ -240,12 +274,35 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
                 f"{MAX_DECLARED_PATH_CHARS} characters, metadata will not be captured",
             )
             return None
+        if "\x00" in path:
+            # ADR-0017 C4: rejected outright, at the declaration boundary,
+            # rather than left to crash `resolve_declared_path` -- a NUL
+            # byte makes `Path.resolve()` raise `ValueError` on every
+            # supported interpreter (sdd-verify CRITICAL-1). Refusing it
+            # here, loudly, is the "declaration is the plugin's own file"
+            # branch this module's docstring already claims for every
+            # other malformed entry; silently dropping it would leave the
+            # plugin dependent on `resolve_declared_path`'s own defence
+            # alone to avoid a crash.
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares a path containing a NUL character, "
+                "metadata will not be captured",
+            )
+            return None
         for key in keys:
             if key in seen_keys:
                 _reject(
                     config,
                     f"{DECLARATION_FILENAME} declares the key {key!r} more than once, "
                     "metadata will not be captured",
+                )
+                return None
+            if len(key) > MAX_DECLARED_KEY_CHARS:
+                _reject(
+                    config,
+                    f"{DECLARATION_FILENAME} declares a key longer than "
+                    f"{MAX_DECLARED_KEY_CHARS} characters, metadata will not be captured",
                 )
                 return None
             seen_keys.add(key)
@@ -378,7 +435,10 @@ def resolve_declared_path(rootpath: Path, declared: str) -> Path | None:
             return None
         if target == root or not target.is_file():
             return None
-    except (OSError, RuntimeError):
+    except Exception:
+        # Fail closed on ANY exception a path operation can raise, not on
+        # an enumerated list -- see the module docstring for why a tuple
+        # of exception types was already proven incomplete once.
         return None
     return target
 
@@ -387,6 +447,7 @@ __all__ = [
     "DECLARATION_FILENAME",
     "MAX_DECLARED_FILE_BYTES",
     "MAX_DECLARED_FILES",
+    "MAX_DECLARED_KEY_CHARS",
     "MAX_DECLARED_PATH_CHARS",
     "MAX_METADATA_ENTRIES",
     "MAX_METADATA_SECTION_BYTES",

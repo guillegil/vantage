@@ -160,3 +160,67 @@ assertion.
 - GIVEN a fixture and harness equivalent to `version-control-context`'s own measurement
 - WHEN metadata capture's session-start cost is measured with the flag enabled
 - THEN the measured overhead is committed to this spec as a number, alongside whether it fits the remaining RQ-25 budget
+
+**Measurements (RQ-25):** Measured 2026-09-04 on
+`Linux-6.18.33.2-microsoft-standard-WSL2-x86_64` (WSL2), git 2.55.0, Python
+3.13.15, via `scripts/measure_metadata_overhead.py` — five interleaved A/B
+paired runs per profile per repository (A = `--vantage` alone; B =
+`--vantage --vantage-metadata` against the worst legitimate declaration:
+`MAX_DECLARED_FILES` = 16 files at `MAX_DECLARED_FILE_BYTES` = 8 KiB each),
+medians reported, never means. A third arm, C (`--vantage --vantage-metadata`
+with no declaration present at all — Q3's warn-only path), was measured
+separately afterward for context, since it needs the declaration file
+absent rather than present, so it is not part of the same interleaved pairs.
+
+| Repository | Profile | A, baseline (median) | B, worst-case (median) | Delta (B−A) | % of A | C, no declaration (median) | Delta (C−A) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| This repository | 1,000 × ~10 ms | 11.305 s | 11.285 s | −20.5 ms | −0.18% | 11.263 s | −42.1 ms |
+| This repository | 1,000 × ~1 ms | 1.678 s | 1.664 s | −14.2 ms | −0.85% | 1.684 s | +5.4 ms |
+| Synthetic (20,000 files) | 1,000 × ~10 ms | 11.347 s | 11.320 s | −26.5 ms | −0.23% | 11.335 s | −11.4 ms |
+| Synthetic (20,000 files) | 1,000 × ~1 ms | 1.717 s | 1.746 s | +29.4 ms | +1.71% | 1.713 s | −3.6 ms |
+
+**Pre-measurement forecast** (design.md D102, recorded so the result can
+visibly disagree with it): under 2 ms once per session — under 0.02% of the
+10 ms profile, under 0.12% of the 1 ms profile.
+
+**The measured delta is indistinguishable from noise at this sample size,
+and that is the honest result, not a defect of the measurement.** Three of
+the four B−A deltas are negative — metadata capture cannot make a session
+faster, so a negative delta is measurement jitter, not a real effect. The
+deltas span −42.1 ms to +29.4 ms, straddling zero, exactly the shape expected
+when a true effect (D102's own <2 ms forecast) sits an order of magnitude
+below the process-spawn variance a five-pair, subprocess-per-run benchmark
+can resolve. `vcs.capture`'s own git-process cost (6.12–27.56 ms,
+`version-control-context`'s Measurements) was large enough to clear that
+noise floor at this same sample size; a projected <2 ms cost is not. The
+forecast is not falsified by this measurement, and it is not confirmed by
+it either — that distinction is recorded rather than collapsed into a false
+"holds."
+
+**What this measurement is compared against, stated plainly.** RQ-25's own
+normative text — the 2% budget these percentages are read against — does
+not exist anywhere in this repository. It was a Notion requirement, and
+unlike every other identifier this project still cites, no capability spec
+ever picked its text up before the corpus was retired (2026-08-28,
+CLAUDE.md); only every other document's *reference* to a "2% budget"
+survives it. Two of those references currently disagree with each other
+about the *conclusion* their own numbers support: this document's sibling,
+`openspec/specs/version-control-context/spec.md`, reads its own 4.11%/4.17%
+1 ms-profile results as "still inside RQ-25's 2% budget," which is
+arithmetically false for those two rows, while `docs/open-questions.md`
+reads the same numbers as a breach and computes the remaining headroom from
+that reading. This paragraph does not resolve that disagreement, and does
+not edit either document — which of two contradictory in-repo statements is
+correct is a human decision, not one available to make silently inside an
+unrelated measurement paragraph. What this paragraph states without
+ambiguity: **this change's own added cost, whatever it turns out to be once
+resolvable, rides on top of a baseline** (`version-control-context`'s
+git-capture overhead) **that is already at 4.11%–4.17% of the 1 ms profile
+before metadata capture is added at all** — over any 2% reading of the
+budget — while holding, with headroom, on the 10 ms profile (0.29%–1.50%
+baseline).
+
+**A future change to the declaration read or its bounds MUST re-run
+`scripts/measure_metadata_overhead.py` and update this paragraph** — the
+same obligation `version-control-context`'s and `run-recording`'s own
+Measurements paragraphs state for their own numbers.
