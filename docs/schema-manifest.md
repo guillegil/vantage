@@ -380,9 +380,15 @@ keys, not types, and comparison is string equality (design.md D91).
 `idx_run_metadata_key_value` (index 15, below) is this table's whole point:
 `WHERE key = ? AND value = ?` is the feature the read filter exposes, and a
 `json_extract` scan over an unindexed blob is exactly what a `(key, value)`
-index avoids (design.md D91). The same index, left-anchored on `key` alone,
-also serves the horizon count a later PR's read filter needs (design.md
-D100). This table, like `run_metadata_file`, exists empty in this PR.
+index avoids (design.md D91). Reaching the index requires the filter query
+to seek it directly rather than correlate on `run_metadata`'s own
+`(run_id, key)` primary key instead — `sdd-verify` found the first
+implementation doing the latter (`_LIST_RUNS_BY_METADATA`'s `WHERE EXISTS`
+form), fixed to the `WHERE id IN (SELECT run_id FROM run_metadata WHERE
+key = ? AND value = ?)` form this index is confirmed served by. The same
+index, left-anchored on `key` alone, also serves the horizon count a later
+PR's read filter needs (design.md D100). This table, like
+`run_metadata_file`, exists empty in this PR.
 
 ## Indexes
 
