@@ -186,6 +186,26 @@ class InvalidIdentityError(RejectionError):
         )
 
 
+class InvalidMetadataFilterError(RejectionError):
+    """`metadata_key` and `metadata_value` were not both supplied on
+    `GET /api/v1/runs` (design.md D100).
+
+    Two query parameters, never one `key=value` string -- a value may itself
+    contain `=`, and D54/D87 already decided a compound whose parts are not
+    separable cannot ride in one segment. Both or neither: `fields` names
+    whichever of the pair the caller omitted, the one new rejection kind the
+    read path adds."""
+
+    status_code = 422
+    error = "invalid_metadata_filter"
+
+    def __init__(self, missing_field: str) -> None:
+        super().__init__(
+            "metadata_key and metadata_value must be supplied together, or neither.",
+            [missing_field],
+        )
+
+
 class UnknownRunError(RejectionError):
     """No run matches the id used in a heartbeat (design.md D33).
 
@@ -353,6 +373,7 @@ __all__ = [
     "IncompleteBodyError",
     "InvalidIdentityError",
     "InvalidJsonError",
+    "InvalidMetadataFilterError",
     "InvalidReportError",
     "InvalidSectionNameError",
     "InvalidSectionPrefixError",

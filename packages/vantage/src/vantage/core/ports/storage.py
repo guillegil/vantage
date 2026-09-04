@@ -131,14 +131,61 @@ class UserSetting:
     updated_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class MetadataFile:
+    """One row of `run_metadata_file` (design.md D91, D98). `source_file` is
+    the DECLARED, rootpath-relative path exactly as written (P-1) -- never
+    the resolved one, which is absolute and can carry a username."""
+
+    source_file: str
+    content_type: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class MetadataEntry:
+    """One row of `run_metadata` (design.md D91, D98). `value` is `None`
+    whenever `status` is not `'captured'` -- a declared-but-uncaptured key
+    is a row, never a missing row (design.md D95)."""
+
+    key: str
+    value: str | None
+    source_file: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunMetadata:
+    """The frozen aggregate `record_session` accepts (design.md D98): one
+    parameter rather than two collections, so a caller cannot pass entries
+    without their files -- a state D95's "every declared thing gets a row"
+    rule forbids and this shape makes unrepresentable."""
+
+    files: tuple[MetadataFile, ...] = ()
+    entries: tuple[MetadataEntry, ...] = ()
+
+
+EMPTY_RUN_METADATA = RunMetadata()
+"""`record_session`'s default (design.md D98) -- what a session with no
+metadata declaration reports. Only the two adapter implementations change to
+accept the new keyword; no existing call site is widened or broken."""
+
+
 class ExecutionStore(Protocol):
     """Persists `Execution` rows. Implementations live in `vantage.storage`."""
 
     def record_session(
-        self, execution: Execution, *, results: Sequence[Result], received_at: datetime
+        self,
+        execution: Execution,
+        *,
+        results: Sequence[Result],
+        received_at: datetime,
+        metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
-        """Store the run and its results. Return True if a row was created, False if the
-        id was already stored."""
+        """Store the run, its results and its declared metadata (design.md
+        D98). Return True if a row was created, False if the id was already
+        stored. `metadata`'s two tables are written once each -- a report
+        with metadata identical to what is already stored is a no-op."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:
@@ -171,7 +218,14 @@ class ExecutionStore(Protocol):
         """Return the catalogue entry for `node_id`, or None if never observed (RQ-13)."""
         ...
 
-    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+    def list_runs(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        metadata_key: str | None = None,
+        metadata_value: str | None = None,
+    ) -> Page[RunListEntry]:
         """Return a page of runs, newest first (design.md D57, D61).
 
         Ordered `started_at DESC, id DESC` -- the `id` tiebreak makes the
@@ -180,7 +234,27 @@ class ExecutionStore(Protocol):
         rejected; `has_more` is true when more rows exist beyond the
         returned page. Each entry's VCS data is a lean `VcsProjection`
         (design.md D59, D60) -- the entry's own `execution.vcs` is always
-        `None`."""
+        `None`.
+
+        `metadata_key`/`metadata_value`, when both given, narrow the page to
+        runs holding that exact declared `(key, value)` pair (design.md
+        D100) -- served by `idx_run_metadata_key_value`, the same index
+        `count_runs_predating_metadata_key` reads left-anchored on `key`
+        alone. The caller (the route) is responsible for the both-or-neither
+        rule; this method treats `metadata_key is not None` as the switch."""
+        ...
+
+    def count_runs_predating_metadata_key(self, key: str) -> int:
+        """Q2's horizon (design.md D100): how many runs were recorded before
+        `key` was ever declared, of any status.
+
+        `first_seen` is `MIN(run.started_at)` over runs holding **any**
+        `run_metadata` row for `key`, regardless of status -- a
+        declared-but-dropped row (design.md D95) still counts, since without
+        it a run whose value was too large to capture would be miscounted as
+        predating the declaration. When no run has ever carried `key`,
+        `first_seen` is undefined and this returns the total run count:
+        every run predates a key that was never declared."""
         ...
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:

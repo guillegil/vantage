@@ -49,7 +49,7 @@ from pathlib import Path
 
 import pytest
 
-from pytest_vantage import vcs
+from pytest_vantage import metadata, vcs
 from pytest_vantage.boundary import _warn, fault_isolated, liveness_isolated
 from pytest_vantage.budget import spend_failure_text_budget
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
@@ -160,6 +160,21 @@ class Recorder:
     `pytest_configure` and is not itself hook-wrapped, only because
     `_capture_vcs` cannot raise. A non-`None` warning is emitted at most
     once, through the same `_warn` the preflight and every hook already use.
+
+    `metadata_requested` is `plugin.py`'s `_metadata_capture_requested(config)`
+    (design.md D99) -- both the base activation gate and the
+    `--vantage-metadata` opt-in have already passed by the time this
+    constructor runs, since a `Recorder` is never constructed at all
+    otherwise. When `True`, `self._metadata` is `metadata.capture_metadata(...)`,
+    called exactly once here, exactly like `_vcs` above -- the declaration
+    is read, validated and every file it names bounded and captured exactly
+    once per session regardless of worker count, since no `Recorder` is
+    ever constructed on an xdist worker. `capture_metadata` warns at most
+    once, through the same `_warn` `_vcs` uses, and never raises (design.md
+    D97); when it returns `None` (no declaration, or an invalid one),
+    `self._metadata` stays `None` and `_metadata_section()` omits the
+    `metadata` key from both reports entirely, the same way an absent
+    `--vantage-metadata` flag does.
     """
 
     def __init__(
@@ -169,6 +184,7 @@ class Recorder:
         timeout: float,
         *,
         lifecycle_available: bool = False,
+        metadata_requested: bool = False,
     ) -> None:
         self._config = config
         self._address = address
@@ -184,6 +200,9 @@ class Recorder:
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
             _warn(config, f"vantage: {self._vcs.warning}")
+        self._metadata: metadata.MetadataSection | None = None
+        if metadata_requested:
+            self._metadata = metadata.capture_metadata(config, Path(str(config.rootpath)))
 
     def _vcs_section(self) -> dict[str, object]:
         """Serialises the snapshot held since `__init__` (design.md D51) --
@@ -195,6 +214,34 @@ class Recorder:
             "commit_subject": self._vcs.commit_subject,
             "dirty": self._vcs.dirty,
             "root": self._vcs.root,
+        }
+
+    def _metadata_section(self) -> dict[str, object] | None:
+        """Serialises the section held since `__init__` (design.md D51's
+        freeze rule, extended to metadata by D96) -- never re-read, so the
+        start report and the finish report describe the identical metadata
+        capture, exactly like `_vcs_section()` above.
+
+        `None` when metadata capture was not requested, or `capture_metadata`
+        found no valid declaration to capture (it has already warned at most
+        once for that, in `__init__`) -- the caller omits the `metadata` key
+        entirely in that case, never sends it as `null`, the same additive-
+        section shape `vcs` and `results` already establish.
+        """
+        if self._metadata is None:
+            return None
+        return {
+            "declaration": self._metadata.declaration,
+            "files": [
+                {
+                    "path": entry.path,
+                    "format": entry.format,
+                    "status": entry.status,
+                    "keys": list(entry.keys),
+                    "content": entry.content,
+                }
+                for entry in self._metadata.files
+            ],
         }
 
     @liveness_isolated
@@ -231,6 +278,9 @@ class Recorder:
             },
             "vcs": self._vcs_section(),
         }
+        metadata_section = self._metadata_section()
+        if metadata_section is not None:
+            report["metadata"] = metadata_section
         send(self._address, report, timeout=self._liveness_timeout)
 
     @fault_isolated
@@ -301,6 +351,9 @@ class Recorder:
             "results": results,
             "vcs": self._vcs_section(),
         }
+        metadata_section = self._metadata_section()
+        if metadata_section is not None:
+            report["metadata"] = metadata_section
         send(self._address, report, timeout=self._timeout)
 
 

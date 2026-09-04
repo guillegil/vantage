@@ -15,7 +15,7 @@ import itertools
 
 import pytest
 import pytest_vantage.config as config_module
-from pytest_vantage.config import resolve_failure_text_capture
+from pytest_vantage.config import resolve_failure_text_capture, resolve_metadata_capture
 
 _BOOL_COMBINATIONS = list(itertools.product([False, True], repeat=2))
 
@@ -86,3 +86,65 @@ def test_no_environment_variable_surface_exists_for_the_opt_in() -> None:
         "pytest_vantage.config must not import os at all for the opt-in to have "
         "nowhere to reach an environment variable from"
     )
+
+
+# --- `resolve_metadata_capture` (design.md D99, task 5.1) --------------------
+#
+# The same monotone conjunction `resolve_failure_text_capture` proved above,
+# for the metadata capture opt-in (opt-in-activation's "Metadata capture flag
+# inertness" requirement, RQ-2 extended). The signature carries no ini
+# parameter and no environment parameter, by construction -- a committed
+# configuration file can never be the means by which capture is enabled.
+
+
+@pytest.mark.parametrize(("activated", "cli_opt_in"), _BOOL_COMBINATIONS)
+def test_resolve_metadata_capture_is_monotone_decreasing_in_activation(
+    activated: bool, cli_opt_in: bool
+) -> None:
+    """design.md D99: for every one of the four input combinations,
+    `resolve(...) <= activated` -- the metadata opt-in cannot turn a session
+    on when recording itself was never activated."""
+    resolved = resolve_metadata_capture(activated=activated, cli_opt_in=cli_opt_in)
+
+    assert int(resolved) <= int(activated)
+
+
+@pytest.mark.parametrize("activated", [False, True])
+def test_resolve_metadata_capture_is_monotone_increasing_in_cli_opt_in(activated: bool) -> None:
+    """design.md D99: the opt-in is monotone INCREASING in `cli_opt_in`
+    -- turning it on can only ever ADD capture, never remove it.
+    `resolve(..., cli_opt_in=True) >= resolve(..., cli_opt_in=False)` for
+    every fixed `activated`."""
+    resolved_false = resolve_metadata_capture(activated=activated, cli_opt_in=False)
+    resolved_true = resolve_metadata_capture(activated=activated, cli_opt_in=True)
+
+    assert int(resolved_true) >= int(resolved_false)
+
+
+def test_resolve_metadata_capture_true_only_when_activated_and_cli_opt_in() -> None:
+    """The exhaustive truth table (task 5.1): only `activated=True,
+    cli_opt_in=True` resolves `True` -- capture is absent by default, not
+    merely narrowable."""
+    assert resolve_metadata_capture(activated=False, cli_opt_in=False) is False
+    assert resolve_metadata_capture(activated=False, cli_opt_in=True) is False
+    assert resolve_metadata_capture(activated=True, cli_opt_in=False) is False
+    assert resolve_metadata_capture(activated=True, cli_opt_in=True) is True
+
+
+def test_no_opt_in_anywhere_leaves_an_activated_session_without_metadata_capture() -> None:
+    """The default state: recording activated, the metadata opt-in not
+    given, capture stays absent."""
+    assert resolve_metadata_capture(activated=True, cli_opt_in=False) is False
+
+
+def test_no_environment_variable_surface_exists_for_the_metadata_opt_in() -> None:
+    """design.md D99: no ini parameter, no environment-variable parameter --
+    the invocation flag is the only means, by construction. Mirrors the
+    identical property already proven for `resolve_failure_text_capture`
+    above, for the metadata opt-in's own signature and source."""
+    parameters = set(inspect.signature(resolve_metadata_capture).parameters)
+
+    assert parameters == {"activated", "cli_opt_in"}
+
+    source = inspect.getsource(resolve_metadata_capture)
+    assert "os.environ" not in source
