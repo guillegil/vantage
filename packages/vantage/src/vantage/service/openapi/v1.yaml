@@ -158,7 +158,7 @@ components:
     SessionReport:
       type: object
       required: [run]
-      properties: {run: {$ref: '#/components/schemas/RunReport'}, results: {type: [array, "null"], items: {type: object}}, vcs: {type: [object, "null"]}}
+      properties: {run: {$ref: '#/components/schemas/RunReport'}, results: {type: [array, "null"], items: {type: object}}, vcs: {type: [object, "null"]}, metadata: {type: [object, "null"]}}
     RunReport:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason]
