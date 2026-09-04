@@ -1,338 +1,257 @@
-# Verification Report: run-metadata-capture
+# Verification Report: run-metadata-capture (re-verification)
 
-**Phase:** `sdd-verify` · **Date:** 2026-09-04 · **Verdict: FAIL**
-**Verified against:** chain tip `ft/run-metadata-capture-11b-docs` @ `339f5ca`, clean worktree,
-in sync with `origin`. Nothing merged; 19 PRs (#88-#106) open and strictly linear.
-**Artifact store:** hybrid — also saved to Engram as `sdd/run-metadata-capture/verify-report`.
-
-> **Verdict in one line:** every gate is green and all 33 scenarios have a named passing
-> test, but two requirement-level MUSTs that **no scenario exercises** are violated — one of
-> them crashes the whole pytest session. Scenario-green is exactly why these were not caught
-> earlier.
+**Phase:** `sdd-verify` · **Date:** 2026-09-04 · **Verdict: PASS WITH WARNINGS**
+**Tip verified:** `ft/run-metadata-capture-12-verify-fixups` @ `afad467c`, clean worktree.
+**Previous verdict:** FAIL (2 critical, 4 warning, 4 suggestion) @ `339f5ca`.
+**Chain:** 20 PRs (#88-#107), strictly linear (`339f5ca` confirmed ancestor of `afad467`), nothing merged.
+**Artifact store:** hybrid — also saved to Engram as `sdd/run-metadata-capture/verify-report` (obs 145, updated in place).
 
 | | |
 | --- | --- |
-| Blockers | **2** |
-| Findings | 2 critical · 4 warning · 4 suggestion |
-| Requirements | **13 / 15** |
+| Blockers | **0** |
+| Findings | 0 critical · 3 warning (**all pre-existing**) · 4 suggestion |
+| Requirements | **15 / 15** |
 | Scenarios | **33 / 33** |
-| Tasks | 67 / 67 across 11 phases |
+| Tasks | 75 / 75 |
+| Tests | **746 passed**, 0 failed, 0 skipped |
 
-## Gates — all green
+## Gates
 
 | Gate | Command | Result |
 | --- | --- | --- |
-| Tests | `uv run pytest -q` | **739 passed**, 0 failed, 12 expected warnings, exit 0 |
-| Types | `uv run mypy .` | Success, **94 source files**, exit 0 |
-| Lint | `uv run ruff check .` | All checks passed, exit 0 |
-| Dependencies | `uv run deptry .` | No dependency issues, exit 0 |
-| Coverage | — | Not measured, deliberately (`coverage_threshold: 0`, no `pytest-cov`) |
+| Tests | `uv run pytest -q` | 746 passed, 12 expected warnings, exit 0 |
+| Types | `uv run mypy .` | Success, 94 source files, exit 0 |
+| Lint | `uv run ruff check .` | All checks passed |
+| Format | `uv run ruff format --check .` | 94 files already formatted |
+| Dependencies | `uv run deptry .` | No issues, 93 files |
+| Coverage | — | Not measured, deliberately (`coverage_threshold: 0`) |
 
-**Marker filters narrow rather than failing open**, including the negative control this
-project's own convention warns about:
+Previous tip measured 739 tests; delta **+7**, matching the remediation slice's claim of 7 added and 0 removed.
+
+**Marker filters still fail closed:**
 
 | Filter | Selected | Deselected |
 | --- | ---: | ---: |
-| `-m 'req(id="RQ-2")'` | 7 | 732 |
-| `-m 'req(id="RQ-29")'` | 1 | 738 |
-| `-m 'req(id="RQ-25")'` | 5 | 734 |
-| `-m 'req(id="RQ-999")'` *(control)* | **0** | **739** |
+| `req(id="RQ-2")` | 7 | 739 |
+| `req(id="RQ-24")` | 4 | 742 |
+| `req(id="RQ-25")` | 5 | 741 |
+| `req(id="RQ-29")` | 1 | 745 |
+| `req(id="RQ-12")` | 2 | 744 |
+| `req(id="RQ-999")` *(negative control)* | **0** | 746 |
 
-The unknown ID collects nothing rather than selecting the whole suite, so the `id=` keyword
-form is applied correctly throughout and the filter fails closed.
+---
 
-## Spec compliance — 33/33 scenarios, 13/15 requirements
+## Blocker re-verification
 
-Every scenario has a named covering test that passed at runtime, or a named non-test method
-with its evidence.
+### CRITICAL-1 — NUL byte crashes the session → **CLOSED**
+
+Verified independently, not accepted on report.
+
+**The catch was genuinely load-bearing.** `Path.resolve()` on a NUL-bearing path still raises
+`ValueError` on 3.13.15, and `isinstance(e, (OSError, RuntimeError))` is `False` for it. The
+previously enumerated tuple did not cover it.
+
+**The fix holds at both boundaries:**
+
+- `resolve_declared_path(root, "a\0b.json")` → `None`, no traceback.
+- `read_declaration` refuses the declaration outright with exactly one `VantageWarning`.
+- End-to-end: a real pytest session with a NUL-bearing declaration exits 0, `INTERNALERROR`
+  absent. The previous reproduction was `INTERNALERROR`, return code 3, zero tests run.
+- Unchanged rejection paths still work; containment suite 11/11.
+
+**New-defect assessment of the bare `except Exception`** — the specific concern raised:
+
+- **`KeyboardInterrupt` and `SystemExit` derive from `BaseException`, not `Exception`, and were
+  confirmed by injection to still propagate.** Ctrl-C during a session is not swallowed. This is
+  the property that would have made the change dangerous, and it holds.
+- The `try` block holds `Path.resolve`, `is_relative_to` and `is_file` only — no resource is
+  held, so broad catching leaks nothing.
+- **Accepted cost:** a programming bug inside the block is now swallowed, confirmed by
+  injection. It degrades to `None`, which `_read_declared_file` converts into a marked
+  `path_rejected` / `not_found` status row — observable and auditable, not silent. Recorded as
+  SUGGESTION-C, not a defect.
+
+### CRITICAL-2 — the filter did not use its index → **CLOSED**
+
+`EXPLAIN QUERY PLAN` run against the **production query object imported from source**
+(`vantage.storage.sqlite_store._LIST_RUNS_BY_METADATA`), never a transcription, on a database
+created through the production `SqliteExecutionStore` path.
+
+Plan — identical on an empty database, at 5,000 runs / 15,200 metadata rows, and after `ANALYZE`:
+
+```text
+SEARCH run USING INDEX sqlite_autoindex_run_1 (id=?)
+LIST SUBQUERY 1
+SEARCH rm USING INDEX idx_run_metadata_key_value (key=? AND value=?)
+USE TEMP B-TREE FOR ORDER BY
+```
+
+The outer `SCAN run` is gone and the purpose-built index is seeked on the full `(key, value)`
+pair. The horizon query is unchanged and still correct.
+
+**The regression test discriminates, and that was proved rather than assumed.** Reverting the
+query to its `WHERE EXISTS` form reproduces the previous report's bad plan exactly, and
+`test_list_runs_by_metadata_uses_the_key_value_index` fails on it and passes on the current
+form. The test interpolates the imported production constant, so it cannot drift from what the
+system runs.
+
+**Row equivalence and duplicates** — the specific concern raised:
+
+- **1,020 `(query, params)` pairs** compared between the new `IN (SELECT …)` and the old
+  correlated `EXISTS`, across 3 populated keys, 50 values each, an absent key, an absent value,
+  and 4 limit/offset combinations. **600 pairs returned non-empty; 18,450 rows; 0 mismatches.**
+- **The non-empty assertion was not decoration.** An earlier attempt at this check silently
+  seeded 0 metadata rows — an `INSERT OR IGNORE` swallowing a `NOT NULL` violation on
+  `source_file` — and would have reported a vacuous 0-mismatch pass over an empty table.
+- **No duplicates:** 15,000 rows across 150 filters, 0 repeated run ids. The enabling invariant
+  was measured directly — the maximum number of `run_metadata` rows sharing a `(run_id, key)`
+  pair is **1**, which is `PRIMARY KEY (run_id, key)` doing exactly the work the absent
+  `DISTINCT` relies on.
+- **Status filtering preserved:** with 200 `value IS NULL` rows present, all four probe values
+  returned 0 rows. SQL `NULL` still never equals a bound string.
+
+### WARNING-1 — `MAX_METADATA_KEY_CHARS` enforced nowhere → **CLOSED**
+
+Resolved by the route the user chose: enforced in `read_declaration`, no new status class, no
+schema change. Verified behaviourally at the boundary:
+
+| Declared key length | `read_declaration` | Warnings |
+| ---: | --- | ---: |
+| 1024 (exactly `MAX`) | accepted | 0 |
+| 1025 (`MAX` + 1) | `None`, whole declaration refused | 1 |
+| 2000 | `None`, whole declaration refused | 1 |
+
+Off-by-one correct (`> MAX`, not `>= MAX`). Cross-package sync measured: plugin
+`MAX_DECLARED_KEY_CHARS` = 1024 = server `MAX_METADATA_KEY_CHARS`, pinned by a test-only import
+in `test_the_mirrored_key_char_bound_matches_the_server`. The constant now gates real behaviour.
+
+### The two "already accurate, left unedited" prose claims → **VERIFIED TRUE**
+
+Both read at the current tip rather than taken on trust.
+
+| Location | Verdict |
+| --- | --- |
+| `core/ports/storage.py` — `list_runs` docstring | **True at this tip**, both halves confirmed by the two plan runs |
+| `storage/memory.py` — metadata-filter comment | **True at this tip**; the NULL-exclusion half confirmed by the 0-row result over 200 `value IS NULL` rows |
+
+**Nuance worth recording**, because it is not quite what the apply note says: the port docstring
+was **false at `339f5ca` and made true by the CRITICAL-2 rewrite itself**, rather than having
+been accurate all along. The end state is correct either way and no edit was needed, so this is
+a wording imprecision in the apply note, not a skipped correction.
+
+---
+
+## Spec compliance — 15/15 requirements, 33/33 scenarios
+
+Counts measured by read-back of the five spec files. Both requirements that carried a violated
+MUST at `339f5ca` are now satisfied with runtime evidence.
 
 | Capability | Req | Scen | Verdict |
 | --- | ---: | ---: | --- |
-| `run-metadata` | 8 | 14 | All scenarios compliant; **R3 carries a violated MUST** (CRITICAL-1) |
+| `run-metadata` | 8 | 14 | Compliant — **R3 was VIOLATED, now COMPLIANT** (containment 11/11 incl. NUL) |
 | `session-ingestion` | 4 | 10 | Compliant |
 | `opt-in-activation` | 1 | 3 | Compliant |
-| `recording-schema` | 1 | 3 | Compliant — Inspection, machine-checked in both directions |
-| `history-read-api` | 1 | 3 | All scenarios compliant; **R1 carries a violated MUST** (CRITICAL-2) |
+| `recording-schema` | 1 | 3 | Compliant — Inspection, bidirectional manifest/live diff |
+| `history-read-api` | 1 | 3 | Compliant — **R1 was VIOLATED, now COMPLIANT** (plan test added) |
 
-Counts measured by `rg -c` against the five written spec files, not taken from artifact prose.
-Independently confirmed: applying `schema.sql` to a fresh in-memory database yields **13
-tables, 15 `idx_*` indexes, `meta.schema_version = '4'`**.
+`run-metadata` R7 is **strengthened**: `test_replaying_metadata_with_a_different_value_does_not_backfill`
+asserts the first value survives *and* differs from the second — a real no-backfill claim rather
+than the idempotence tautology it replaces.
 
-**RQ-25 (`run-metadata` R8) is verified by Analysis, not Test** — the harness is
-`scripts/measure_metadata_overhead.py` and four measured deltas are committed. Three of four
-are negative, correctly read as a true effect below the harness noise floor rather than tuned
-into a favourable-looking pass. This is what an Analysis verification method should look like.
+Live schema re-measured: **13 tables, 15 named indexes, 139 columns, `schema_version = 4`**.
 
-## Targeted high-risk checks
+## Correctness and coherence
 
-| Check | Status |
+| Area | Status |
 | --- | --- |
-| The 422 trap — no constraint on the metadata wire models | **PASS** — bare `str` / `list[str]` / `str \| None`, no `Field(...)` anywhere |
-| The CHECK counterpart — allow-list before storage | **PASS** — `runs.py:196-201` drops before building a row; both allow-lists match `schema.sql`'s CHECKs exactly |
-| Never raise (D97) — server side | **PASS** — `parse` catches `JSONDecodeError`, `YAMLError`, `RecursionError`; no unguarded call |
-| Never raise (D97) — plugin side | **FAIL** — CRITICAL-1 |
-| `yaml.compose`, never `safe_load` | **PASS** — no `safe_load` or `yaml.load` anywhere; backed by an alias-bomb test and an `!!python/object/apply` test |
-| RQ-24 — plugin takes pytest and nothing else | **PASS** — the only `yaml` under the plugin is the string literal `frozenset({"json","yaml"})` |
-| RQ-26 — `vantage.core` is stdlib-only | **PASS** — zero non-stdlib imports under `core/` |
-| Q2 horizon counts declared-but-dropped keys | **PASS** — `_METADATA_KEY_FIRST_SEEN` has no `value` or `status` predicate |
-| C4 resolves both sides, rejects not clamps | **PASS**, with the CRITICAL-1 caveat |
-| C4 correct on the floor AND the ceiling | **PASS** — reconfirmed on 3.10.21 and 3.13.15 |
-| The index is actually used by the filter | **FAIL** — CRITICAL-2 |
+| RQ-24 plugin boundary | Intact — deps are `["pytest>=8.0"]`; **0** `vantage.*` imports in plugin source; the two new server-constant imports are test-only |
+| RQ-26 core purity | Intact — architecture test green |
+| D97 never-raise | Restored; the docstring now argues the fail-closed **shape** rather than enumerating exception types |
+| D100 filter served by the index | Now true in implementation **and** prose |
+| SUGGESTION-2 refactor | Correct — the deliberate asymmetry against `runs.py`'s wider allow-list is preserved and documented |
+
+## TDD compliance — 7/7
+
+RED was independently **reproduced**, not merely reported: reverting the query yields the exact
+bad plan and the new test fails on it. Key-length bound triangulated at 1024/1025/2000.
+
+## Assertion quality
+
+All 7 tests added by the remediation slice audited. No tautologies, no ghost loops, no assertion
+without a production call. The two strongest assert discriminating properties — the plan test
+asserts a positive (index present) **and** a negative (PK autoindex absent); the no-backfill test
+asserts both equality to the first write and inequality to the second.
 
 ---
 
-## CRITICAL-1 — A NUL byte in a declared path crashes the entire pytest session
+## Findings
 
-**Introduced by this change. Blocker.**
+### Warnings — 3, all pre-existing, none blocking
 
-`resolve_declared_path` (`packages/pytest-vantage/src/pytest_vantage/metadata.py:381`) catches
-`(OSError, RuntimeError)`. `Path.resolve()` raises **`ValueError`** for a path containing a NUL
-byte, on every supported interpreter.
+**WARNING-2 — `docs/schema-manifest.md` historical block is stale.** Dated 2026-08-15, states
+10 tables / 13 indexes / 125 columns against a live 13 / 15 / 139. Already stale before this
+change (it omits `user_setting`). The manifest **body** is current and machine-checked
+bidirectionally, which is stronger evidence than the prose, so RQ-29's Inspection deliverable is
+satisfied. *Routing:* relabel as a dated historical record. Belongs on `main`.
 
-A `vantage-metadata.json` whose entry embeds `\0` in `path` is valid JSON and passes every
-`read_declaration` check — `isinstance(str)`, length, format. It then produces:
+**WARNING-3 — RQ-25 2% budget contradiction.** `version-control-context/spec.md:152-159` claims
+results are "still inside RQ-25's 2% budget in every one of the four measured cases" while
+recording 4.11% and 4.17% — arithmetically false. This change's own spec records the
+contradiction honestly rather than repeating it. *Routing:* human decision — correct the claim,
+and decide whether RQ-25's budget becomes a capability requirement (reusing the existing ID,
+minting no new `RQ-xx`) or stops being cited. Outside this chain.
 
-```text
-INTERNALERROR>   File ".../pytest_vantage/metadata.py", line 376, in resolve_declared_path
-INTERNALERROR>     target = (root / candidate).resolve()
-INTERNALERROR> ValueError: lstat: embedded null character in path
-RETURNCODE: 3
-```
+**WARNING-4 — `_StubServer` latent flake.** `git diff main...afad467 -- test_failure_paths.py`
+is **empty** — untouched by the entire chain. Did not fire in the full suite nor in 5 consecutive
+dedicated runs (41 passed each). Structural cause unchanged: `_accept_loop` spawns one untracked
+daemon thread per connection and `__exit__` joins only the accept loop, so the captured list
+records handler-completion order rather than connection order. *Routing:* fix `_StubServer`, not
+the test. Belongs on `main`.
 
-**Zero tests run.** The session dies in `pytest_configure` -> `Recorder.__init__` ->
-`capture_metadata` -> `_read_declared_file` (`metadata.py:289`, where the call sits **outside**
-the `try`) -> `resolve_declared_path`. There is no `try`/`except` anywhere on that chain.
+### Suggestions — 4, none blocking
 
-Confirmed on both ends of the supported range — `ValueError` on 3.10.21 and 3.13.15, and
-`isinstance(e, (OSError, RuntimeError))` is `False` on both. Reconfirmed independently by the
-orchestrator.
+**SUGGESTION-A — the plan test does not pin the absence of an outer scan.** It asserts the right
+index present and the PK autoindex absent, but not that `SCAN run` is absent. A future rewrite
+reaching the right index while reintroducing a full outer scan would pass. `assert "SCAN run"
+not in plan_text` closes it.
 
-This breaks simultaneously: D97's never-raise contract, `_read_declared_file`'s own docstring
-("never raises"), ADR-0017's fault-tolerance posture, and `run-metadata` R3's "MUST be rejected
-outright". It is the exact disaster class the design guards against everywhere else — a
-metadata problem taking down the run — arriving through a **third** exception mechanism after
-the module carefully enumerated two.
+**SUGGESTION-B — the rewrite is a measured two-sided tradeoff, and the design note claims only
+the upside.** The new plan ends in `USE TEMP B-TREE FOR ORDER BY` (full sort of the matched set);
+the old one ended in `USE TEMP B-TREE FOR LAST TERM OF ORDER BY` and streamed in
+`idx_run_started_at` order with early `LIMIT` termination. Measured at 20,000 runs:
 
-**Fix**
+| Case | New | Old |
+| --- | ---: | ---: |
+| **Selective** filter (34 of 20,000 match) | **0.06 ms** | 14.73 ms |
+| Degenerate filter (20,000 of 20,000 match) | 7.35 ms | 0.05 ms |
 
-1. `except (OSError, RuntimeError, ValueError): return None` at `metadata.py:381`. This is the
-   load-bearing fix, and it matches how `Path.exists()`/`Path.is_file()` already treat
-   `ValueError` internally — which is precisely why `_rejected_file_status` returns `not_found`
-   for the same input instead of crashing.
-2. Reject a NUL character in `read_declaration`'s per-entry path validation, so the declaration
-   is refused loudly rather than silently dropped.
-3. Add `test_a_path_containing_a_nul_byte_is_rejected_not_crashed`, sibling to the existing
-   `test_a_symlink_loop_is_rejected_not_crashed` — the test proving this bug class was already
-   understood, just not generalised past the two exception types it enumerated.
+The tradeoff is **correct** — cost now scales with matches rather than with total runs, which is
+the case the index exists for and the case the MUST is about — and 7.35 ms is not a defect. But
+the design note states only the win and is worth completing.
 
-## CRITICAL-2 — The `key=value` filter does not use its index; six in-repo claims are false
+**SUGGESTION-C — `except Exception` is observable but not diagnosable.** A genuine bug inside the
+block degrades to a marked status rather than a traceback. Right production behaviour for a
+security boundary, and auditable, but a debug-level log of the swallowed exception would make
+such a bug diagnosable without weakening the fail-closed posture.
 
-**Introduced by this change. Blocker.**
-
-`history-read-api`'s requirement states the filter MUST work *"using the `(key, value)`
-index"*. It does not. `EXPLAIN QUERY PLAN` against a live `schema.sql` database:
-
-```text
-SCAN run USING INDEX idx_run_started_at
-CORRELATED SCALAR SUBQUERY 1
-SEARCH rm USING INDEX sqlite_autoindex_run_metadata_1 (run_id=? AND key=?)
-USE TEMP B-TREE FOR LAST TERM OF ORDER BY
-```
-
-The planner anchors the correlated `WHERE EXISTS` on `rm.run_id = run.id` and therefore prefers
-the `PRIMARY KEY (run_id, key)` autoindex. **`idx_run_metadata_key_value` is never touched.**
-The outer query is a full pass over `run`, one subquery per run, and `USE TEMP B-TREE` prevents
-early termination under `LIMIT`. Cost is O(total runs), not O(matching runs) — the precise
-outcome `schema.sql:290-291` says the index exists to prevent.
-
-Stable, not an artefact: identical plan on an empty database, on 5,000 runs by 3 keys, and after
-`ANALYZE`. Production never runs `ANALYZE`, so the no-stats plan **is** the production plan.
-
-The horizon query is fine — `_METADATA_KEY_FIRST_SEEN` gives
-`SEARCH rm USING INDEX idx_run_metadata_key_value (key=?)`. The index earns its keep for Q2;
-only the filter misses it.
-
-**No test asserts any query plan anywhere in the repository.** The claim survives only as prose,
-asserted as fact in six places, all currently false for the filter: `sqlite_store.py:192-196`,
-`core/ports/storage.py:241`, `storage/memory.py:226`, `docs/schema-manifest.md:380`,
-`test_routes_read.py:1394`, and `design.md:650`.
-
-> **Note on how this was missed.** The orchestrator reported this as verified during Phase 10.
-> That check ran `EXPLAIN QUERY PLAN` on a hand-written query — `SELECT run_id FROM run_metadata
-> WHERE key = ? AND value = ?` — **not** on `_LIST_RUNS_BY_METADATA`. The hand-written query does
-> use the index; the production query does not. A plan proved for a query the system never runs
-> is not evidence about the system.
-
-**Fix** — one clause, and it works:
-
-```text
-SEARCH rm USING INDEX idx_run_metadata_key_value (key=? AND value=?)
-SEARCH run USING INDEX sqlite_autoindex_run_1 (id=?)
-```
-
-An `IN (SELECT rm.run_id FROM run_metadata rm WHERE rm.key=? AND rm.value=?)` rewrite works
-equally well and is the smaller edit — it preserves the one-row-per-run shape without needing a
-`DISTINCT`, since `(run_id, key)` is the primary key. Then **add a regression test asserting
-`idx_run_metadata_key_value` appears in the plan**; without one this silently regresses again,
-because correctness never changes. Results are correct today — this is a performance MUST and
-six false statements, not wrong data.
+**SUGGESTION-D — scenario traceability annotation is inconsistent.** `session-ingestion` and
+`history-read-api` tests carry `*(capability → Requirement → Scenario)*` docstring annotations;
+`run-metadata`, `opt-in-activation` and `recording-schema` tests carry none. Coverage is real
+either way — confirmed here by named tests — but the mechanical grep-to-scenario audit that works
+for two capabilities does not work for the other three.
 
 ---
-
-## WARNING-1 — `MAX_METADATA_KEY_CHARS` is defined, exported, and enforced nowhere
-
-**Introduced by this change.** The constant appears in exactly five places: its definition
-(`core/domain/metadata.py:66`), its `__all__` entry, one test asserting it equals 1024, and two
-artifact mentions. **No production code reads it.** The test cannot fail for any reason
-connected to system behaviour.
-
-Two facts that shape the decision:
-
-- **No rollback hazard.** `run_metadata.key` has no CHECK and no length constraint
-  (`schema.sql:274` is bare `key TEXT NOT NULL`) and the insert is `INSERT OR IGNORE`. An
-  over-long key is stored, not rejected. This is a bound that silently does not exist, not
-  latent corruption.
-- **D97's taxonomy has no "key too long" class.** Adding one touches the SQL CHECK, the
-  `frozenset`, the Pydantic models and the manifest — a three-way contract, and arguably a
-  `schema_version` bump.
-
-**Recommendation: delete it.** The real bound on key volume already exists and is enforced —
-`MAX_METADATA_ENTRIES` (200 keys/run) at `metadata.py:252`.
-
-**Acceptable alternative:** enforce it in `read_declaration` beside the existing
-`MAX_DECLARED_PATH_CHARS` check — the whole declaration is refused with a warning, which needs
-**no** new status class and no schema change. Strictly cheaper than a taxonomy change.
-
-What should not survive review is the current state: a constant that exists, is exported, is
-tested, and does nothing.
-
-## WARNING-2 — `docs/schema-manifest.md` narrative block is stale — **pre-existing**
-
-Confirmed genuinely pre-existing. The block at lines 419-449 is dated **2026-08-15**, enumerates
-ten tables by name, and omits `user_setting` — so it was already stale before this change
-existed.
-
-| | Tables | Indexes | Columns |
-| --- | ---: | ---: | ---: |
-| Narrative block claims (2026-08-15) | 10 | 13 | 125 |
-| Before this change | 11 | 14 | 130 |
-| **After this change** (measured) | **13** | **15** | **139** |
-
-**Numerically worse, evidentially better.** The same change updated
-`test_schema_manifest.py`'s ground truth to `13/139/15` in the same commit, and
-`test_fresh_database_matches_the_manifest_in_both_directions` diffs the manifest against a live
-database in **both** directions. The per-table sections *were* updated; only the narrative prose
-was not. RQ-29's Inspection deliverable is satisfied by machine-checked evidence stronger than
-the prose record.
-
-**Recommendation:** retitle the block "Comparison recorded 2026-08-15 (superseded)" and point at
-the automated check. A hand-maintained count sitting next to an automated one is always the copy
-that rots — it has now done so twice. **Not a blocker, and not this change's fault.**
-
-## WARNING-3 — The RQ-25 contradiction is real and unresolved — **pre-existing**
-
-Verified directly against the files.
-
-1. **RQ-25's normative text exists nowhere in this repository.** All ~20 hits are *references*.
-   No file states the budget. Unlike the other requirements, no capability spec ever picked it
-   up — consistent with the Notion corpus deletion of 2026-08-28.
-2. **`version-control-context/spec.md` contradicts its own table.** Lines 143/145 record
-   **4.17%** and **4.11%**; lines 154-158 claim the results are *"still inside RQ-25's 2% budget
-   in every one of the four measured cases"*. Arithmetically false for those two rows.
-3. **`docs/open-questions.md:130-141` reads the same regime as a breach**, computing ~55 ms of
-   remaining headroom.
-4. **A third document already agrees it is a breach** — `failure-evidence/spec.md:171`. So
-   `version-control-context` is the **outlier**, and a later change already reached the opposite
-   conclusion without correcting it.
-
-This change's own Measurements paragraph names the contradiction explicitly and leaves
-resolution to a human. **That was the right call.**
-
-**Recommendation (human decision, not to be auto-applied):** correct
-`version-control-context/spec.md:154-158` — the numbers are right, only the conclusion drawn
-from them is wrong. The two 10 ms cases (0.29%, 1.50%) hold; the two 1 ms cases (4.17%, 4.11%)
-breach. Separately and more importantly: **three specs now measure against a budget no document
-states.** Either write the 2% budget down as a capability requirement — permitted, it reuses an
-existing ID and mints no new `RQ-xx` — or stop citing a number nothing defines.
-
-## WARNING-4 — Confirmed flaky test, **pre-existing**, with a different root cause than reported
-
-`git diff --name-only main...HEAD -- packages/pytest-vantage/tests/test_failure_paths.py` returns
-empty. Untouched by this change. Correctly excluded from this chain.
-
-The read at line 953 does sit outside the `with` block, but **the root cause is ordering, not
-shutdown timing**, and that changes the fix:
-
-- `_StubServer._accept_loop` spawns **one untracked daemon thread per connection**; `__exit__`
-  joins only the accept loop. Handler threads are never tracked or joined.
-- `_capturing_handler` appends **inside each handler thread**, after its own `recv()` returns.
-  The list therefore records *handler-completion order*, not *connection order*.
-- The plugin opens three connections: bare preflight (sends nothing), capability probe,
-  finish-write. If the preflight's handler is scheduled late, the list becomes
-  `[probe, finish, preflight]` and `requests_seen[2]` is the preflight's empty body.
-- `json.loads(b"")` raises exactly `JSONDecodeError: Expecting value: line 1 column 1`.
-
-A pure shutdown race would give `IndexError`, not `JSONDecodeError`. **The observed exception is
-itself the evidence that the entries were misordered rather than missing.**
-
-**Fix `_StubServer`, not the test.** Moving the assertions inside the `with` block narrows the
-window without closing it. Assign a sequence number at **accept** time and have `_handle` write
-into that slot; track and join the handler threads with a bounded timeout.
-`test_no_start_write_is_sent_when_the_server_predates_the_lifecycle` has the **identical**
-exposure and is the same latent flake, simply not yet observed. **Belongs on `main`, outside
-this chain.**
-
----
-
-## Suggestions
-
-1. **Write-once is tested with identical metadata only.** `test_replaying_the_same_metadata_is_a_no_op`
-   replays the *same* `RunMetadata`. `INSERT OR IGNORE` would equally ignore a *differing* value
-   — which is what R7 actually promises. A second call with `value="v2"` asserting the store
-   still reads `"v"` would prove no-backfill rather than idempotence.
-2. **Dead constant `_ADMISSIBLE_CONTENT_TYPES`** (`metadata_parse.py:75`) is unreferenced. Same
-   class of defect as WARNING-1, lower stakes. Note its value is deliberately narrower than
-   `runs.py`'s `_KNOWN_METADATA_CONTENT_TYPES` — that asymmetry is **correct and load-bearing**
-   (storage must match the CHECK including `toml`; the parser supports two and routes `toml` to
-   `malformed`). If revived, do not "fix" the difference.
-3. **Add a query-plan regression test.** See CRITICAL-2. The absence of any `EXPLAIN QUERY PLAN`
-   assertion is why a stated performance guarantee could be false in six documents at once with
-   a fully green suite.
-4. **`extra="forbid"` on the metadata wire models is a forward-compat asymmetry.** A newer plugin
-   adding a field to a file entry would get a 422 from an older server. Matches the `VcsReport`
-   precedent and is defensible — flagged so the choice is deliberate next time the section grows.
-
-## What this change got right
-
-- `yaml.compose` over `safe_load`, with the reasoning written down **and** backed by an
-  alias-bomb test and an `!!python/object/apply` test asserting nothing executed. Unreachable
-  rather than merely unreached.
-- Catching `RecursionError` beside `JSONDecodeError` — a real trap, since `json`'s
-  recursive-descent decoder does not raise a decode error on deep nesting.
-- The cross-version symlink-loop analysis is accurate and was confirmed on 3.10 and 3.13 rather
-  than taken on trust.
-- `INSERT OR IGNORE` plus `read_declaration`'s duplicate-key rejection independently neutralise
-  the `PRIMARY KEY (run_id, key)` rollback trap.
-- RQ-25 reported honestly as noise-bound rather than tuned into a favourable "confirmed under
-  budget", and the contradiction it hit was named instead of smoothed over.
-- `test_the_walk_is_not_vacuous` extended so the RQ-26 purity test cannot silently skip the new
-  module.
 
 ## Verdict
 
-**FAIL** — 2 critical, 4 warning, 4 suggestion. Not archive-ready.
+**PASS WITH WARNINGS.** Archive-ready.
 
-Not a failure of workmanship: 67/67 tasks, 739/739 tests, every gate clean, 33/33 scenarios with
-named passing tests. It fails because **two requirement-level MUSTs are violated in ways no
-scenario exercises**. Scenario-green is not requirement-green.
+Both blockers are independently confirmed closed **against the production artefacts, not the
+report**: CRITICAL-2's plan was proved on the query object imported from source and shown to fail
+on the reverted form, with row equivalence checked over a dataset verified non-empty first;
+CRITICAL-1's fix was proved end-to-end and shown not to swallow `KeyboardInterrupt` or
+`SystemExit`.
 
-| Finding | Origin | Routing |
-| --- | --- | --- |
-| CRITICAL-1 NUL byte crash | this change | `sdd-apply`, one slice on the chain tip |
-| CRITICAL-2 filter misses its index | this change | same slice |
-| WARNING-1 unenforced constant | this change | same slice |
-| WARNING-2 manifest drift | **pre-existing** | separate work on `main` |
-| WARNING-3 RQ-25 contradiction | **pre-existing** | human decision, separate |
-| WARNING-4 flaky stub server | **pre-existing** | separate work on `main` |
-
-The three pre-existing items must not be attributed to this change and must not block the chain.
+15/15 requirements and 33/33 scenarios compliant, 75/75 tasks complete, every gate green at 746
+passed. The three remaining warnings are pre-existing, are not attributable to this change, and
+do not block archive of this chain.
