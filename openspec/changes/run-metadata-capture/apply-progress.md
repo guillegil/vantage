@@ -18,7 +18,10 @@ in full.
   `resolve_declared_path` (6.1/6.2/6.5/6.6) is landed; `read_declaration`
   (6.3/6.4) is deferred to the next `sdd-apply` batch per this launch's
   explicit narrowing (see Phase 6's own note in `tasks.md`).
-- Phases 7-11 are untouched and remain for future `sdd-apply` batches.
+- Phase 7 (PR7a/PR7b/PR7c → PR6) — complete.
+- Phase 8 (PR8a/PR8b → PR7c) — complete, this batch, **re-sliced into two
+  PRs** (see Phase 8's own note in `tasks.md`).
+- Phases 9-11 are untouched and remain for future `sdd-apply` batches.
 
 ## Completed Tasks
 
@@ -545,25 +548,85 @@ more uniquely-named files: `test_metadata_declaration.py` (PR7a,
 - None merged yet — chain merges in order once every slice up to this one
   is reviewed, per `feature-branch-chain`.
 
+## Batch: Phase 8 (PR8a/PR8b)
+
+### Tasks completed
+
+- [x] 8.1 RED / 8.2 GREEN (PR8a): `MetadataFileReport`/`MetadataReport`
+  (`extra="forbid"`, matching `VcsReport`) — no `max_length`, no pattern,
+  no constraint of any kind on any field (D96 trap). `SessionReport.metadata:
+  MetadataReport | None = None`. `service/openapi/v1.yaml`'s `SessionReport`
+  schema property list updated in the same commit — required by the
+  existing schema-binding drift check (`test_interface_document.py`), not a
+  scope addition. Confirmed RED: `ImportError: cannot import name
+  'MetadataFileReport' from 'vantage.service.schemas'`. GREEN: 17 passed.
+- [x] 8.3 RED / 8.4 GREEN (PR8b): `metadata_parse.py` — the only module
+  importing `yaml`; `yaml.compose()` + `ScalarNode` walk (never
+  `safe_load`/`load`); `json.loads`; both plus `RecursionError` collapse to
+  `None` (D97 class 7). `parse(content, content_type, keys)` classifies
+  each requested key directly (`captured`/`absent`/`not_scalar`/
+  `value_too_large`) rather than deferring that to Phase 9's
+  `_to_run_metadata` — the node-type information the classification needs
+  is exactly what the walk already produces. Confirmed RED: `ModuleNotFoundError:
+  No module named 'vantage.service.metadata_parse'`. GREEN: 13 passed.
+  **Depth correction, verified not assumed**: the launch brief's
+  "1,000-deep" JSON nesting does not reproduce `RecursionError` on cpython
+  3.13.15 (`sys.getrecursionlimit() == 1000`) — measured 1,000/5,000/8,192
+  levels all return with no exception; `RecursionError` first reproduces at
+  10,000 levels. Test uses 20,000 for margin, with the bare `json.loads`
+  call proven first.
+- [x] 8.5 GREEN (PR8b): `packages/vantage/pyproject.toml` — `PyYAML>=6.0`
+  added to `vantage`'s main `dependencies`, not root's dev-only extra
+  (which already carried it for `test_interface_document.py`).
+- [x] 8.6 Verify (PR8b): `uv run pytest packages/vantage/tests/test_metadata_parse.py packages/vantage/tests/test_schemas.py` —
+  30 passed; re-verified individually on Python 3.10/3.11/3.12/3.13.
+  `uv run pytest` (whole workspace) — 698 passed (was 677). `uv run deptry .`
+  — clean, no per-rule ignore needed. `uv run mypy .` (strict) — clean, 93
+  files.
+
+### Re-slicing rationale
+
+The combined 8.1-8.6 diff measured 562 changed lines against
+`ft/run-metadata-capture-07c-wire`, 40% over the 400-line budget, before
+bookkeeping. `metadata_parse.py` does not import or depend on
+`MetadataFileReport`/`MetadataReport`, and the schemas do not depend on the
+parser — an honest seam, cut once rather than accepting a
+`size:exception`. PR8a (schemas) and PR8b (parser) both land comfortably
+under budget on their own.
+
+### Measured changed lines
+
+- **PR8a** (vs `ft/run-metadata-capture-07c-wire`): 190 changed lines (55
+  schemas.py + 133 test_schemas.py + 2 openapi/v1.yaml).
+- **PR8b** (vs PR8a's branch): 372 changed lines (166 metadata_parse.py +
+  193 test_metadata_parse.py + 11 pyproject.toml + 2 uv.lock).
+
+### Git / PR state (this batch)
+
+- PR8a: base `ft/run-metadata-capture-07c-wire`, head
+  `ft/run-metadata-capture-08a-schemas`.
+- PR8b: base PR8a's branch, head `ft/run-metadata-capture-08b-parse`.
+- PR URLs and CI status recorded once opened (see the apply-phase return
+  summary for this batch).
+
 ## Workload / PR Boundary
 
-- Mode: chained PR slices (`feature-branch-chain`); Phase 7 re-sliced from 2 planned PRs into 3 for size, not by launch instruction
-- Current work unit: Phase 6.3/6.4 + Phase 7, complete
-- Boundary: starts from PR6's tip (`resolve_declared_path` already landed) and ends with the full declaration-read → bound → wire pipeline proven and wired into both session writes. Server-side parsing/ingestion (Phase 8) untouched
-- Estimated review budget impact: PR7a is a documented `size:exception` (8.75% over, matching PR6's own precedent); PR7b and PR7c are both comfortably under budget
+- Mode: chained PR slices (`feature-branch-chain`); Phase 8 re-sliced from 1 planned PR into 2 for size, not by launch instruction
+- Current work unit: Phase 8 (server parse engine), complete
+- Boundary: starts from PR7c's tip (declared metadata read, bound and wired into both session writes) and ends with the server-side schemas and standalone parse module proven in isolation. Nothing calls `metadata_parse.parse` yet — route wiring, `_to_run_metadata` and ingestion are Phase 9
+- Estimated review budget impact: PR8a (190 lines) and PR8b (372 lines) are both comfortably under budget; no `size:exception` needed this batch
 
 ## Remaining Tasks
 
-Phase 8 (server parse engine) through Phase 11 (RQ-25 measurement + docs)
-— see tasks.md. The next PR (`ft/run-metadata-capture-08-...` or similar)
-targets `ft/run-metadata-capture-07c-wire` (this batch's last branch) for
-Phase 8's schema/parse dependency, or PR2/PR3 per the dependency table —
-follow `tasks.md`'s own base-branch column.
+Phase 9 (server ingest wiring) through Phase 11 (RQ-25 measurement + docs)
+— see tasks.md. The next PR targets `ft/run-metadata-capture-08b-parse`
+(this batch's last branch) for Phase 9, which needs PR4's port, PR7's wire
+section and PR8's schemas/parser — all satisfied transitively by the chain.
 
 ## Status
 
-40/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
-Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6, 6.3/6.4 landed this batch) and
-Phase 7 (6/6, all this batch). PR1 through PR7c open and green, not merged
-(chain merges in order at the end). Ready for the next `sdd-apply` batch
-(Phase 8: server parse engine).
+46/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
+Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6) and Phase 8
+(6/6, this batch). PR1 through PR8b open and green, not merged (chain
+merges in order at the end). Ready for the next `sdd-apply` batch (Phase 9:
+server ingest wiring).
