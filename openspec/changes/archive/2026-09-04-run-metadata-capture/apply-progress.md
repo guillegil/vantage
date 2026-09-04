@@ -981,7 +981,7 @@ instruction — a human decision for `sdd-verify` or later, not this batch.
 
 None. All 67 tasks across all 11 phases are complete.
 
-## Status
+## Status (superseded by Phase 12 below — kept for history)
 
 67/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
 Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6), Phase 8 (6/6),
@@ -989,3 +989,103 @@ Phase 9 (8/8), Phase 10 (8/8) and Phase 11 (5/5, this batch — final).
 PR1 through PR11b (#88-#106) open and green, not merged (chain merges in
 order at the end, then the tracker aggregates to `main`). Ready for
 `sdd-verify`.
+
+---
+
+## Phase 12 (PR12 → `ft/run-metadata-capture-11b-docs`): sdd-verify remediation
+
+`sdd-verify` (2026-09-04, chain tip `339f5ca`) returned **FAIL**: 2 critical, 4
+warning, 4 suggestion, on an otherwise 67/67-task, 739/739-test, 33/33-scenario
+green chain. Three findings (CRITICAL-1, CRITICAL-2, WARNING-1) were routed back
+to `sdd-apply` as **one slice on the chain tip**; three others (WARNING-2/3/4)
+were classified pre-existing and explicitly out of scope here. Both suggestions
+(SUGGESTION-1, SUGGESTION-2) were also fixed, in scope of the same launch prompt.
+
+### Branch / PR
+
+- Branch: `ft/run-metadata-capture-12-verify-fixups`, created from the chain tip
+  `ft/run-metadata-capture-11b-docs` (`339f5ca`).
+- PR targets `ft/run-metadata-capture-11b-docs` (feature-branch-chain,
+  unchanged strategy).
+- One PR, not re-sliced — 287 changed lines (code+tests), comfortably under the
+  400-line budget.
+
+### TDD Cycle Evidence (Strict TDD Mode)
+
+| Task | RED | GREEN | REFACTOR |
+| --- | --- | --- | --- |
+| 12.1 NUL-byte path (`resolve_declared_path`) | Reverted `except (OSError, RuntimeError)`, ran `test_a_path_containing_a_nul_byte_is_rejected_not_crashed` — `ValueError: lstat: embedded null character in path`, uncaught, test failed with the raw traceback (not an assertion failure) | Restored `except Exception`, test passed | Generalised module docstring: a third exception mechanism disproves an enumerated list twice; documented why `except Exception` is the more honest shape here (no resource held, no caller-visible invariant to hide, both exits already return `None`) |
+| 12.1 NUL-byte path (`read_declaration`) | Removed the new `"\x00" in path` check, ran `test_a_path_containing_a_nul_byte_captures_nothing_and_warns_once` — failed, `result` was a real `DeclaredFile`, not `None` | Restored the check, test passed | — |
+| 12.2 key length (`read_declaration`) | Removed the new `len(key) > MAX_DECLARED_KEY_CHARS` check, ran `test_a_key_longer_than_the_bound_captures_nothing_and_warns_once` — failed, `result` was a real `DeclaredFile` with the 1025-char key intact | Restored the check, test passed | Added `MAX_DECLARED_KEY_CHARS` mirror constant + `test_the_mirrored_key_char_bound_matches_the_server`, same shape as the existing `MAX_METADATA_ENTRIES` mirror |
+| 12.3 index usage (`_LIST_RUNS_BY_METADATA`) | Reverted the query to its original `WHERE EXISTS` form, ran `test_list_runs_by_metadata_uses_the_key_value_index` — failed, plan was exactly the bad one from the verify report (`SCAN run USING INDEX idx_run_started_at` / `CORRELATED SCALAR SUBQUERY 1` / `SEARCH rm USING INDEX sqlite_autoindex_run_metadata_1 (run_id=? AND key=?)`) | Restored the `WHERE id IN (...)` rewrite, test passed, plan now `SEARCH run USING INDEX sqlite_autoindex_run_1 (id=?)` / `LIST SUBQUERY 1` / `SEARCH rm USING INDEX idx_run_metadata_key_value (key=? AND value=?)` | Rewrote the query's own comment; corrected `docs/schema-manifest.md:380`, `design.md:650`, `test_routes_read.py:1394`'s docstring — verified `core/ports/storage.py:241` and `storage/memory.py:226` already state the true thing and left them unedited |
+| 12.5 no-backfill (SUGGESTION-1) | New test asserted differing-value replay leaves the first value — this is a NEW test, not a bug fix, so RED was "test doesn't exist yet"; ran it against the (already-correct) `INSERT OR IGNORE` behaviour and it passed immediately (no production change needed, `INSERT OR IGNORE` already had this property, only the test coverage was missing) | Passed on first run | — |
+| 12.6 dead constant (SUGGESTION-2) | N/A — refactor, not a behavior bug; existing `test_unsupported_content_type_is_treated_the_same_as_malformed` already covered the `toml` -> `malformed` case both before and after | All 13 `test_metadata_parse.py` tests pass unchanged | `parse()`'s dispatch is a membership check + one-line ternary instead of `if`/`elif`/`else` |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+| --- | --- |
+| Focused test command and result | `uv run pytest packages/pytest-vantage/tests/test_metadata_declaration.py packages/pytest-vantage/tests/test_metadata_containment.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_metadata_parse.py packages/vantage/tests/vantage_port_contract.py -q` — all passed (33 + 65 + 13 + contract tests, no failures) |
+| Runtime harness command/scenario and result | `uv run pytest -q` (whole workspace) — **746 passed**, 0 failed, 12 expected warnings (was 739 before this batch; +7 new tests, 0 removed). `uv run mypy .` strict — 94 files, clean. `uv run ruff format . && uv run ruff check --fix .` — clean, zero files reformatted. `uv run deptry .` — clean |
+| Rollback boundary | Each of the 6 commits on `ft/run-metadata-capture-12-verify-fixups` is independently revertible: the verify-report commit and its NUL-byte-fix follow-up touch only `verify-report.md`; the declaration-boundary fix touches only `pytest_vantage/metadata.py` + its two test files; the index fix touches only `sqlite_store.py` + `test_sqlite_store.py` + three prose files; the two suggestion commits touch one file each |
+
+### Deviations from Design
+
+None from `design.md`'s D91-D102 decisions. Two prose corrections were made to
+`design.md` itself (D100's paragraph at line 650) because the verify report
+found it stated something imprecise about which query is left-anchored on `key`
+alone versus seeked on the full `(key, value)` pair — corrected to match the
+implementation, not the other way around.
+
+### Issues Found
+
+- The committed `verify-report.md` (untracked before this batch) contained a
+  literal NUL byte where the CRITICAL-1 prose meant to show the two-character
+  escape `\0`, which made git/GitHub classify the whole markdown file as
+  binary. Fixed in a separate one-line-purpose commit before touching any
+  fix content, so the report's own text is legible in the PR diff.
+- `core/ports/storage.py:241` and `storage/memory.py:226` were named among the
+  "six false claims" in the launch prompt; on inspection both already state
+  the query's real behaviour correctly (they distinguish the filter's full
+  `(key, value)` lookup from the horizon count's `key`-only one) and needed no
+  edit. Verified, not assumed — recorded here so the count is auditable: 4 of
+  6 files edited, 2 of 6 confirmed already-true.
+
+### Git / PR state (this batch)
+
+- Branch: `ft/run-metadata-capture-12-verify-fixups`, 6 commits, based on
+  `ft/run-metadata-capture-11b-docs` @ `339f5ca`.
+- PR: opened against `ft/run-metadata-capture-11b-docs` — see PR URL in the
+  `sdd-apply` return envelope for this batch.
+- 287 changed lines (code+tests: ~226 insertions across 8 source/test files;
+  bookkeeping/docs: ~61 across `schema-manifest.md`, `design.md`, `tasks.md`,
+  this file). The committed `verify-report.md` (338 lines, a pre-produced
+  artifact from the prior `sdd-verify` phase, not authored fresh for review
+  here) is excluded from that count, matching this project's generated-content
+  convention; included, the branch diff is 625 changed lines across 11 files.
+
+## Workload / PR Boundary (Phase 12)
+
+- Mode: single PR, `feature-branch-chain` unchanged — no re-slicing needed,
+  287 changed lines is well under the 400-line budget
+- Current work unit: Phase 12 (sdd-verify remediation: CRITICAL-1, CRITICAL-2,
+  WARNING-1, SUGGESTION-1, SUGGESTION-2) — complete
+- Boundary: starts from the chain tip exactly as `sdd-verify` left it (67/67
+  tasks, 739 tests) and ends with the two blockers and the one warning fixed,
+  both suggestions applied, and the query-plan regression test in place so
+  CRITICAL-2's specific failure mode cannot silently regress again
+- Estimated review budget impact: 287 lines, one PR, comfortably reviewable in
+  well under 60 minutes
+
+## Remaining Tasks
+
+None. 67/67 original tasks plus 8/8 Phase 12 remediation tasks complete.
+
+## Status
+
+75/75 tasks complete (67 original + 8 Phase 12). PR1 through PR11b (#88-#106)
+plus PR12 (`ft/run-metadata-capture-12-verify-fixups` → PR11b) all open.
+Nothing merged yet — the chain merges in order once every slice is reviewed,
+then the tracker `ft/run-metadata-capture` aggregates the whole feature into
+`main`. Next: `sdd-verify` (re-verify with PR12 included), or merge order if
+already re-verified.
