@@ -25,6 +25,7 @@ import pytest
 from pytest_vantage import metadata
 from pytest_vantage.boundary import VantageWarning
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES as _SERVER_MAX_METADATA_ENTRIES
+from vantage.core.domain.metadata import MAX_METADATA_KEY_CHARS as _SERVER_MAX_METADATA_KEY_CHARS
 
 
 def _config() -> pytest.Config:
@@ -54,6 +55,16 @@ def test_the_mirrored_entry_bound_matches_the_server() -> None:
     cross-package import, never trusted to stay in sync by convention.
     """
     assert metadata.MAX_METADATA_ENTRIES == _SERVER_MAX_METADATA_ENTRIES
+
+
+def test_the_mirrored_key_char_bound_matches_the_server() -> None:
+    """sdd-verify WARNING-1: `metadata.MAX_DECLARED_KEY_CHARS` mirrors
+    `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS` across the same
+    RQ-24 boundary `MAX_METADATA_ENTRIES` above already mirrors, pinned the
+    same way -- a test-only cross-package import, never trusted to stay in
+    sync by convention alone.
+    """
+    assert metadata.MAX_DECLARED_KEY_CHARS == _SERVER_MAX_METADATA_KEY_CHARS
 
 
 # --- read_declaration: rejection conditions (task 6.3, design.md D92) -------
@@ -199,6 +210,42 @@ def test_a_path_longer_than_the_bound_captures_nothing_and_warns_once(
     root.mkdir()
     long_path = "a" * (metadata.MAX_DECLARED_PATH_CHARS + 1) + ".json"
     entry = {"path": long_path, "format": "json", "keys": ["k"]}
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": [entry]}))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    assert len(_metadata_warnings(recwarn)) == 1
+
+
+def test_a_path_containing_a_nul_byte_captures_nothing_and_warns_once(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # sdd-verify CRITICAL-1: rejected loudly at the declaration boundary,
+    # before `resolve_declared_path` ever sees it -- see that module's
+    # own `test_a_path_containing_a_nul_byte_is_rejected_not_crashed` for
+    # the crash this prevents downstream.
+    root = tmp_path / "project"
+    root.mkdir()
+    entry = {"path": "config\x00.json", "format": "json", "keys": ["k"]}
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": [entry]}))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    assert len(_metadata_warnings(recwarn)) == 1
+
+
+def test_a_key_longer_than_the_bound_captures_nothing_and_warns_once(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # sdd-verify WARNING-1: `MAX_DECLARED_KEY_CHARS` gates real behaviour --
+    # the whole declaration is refused, exactly like `MAX_DECLARED_PATH_CHARS`
+    # beside it, with no new status class and no schema change.
+    root = tmp_path / "project"
+    root.mkdir()
+    long_key = "k" * (metadata.MAX_DECLARED_KEY_CHARS + 1)
+    entry = {"path": "a.json", "format": "json", "keys": [long_key]}
     (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": [entry]}))
 
     result = metadata.read_declaration(_config(), root)

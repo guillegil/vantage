@@ -55,6 +55,7 @@ to a 1.5 server is ordinary rather than a bug.
 ```bash
 pytest --vantage --vantage-server http://localhost:8000   # record this session
 pytest --vantage --vantage-server ... --vantage-failure-text  # also capture failure text
+pytest --vantage --vantage-server ... --vantage-metadata   # also capture declared configuration
 pytest                                                     # unchanged -- opt-in (RQ-2)
 ```
 
@@ -75,6 +76,32 @@ credentials**
 (`docs/adr/0016-store-pytest-s-rendered-failure-text-bounded-and-unredacted.md`)
 -- which is exactly why the flag that turns it on is also where this
 disclosure lives.
+
+Metadata capture -- named values read from files the test repository itself
+declares, such as a firmware revision or a board identifier -- is a **third,
+separate opt-in**, also absent by default and also invocation-flag-only
+(RQ-2's same invariant, `docs/adr/0017-store-user-declared-configuration-values-read-from-the-test-repository.md`).
+It reads nothing unless a `vantage-metadata.json` file exists at the project
+root, naming which files to read and which top-level keys to take from each:
+
+```json
+{
+  "version": 1,
+  "files": [
+    {"path": "board.json", "format": "json", "keys": ["board_revision"]}
+  ]
+}
+```
+
+Every declared path must resolve strictly under the project root -- an
+absolute path, a `..` escape, or a symlink pointing outside it is rejected,
+never clamped. A declared file is read whole or not at all: an oversized or
+unreadable file is dropped in its entirety and marked, never truncated, and
+a malformed declaration never fails the run -- the session is still
+recorded, with metadata capture contributing nothing for it. **Vantage will
+read and upload a file a co-worker named, on some machine, at some point** --
+stated, not mitigated, the same posture the ADR above takes for its own
+disclosure.
 
 ## Architecture
 
