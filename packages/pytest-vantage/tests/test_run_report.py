@@ -235,6 +235,96 @@ def test_vcs_section_is_identical_on_both_reports(
     assert call_count[0] == 1
 
 
+@pytest.mark.req(id="RQ-25")
+def test_metadata_section_is_identical_on_both_reports(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """design.md D51, extended to metadata by D96: `self._metadata` is
+    captured once, in `__init__`, and never re-read -- both the start
+    report and the finish report must serialise the IDENTICAL section.
+    `capture_metadata` is patched to return a DIFFERENT `MetadataSection`
+    on every call it might receive; if `Recorder` re-read at finish time,
+    the two reports would disagree. They cannot, because there is only
+    ever one call to disagree with itself -- the same proof
+    `test_vcs_section_is_identical_on_both_reports` already uses for `vcs`.
+
+    `assert call_count[0] == 1` is also RQ-25's O(1)-per-session shape claim
+    (design.md D102): the declaration read and every file it names are read
+    exactly once per session, never once per test -- the same
+    process-count-does-not-scale proof `test_git_invocation_count_does_not_
+    scale_with_test_count` already carries for `vcs.capture`. The measured
+    number this shape claim predicts lives in `run-metadata/spec.md`'s own
+    Measurements paragraph (Analysis, not Test), not in an assertion here.
+    """
+    from pytest_vantage import metadata as metadata_module
+
+    call_count = [0]
+
+    def _fake_capture(config: pytest.Config, rootpath: Path) -> metadata_module.MetadataSection:
+        call_count[0] += 1
+        return metadata_module.MetadataSection(
+            declaration=metadata_module.DECLARATION_FILENAME,
+            files=(
+                metadata_module.CapturedFile(
+                    path="f.json",
+                    format="json",
+                    status="captured",
+                    keys=("k",),
+                    content=f"call-{call_count[0]}",
+                ),
+            ),
+        )
+
+    monkeypatch.setattr("pytest_vantage.recorder.metadata.capture_metadata", _fake_capture)
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send",
+        lambda address, report, *, timeout: sent.append(report),
+    )
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+    (pytester.path / "vantage-metadata.json").write_text(
+        json.dumps({"version": 1, "files": [{"path": "f.json", "format": "json", "keys": ["k"]}]})
+    )
+
+    result = pytester.runpytest(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-metadata"
+    )
+
+    result.assert_outcomes(passed=1)
+    assert len(sent) == 2
+    start_report, finish_report = sent
+    assert start_report["metadata"] == finish_report["metadata"]
+    # The FIRST capture, never a later one -- proves it was not re-read.
+    assert start_report["metadata"]["files"][0]["content"] == "call-1"  # type: ignore[index]
+    assert call_count[0] == 1
+
+
+def test_no_metadata_section_when_capture_was_not_requested(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The `metadata` wire key is absent entirely -- not `null` -- on both
+    reports when `--vantage-metadata` was never passed, the same
+    additive-section shape `vcs`/`results` already establish."""
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send",
+        lambda address, report, *, timeout: sent.append(report),
+    )
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert len(sent) == 2
+    start_report, finish_report = sent
+    assert "metadata" not in start_report
+    assert "metadata" not in finish_report
+
+
 @pytest.mark.req(id="RQ-39")
 def test_passing_suite_exit_status_survives_unreadable_repository(
     pytester: pytest.Pytester,
