@@ -17,6 +17,17 @@ drifts high produces 413s that reject whole sessions -- so
 against the server's real value via a test-only cross-package import; that
 import lives in the test file, never here.
 
+**This ~1,000-result headroom derivation predates `run-metadata-capture`
+(design.md D94).** That change's `metadata` section rides the finish-write
+too (`recorder.py::_metadata_section`), spending up to
+`pytest_vantage.metadata.MAX_METADATA_SECTION_BYTES` (32,768 bytes) of the
+same `MAX_REPORT_BYTES` cap this module's headroom is computed against.
+The derivation above is otherwise unchanged -- `(524,288 - 32,768) / 505 ≈
+973` results -- a 6% reduction from ~1,038, still comfortably above the
+500-result session Measurements exercises. A derived invariant another
+module's arithmetic depends on is not allowed to drift silently just
+because the module that changed it lives elsewhere.
+
 `spend_failure_text_budget` is called between `assemble_results(...)` and
 `send(...)` in `recorder.py::pytest_sessionfinish` -- one pass, in execution
 order (the order the `results[]` entries already carry), charging each

@@ -41,6 +41,21 @@ would break every plugin upgrade the same way a strict `run` would; ignoring
 it silently would hide the drift RQ-42 exists to surface. `"allow"` keeps
 both: the report still records, and the tolerated key names surface,
 deduplicated, in `Acknowledgement.ignored`.
+
+**`MetadataFileReport` and `MetadataReport` (design.md D96) carry NO length
+or pattern constraint on any field, and that is the one rule that overrides
+every other pattern in this module.** `VcsReport.commit` below uses
+``max_length=64``, and a Pydantic constraint that fails raises
+``InvalidReportError`` -- a ``422`` that rejects the WHOLE session report.
+A co-worker's declared configuration value is exactly the kind of string
+this project does not control the length or shape of, so a constraint here
+would convert a typo in someone else's file into a lost test session. Every
+bound on a metadata value is applied by the normalizer (Phase 9's
+`_to_run_metadata`), which drops the offending value rather than rejecting
+the report. `extra="forbid"` still applies to both models, matching
+`VcsReport` rather than `ResultReport`: an unknown field *inside* the
+metadata section means the two sides disagree about what a captured file
+looks like, which is a schema disagreement, not enrichment.
 """
 
 from __future__ import annotations
@@ -186,6 +201,41 @@ class VcsReport(BaseModel):
     root: str | None
 
 
+class MetadataFileReport(BaseModel):
+    """One entry of `MetadataReport.files` (design.md D96): the outcome
+    recorded for one declared file, whether or not it was captured.
+
+    ``extra="forbid"``, matching `VcsReport`. **No `max_length`, no
+    `pattern`, no constraint of any kind on `path`, `keys` or `content`** --
+    see the module docstring's D96 paragraph. `content` is `None` whenever
+    `status` is not `"captured"`, mirroring D95's "declared-but-dropped is a
+    row, not an absence" contract on the storage side.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    format: str
+    status: str
+    keys: list[str]
+    content: str | None
+
+
+class MetadataReport(BaseModel):
+    """The ``metadata`` section of a session report (design.md D96): the
+    declaration's own name, and one `MetadataFileReport` per file it named.
+
+    ``extra="forbid"``, matching `VcsReport` rather than `SessionReport`'s
+    envelope tolerance -- see the module docstring. **No constraint on
+    `declaration` either.**
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    declaration: str
+    files: list[MetadataFileReport]
+
+
 class SessionReport(BaseModel):
     """The envelope submitted to `POST /api/v1/runs` (design.md D1).
 
@@ -203,6 +253,10 @@ class SessionReport(BaseModel):
     an unrecognised key rather than rejecting the whole report (design.md
     D47). No capability gate exists for it: a flag nothing branches on would
     advertise a gate that does not exist.
+
+    ``metadata`` is `None` by default for the same reason again -- an older
+    plugin, or a session run without `--vantage-metadata`, carries no such
+    key (design.md D96).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -210,6 +264,7 @@ class SessionReport(BaseModel):
     run: RunReport
     results: list[ResultReport] | None = None
     vcs: VcsReport | None = None
+    metadata: MetadataReport | None = None
 
     @field_validator("results")
     @classmethod
@@ -293,12 +348,25 @@ class RunListItemResponse(BaseModel):
     vcs: RunVcsResponse | None
 
 
+class MetadataHorizonResponse(BaseModel):
+    """`RunListResponse.metadata_horizon`'s populated shape (design.md D100,
+    Q2) -- present only when a metadata filter was supplied. `predating` is
+    the count of runs recorded before `key` was ever declared, which equals
+    the total run count when `key` was never declared at all: "every run
+    predates this key; it has never been declared.\""""
+
+    key: str
+    predating: int
+
+
 class RunListResponse(BaseModel):
     """The response body for `GET /api/v1/runs` (design.md D58 -- no
-    `total`)."""
+    `total`; D100 -- `metadata_horizon`, `None` when no metadata filter was
+    given: a query with no metadata filter has no horizon to report)."""
 
     items: list[RunListItemResponse]
     has_more: bool
+    metadata_horizon: MetadataHorizonResponse | None
 
 
 class RunDetailResponse(BaseModel):
