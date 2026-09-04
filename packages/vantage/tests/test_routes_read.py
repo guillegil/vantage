@@ -1392,8 +1392,11 @@ def test_run_list_metadata_filter_returns_only_matching_runs(
 ) -> None:
     """*(history-read-api -> Exact key=value equality filter -> A key=value
     filter returns matching runs)*. Served by `idx_run_metadata_key_value`,
-    left-anchored on `key` (design.md D100) -- a run declaring the same key
-    at a different value must not match."""
+    seeked on the full `(key, value)` pair rather than `key` alone
+    (design.md D100, `sdd-verify` CRITICAL-2 --
+    `test_list_runs_by_metadata_uses_the_key_value_index` pins the query
+    plan) -- a run declaring the same key at a different value must not
+    match."""
     now = datetime.now(timezone.utc)
     matching_run = _run_id(100)
     other_value_run = _run_id(101)

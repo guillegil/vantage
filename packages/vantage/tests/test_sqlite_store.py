@@ -18,7 +18,7 @@ import pytest
 from vantage.core.domain.result import CapturedOutput
 from vantage.core.ports.storage import ExecutionStore
 from vantage.storage.connection import SchemaVersionError
-from vantage.storage.sqlite_store import SqliteExecutionStore
+from vantage.storage.sqlite_store import _LIST_RUNS_BY_METADATA, SqliteExecutionStore
 from vantage_port_contract import ExecutionStoreContract, _execution, _start_only_execution
 
 # The pre-`failure-capture` `_INSERT_RESULT` shape (14 bound columns, no
@@ -286,3 +286,38 @@ def test_a_v2_stamped_database_is_refused_naming_version_found_required_and_path
     assert "3" in message
     assert str(db_path) in message
     assert captured == []
+
+
+def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
+    """sdd-verify CRITICAL-2: `_LIST_RUNS_BY_METADATA` MUST reach the
+    read filter's whole reason to exist -- `idx_run_metadata_key_value`
+    (schema.sql, docs/schema-manifest.md) -- rather than a full scan of
+    `run` with one correlated subquery per row.
+
+    A prior `WHERE EXISTS (SELECT 1 FROM run_metadata rm WHERE rm.run_id =
+    run.id AND rm.key = ? AND rm.value = ?)` form correlated the subquery on
+    `rm.run_id = run.id`, so SQLite's planner anchored there and preferred
+    `run_metadata`'s own `PRIMARY KEY (run_id, key)` autoindex instead --
+    `idx_run_metadata_key_value` was never touched, and cost was O(total
+    runs) rather than O(matching runs). Results were correct either way;
+    only the plan regressed silently, which is exactly why this asserts the
+    plan and not just the rows -- `test_run_list_metadata_filter_returns_
+    only_matching_runs` (`test_routes_read.py`) already covers correctness.
+
+    No `ANALYZE` is run here, deliberately: production never runs it
+    either (no `sqlite_stat1` table exists), so the no-stats plan asserted
+    here is the plan production actually gets, not an optimistic one only
+    reachable after statistics collection.
+    """
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        plan_rows = store._conn.execute(  # noqa: SLF001
+            f"EXPLAIN QUERY PLAN {_LIST_RUNS_BY_METADATA}",
+            (200, 200, "firmware_version", "2.1", 21, 0),
+        ).fetchall()
+        plan_text = "\n".join(str(row[-1]) for row in plan_rows)
+
+        assert "idx_run_metadata_key_value" in plan_text
+        assert "sqlite_autoindex_run_metadata_1" not in plan_text
+    finally:
+        store.close()
