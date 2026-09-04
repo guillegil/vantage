@@ -73,6 +73,14 @@ from yaml.nodes import MappingNode, ScalarNode
 from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES
 
 _ADMISSIBLE_CONTENT_TYPES = frozenset({"json", "yaml"})
+"""`sdd-verify` SUGGESTION-2: narrower than `routes/runs.py`'s
+`_KNOWN_METADATA_CONTENT_TYPES` (which also admits `"toml"`) on purpose --
+this is load-bearing, not an oversight to reconcile. Storage must match
+`schema.sql`'s CHECK, which already includes `toml` for a future slice;
+this parser supports exactly two formats today and routes `toml` to
+`"malformed"` like any other unsupported type. Widening this set to match
+the other would silently start attempting to parse a format `parse()` has
+no branch for."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,13 +108,10 @@ def parse(content: str, content_type: str, keys: Sequence[str]) -> dict[str, Key
     particular order requirement -- `absent` (class 8), `not_scalar`
     (class 9), `value_too_large` (class 10), or `captured`.
     """
+    if content_type not in _ADMISSIBLE_CONTENT_TYPES:
+        return None
     try:
-        if content_type == "json":
-            document = _parse_json(content)
-        elif content_type == "yaml":
-            document = _parse_yaml(content)
-        else:
-            return None
+        document = _parse_json(content) if content_type == "json" else _parse_yaml(content)
     except (json.JSONDecodeError, yaml.YAMLError, RecursionError):
         return None
     if document is None:
