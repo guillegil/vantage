@@ -1352,6 +1352,39 @@ class ExecutionStoreContract:
             metadata.entries
         )
 
+    def test_replaying_metadata_with_a_different_value_does_not_backfill(
+        self, store: ExecutionStore
+    ) -> None:
+        """`run-metadata` R7: a stored value is unchanged from what was
+        written at ingestion (`sdd-verify` SUGGESTION-1). Identical-metadata
+        replay, above, proves `INSERT OR IGNORE` is idempotent -- it does
+        NOT prove no-backfill, since idempotence holds trivially when the
+        two writes agree. This asserts the requirement directly: a second
+        `record_session` call for the same run, same key, a DIFFERENT
+        value, must leave the FIRST value on read -- `INSERT OR IGNORE`
+        silently discards the second write's row rather than updating it,
+        which is a different, stronger claim than "replaying is a no-op"."""
+        execution = _execution("8" * 32)
+        first = RunMetadata(
+            files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
+            entries=(MetadataEntry(key="k", value="v1", source_file="a.yaml", status="captured"),),
+        )
+        second = RunMetadata(
+            files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
+            entries=(MetadataEntry(key="k", value="v2", source_file="a.yaml", status="captured"),),
+        )
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=first
+        )
+
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=second
+        )
+
+        stored = _stored_metadata_entries(store, execution.identity.value)
+        assert stored == frozenset(first.entries)
+        assert stored != frozenset(second.entries)
+
     def test_a_finish_only_session_records_the_same_rows_a_start_finish_pair_would(
         self, store: ExecutionStore
     ) -> None:
