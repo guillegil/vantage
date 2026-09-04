@@ -1,13 +1,13 @@
 -- Vantage database schema (RQ-29: complete schema from first use, ADR-5).
 --
--- All eleven tables and their fourteen indexes are declared here, whole, and
+-- All thirteen tables and their fifteen indexes are declared here, whole, and
 -- applied the first time a database is opened (vantage/storage/connection.py,
 -- PR4). Every statement is IF NOT EXISTS so a second process opening the same
 -- fresh database races safely (design.md D8) and reopening an existing
 -- database issues no schema-altering statement (RQ-29.2).
 --
--- Milestone 1 populates only the marked `run` columns; the other ten tables
--- exist empty until the milestone that writes them. No migration framework
+-- Milestone 1 populates only the marked `run` columns; the other twelve
+-- tables exist empty until the milestone that writes them. No migration framework
 -- ships in Phase 1 (ADR-5) -- `meta.schema_version` is the seam, not a
 -- substitute for one. This file stamps that seam itself, as its own last
 -- statement (ADR-0013, design.md D28): a database created without ever
@@ -247,12 +247,48 @@ CREATE TABLE IF NOT EXISTS user_setting (
 );
 
 -- ---------------------------------------------------------------------------
--- Indexes -- fourteen in total (docs/schema-manifest.md enumerates the same
+-- run_metadata_file -- one row per DECLARED file, captured or not. This table
+-- is the audit surface C5 requires and the "absence is marked" record for a
+-- file that contributed no keys at all (design.md D91, D95). `source_file` is
+-- the DECLARED, rootpath-relative path exactly as written (P-1) -- never the
+-- resolved one, which is absolute and can carry a username (ADR-0016).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS run_metadata_file (
+    run_id       TEXT NOT NULL REFERENCES run (id),
+    source_file  TEXT NOT NULL,
+    content_type TEXT NOT NULL CHECK (content_type IN ('json', 'yaml', 'toml')),
+    status       TEXT NOT NULL CHECK (status IN (
+                     'captured', 'not_found', 'path_rejected', 'too_large',
+                     'not_text', 'unreadable', 'over_budget', 'malformed')),
+    PRIMARY KEY (run_id, source_file)
+);
+
+-- ---------------------------------------------------------------------------
+-- run_metadata -- one row per DECLARED key. `value` is NULL whenever `status`
+-- is not 'captured': a declared-but-uncaptured key is a row, never a missing
+-- row (design.md D95). All values are TEXT, numbers included (D-c) --
+-- comparison is string equality, and the declaration names keys, not types.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS run_metadata (
+    run_id       TEXT NOT NULL REFERENCES run (id),
+    key          TEXT NOT NULL,
+    value        TEXT NULL,
+    source_file  TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN (
+                     'captured', 'absent', 'not_scalar', 'value_too_large',
+                     'source_unavailable')),
+    PRIMARY KEY (run_id, key)
+);
+
+-- ---------------------------------------------------------------------------
+-- Indexes -- fifteen in total (docs/schema-manifest.md enumerates the same
 -- list). The failure index (5) is RQ-8's criterion that twenty tests failing
 -- at one source line come back as one `GROUP BY failure_path, failure_lineno`
 -- group. `run(received_at)` (2) is the arrival-order index the Milestone 4
 -- read API needs, created now per ADR-5. `run(last_contact_at)` (14) is the
--- liveness-derivation index this change adds (RQ-44).
+-- liveness-derivation index a prior change added (RQ-44). `run_metadata(key,
+-- value)` (15) is this change's own index -- the product itself: filtering
+-- runs by a declared key/value pair is a full scan without it.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_started_at
     ON run (started_at);                                            -- 1
@@ -282,6 +318,8 @@ CREATE INDEX IF NOT EXISTS idx_result_artifact_content_hash
     ON result_artifact (content_hash);                              -- 13
 CREATE INDEX IF NOT EXISTS idx_run_last_contact_at
     ON run (last_contact_at);                                       -- 14
+CREATE INDEX IF NOT EXISTS idx_run_metadata_key_value
+    ON run_metadata (key, value);                                   -- 15
 
 -- ---------------------------------------------------------------------------
 -- Schema version stamp (ADR-0013, design.md D28) -- must be the last
@@ -293,4 +331,4 @@ CREATE INDEX IF NOT EXISTS idx_run_last_contact_at
 -- relies on, so reapplying this script against an already-stamped database
 -- changes nothing.
 -- ---------------------------------------------------------------------------
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '3');
+INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '4');

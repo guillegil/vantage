@@ -43,26 +43,26 @@ Chain strategy: feature-branch-chain
 
 ## Phase 1 (PR1 → tracker): ADR-0017
 
-- [ ] 1.1 Write `docs/adr/0017-store-user-declared-configuration-values-read-from-the-test-repository.md`. Nygard + `Alternatives rejected` (ADR-0016's shape). `Status: Proposed`.
-- [ ] 1.2 Decision section: what is authorised (declared top-level scalars only, never file bodies, D-k deferred); the five conditions C1–C5 held together, inheriting ADR-0016's register; the EAV justification (D-e); the must-not-fail-the-run rule (D97); what is not authorised (host env, arbitrary bodies, server-directed reads, web editing, backfill).
-- [ ] 1.3 Consequences section: read exposure stated not mitigated; reversal cost (`schema_version` 3→4, refuse not migrate, ADR-0013); RQ-25 O(1)-measured obligation; unbounded growth named not solved; Q2's horizon published not implied. Bind to ADR-0013, ADR-0014, ADR-0016, RQ-2/24/25/26/28/29/44, and `run-metadata`/`opt-in-activation`/`session-ingestion`/`recording-schema`/`history-read-api`.
-- [ ] 1.4 PR description: `Status` flips to `Accepted` on merge (CLAUDE.md); no test surface, this PR is Inspection-only.
+- [x] 1.1 Write `docs/adr/0017-store-user-declared-configuration-values-read-from-the-test-repository.md`. Nygard + `Alternatives rejected` (ADR-0016's shape). `Status: Proposed`.
+- [x] 1.2 Decision section: what is authorised (declared top-level scalars only, never file bodies, D-k deferred); the five conditions C1–C5 held together, inheriting ADR-0016's register; the EAV justification (D-e); the must-not-fail-the-run rule (D97); what is not authorised (host env, arbitrary bodies, server-directed reads, web editing, backfill).
+- [x] 1.3 Consequences section: read exposure stated not mitigated; reversal cost (`schema_version` 3→4, refuse not migrate, ADR-0013); RQ-25 O(1)-measured obligation; unbounded growth named not solved; Q2's horizon published not implied. Bind to ADR-0013, ADR-0014, ADR-0016, RQ-2/24/25/26/28/29/44, and `run-metadata`/`opt-in-activation`/`session-ingestion`/`recording-schema`/`history-read-api`.
+- [x] 1.4 PR description: `Status` flips to `Accepted` on merge (CLAUDE.md); no test surface, this PR is Inspection-only.
 
 ## Phase 2 (PR2 → PR1): Schema bump — the irreversible point
 
-- [ ] 2.1 RED: extend `test_connection.py` — opening a database stamped `meta.schema_version='3'` with this build is refused, naming both versions and the path (ADR-0013 proven).
-- [ ] 2.2 RED: update `test_schema_manifest.py:216-221` literals 11/130/14 → 13/139/15 (fails until 2.3).
-- [ ] 2.3 GREEN: `schema.sql` — add `run_metadata_file`, `run_metadata`, `idx_run_metadata_key_value` (D91) between `user_setting` and `-- Indexes`; update header counts and the "fourteen in total" comment; stamp `'4'`.
-- [ ] 2.4 GREEN: `connection.py` — `_SCHEMA_VERSION = 4`.
-- [ ] 2.5 GREEN: `docs/schema-manifest.md` — two new `###` sections (`run_metadata_file`, `run_metadata`, column-for-column) and corrected header counts (D91).
-- [ ] 2.6 Verify 2.1–2.2 pass; run `uv run pytest packages/vantage/tests/test_schema_manifest.py packages/vantage/tests/test_connection.py`.
-- [ ] 2.7 PR description: flag `docs/schema-manifest.md:364-403`'s pre-existing "Table count 10"/"Index count 13" drift (2026-08-15) as NOT this PR's obligation, so a reviewer does not misattribute it.
+- [x] 2.1 RED: extend `test_connection.py` — opening a database stamped `meta.schema_version='3'` with this build is refused, naming both versions and the path (ADR-0013 proven).
+- [x] 2.2 RED: update `test_schema_manifest.py:216-221` literals 11/130/14 → 13/139/15 (fails until 2.3).
+- [x] 2.3 GREEN: `schema.sql` — add `run_metadata_file`, `run_metadata`, `idx_run_metadata_key_value` (D91) between `user_setting` and `-- Indexes`; update header counts and the "fourteen in total" comment; stamp `'4'`.
+- [x] 2.4 GREEN: `connection.py` — `_SCHEMA_VERSION = 4`.
+- [x] 2.5 GREEN: `docs/schema-manifest.md` — two new `###` sections (`run_metadata_file`, `run_metadata`, column-for-column) and corrected header counts (D91).
+- [x] 2.6 Verify 2.1–2.2 pass; run `uv run pytest packages/vantage/tests/test_schema_manifest.py packages/vantage/tests/test_connection.py`.
+- [x] 2.7 PR description: flag `docs/schema-manifest.md:364-403`'s pre-existing "Table count 10"/"Index count 13" drift (2026-08-15) as NOT this PR's obligation, so a reviewer does not misattribute it.
 
 ## Phase 3 (PR3 → PR2): Core vocabulary
 
-- [ ] 3.1 RED: `packages/vantage/tests/test_metadata.py` — `FILE_STATUSES`/`KEY_STATUSES` are plain-`str` `frozenset`s (never `Enum`, per `liveness.py`'s 3.10-vs-3.13 `__format__` precedent); membership covers exactly D91's SQL `CHECK` lists.
-- [ ] 3.2 GREEN: create `packages/vantage/src/vantage/core/domain/metadata.py` — `FILE_STATUSES`, `KEY_STATUSES`, `MAX_METADATA_VALUE_BYTES`, `MAX_METADATA_KEY_CHARS`, `MAX_METADATA_ENTRIES` (D94, D95). No logic beyond vocabulary (RQ-26).
-- [ ] 3.3 RED+GREEN: extend `test_architecture.py`'s RQ-26 purity walk to include `metadata.py` importing nothing outside stdlib.
+- [x] 3.1 RED: `packages/vantage/tests/test_metadata.py` — `FILE_STATUSES`/`KEY_STATUSES` are plain-`str` `frozenset`s (never `Enum`, per `liveness.py`'s 3.10-vs-3.13 `__format__` precedent); membership covers exactly D91's SQL `CHECK` lists.
+- [x] 3.2 GREEN: create `packages/vantage/src/vantage/core/domain/metadata.py` — `FILE_STATUSES`, `KEY_STATUSES`, `MAX_METADATA_VALUE_BYTES`, `MAX_METADATA_KEY_CHARS`, `MAX_METADATA_ENTRIES` (D94, D95). No logic beyond vocabulary (RQ-26).
+- [x] 3.3 RED+GREEN: extend `test_architecture.py`'s RQ-26 purity walk to include `metadata.py` importing nothing outside stdlib.
 
 ## Phase 4 (PR4 → PR3): Port dataclasses + both adapters + contract
 
