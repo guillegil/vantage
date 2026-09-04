@@ -178,14 +178,26 @@ changed lines respectively).
 
 ## Phase 9 (PR9 → PR4, PR7, PR8): Server ingest wiring
 
-- [ ] 9.1 RED: `test_routes_runs.py` — a metadata section with an oversized/absolute/`..` `source_file` is dropped, never rejected (D93's server re-check); no `422` reaches the client for it.
-- [ ] 9.2 GREEN: `routes/runs.py` — `_to_run_metadata(payload.metadata)` following `_to_vcs_context`'s shape: re-check `source_file` shape (≤1024 chars, not absolute, no `..`); call `metadata_parse.parse`; classify each declared key into `captured | absent | not_scalar | value_too_large | source_unavailable`; drop-whole everywhere, `truncate()` never called (D95, D97).
-- [ ] 9.3 GREEN: wire `metadata=` into the `store.record_session(...)` call.
-- [ ] 9.4 RED (RQ-44, `@pytest.mark.req(id="RQ-44")`): `test_ingestion.py` — a report whose metadata section is entirely garbage still yields `201` and a written run row (RQ-44's rule proven, not asserted).
-- [ ] 9.5 RED: one integration test per D97 row (11 classes: `not_found`, `path_rejected`, `too_large`, `not_text`, `unreadable`, `over_budget`, `malformed`, `absent`, `not_scalar`, `value_too_large`, server-side-shape-reject) — each asserts the exact `(file.status, key.status)` pair.
-- [ ] 9.6 GREEN: implement whatever of 9.2's classification 9.5 finds incomplete.
-- [ ] 9.7 RED: a quoting-shaped metadata key round-trips byte-identically through storage and a response; a CR/LF-containing key never appears unescaped in an error body (threat matrix: client-chosen text reaching SQL/response bodies — bound parameters only, `_fields_from_errors`/`safe_segment` reused, never interpolated).
-- [ ] 9.8 Verify: `uv run pytest packages/vantage/tests/test_routes_runs.py packages/vantage/tests/test_ingestion.py`.
+**Re-sliced at apply time into three PRs**, not one -- the combined diff
+measured 682 changed lines against `ft/run-metadata-capture-08b-parse`,
+70% over the 400-line budget, before any bookkeeping (matching this
+project's own ~1.9x historical under-forecast note almost exactly: 350
+forecast × 1.9 ≈ 665). An honest seam existed, the same shape Phase 7 and
+Phase 8 already used: `_to_run_metadata` and its own unit-level proof
+(`test_routes_runs.py`) do not need any endpoint-level test to be complete
+and independently verifiable, only the reverse. Chain:
+`ft/run-metadata-capture-09a-normalizer` (9.1-9.3 → PR8b), `ft/run-metadata-
+capture-09b-taxonomy` (9.4-9.6 → PR9a), `ft/run-metadata-capture-09c-
+threat-matrix` (9.7-9.8 → PR9b).
+
+- [x] 9.1 RED (PR9a): `test_routes_runs.py` — a metadata section with an oversized/absolute/`..` `source_file` is dropped, never rejected (D93's server re-check); no `422` reaches the client for it (proven at the `_to_run_metadata` unit level: the function never raises, so no path to a `422` exists for this case). **Completeness addition**: two further drop-entirely cases beyond the task's literal `source_file` wording -- an unrecognised `status` and an unrecognised `format`, neither of which D96 lets Pydantic reject, and either of which would otherwise reach the SQL `CHECK` on `run_metadata_file` and roll back the whole transaction.
+- [x] 9.2 GREEN (PR9a): `routes/runs.py` — `_to_run_metadata(payload.metadata)` following `_to_vcs_context`'s shape: re-check `source_file` shape (≤1024 chars, not absolute, no `..`); call `metadata_parse.parse`; classify each declared key into `captured | absent | not_scalar | value_too_large | source_unavailable`; drop-whole everywhere, `truncate()` never called (D95, D97).
+- [x] 9.3 GREEN (PR9a): wire `metadata=` into the `store.record_session(...)` call.
+- [x] 9.4 RED (PR9b, RQ-44, `@pytest.mark.req(id="RQ-44")`): `test_ingestion.py` — a report whose metadata section is entirely garbage still yields `201` and a written run row (RQ-44's rule proven, not asserted).
+- [x] 9.5 RED (PR9b): one integration test per D97 row (11 classes: `not_found`, `path_rejected`, `too_large`, `not_text`, `unreadable`, `over_budget`, `malformed`, `absent`, `not_scalar`, `value_too_large`, server-side-shape-reject) — each asserts the exact `(file.status, key.status)` pair.
+- [x] 9.6 GREEN (PR9a/PR9b): 9.2's classification already covers every row 9.5 exercises -- confirmed by running 9.5 against 9.1-9.3's already-landed code with zero further production changes needed.
+- [x] 9.7 RED (PR9c): a quoting-shaped metadata key round-trips byte-identically through storage and a response; a CR/LF-containing key never appears unescaped in an error body (threat matrix: client-chosen text reaching SQL/response bodies — bound parameters only, `_fields_from_errors`/`safe_segment` reused, never interpolated). **Confirmed via existing code, not new production code**: the CR/LF case exercises `MetadataReport`'s own `extra="forbid"` rejection path, which already routes through `errors.py`'s pre-existing `safe_segment` allow-list.
+- [x] 9.8 Verify (PR9c): `uv run pytest packages/vantage/tests/test_routes_runs.py packages/vantage/tests/test_ingestion.py`.
 
 ## Phase 10 (PR10 → PR2, PR9): Read filter
 
