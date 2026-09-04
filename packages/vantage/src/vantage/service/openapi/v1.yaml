@@ -27,12 +27,15 @@ paths:
       operationId: list_runs
       tags: [read]
       summary: Page through recorded runs, newest first.
+      description: metadata_key and metadata_value together filter to runs holding that declared key=value pair (design.md D100) -- both or neither, one without the other is 422. A run recorded before the key was ever declared has no value for it and is excluded; metadata_horizon in the response reports how many runs predate it (null when no metadata filter was given).
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
+        - {name: metadata_key, in: query, required: false, schema: {type: string}}
+        - {name: metadata_value, in: query, required: false, schema: {type: string}}
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
-        "422": {description: limit below 1 or offset below 0 -- not a page.}
+        "422": {description: "limit below 1 or offset below 0 -- not a page; or metadata_key/metadata_value supplied without its pair."}
   /runs/{run_id}:
     get:
       operationId: get_run_detail
@@ -209,10 +212,17 @@ components:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs]
       properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
+    # `predating` equals the total run count when `key` was never declared
+    # (design.md D100, Q2) -- populated only when a metadata filter was
+    # given.
+    MetadataHorizon:
+      type: object
+      required: [key, predating]
+      properties: {key: {type: string}, predating: {type: integer}}
     RunListResponse:
       type: object
-      required: [items, has_more]
-      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}}
+      required: [items, has_more, metadata_horizon]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}, metadata_horizon: {oneOf: [{$ref: '#/components/schemas/MetadataHorizon'}, {type: "null"}]}}
     # Carries `interrupt_reason` and an untruncated `commit_subject`, which
     # the lean list entry omits -- the detail path keeps the full record
     # reachable (design.md D57).

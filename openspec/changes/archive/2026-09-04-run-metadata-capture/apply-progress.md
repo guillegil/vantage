@@ -747,32 +747,345 @@ None beyond the two completeness additions above.
 - None merged yet — chain merges in order once every slice up to this one
   is reviewed, per `feature-branch-chain`.
 
+## Batch: Phase 10 (PR10a/PR10b) — the read filter
+
+**Scope**: all of Phase 10 (read filter, tasks 10.1-10.8), per this
+launch's explicit scope narrowing to Phase 10 only. Phase 11 (RQ-25
+measurement + docs) not started.
+
+### Re-slicing rationale
+
+The combined diff measured 511 changed lines against
+`ft/run-metadata-capture-09c-threat-matrix`, 28% over the 400-line budget,
+before any bookkeeping (this project's own ~1.9x historical under-forecast
+note: 220 forecast x 1.9 ≈ 418, and this measured higher still). An honest
+seam existed, the same shape Phases 7/8/9 already used: task 10.3's
+`list_runs` filter half is independently complete and independently
+testable without its `count_runs_predating_metadata_key` (Q2's horizon)
+half, only the reverse. Cut into two PRs rather than accepting a
+`size:exception`:
+
+- `ft/run-metadata-capture-10-read-filter` (10.1-10.3's filter half → PR9c,
+  #103) — 277 changed lines
+- `ft/run-metadata-capture-10b-horizon` (10.3's horizon half + 10.4-10.8 →
+  PR10a) — 252 changed lines
+
+### Tasks completed
+
+- [x] 10.1 RED (PR10a): `test_routes_read.py` — 3 tests: the filter returns
+  only matching runs (served by `idx_run_metadata_key_value`'s two-column
+  point lookup — `rm.value = ?` also excludes any declared-but-dropped row
+  for free, since SQL NULL never equals a bound string); one param without
+  the other is `422 invalid_metadata_filter`, naming the missing field;
+  an unknown key/value yields `items: []`, not an error. Confirmed RED
+  (16 assertions failed, `AssertionError` not collection error) before
+  `errors.py`/`storage.py`/adapters/`read.py` were touched.
+- [x] 10.2 GREEN (PR10a): `errors.py` — `InvalidMetadataFilterError` (422).
+- [x] 10.3 GREEN, split: `list_runs(..., metadata_key=None,
+  metadata_value=None)` (PR10a, both adapters) and
+  `count_runs_predating_metadata_key(key)` (PR10b, both adapters), both
+  served by `idx_run_metadata_key_value` — the point lookup and the
+  key-only left-anchored seek respectively.
+- [x] 10.4 RED (PR10b): `test_routes_read.py` — 4 tests: predating runs
+  excluded and counted; `predating` equals total run count when the key
+  was never declared; `metadata_horizon: null` with no filter.
+  **Completeness addition**: a declared-but-dropped key
+  (`status='value_too_large'`, `value IS NULL`) still counts towards
+  `first_seen` — proven directly, since D95's whole reason for keeping a
+  dropped-key row is exactly to keep this count honest.
+- [x] 10.5 GREEN (PR10b): `MetadataHorizonResponse`;
+  `RunListResponse.metadata_horizon`; `routes/read.py` wiring.
+- [x] 10.6 GREEN (PR10b): `v1.yaml` — `MetadataHorizon` schema, widened
+  `RunListResponse`, `GET /runs` query params + description.
+- [x] 10.7 GREEN: `test_read_only_surface.py` binding entries for the
+  filter's happy/422 calls (PR10a); `test_interface_document.py`'s
+  schema-binding table for `MetadataHorizon` (PR10b).
+- [x] 10.8 Verify (PR10b): `uv run pytest packages/vantage/tests/test_
+  routes_read.py packages/vantage/tests/test_read_only_surface.py
+  packages/vantage/tests/test_interface_document.py` — 96 passed.
+
+### Full-suite regression per PR
+
+| PR | Full `uv run pytest` | mypy strict | deptry |
+|---|---|---|---|
+| PR10a | 731 passed (was 725) | clean, 93 files | clean |
+| PR10b | 739 passed (was 731) | clean, 93 files | clean |
+
+### Measured changed lines
+
+- **PR10a** (vs `ft/run-metadata-capture-09c-threat-matrix`): 254
+  insertions, 23 deletions = 277 changed lines — under budget.
+- **PR10b** (vs PR10a's branch): 238 insertions, 14 deletions = 252
+  changed lines — under budget.
+- **Total**: 511 changed lines across two PRs, neither individually over
+  budget.
+
+### Deviations from Design
+
+None. The `idx_run_metadata_key_value` seek shape and Q2's `first_seen`
+definition match D100 exactly; the one completeness addition (10.4's
+declared-but-dropped-key test) is coverage, not a behavioural deviation.
+
+### Issues Found
+
+None. `MAX_METADATA_KEY_CHARS` remains unenforced (flagged in the Phase 9
+batch record above) — left alone per this batch's explicit instruction to
+defer it to `sdd-verify`.
+
+### Git / PR state (this batch)
+
+- PR10a: https://github.com/guillegil/vantage/pull/103 — base
+  `ft/run-metadata-capture-09c-threat-matrix`, head
+  `ft/run-metadata-capture-10-read-filter`. Open.
+- PR10b: base PR10a's branch, head `ft/run-metadata-capture-10b-horizon`.
+  Opened this batch (see the apply-phase return summary for the URL).
+- None merged yet — chain merges in order once every slice up to this one
+  is reviewed, per `feature-branch-chain`.
+
+## Batch: Phase 11 (PR11a/PR11b) — RQ-25 measurement + docs, final phase
+
+**Scope**: all of Phase 11 (tasks 11.1-11.5), per this launch's explicit
+scope narrowing to Phase 11 only. **This is the last phase of the change.**
+
+### Re-slicing rationale
+
+The combined diff (harness script + measured numbers + spec paragraph +
+README + test marker) measured 459 changed lines against PR10b, 15% over
+the 400-line budget. An honest seam existed, the same shape Phases 7-10
+already used: the harness script is independently complete and runnable
+without the docs that transcribe its output, only the reverse. Cut into
+two PRs rather than accepting a `size:exception`:
+
+- `ft/run-metadata-capture-11a-measurement-script` (script alone → PR10b,
+  #104) — 355 changed lines
+- `ft/run-metadata-capture-11b-docs` (measured numbers + spec + README +
+  test marker → PR11a) — 104 changed lines
+
+### Tasks completed
+
+- [x] 11.1 (PR11a): `scripts/measure_metadata_overhead.py`, copying
+  `measure_vcs_overhead.py`'s shape. Three arms: A = `--vantage` alone;
+  B = `--vantage --vantage-metadata` against the worst legitimate
+  declaration (`MAX_DECLARED_FILES`=16 files at `MAX_DECLARED_FILE_BYTES`
+  =8 KiB each), interleaved with A (5 pairs) to isolate this change's own
+  added cost; C = the flag alone with nothing declared (Q3's warn path),
+  measured separately afterward since it needs the declaration file
+  absent rather than present — cannot share the same interleaved pass as
+  B without swapping declaration state on every single run.
+  **Verified end to end, not just "subprocess exits 0"**: before trusting
+  the harness, ran a one-off `--vantage --vantage-metadata` session
+  against a real in-process server and inspected the store directly —
+  `MetadataFile`/`MetadataEntry` rows for all 3 smoke-test files landed
+  with `status="captured"`, confirming the worst-case declaration is
+  genuinely read and its keys genuinely persisted before benchmarking it.
+- [x] 11.2 Ran the script for real. **Result, not tuned to be
+  favourable** (explicit launch instruction, honored): the four B-A
+  deltas are -20.5ms (-0.18%, this-repo/10ms), -14.2ms (-0.85%,
+  this-repo/1ms), -26.5ms (-0.23%, synthetic/10ms), +29.4ms (+1.71%,
+  synthetic/1ms). Three of four negative — metadata capture cannot make
+  a session faster, so this is process-spawn noise, not a real effect,
+  consistent with D102's own <2ms forecast sitting an order of magnitude
+  below what a 5-pair subprocess benchmark can resolve. No re-runs were
+  made to chase a cleaner number.
+- [x] 11.3 (PR11b): `run-metadata/spec.md`'s Measurements paragraph,
+  matching `version-control-context`'s house style — full table, the
+  "neither falsified nor confirmed" framing, the standing re-measure
+  sentence. `@pytest.mark.req(id="RQ-25")` added to
+  `test_metadata_section_is_identical_on_both_reports`
+  (`test_run_report.py`) instead of a new assertion — its
+  `assert call_count[0] == 1` already proves the O(1)-per-session shape
+  claim D102 depends on, no test asserts a raw percentage (RQ-25 is
+  Analysis, not Test, per CLAUDE.md's own taxonomy), and this mirrors
+  exactly how `test_git_invocation_count_does_not_scale_with_test_count`
+  carries the marker for `vcs`.
+- [x] 11.4 (PR11b): README — `--vantage-metadata` in the usage block, a
+  new paragraph describing the declaration file, its JSON shape, path
+  containment, and the "reads and uploads a file a co-worker named"
+  disclosure, alongside the existing `--vantage-failure-text` one.
+- [x] 11.5 (PR11b): Recorded the number regardless of the budget verdict.
+  **Also recorded, unprompted by the task's own literal wording**: RQ-25's
+  normative 2% budget text does not exist anywhere in this repository —
+  verified by inspection before writing anything, not assumed from the
+  launch prompt. `openspec/specs/version-control-context/spec.md:154-158`
+  reads its own 4.11%/4.17% (1ms profile) results as "still inside RQ-25's
+  2% budget," arithmetically false for those two rows;
+  `docs/open-questions.md:133-141` reads the identical numbers as a
+  breach and computes ~55ms of headroom from that reading. **Neither
+  document was touched.** The new Measurements paragraph names the
+  contradiction explicitly and states this change's own cost rides atop
+  an already-breached 1ms-profile baseline — a human decision, not one
+  made silently inside this batch.
+
+### Full-suite regression per PR
+
+| PR | Full `uv run pytest` | mypy strict | deptry | `req(id="RQ-25")` |
+|---|---|---|---|---|
+| PR11a | 739 passed (unchanged from PR10b — no production code) | clean, 94 files | clean | 4 (unchanged) |
+| PR11b | 739 passed (marker only, no behavior change) | clean, 94 files | clean | 5 (new marker collects) |
+
+### Measured changed lines
+
+- **PR11a** (vs `ft/run-metadata-capture-10b-horizon`): 355 insertions,
+  1 deletion (tasks.md checkbox) = 355 changed lines — under budget.
+- **PR11b** (vs PR11a's branch): 104 insertions, 4 deletions = 104 changed
+  lines — under budget, no `size:exception` needed.
+- **Total**: 459 changed lines across two PRs, neither individually over
+  budget.
+
+### Deviations from Design
+
+Arm labeling in task 11.1's literal wording ("arm B = `--vantage
+--vantage-metadata`; arm C = worst legitimate declaration") is read here
+as the reverse pairing: B carries the worst-case declaration (interleaved
+with A, since D102's own reasoning for the three-arm design is to isolate
+this change's cost against a shared baseline) and C is the flag alone
+with nothing declared (measured separately, since it needs the opposite
+filesystem state from B). No other deviation — the harness shape, the two
+RQ-25 profiles, the five-pair interleaving and the medians-not-means rule
+all match `measure_vcs_overhead.py` and design.md D102 exactly.
+
+### Issues Found
+
+None new. `MAX_METADATA_KEY_CHARS` remains unenforced (flagged in the
+Phase 9 batch record above) — left alone per this batch's explicit
+instruction to defer it to `sdd-verify`. The RQ-25 budget-text
+contradiction (see 11.5 above) is named, not fixed, per explicit
+instruction — a human decision for `sdd-verify` or later, not this batch.
+
+### Git / PR state (this batch)
+
+- PR11a: https://github.com/guillegil/vantage/pull/105 — base
+  `ft/run-metadata-capture-10b-horizon`, head
+  `ft/run-metadata-capture-11a-measurement-script`. Open, 12/12 CI green.
+- PR11b: https://github.com/guillegil/vantage/pull/106 — base PR11a's
+  branch, head `ft/run-metadata-capture-11b-docs`. Open, 12/12 CI green.
+- None merged yet — chain merges in order once every slice (#88-#106) is
+  reviewed, per `feature-branch-chain`. Tracker `ft/run-metadata-capture`
+  then aggregates the whole feature into `main`.
+
 ## Workload / PR Boundary
 
-- Mode: chained PR slices (`feature-branch-chain`); Phase 9 re-sliced from
-  1 planned PR into 3 for size, not by launch instruction
-- Current work unit: Phase 9 (server ingest wiring), complete
-- Boundary: starts from PR8b's tip (server-side schemas and standalone
-  parse module, proven in isolation, nothing calling them yet) and ends
-  with `_to_run_metadata` wired into `record_session`, every D97 taxonomy
-  row proven end-to-end, RQ-44 proven, and the D96 quoting/CRLF threat
-  matrix closed. Phase 10 (read filter) and Phase 11 (RQ-25 measurement)
-  are explicitly out of scope for this batch
-- Estimated review budget impact: PR9a (266 lines), PR9b (269 lines) and
-  PR9c (147 lines) are all comfortably under budget; no `size:exception`
-  needed this batch
+- Mode: chained PR slices (`feature-branch-chain`); Phase 11 re-sliced
+  from 1 planned PR into 2 for size, not by launch instruction
+- Current work unit: Phase 11 (RQ-25 measurement + docs), complete —
+  **this was the last work unit of the change**
+- Boundary: starts from PR10b's tip (metadata fully captured, stored,
+  filterable and horizon-counted) and ends with a real, committed RQ-25
+  measurement, the capability spec's own Measurements paragraph, the
+  README documenting the feature end-to-end, and the RQ-25 marker on the
+  test proving the shape claim the measurement depends on
+- Estimated review budget impact: PR11a (355 lines) and PR11b (104 lines)
+  are both comfortably under budget; no `size:exception` needed this batch
 
 ## Remaining Tasks
 
-Phase 10 (read filter) and Phase 11 (RQ-25 measurement + docs) — see
-tasks.md. The next PR targets `ft/run-metadata-capture-09c-threat-matrix`
-(this batch's last branch) for Phase 10, which needs PR2's schema and
-PR9's wiring — both satisfied transitively by the chain.
+None. All 67 tasks across all 11 phases are complete.
+
+## Status (superseded by Phase 12 below — kept for history)
+
+67/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
+Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6), Phase 8 (6/6),
+Phase 9 (8/8), Phase 10 (8/8) and Phase 11 (5/5, this batch — final).
+PR1 through PR11b (#88-#106) open and green, not merged (chain merges in
+order at the end, then the tracker aggregates to `main`). Ready for
+`sdd-verify`.
+
+---
+
+## Phase 12 (PR12 → `ft/run-metadata-capture-11b-docs`): sdd-verify remediation
+
+`sdd-verify` (2026-09-04, chain tip `339f5ca`) returned **FAIL**: 2 critical, 4
+warning, 4 suggestion, on an otherwise 67/67-task, 739/739-test, 33/33-scenario
+green chain. Three findings (CRITICAL-1, CRITICAL-2, WARNING-1) were routed back
+to `sdd-apply` as **one slice on the chain tip**; three others (WARNING-2/3/4)
+were classified pre-existing and explicitly out of scope here. Both suggestions
+(SUGGESTION-1, SUGGESTION-2) were also fixed, in scope of the same launch prompt.
+
+### Branch / PR
+
+- Branch: `ft/run-metadata-capture-12-verify-fixups`, created from the chain tip
+  `ft/run-metadata-capture-11b-docs` (`339f5ca`).
+- PR targets `ft/run-metadata-capture-11b-docs` (feature-branch-chain,
+  unchanged strategy).
+- One PR, not re-sliced — 287 changed lines (code+tests), comfortably under the
+  400-line budget.
+
+### TDD Cycle Evidence (Strict TDD Mode)
+
+| Task | RED | GREEN | REFACTOR |
+| --- | --- | --- | --- |
+| 12.1 NUL-byte path (`resolve_declared_path`) | Reverted `except (OSError, RuntimeError)`, ran `test_a_path_containing_a_nul_byte_is_rejected_not_crashed` — `ValueError: lstat: embedded null character in path`, uncaught, test failed with the raw traceback (not an assertion failure) | Restored `except Exception`, test passed | Generalised module docstring: a third exception mechanism disproves an enumerated list twice; documented why `except Exception` is the more honest shape here (no resource held, no caller-visible invariant to hide, both exits already return `None`) |
+| 12.1 NUL-byte path (`read_declaration`) | Removed the new `"\x00" in path` check, ran `test_a_path_containing_a_nul_byte_captures_nothing_and_warns_once` — failed, `result` was a real `DeclaredFile`, not `None` | Restored the check, test passed | — |
+| 12.2 key length (`read_declaration`) | Removed the new `len(key) > MAX_DECLARED_KEY_CHARS` check, ran `test_a_key_longer_than_the_bound_captures_nothing_and_warns_once` — failed, `result` was a real `DeclaredFile` with the 1025-char key intact | Restored the check, test passed | Added `MAX_DECLARED_KEY_CHARS` mirror constant + `test_the_mirrored_key_char_bound_matches_the_server`, same shape as the existing `MAX_METADATA_ENTRIES` mirror |
+| 12.3 index usage (`_LIST_RUNS_BY_METADATA`) | Reverted the query to its original `WHERE EXISTS` form, ran `test_list_runs_by_metadata_uses_the_key_value_index` — failed, plan was exactly the bad one from the verify report (`SCAN run USING INDEX idx_run_started_at` / `CORRELATED SCALAR SUBQUERY 1` / `SEARCH rm USING INDEX sqlite_autoindex_run_metadata_1 (run_id=? AND key=?)`) | Restored the `WHERE id IN (...)` rewrite, test passed, plan now `SEARCH run USING INDEX sqlite_autoindex_run_1 (id=?)` / `LIST SUBQUERY 1` / `SEARCH rm USING INDEX idx_run_metadata_key_value (key=? AND value=?)` | Rewrote the query's own comment; corrected `docs/schema-manifest.md:380`, `design.md:650`, `test_routes_read.py:1394`'s docstring — verified `core/ports/storage.py:241` and `storage/memory.py:226` already state the true thing and left them unedited |
+| 12.5 no-backfill (SUGGESTION-1) | New test asserted differing-value replay leaves the first value — this is a NEW test, not a bug fix, so RED was "test doesn't exist yet"; ran it against the (already-correct) `INSERT OR IGNORE` behaviour and it passed immediately (no production change needed, `INSERT OR IGNORE` already had this property, only the test coverage was missing) | Passed on first run | — |
+| 12.6 dead constant (SUGGESTION-2) | N/A — refactor, not a behavior bug; existing `test_unsupported_content_type_is_treated_the_same_as_malformed` already covered the `toml` -> `malformed` case both before and after | All 13 `test_metadata_parse.py` tests pass unchanged | `parse()`'s dispatch is a membership check + one-line ternary instead of `if`/`elif`/`else` |
+
+### Work Unit Evidence
+
+| Evidence | Value |
+| --- | --- |
+| Focused test command and result | `uv run pytest packages/pytest-vantage/tests/test_metadata_declaration.py packages/pytest-vantage/tests/test_metadata_containment.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_metadata_parse.py packages/vantage/tests/vantage_port_contract.py -q` — all passed (33 + 65 + 13 + contract tests, no failures) |
+| Runtime harness command/scenario and result | `uv run pytest -q` (whole workspace) — **746 passed**, 0 failed, 12 expected warnings (was 739 before this batch; +7 new tests, 0 removed). `uv run mypy .` strict — 94 files, clean. `uv run ruff format . && uv run ruff check --fix .` — clean, zero files reformatted. `uv run deptry .` — clean |
+| Rollback boundary | Each of the 6 commits on `ft/run-metadata-capture-12-verify-fixups` is independently revertible: the verify-report commit and its NUL-byte-fix follow-up touch only `verify-report.md`; the declaration-boundary fix touches only `pytest_vantage/metadata.py` + its two test files; the index fix touches only `sqlite_store.py` + `test_sqlite_store.py` + three prose files; the two suggestion commits touch one file each |
+
+### Deviations from Design
+
+None from `design.md`'s D91-D102 decisions. Two prose corrections were made to
+`design.md` itself (D100's paragraph at line 650) because the verify report
+found it stated something imprecise about which query is left-anchored on `key`
+alone versus seeked on the full `(key, value)` pair — corrected to match the
+implementation, not the other way around.
+
+### Issues Found
+
+- The committed `verify-report.md` (untracked before this batch) contained a
+  literal NUL byte where the CRITICAL-1 prose meant to show the two-character
+  escape `\0`, which made git/GitHub classify the whole markdown file as
+  binary. Fixed in a separate one-line-purpose commit before touching any
+  fix content, so the report's own text is legible in the PR diff.
+- `core/ports/storage.py:241` and `storage/memory.py:226` were named among the
+  "six false claims" in the launch prompt; on inspection both already state
+  the query's real behaviour correctly (they distinguish the filter's full
+  `(key, value)` lookup from the horizon count's `key`-only one) and needed no
+  edit. Verified, not assumed — recorded here so the count is auditable: 4 of
+  6 files edited, 2 of 6 confirmed already-true.
+
+### Git / PR state (this batch)
+
+- Branch: `ft/run-metadata-capture-12-verify-fixups`, 6 commits, based on
+  `ft/run-metadata-capture-11b-docs` @ `339f5ca`.
+- PR: opened against `ft/run-metadata-capture-11b-docs` — see PR URL in the
+  `sdd-apply` return envelope for this batch.
+- 287 changed lines (code+tests: ~226 insertions across 8 source/test files;
+  bookkeeping/docs: ~61 across `schema-manifest.md`, `design.md`, `tasks.md`,
+  this file). The committed `verify-report.md` (338 lines, a pre-produced
+  artifact from the prior `sdd-verify` phase, not authored fresh for review
+  here) is excluded from that count, matching this project's generated-content
+  convention; included, the branch diff is 625 changed lines across 11 files.
+
+## Workload / PR Boundary (Phase 12)
+
+- Mode: single PR, `feature-branch-chain` unchanged — no re-slicing needed,
+  287 changed lines is well under the 400-line budget
+- Current work unit: Phase 12 (sdd-verify remediation: CRITICAL-1, CRITICAL-2,
+  WARNING-1, SUGGESTION-1, SUGGESTION-2) — complete
+- Boundary: starts from the chain tip exactly as `sdd-verify` left it (67/67
+  tasks, 739 tests) and ends with the two blockers and the one warning fixed,
+  both suggestions applied, and the query-plan regression test in place so
+  CRITICAL-2's specific failure mode cannot silently regress again
+- Estimated review budget impact: 287 lines, one PR, comfortably reviewable in
+  well under 60 minutes
+
+## Remaining Tasks
+
+None. 67/67 original tasks plus 8/8 Phase 12 remediation tasks complete.
 
 ## Status
 
-54/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
-Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6), Phase 8 (6/6)
-and Phase 9 (8/8, this batch). PR1 through PR9c open and green, not merged
-(chain merges in order at the end). Ready for the next `sdd-apply` batch
-(Phase 10: read filter).
+75/75 tasks complete (67 original + 8 Phase 12). PR1 through PR11b (#88-#106)
+plus PR12 (`ft/run-metadata-capture-12-verify-fixups` → PR11b) all open.
+Nothing merged yet — the chain merges in order once every slice is reviewed,
+then the tracker `ft/run-metadata-capture` aggregates the whole feature into
+`main`. Next: `sdd-verify` (re-verify with PR12 included), or merge order if
+already re-verified.
