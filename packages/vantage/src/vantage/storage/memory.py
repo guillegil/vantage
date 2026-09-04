@@ -31,7 +31,7 @@ exactly, unlike the SQLite adapter's stored TEXT.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime
 
@@ -39,12 +39,16 @@ from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.projection import project_failure, project_vcs
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
+    EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
     HistoryEntry,
+    MetadataEntry,
+    MetadataFile,
     Page,
     ResultListEntry,
     RunDetail,
     RunListEntry,
+    RunMetadata,
     UserSetting,
 )
 
@@ -85,9 +89,16 @@ class InMemoryExecutionStore:
         self._results: dict[tuple[str, str, int], Result] = {}
         self._last_contact: dict[str, datetime] = {}
         self._settings: dict[tuple[str, str], UserSetting] = {}
+        self._metadata_files: dict[tuple[str, str], MetadataFile] = {}
+        self._metadata_entries: dict[tuple[str, str], MetadataEntry] = {}
 
     def record_session(
-        self, execution: Execution, *, results: Sequence[Result], received_at: datetime
+        self,
+        execution: Execution,
+        *,
+        results: Sequence[Result],
+        received_at: datetime,
+        metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
         # `received_at` is part of the port's signature (the two-clocks point,
         # design.md D1); `get_execution` still returns only what the client
@@ -132,6 +143,15 @@ class InMemoryExecutionStore:
             key = (identity, result.identity.node_id, _ATTEMPT)
             if key not in self._results:
                 self._results[key] = result
+
+        # `setdefault` is `INSERT OR IGNORE`'s second mechanism (design.md
+        # D98): a metadata file/entry is written once, and a second
+        # `record_session` call for the same run carrying the identical
+        # metadata changes nothing, mirroring the SQLite adapter exactly.
+        for metadata_file in metadata.files:
+            self._metadata_files.setdefault((identity, metadata_file.source_file), metadata_file)
+        for metadata_entry in metadata.entries:
+            self._metadata_entries.setdefault((identity, metadata_entry.key), metadata_entry)
 
         return created
 
@@ -185,7 +205,14 @@ class InMemoryExecutionStore:
     def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         return self._catalogue.get(node_id)
 
-    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+    def list_runs(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        metadata_key: str | None = None,
+        metadata_value: str | None = None,
+    ) -> Page[RunListEntry]:
         # Python sort/slice mirrors the SQLite adapter's `ORDER BY
         # started_at DESC, id DESC` / `LIMIT min(limit, 200) + 1 OFFSET`
         # exactly (design.md D57, D61): sorting descending on the same
@@ -193,8 +220,25 @@ class InMemoryExecutionStore:
         # order, and slicing `page_limit + 1` rows is the same
         # truncation-vs-exhaustion signal without a second pass.
         page_limit = min(limit, MAX_PAGE_ITEMS)
+        candidates: Iterable[Execution] = self._executions.values()
+        if metadata_key is not None and metadata_value is not None:
+            # The in-memory mirror of `rm.key = ? AND rm.value = ?` served by
+            # `idx_run_metadata_key_value` (design.md D100): `entry.value` is
+            # `None` for any declared-but-dropped key, so this equality check
+            # excludes it exactly the way SQL NULL never equals a bound
+            # string does for the SQLite adapter.
+            matching_run_ids = {
+                run_id
+                for (run_id, entry_key), entry in self._metadata_entries.items()
+                if entry_key == metadata_key and entry.value == metadata_value
+            }
+            candidates = [
+                execution
+                for execution in candidates
+                if execution.identity.value in matching_run_ids
+            ]
         ordered = sorted(
-            self._executions.values(),
+            candidates,
             key=lambda execution: (execution.started_at, execution.identity.value),
             reverse=True,
         )
@@ -209,6 +253,24 @@ class InMemoryExecutionStore:
             for execution in window[:page_limit]
         )
         return Page(items=items, has_more=has_more)
+
+    def count_runs_predating_metadata_key(self, key: str) -> int:
+        # Q2's horizon (design.md D100): ANY row for `key`, of any status,
+        # counts towards `first_seen` -- mirroring the SQLite adapter's
+        # `run_metadata` join, which does not filter on `value` either.
+        run_ids_with_key = {
+            run_id for (run_id, entry_key) in self._metadata_entries if entry_key == key
+        }
+        if not run_ids_with_key:
+            return len(self._executions)
+        first_seen = min(
+            self._executions[run_id].started_at
+            for run_id in run_ids_with_key
+            if run_id in self._executions
+        )
+        return sum(
+            1 for execution in self._executions.values() if execution.started_at < first_seen
+        )
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         execution = self._executions.get(execution_id)
@@ -326,3 +388,5 @@ class InMemoryExecutionStore:
         self._results.clear()
         self._last_contact.clear()
         self._settings.clear()
+        self._metadata_files.clear()
+        self._metadata_entries.clear()

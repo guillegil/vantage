@@ -1,0 +1,315 @@
+# Tasks: run-metadata-capture
+
+Strict TDD: every implementation task is preceded by its RED test task.
+`chain_strategy: feature-branch-chain`. Tracker branch: `ft/run-metadata-capture`
+(draft, no-merge until every slice below is reviewed and merged in order).
+
+**Re-slicing note.** The design's 7-slice plan (~2,160 lines) is split here into
+**11 slices**, for two reasons. (1) This project's forecasts run ~1.9x under
+measured (`user-configuration`: 450–600 forecast, ~1,090 measured); design's own
+slice 1 (~360 est.) bundles schema DDL + 3 port dataclasses + both adapters +
+contract tests + a refusal test + manifest docs + a ~220-line ADR — recomputed
+per-file that is ~750+ lines, already 2x its own estimate before any correction.
+(2) The hard rollback constraint — ADR-0017 must not arrive *after* the
+irreversible `schema_version` 4 bump — is satisfied more safely by landing the
+ADR **strictly before** the bump merges (Slice 1, PR1) rather than bundling both
+in one oversized diff (Slice 2, PR2, targets PR1's branch). Authorization arriving
+before the point of no return satisfies D101 at least as well as arriving with it.
+
+## Suggested Work Units
+
+| # | Goal | Base | Est. lines | Focused test | Runtime harness | Rollback boundary |
+|---|------|------|-----------:|---------------|------------------|--------------------|
+| 1 | ADR-0017, Status: Proposed | tracker | ~220 | N/A — doc-only | N/A — no code path exists yet | Revert the one new file |
+| 2 | Schema bump: 2 tables, index 15, `_SCHEMA_VERSION=4`, manifest, refusal test | PR1 | ~164 | `uv run pytest packages/vantage/tests/test_schema_manifest.py packages/vantage/tests/test_connection.py` | N/A until PR4 wires a writer | Clean revert only *before* any DB opened at v4 (ADR-0013) |
+| 3 | Core vocabulary: `core/domain/metadata.py` frozensets + bounds | PR2 | ~220 | `uv run pytest packages/vantage/tests/test_metadata.py` | N/A — pure, no I/O | Delete module + its import sites |
+| 4 | Port dataclasses + both adapters + contract tests | PR3 | ~370 | `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_storage_types.py` | `uv run pytest packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py` | Revert; `metadata=` kwarg has a default, no call site broke |
+| 5 | Plugin flag + resolver + `--help` denial + C1/C2/C3 + Q3 warning | PR4 | ~380 | `uv run pytest packages/pytest-vantage/tests/test_config.py packages/pytest-vantage/tests/test_opt_in.py` | `uv run pytest packages/pytest-vantage` (real subprocess-run differential) | Flag removed, unflagged sessions unaffected |
+| 6 | Path containment: `resolve_declared_path`, symlink/loop/FIFO/absolute/`..` | PR5 | ~380 | `uv run pytest packages/pytest-vantage/tests/test_metadata.py` | Real `tmp_path` + `os.symlink`/`os.mkfifo` | Revert; flag-gated, unreachable otherwise |
+| 7 | Declaration read, bounds, `_metadata_section()`, both reports | PR6 | ~350 | `uv run pytest packages/pytest-vantage/tests/test_metadata.py packages/pytest-vantage/tests/test_report_budget.py packages/pytest-vantage/tests/test_run_report.py` | In-process `_LiveServer`, real start+finish POST pair | Revert; wire section additive, `extra="ignore"` |
+| 8 | `MetadataReport`/`MetadataFileReport` schemas + `metadata_parse.py` (JSON/YAML) | PR7 | ~250 | `uv run pytest packages/vantage/tests/test_metadata_parse.py packages/vantage/tests/test_schemas.py` | N/A — pure parse functions | Revert; module unreferenced until PR9 |
+| 9 | `_to_run_metadata`, `routes/runs.py` wiring, 11 taxonomy tests, PyYAML dep | PR8 | ~350 | `uv run pytest packages/vantage/tests/test_routes_runs.py packages/vantage/tests/test_ingestion.py` | ASGI in-process client, real POST /api/v1/runs | Revert; `metadata=` still defaults empty |
+| 10 | Read filter: query params, horizon count, `v1.yaml`, binding test | PR9 | ~220 | `uv run pytest packages/vantage/tests/test_routes_read.py packages/vantage/tests/test_read_only_surface.py packages/vantage/tests/test_interface_document.py` | ASGI in-process, real GET /api/v1/runs | Revert; additive query params, `metadata_horizon` nullable |
+| 11 | `scripts/measure_metadata_overhead.py`, Measurements paragraph, README, `budget.py` docstring | PR10 | ~180 | `python scripts/measure_metadata_overhead.py` (manual harness run, not pytest) | Same in-process `_LiveServer` A/B harness as `measure_vcs_overhead.py` | Revert; measurement is documentation, not behavior |
+
+**`Base` is the branch each PR targets, and the chain is strictly linear** (`feature-branch-chain`): PR1 targets the tracker, PR*n* targets PR*n-1*'s branch. Content dependencies that skip backwards -- PR8 needs PR3's vocabulary, PR9 needs PR4's port and PR7's wire section, PR10 needs PR2's schema -- are satisfied transitively by the chain and are NOT alternative bases. A PR has exactly one base.
+
+```text
+Decision needed before apply: No
+Chained PRs recommended: Yes
+Chain strategy: feature-branch-chain
+400-line budget risk: High
+```
+
+## Phase 1 (PR1 → tracker): ADR-0017
+
+- [x] 1.1 Write `docs/adr/0017-store-user-declared-configuration-values-read-from-the-test-repository.md`. Nygard + `Alternatives rejected` (ADR-0016's shape). `Status: Proposed`.
+- [x] 1.2 Decision section: what is authorised (declared top-level scalars only, never file bodies, D-k deferred); the five conditions C1–C5 held together, inheriting ADR-0016's register; the EAV justification (D-e); the must-not-fail-the-run rule (D97); what is not authorised (host env, arbitrary bodies, server-directed reads, web editing, backfill).
+- [x] 1.3 Consequences section: read exposure stated not mitigated; reversal cost (`schema_version` 3→4, refuse not migrate, ADR-0013); RQ-25 O(1)-measured obligation; unbounded growth named not solved; Q2's horizon published not implied. Bind to ADR-0013, ADR-0014, ADR-0016, RQ-2/24/25/26/28/29/44, and `run-metadata`/`opt-in-activation`/`session-ingestion`/`recording-schema`/`history-read-api`.
+- [x] 1.4 PR description: `Status` flips to `Accepted` on merge (CLAUDE.md); no test surface, this PR is Inspection-only.
+
+## Phase 2 (PR2 → PR1): Schema bump — the irreversible point
+
+- [x] 2.1 RED: extend `test_connection.py` — opening a database stamped `meta.schema_version='3'` with this build is refused, naming both versions and the path (ADR-0013 proven).
+- [x] 2.2 RED: update `test_schema_manifest.py:216-221` literals 11/130/14 → 13/139/15 (fails until 2.3).
+- [x] 2.3 GREEN: `schema.sql` — add `run_metadata_file`, `run_metadata`, `idx_run_metadata_key_value` (D91) between `user_setting` and `-- Indexes`; update header counts and the "fourteen in total" comment; stamp `'4'`.
+- [x] 2.4 GREEN: `connection.py` — `_SCHEMA_VERSION = 4`.
+- [x] 2.5 GREEN: `docs/schema-manifest.md` — two new `###` sections (`run_metadata_file`, `run_metadata`, column-for-column) and corrected header counts (D91).
+- [x] 2.6 Verify 2.1–2.2 pass; run `uv run pytest packages/vantage/tests/test_schema_manifest.py packages/vantage/tests/test_connection.py`.
+- [x] 2.7 PR description: flag `docs/schema-manifest.md:364-403`'s pre-existing "Table count 10"/"Index count 13" drift (2026-08-15) as NOT this PR's obligation, so a reviewer does not misattribute it.
+
+## Phase 3 (PR3 → PR2): Core vocabulary
+
+- [x] 3.1 RED: `packages/vantage/tests/test_metadata.py` — `FILE_STATUSES`/`KEY_STATUSES` are plain-`str` `frozenset`s (never `Enum`, per `liveness.py`'s 3.10-vs-3.13 `__format__` precedent); membership covers exactly D91's SQL `CHECK` lists.
+- [x] 3.2 GREEN: create `packages/vantage/src/vantage/core/domain/metadata.py` — `FILE_STATUSES`, `KEY_STATUSES`, `MAX_METADATA_VALUE_BYTES`, `MAX_METADATA_KEY_CHARS`, `MAX_METADATA_ENTRIES` (D94, D95). No logic beyond vocabulary (RQ-26).
+- [x] 3.3 RED+GREEN: extend `test_architecture.py`'s RQ-26 purity walk to include `metadata.py` importing nothing outside stdlib.
+
+## Phase 4 (PR4 → PR3): Port dataclasses + both adapters + contract
+
+- [x] 4.1 RED: `test_storage_types.py` — `MetadataFile`, `MetadataEntry`, `RunMetadata`, `EMPTY_RUN_METADATA` are frozen, `slots=True`, and `RunMetadata()` equals `EMPTY_RUN_METADATA`.
+- [x] 4.2 GREEN: `core/ports/storage.py` — add the three dataclasses + `EMPTY_RUN_METADATA`; `ExecutionStore.record_session` gains `metadata: RunMetadata = EMPTY_RUN_METADATA` (D98). No existing call site changes.
+- [x] 4.3 RED: `vantage_port_contract.py` — metadata round-trip persists both tables; `INSERT OR IGNORE`/`setdefault` makes a second `record_session` call for the same run a no-op (write-once, D-b); a finish-only session (no prior start-write) records the same rows a start+finish pair would.
+- [x] 4.4 GREEN: `sqlite_store.py` — two `INSERT OR IGNORE` statements appended inside the existing `BEGIN IMMEDIATE … COMMIT` transaction, after the result insert, referencing `run(id)` (D98).
+- [x] 4.5 GREEN: `memory.py` — mirror with two `dict[tuple[str, str], …]` using `setdefault` (second-mechanism discipline, D98).
+- [x] 4.6 Verify 4.1/4.3 pass on both adapters: `uv run pytest packages/vantage/tests/vantage_port_contract.py packages/vantage/tests/test_storage_types.py packages/vantage/tests/test_sqlite_store.py packages/vantage/tests/test_memory_store.py`.
+
+## Phase 5 (PR5 → PR4): Plugin flag
+
+**Re-sliced into PR5a and PR5b at apply time** (`auto-chain`'s authorised
+honest seam): the code+tests commit alone measured 428 changed lines, over
+the 400-line budget, and "the flag and resolver first, then the C1/C2/C3
+differential tests and the Q3 warning" is exactly the seam the launch
+instructions suggested. PR5a lands `resolve_metadata_capture`, the flag's
+registration, `_metadata_capture_requested` and its short-circuit, and
+threads `metadata_requested` through to `Recorder.__init__` where it is
+accepted but not yet acted on. PR5b (→ PR5a) lands C1/C2/C3 and Q3 on top.
+Every intermediate state (PR5a alone) is green under `mypy --strict` and a
+full `uv run pytest`.
+
+- [x] 5.1 RED (PR5a): `test_config.py` — `resolve_metadata_capture(activated, cli_opt_in)` signature carries **no** ini/env parameter; monotone conjunction table (T/T→T, else F).
+- [x] 5.2 GREEN (PR5a): `pytest_vantage/config.py` — `resolve_metadata_capture`.
+- [x] 5.3 RED (PR5b): `test_opt_in.py` — **C1** differential: `vantage-metadata.json` present, flag absent → byte-identical tree vs `-p no:vantage`, zero connections. **C3**: shipped `--help` contains "there is no ini equivalent" and never "or the ini equivalent is given" for `--vantage-metadata`.
+- [x] 5.4 GREEN (PR5a): `pytest_vantage/plugin.py` — register `--vantage-metadata` in the existing `group.addoption` block; `_metadata_capture_requested`, short-circuited on `_activation_requested` (mirrors `plugin.py:157-158`). **Deviation**: called only from the controller, not "identically on both xdist branches" as originally worded — `test_xdist_guard.py`'s `_WorkerConfigDouble` allow-list forbids reading `vantage_metadata` on a worker, and nothing worker-side consumes it in this slice (no `EvidenceCollector`-equivalent for metadata exists). The declaration is still read exactly once per session regardless of worker count, since no `Recorder` is ever constructed on a worker.
+- [x] 5.5 RED (PR5b): **C2** — a `Path.open`-wrapped call recorder (a plain function, not a callable class instance, so the descriptor protocol still binds the `Path` instance) asserts the declaration is opened zero times when either gate is closed, and once both gates pass (`test_vcs.py`'s `_CallRecorder` shape, adapted).
+- [x] 5.6 RED (PR5b): Q3 scenario — flag set, no `vantage-metadata.json` present → exactly one pytest warning, run otherwise unaffected; a declaration present emits none.
+- [x] 5.7 GREEN (PR5a signature, PR5b behaviour): wire `metadata_requested=_metadata_capture_requested(config)` into the `Recorder(...)` construction on the controller only (no `Recorder` on an xdist worker, D99). `Recorder.__init__` accepts the keyword in PR5a; the presence check and Q3's warning that act on it land in PR5b.
+- [x] 5.8 Verify (PR5b): `uv run pytest packages/pytest-vantage/tests/test_config.py packages/pytest-vantage/tests/test_opt_in.py packages/pytest-vantage/tests/test_vcs.py`.
+
+## Phase 6 (PR6 → PR5): Path containment
+
+**Re-scoped at apply time.** The launch instructions for this batch narrowed
+Phase 6 explicitly to "path containment (`resolve_declared_path`, and the
+symlink / loop / FIFO / absolute / `..` cases)" and listed "no file reading,
+no bounding" among the out-of-scope items for this PR. `read_declaration`
+(6.3/6.4) parses and validates the declaration file's own JSON content --
+that is exactly the "file reading" the launch instructions excluded, so 6.3
+and 6.4 are deferred to the next `sdd-apply` batch rather than implemented
+here. 6.1 and 6.2 land in this PR; 6.5 and 6.6 are re-worded below to match
+what this PR actually proves, with the rest of Phase 6's original text still
+tracked as the next batch's starting point.
+
+**Filename collision found and resolved.** `packages/vantage/tests/test_
+metadata.py` already exists (PR3, core vocabulary). Neither test tree
+carries an `__init__.py`, so pytest's classic import mode requires globally
+unique basenames across the whole workspace -- `test_metadata.py` (plugin)
+as tasks.md originally named it collides and fails collection with `import
+file mismatch`, proven by running both files together. The plugin-side file
+is `packages/pytest-vantage/tests/test_metadata_containment.py` instead.
+Phase 7 must either continue that name or pick a second, equally unique one
+for `read_declaration`/`capture_metadata` -- not reintroduce `test_metadata.py`.
+
+- [x] 6.1 RED: `test_metadata_containment.py` (plugin) — `resolve_declared_path` rejects: absolute path, `..` escape, a real symlink pointing outside `rootpath`, a symlink loop, a directory, a real FIFO (`os.mkfifo`, skipped where unsupported), a path equal to `rootpath` itself, a missing path — each **rejected, never clamped**. Accepts a legitimate nested path, and a root reached through a symlink still accepts its own children.
+- [x] 6.2 GREEN: created `packages/pytest-vantage/src/pytest_vantage/metadata.py` — `resolve_declared_path` exactly as D93: resolve both `rootpath` and candidate, `is_relative_to`, `is_file`, catch `OSError`/`RuntimeError`.
+- [x] 6.3 RED (PR7a, `ft/run-metadata-capture-07a-declaration` → PR6): `read_declaration` — absent file, non-JSON, non-object, `version != 1`, missing `path`/`format`/`keys`, unknown `format`, duplicate stored key, over `MAX_DECLARED_FILES` — each captures nothing and warns **exactly once** via `_warn`. **Completeness addition, not in this task's literal list but required by D92's full 8-row table** (this task's own 6.4 already names both bounds as constants to define, so leaving either untested would ship an unused bound): a path over `MAX_DECLARED_PATH_CHARS`, and more than `MAX_METADATA_ENTRIES` total keys, are also RED-tested and rejected. Test file: `test_metadata_declaration.py` (see the basename note below — not `test_metadata.py`, which collides with PR3's).
+- [x] 6.4 GREEN (PR7a): `read_declaration` in `metadata.py`; constants `DECLARATION_FILENAME`, `MAX_DECLARED_FILES=16`, `MAX_DECLARED_PATH_CHARS=1024`, `MAX_METADATA_ENTRIES=200` (D94; the fourth mirrors `vantage.core.domain.metadata.MAX_METADATA_ENTRIES` across the RQ-24 boundary, pinned by a test-only cross-package import, the same shape `budget.py`'s `_REPORT_BYTES_CAP` already uses for its own server mirror).
+- [x] 6.5 Threat-matrix RED, scoped to `resolve_declared_path`: a real FIFO at a declared path is rejected via `is_file()` alone (a `stat`, never an `open()`) with a bounded-wall-time assertion (< 1s), not just an outcome assertion — proven on `resolve_declared_path` directly, since no production code calls it from `pytest_sessionstart` yet (that wiring is Phase 7). The equivalent guard against the real `pytest_sessionstart` path is the next batch's obligation once `read_declaration`/`capture_metadata` are wired in.
+- [x] 6.6 Verify (this batch's scope only): `uv run pytest packages/pytest-vantage/tests/test_metadata_containment.py` — 10 passed, run individually across Python 3.10/3.11/3.12/3.13 (`uv run --python <ver> pytest ...`) to prove the `OSError`/`RuntimeError` cross-version claim empirically, not just on the default interpreter. Re-verify once 6.3/6.4 land in the next batch, at whatever filename Phase 7 settles on.
+
+## Phase 7 (PR7 → PR6): Read, bound, ship
+
+**Re-sliced at apply time into three PRs**, not two — the combined 6.3/6.4 +
+7.1/7.2 diff measured 759 changed lines against PR6, 90% over the 400-line
+budget even before this note, so `auto-chain`'s authorised seam was cut a
+second time rather than accepting a `size:exception` where an honest seam
+existed: `read_declaration` (6.3/6.4) does not need `capture_metadata`
+(7.1/7.2) to be independently useful and independently tested, only the
+reverse. Chain: `ft/run-metadata-capture-07a-declaration` (6.3/6.4 → PR6),
+`ft/run-metadata-capture-07b-capture` (7.1/7.2 → PR7a),
+`ft/run-metadata-capture-07c-wire` (7.3/7.4/7.5/7.6 → PR7b).
+
+**Basename note, continuing Phase 6's own forward pointer.**
+`packages/vantage/tests/test_metadata.py` (PR3) and
+`packages/pytest-vantage/tests/test_metadata_containment.py` (PR6) already
+exist; this task's original wording (`test_metadata.py`) would collide with
+the first. `read_declaration`'s tests are in
+`packages/pytest-vantage/tests/test_metadata_declaration.py` (PR7a);
+`capture_metadata`'s are in `test_metadata_capture.py` (PR7b) — two files,
+not one, matching the two-PR split rather than sharing a name across a PR
+boundary.
+
+- [x] 7.1 RED (PR7b, `ft/run-metadata-capture-07b-capture` → PR7a): `test_metadata_capture.py` — a file at `MAX_DECLARED_FILE_BYTES` (8,192) is kept; one byte over is dropped whole, marked `too_large`; files past `MAX_METADATA_SECTION_BYTES` (32,768) are marked `over_budget` in declaration order; a non-UTF-8 file is marked `not_text` before JSON encoding; a permission-denied open is marked `unreadable` (class 5, the eighth plugin-side class). **Completeness addition**: a missing declared path is marked `not_found`, and a rejected-but-existing path (e.g. a real absolute file outside rootpath) is marked `path_rejected` — D97 classes 1/2, distinguished by a small advisory-only classifier since `resolve_declared_path` itself intentionally collapses both to `None` for the security decision alone.
+- [x] 7.2 GREEN (PR7b): `metadata.py` — `capture_metadata`: per-file read ≤8,192 bytes (bounded via `handle.read(MAX_DECLARED_FILE_BYTES + 1)`, never the whole file), UTF-8 decode, `_encoded_cost` charge against 32,768 bytes by importing `budget.py`'s exact `_encoded_cost` function directly — not a second, subtly different cost function; every failure sets a status, content=`None`, never raises (D97).
+- [x] 7.3 GREEN (PR7c, `ft/run-metadata-capture-07c-wire` → PR7b): `budget.py` — docstring-only addition recording the finish-write headroom drop from ~1,038 to ~973 results (D94). No behaviour change.
+- [x] 7.4 RED (PR7c): `test_run_report.py::test_metadata_section_is_identical_on_both_reports` — identical serialized `metadata` bytes appear on the start report and the finish report (D51 freeze rule extended, D96), proven the same way `test_vcs_section_is_identical_on_both_reports` proves it for `vcs`: `capture_metadata` patched to return a DIFFERENT `MetadataSection` per call, and the two reports still agree because there is only ever one call. Confirmed failing before 7.5: `ImportError: No module named 'pytest_vantage.recorder.metadata'` (the module wasn't imported into `recorder.py` yet). Also adds `test_no_metadata_section_when_capture_was_not_requested` (passed trivially before 7.5, since no `metadata` key existed on any report yet — a true negative, same shape PR5b's C2/Q3 "off" halves).
+- [x] 7.5 GREEN (PR7c): `recorder.py` — removed the now-superseded `_METADATA_DECLARATION_FILENAME`/`_metadata_declaration_missing_warning` (PR5b's presence-only check); `self._metadata` is `metadata.capture_metadata(config, rootpath)`, captured once in `__init__` beside `self._vcs`; `_metadata_section()` mirrors `_vcs_section()` and returns `None` (key omitted, never `null`) when metadata was not requested or `capture_metadata` found nothing valid; wired into both `pytest_sessionstart` and `pytest_sessionfinish` report builds. PR5b's C2/Q3 tests (declaration opened/not-opened, warns-once/no-warning) still pass unmodified — `capture_metadata`'s own `read_declaration` call reaches the same file and emits the same warning text.
+- [x] 7.6 Verify (PR7c): `uv run pytest packages/pytest-vantage/tests/test_metadata_declaration.py packages/pytest-vantage/tests/test_metadata_capture.py packages/pytest-vantage/tests/test_report_budget.py packages/pytest-vantage/tests/test_run_report.py` (adapted from the task's original `test_metadata.py` to the actual, collision-free filenames Phase 6/7 settled on) — 61 passed.
+
+## Phase 8 (PR8 → PR2, PR3): Server parse engine
+
+**Re-sliced at apply time into two PRs**, not one — the combined 8.1-8.6
+diff measured 562 changed lines against `ft/run-metadata-capture-07c-wire`,
+40% over the 400-line budget, before any bookkeeping. An honest seam
+existed — `metadata_parse.py` does not import or depend on
+`MetadataFileReport`/`MetadataReport` at all, and the schemas do not depend
+on the parser either — so it was cut once rather than accepting a
+`size:exception` where a real seam was available (the same reasoning
+Phase 7 used to cut its own oversized combined diff). Chain:
+`ft/run-metadata-capture-08a-schemas` (8.1/8.2 → PR7c/`ft/run-metadata-
+capture-07c-wire`), `ft/run-metadata-capture-08b-parse` (8.3/8.4/8.5/8.6 →
+PR8a). Both land comfortably under budget on their own (190 and 372
+changed lines respectively).
+
+- [x] 8.1 RED (PR8a): `test_schemas.py` — `MetadataFileReport`/`MetadataReport` accept a declared value of arbitrary length and content without raising; **no `max_length`, no pattern, no constraint of any kind** on any field in the metadata section (the D96 trap, made a falsifier before it can be committed by accident).
+- [x] 8.2 GREEN (PR8a): `service/schemas.py` — `MetadataFileReport`, `MetadataReport` (`extra="forbid"`, matching `VcsReport`), `SessionReport.metadata: MetadataReport | None` (envelope stays `extra="ignore"`, D96). `service/openapi/v1.yaml`'s `SessionReport` schema gains the same `metadata` property in the same commit — required by the existing schema-binding drift check, not a scope addition.
+- [x] 8.3 RED (PR8b): `test_metadata_parse.py` (new) — malformed YAML, malformed JSON, deep JSON nesting (`RecursionError`, not `JSONDecodeError`), a YAML alias-expansion bomb that `safe_load` would expand and `compose` does not (bounded wall-time asserted), a `!!python/object/apply` document yields `malformed` and executes nothing, a non-scalar value (both JSON and YAML), an absent key, a value over `MAX_METADATA_VALUE_BYTES`, a value within it, an unsupported content type, and a top-level document that is not an object. **Depth correction, verified rather than assumed**: the launch brief's "1,000-deep" does not reproduce `RecursionError` on cpython 3.13.15 (`sys.getrecursionlimit() == 1000`) — 1,000, 5,000 and 8,192 levels of nested `[` all return successfully with no exception, confirmed with a bare `json.loads` call before trusting `parse` to degrade it. `RecursionError` first reproduces at 10,000 levels; the test uses 20,000 for margin.
+- [x] 8.4 GREEN (PR8b): created `packages/vantage/src/vantage/service/metadata_parse.py` — the **only** module importing `yaml`; `yaml.compose()` + walk top-level `ScalarNode`s only (never `safe_load`/`load`); `json.loads`; catch `YAMLError`, `JSONDecodeError`, `RecursionError` → all become class 7 `malformed` (D97). `parse(content, content_type, keys)` also classifies each requested key directly (`captured`/`absent`/`not_scalar`/`value_too_large`, D97 classes 8-10) — kept in this one module rather than split into `_to_run_metadata` (Phase 9), since the classification needs the same node-type information the walk already has (a `SequenceNode`/`MappingNode` value is `not_scalar` "for free," per design.md D97).
+- [x] 8.5 GREEN (PR8b): `packages/vantage/pyproject.toml` — added `PyYAML>=6.0` to `vantage`'s main `dependencies` (not root's dev-only extra, which already carried it for `test_interface_document.py`'s own YAML parsing).
+- [x] 8.6 Verify (PR8b): `uv run pytest packages/vantage/tests/test_metadata_parse.py packages/vantage/tests/test_schemas.py` — 30 passed; re-verified on Python 3.10/3.11/3.12/3.13 individually. `uv run pytest` (whole workspace) — 698 passed. `uv run deptry .` — clean, no per-rule ignore needed (root's existing dev-only `pyyaml` declaration already satisfies deptry's view; the real per-package boundary is what the clean-environment install check protects). `uv run mypy .` (strict) — clean, 93 files.
+
+## Phase 9 (PR9 → PR4, PR7, PR8): Server ingest wiring
+
+**Re-sliced at apply time into three PRs**, not one -- the combined diff
+measured 682 changed lines against `ft/run-metadata-capture-08b-parse`,
+70% over the 400-line budget, before any bookkeeping (matching this
+project's own ~1.9x historical under-forecast note almost exactly: 350
+forecast × 1.9 ≈ 665). An honest seam existed, the same shape Phase 7 and
+Phase 8 already used: `_to_run_metadata` and its own unit-level proof
+(`test_routes_runs.py`) do not need any endpoint-level test to be complete
+and independently verifiable, only the reverse. Chain:
+`ft/run-metadata-capture-09a-normalizer` (9.1-9.3 → PR8b), `ft/run-metadata-
+capture-09b-taxonomy` (9.4-9.6 → PR9a), `ft/run-metadata-capture-09c-
+threat-matrix` (9.7-9.8 → PR9b).
+
+- [x] 9.1 RED (PR9a): `test_routes_runs.py` — a metadata section with an oversized/absolute/`..` `source_file` is dropped, never rejected (D93's server re-check); no `422` reaches the client for it (proven at the `_to_run_metadata` unit level: the function never raises, so no path to a `422` exists for this case). **Completeness addition**: two further drop-entirely cases beyond the task's literal `source_file` wording -- an unrecognised `status` and an unrecognised `format`, neither of which D96 lets Pydantic reject, and either of which would otherwise reach the SQL `CHECK` on `run_metadata_file` and roll back the whole transaction.
+- [x] 9.2 GREEN (PR9a): `routes/runs.py` — `_to_run_metadata(payload.metadata)` following `_to_vcs_context`'s shape: re-check `source_file` shape (≤1024 chars, not absolute, no `..`); call `metadata_parse.parse`; classify each declared key into `captured | absent | not_scalar | value_too_large | source_unavailable`; drop-whole everywhere, `truncate()` never called (D95, D97).
+- [x] 9.3 GREEN (PR9a): wire `metadata=` into the `store.record_session(...)` call.
+- [x] 9.4 RED (PR9b, RQ-44, `@pytest.mark.req(id="RQ-44")`): `test_ingestion.py` — a report whose metadata section is entirely garbage still yields `201` and a written run row (RQ-44's rule proven, not asserted).
+- [x] 9.5 RED (PR9b): one integration test per D97 row (11 classes: `not_found`, `path_rejected`, `too_large`, `not_text`, `unreadable`, `over_budget`, `malformed`, `absent`, `not_scalar`, `value_too_large`, server-side-shape-reject) — each asserts the exact `(file.status, key.status)` pair.
+- [x] 9.6 GREEN (PR9a/PR9b): 9.2's classification already covers every row 9.5 exercises -- confirmed by running 9.5 against 9.1-9.3's already-landed code with zero further production changes needed.
+- [x] 9.7 RED (PR9c): a quoting-shaped metadata key round-trips byte-identically through storage and a response; a CR/LF-containing key never appears unescaped in an error body (threat matrix: client-chosen text reaching SQL/response bodies — bound parameters only, `_fields_from_errors`/`safe_segment` reused, never interpolated). **Confirmed via existing code, not new production code**: the CR/LF case exercises `MetadataReport`'s own `extra="forbid"` rejection path, which already routes through `errors.py`'s pre-existing `safe_segment` allow-list.
+- [x] 9.8 Verify (PR9c): `uv run pytest packages/vantage/tests/test_routes_runs.py packages/vantage/tests/test_ingestion.py`.
+
+## Phase 10 (PR10 → PR2, PR9): Read filter
+
+**Re-sliced at apply time into two PRs**, not one -- the combined diff
+measured 511 changed lines against PR9c, 28% over the 400-line budget,
+before any bookkeeping (this project's own ~1.9x historical under-forecast
+note: 220 forecast x 1.9 ≈ 418, and this measured higher still). An honest
+seam existed, the same shape Phases 7/8/9 already used: the `key=value`
+filter (task 10.3's `list_runs` half) is independently complete and
+independently testable without Q2's horizon count (task 10.3's
+`count_runs_predating_metadata_key` half) on top of it, only the reverse.
+Chain: `ft/run-metadata-capture-10-read-filter` (10.1-10.3's filter half →
+PR9c), `ft/run-metadata-capture-10b-horizon` (10.3's horizon half + 10.4-10.8
+→ PR10a). Both land comfortably under budget on their own (277 and 252
+changed lines respectively).
+
+- [x] 10.1 RED (PR10a): `test_routes_read.py` — `GET /api/v1/runs?metadata_key=K&metadata_value=V` returns only matching runs; one param without the other → `422 invalid_metadata_filter`; an unknown key/value yields zero matches, not an error.
+- [x] 10.2 GREEN (PR10a): `errors.py` — `InvalidMetadataFilterError` (422) + `__all__` entry.
+- [x] 10.3 GREEN, split across both PRs: `core/ports/storage.py` — `list_runs(..., metadata_key=None, metadata_value=None)` lands in PR10a, both adapters implementing the filter over `idx_run_metadata_key_value`'s two-column point lookup; `count_runs_predating_metadata_key(key)` lands in PR10b, both adapters implementing it over the same index left-anchored on `key` alone (D100).
+- [x] 10.4 RED (PR10b): `test_routes_read.py` — runs predating a declared key are excluded from the match and the response reports `metadata_horizon: {key, predating}`; `predating` equals total run count when the key was never declared; `metadata_horizon: null` when no filter given (Q2). **Completeness addition, not in this task's literal list but required by D95's own justification for D100's horizon rule**: a declared-but-dropped key (a value over the per-value bound, `status='value_too_large'`, `value IS NULL`) still counts towards `first_seen` — proven directly, since without it a run whose capture failed would be miscounted as predating its own key's declaration.
+- [x] 10.5 GREEN (PR10b): `RunListResponse.metadata_horizon` field; `routes/read.py` wiring.
+- [x] 10.6 GREEN (PR10b): hand-edit `service/openapi/v1.yaml` for the widened `GET /runs` operation; run the drift check.
+- [x] 10.7 GREEN (PR10a for the filter calls, PR10b's schema-binding table for `metadata_horizon`): add the binding-table entries in `test_read_only_surface.py` (PR10a) and `test_interface_document.py` (PR10b) for the widened `read` path.
+- [x] 10.8 Verify (PR10b): `uv run pytest packages/vantage/tests/test_routes_read.py packages/vantage/tests/test_read_only_surface.py packages/vantage/tests/test_interface_document.py` — 96 passed. `uv run pytest` (whole workspace) — 739 passed (was 731 after PR10a, 725 before Phase 10 started). `uv run ruff format . && uv run ruff check --fix .` — clean. `uv run mypy .` (strict) — clean, 93 files. `uv run deptry .` — clean.
+
+## Phase 11 (PR11 → PR7): RQ-25 measurement + docs
+
+- [x] 11.1 Create `scripts/measure_metadata_overhead.py` by copying `scripts/measure_vcs_overhead.py`'s harness: same two RQ-25 profiles, five interleaved A/B/A/B pairs, medians reported never means, same in-process `_LiveServer` over `InMemoryExecutionStore`. Arm A = `--vantage`; arm B = `--vantage --vantage-metadata`; arm C = worst legitimate declaration (16 files × 8 KiB). **Deviation, stated**: arm B is the worst-case declaration (16 files × 8 KiB, `MAX_DECLARED_FILES`/`MAX_DECLARED_FILE_BYTES`) and arm C is the flag alone with no declaration present — the reverse pairing of the task's literal wording, chosen because B needs to be interleaved with A to isolate this change's added cost (D102's own reason for the three-arm design), while C (the near-zero warn-only path) is measured separately since it needs the declaration file *absent*, which cannot be interleaved with B's declaration being *present* in the same repository root without swapping files between every single run. **Re-sliced at apply time into PR11a and PR11b**: the combined diff (script + docs) measured 459 changed lines against PR10b, over the 400-line budget. Honest seam: the script is independently complete and testable (it runs and produces numbers) without the docs that transcribe its output, only the reverse. PR11a lands the script alone (354 lines); PR11b (→ PR11a) lands the measured numbers, the spec's Measurements paragraph, the README update and the RQ-25 test marker.
+- [x] 11.2 Run the script; record the four measured medians (this-repo/synthetic × 10ms/1ms profiles) — a real deliverable, a committed number, not an assertion. **Result, not tuned to be favourable**: the measured B−A deltas (−20.5ms, −14.2ms, −26.5ms, +29.4ms) straddle zero and are indistinguishable from process-spawn noise at this sample size — three of four are negative, which a real added cost cannot produce. This is read as "unresolvable against the noise floor," not as "confirmed zero cost" or "confirmed under budget." See the spec's own Measurements paragraph for the full table and reasoning.
+- [x] 11.3 Add the `run-metadata` capability spec's own Measurements paragraph with the medians and the standing re-measure sentence, `@pytest.mark.req(id="RQ-25")` cross-reference in whichever test asserts the budget comparison. **No test asserts a budget percentage** (Analysis, not Test, per this project's own verification-method taxonomy) — the marker was added instead to `test_metadata_section_is_identical_on_both_reports` (`test_run_report.py`), whose `assert call_count[0] == 1` proves the O(1)-per-session shape claim D102's forecast depends on, the same role `test_git_invocation_count_does_not_scale_with_test_count` already plays for `vcs`.
+- [x] 11.4 Update `README` with the new flag and declaration file.
+- [x] 11.5 Whether or not the 2% budget holds, record the number anyway — the 1ms profile is already breached before this change starts (D102); state that explicitly, not silently. **Also recorded, unprompted by the task's own wording**: RQ-25's normative 2% budget text does not exist anywhere in this repository (never migrated from Notion), and `version-control-context/spec.md` and `docs/open-questions.md` currently draw opposite conclusions from the same 4.11%/4.17% numbers. Named in the new Measurements paragraph as a human decision, not resolved there or anywhere in this batch.
+
+## Phase 12 (PR12 → ft/run-metadata-capture-11b-docs): sdd-verify remediation
+
+`sdd-verify` (2026-09-04) FAILed the chain tip on two requirement-level MUSTs no
+scenario exercised, plus one unenforced constant, and routed all three back here
+as one slice. One PR (`ft/run-metadata-capture-12-verify-fixups`), 287 changed
+lines, well under budget — no re-slicing needed.
+
+- [x] 12.1 RED/GREEN (CRITICAL-1): `resolve_declared_path` (`pytest_vantage/metadata.py`)
+  caught `(OSError, RuntimeError)` only; `Path.resolve()` raises `ValueError` for a
+  NUL byte in the path on every supported interpreter (confirmed 3.10.21, 3.13.15),
+  uncaught anywhere on the `pytest_configure` -> `capture_metadata` chain, crashing
+  the whole session (`INTERNALERROR`, zero tests run). Changed to `except Exception`
+  — fail closed on any exception, not an enumerated tuple a third mechanism has now
+  slipped past twice — and generalised the module docstring's lesson. Also rejects a
+  NUL byte in `read_declaration`'s per-entry path validation, loudly, before
+  `resolve_declared_path` ever sees it. RED confirmed both ways (reverted the
+  `except` clause and the `read_declaration` check independently, each crashed/failed
+  as expected, then restored).
+- [x] 12.2 RED/GREEN (WARNING-1): `MAX_METADATA_KEY_CHARS` was defined, exported and
+  pinned by a tautological test, but enforced nowhere. Per the user's resolution,
+  enforced in `read_declaration` beside `MAX_DECLARED_PATH_CHARS` — a key over the
+  bound refuses the whole declaration, with a warning. No new status class, no
+  schema change (declaration refused before any row exists). Mirrored as
+  `pytest_vantage.metadata.MAX_DECLARED_KEY_CHARS`, pinned against the server
+  constant the same way `MAX_METADATA_ENTRIES` already is. `test_metadata.py:78`'s
+  assertion is no longer a tautology — real behaviour now depends on the value.
+- [x] 12.3 RED/GREEN (CRITICAL-2): `_LIST_RUNS_BY_METADATA`'s `WHERE EXISTS`
+  correlated on `rm.run_id = run.id`, so the planner anchored there and preferred
+  `run_metadata`'s own `PRIMARY KEY (run_id, key)` autoindex over
+  `idx_run_metadata_key_value` — confirmed by `EXPLAIN QUERY PLAN`, cost O(total
+  runs) not O(matching runs). Rewritten as `WHERE id IN (SELECT run_id FROM
+  run_metadata WHERE key = ? AND value = ?)`; measured plan now
+  `SEARCH rm USING INDEX idx_run_metadata_key_value (key=? AND value=?)` +
+  `SEARCH run USING INDEX sqlite_autoindex_run_1 (id=?)`. Returned rows unchanged.
+  Added `test_list_runs_by_metadata_uses_the_key_value_index`
+  (`test_sqlite_store.py`) asserting the index name appears (and the PK autoindex
+  does not) in the plan — RED confirmed against the un-rewritten query, reproducing
+  the exact bad plan from the verify report.
+- [x] 12.4 Corrected the six false prose claims naming the filter's index usage.
+  Rewrote: `sqlite_store.py`'s `_LIST_RUNS_BY_METADATA` comment,
+  `docs/schema-manifest.md:380`, `design.md:650` (distinguishes the filter's full
+  `(key, value)` seek from the horizon count's `key`-only seek — both are now
+  true, but were not the same claim), `test_routes_read.py:1394`'s docstring.
+  Verified `core/ports/storage.py:241` and `storage/memory.py:226` already state
+  the true thing (they distinguish the filter's `(key, value)` lookup from the
+  horizon's `key`-only one correctly) and needed no edit.
+- [x] 12.5 SUGGESTION-1: `test_replaying_the_same_metadata_is_a_no_op`
+  (`vantage_port_contract.py`) only replays identical metadata, proving
+  idempotence, not `run-metadata` R7's actual "unchanged from ingestion" promise.
+  Added `test_replaying_metadata_with_a_different_value_does_not_backfill` —
+  second write carries a genuinely different value, asserts the first value still
+  reads back.
+- [x] 12.6 SUGGESTION-2: `_ADMISSIBLE_CONTENT_TYPES` (`metadata_parse.py`) was
+  defined, exported and referenced nowhere. Revived: `parse()` checks membership
+  once instead of an `if`/`elif`/`else` chain. Deliberately NOT widened to match
+  `routes/runs.py`'s `_KNOWN_METADATA_CONTENT_TYPES` (which also admits `"toml"`)
+  — that asymmetry is correct and load-bearing, documented in a docstring note.
+- [x] 12.7 Verify: `uv run pytest` — 746 passed (was 739; +7 new tests).
+  `uv run ruff format . && uv run ruff check --fix .` — clean, no changes.
+  `uv run mypy .` (strict) — clean, 94 files. `uv run deptry .` — clean.
+- [x] 12.8 Explicitly out of scope, left untouched per `sdd-verify`'s own routing:
+  WARNING-2 (`docs/schema-manifest.md`'s stale narrative block, pre-existing),
+  WARNING-3 (RQ-25 budget contradiction, human decision), WARNING-4 (`_StubServer`
+  flake, pre-existing).
+
+**Review Workload**: 287 changed lines (code+tests: ~226; bookkeeping/docs: ~61)
+in one PR against the chain tip — comfortably under the 400-line budget, no
+`size:exception`, no re-slicing.
+
+## Cross-cutting rules (apply throughout)
+
+- No new `RQ-xx` identifiers. New obligations cite the capability/scenario only. Only tests verifying an *existing* RQ (RQ-2 in Phase 5, RQ-24 in Phase 8, RQ-25 in Phase 11, RQ-26 in Phase 3, RQ-29 in Phase 2, RQ-44 in Phase 9) carry `@pytest.mark.req(id="RQ-xx")`, always as a keyword, never positional.
+- Every RED test names its capability + scenario in its docstring (no `req` marker on new-obligation tests).
+- `uv run mypy .` (strict) and `uv run ruff format . && uv run ruff check --fix .` run at the end of every phase, not only at the end of the chain.
+- Each PR body includes: Chain Context section, dependency diagram marking the current PR with `📍`, and the Phase 2 / Phase 10 notes above verbatim.
+
+## Review Workload Forecast
+
+Estimated changed lines: PR1 ~220, PR2 ~164, PR3 ~220, PR4 ~370, PR5 ~380, PR6 ~380, PR7 ~350, PR8 ~250, PR9 ~350, PR10 ~220, PR11 ~180 — **total ~3,084**, expect the upper half given this project's 1.9x historical under-forecast (design's own uncorrected total: ~2,160).
+Chained PRs recommended: Yes
+400-line budget risk: High
+Decision needed before apply: No

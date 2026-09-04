@@ -108,6 +108,25 @@ def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool) -> bool:
     return activated and cli_opt_in
 
 
+def resolve_metadata_capture(*, activated: bool, cli_opt_in: bool) -> bool:
+    """Whether the plugin should attempt to read the metadata declaration
+    for this session (design.md D99, opt-in-activation's "Metadata capture
+    flag inertness" requirement, RQ-2 extended). The identical monotone
+    conjunction `resolve_failure_text_capture` uses: `resolve(...) <=
+    activated` for every input combination, and `cli_opt_in` only WIDENS an
+    already-activated session's capture from absent to present, never
+    narrows it or enables recording on its own.
+
+    **The invocation flag is the only means, by construction: this
+    signature carries no ini parameter and no environment-variable
+    parameter**, the same structural guarantee `resolve_failure_text_
+    capture` holds -- a committed configuration file can never be the
+    means by which a filesystem read this design authorises (ADR-0017) is
+    enabled for everyone who checks the project out.
+    """
+    return activated and cli_opt_in
+
+
 def resolve_liveness_timeout(report_timeout: float) -> float:
     """The bound on a liveness request (start-write, heartbeat): `min(2.0,
     report_timeout)` (design.md D31).
@@ -127,6 +146,7 @@ __all__ = [
     "resolve_and_validate_address",
     "resolve_failure_text_capture",
     "resolve_liveness_timeout",
+    "resolve_metadata_capture",
     "resolve_report_timeout",
     "resolve_server_address",
 ]

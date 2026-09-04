@@ -6,12 +6,20 @@ storage adapter persists the section.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
 from vantage.core.domain.result import CapturedOutput
-from vantage.service.routes.runs import _to_execution, _to_result
-from vantage.service.schemas import ResultReport, RunReport, VcsReport
+from vantage.core.ports.storage import EMPTY_RUN_METADATA, MetadataEntry, MetadataFile
+from vantage.service.routes.runs import _to_execution, _to_result, _to_run_metadata
+from vantage.service.schemas import (
+    MetadataFileReport,
+    MetadataReport,
+    ResultReport,
+    RunReport,
+    VcsReport,
+)
 from vantage.service.truncation import MAX_TEXT_FIELD_BYTES
 
 
@@ -260,3 +268,128 @@ def test_to_result_captured_output_is_never_none() -> None:
     assert absent.captured.stdout is None
     assert isinstance(empty.captured, CapturedOutput)
     assert empty.captured.stdout == ""
+
+
+# --- Phase 9: `_to_run_metadata` (design.md D96, D97, D98) ------------------
+
+
+def _metadata_file_report(**overrides: object) -> MetadataFileReport:
+    payload: dict[str, object] = {
+        "path": "config/firmware.json",
+        "format": "json",
+        "status": "captured",
+        "keys": ["firmware_version"],
+        "content": json.dumps({"firmware_version": "2.1"}),
+    }
+    payload.update(overrides)
+    return MetadataFileReport.model_validate(payload)
+
+
+def _metadata_report(*files: MetadataFileReport) -> MetadataReport:
+    return MetadataReport(declaration="vantage-metadata.json", files=list(files))
+
+
+def test_to_run_metadata_returns_empty_when_the_section_is_absent() -> None:
+    assert _to_run_metadata(None) == EMPTY_RUN_METADATA
+
+
+def test_to_run_metadata_captures_a_well_formed_declared_key() -> None:
+    """*(Scenario: A value within bound is stored whole, `session-ingestion`)*."""
+    metadata = _metadata_report(_metadata_file_report())
+
+    result = _to_run_metadata(metadata)
+
+    assert result.files == (
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="captured"),
+    )
+    assert result.entries == (
+        MetadataEntry(
+            key="firmware_version",
+            value="2.1",
+            source_file="config/firmware.json",
+            status="captured",
+        ),
+    )
+
+
+@pytest.mark.parametrize("bad_path", ["/etc/passwd", "../escape.json", "x" * 1025])
+def test_to_run_metadata_drops_an_entry_whose_source_file_fails_the_shape_recheck(
+    bad_path: str,
+) -> None:
+    """design.md D93/D97 class 11 -- an oversized/absolute/`..` `source_file`
+    is dropped whole, never rejected: no file row and no key row at all, and
+    `_to_run_metadata` never raises."""
+    metadata = _metadata_report(_metadata_file_report(path=bad_path))
+
+    result = _to_run_metadata(metadata)
+
+    assert result == EMPTY_RUN_METADATA
+
+
+def test_to_run_metadata_drops_an_entry_with_an_unrecognised_status() -> None:
+    """Completeness addition beyond D97's eleven rows: `status` carries no
+    Pydantic constraint (D96's trap), so a garbage value must never reach
+    `record_session` and raise the SQL `CHECK` on `run_metadata_file.status`
+    mid-transaction -- dropped whole, the same bucket class 11 already uses
+    for a rejected `source_file`."""
+    metadata = _metadata_report(_metadata_file_report(status="not-a-real-status", content=None))
+
+    result = _to_run_metadata(metadata)
+
+    assert result == EMPTY_RUN_METADATA
+
+
+def test_to_run_metadata_drops_an_entry_with_an_unrecognised_format() -> None:
+    """The `content_type` sibling of the status guard above."""
+    metadata = _metadata_report(
+        _metadata_file_report(format="xml", status="not_found", content=None)
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result == EMPTY_RUN_METADATA
+
+
+def test_to_run_metadata_marks_a_non_captured_file_and_all_its_keys_source_unavailable() -> None:
+    """design.md D97 classes 1-6: the plugin's own status is trusted
+    verbatim, and every declared key under that file becomes a
+    `source_unavailable` row (D95's "declared but dropped is a row")."""
+    metadata = _metadata_report(
+        _metadata_file_report(status="not_found", content=None, keys=["a", "b"])
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result.files == (
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="not_found"),
+    )
+    assert set(result.entries) == {
+        MetadataEntry(
+            key="a", value=None, source_file="config/firmware.json", status="source_unavailable"
+        ),
+        MetadataEntry(
+            key="b", value=None, source_file="config/firmware.json", status="source_unavailable"
+        ),
+    }
+
+
+def test_to_run_metadata_marks_an_unparseable_document_malformed() -> None:
+    """design.md D97 class 7: the server-detected parse failure, not one of
+    the plugin's own six status classes."""
+    metadata = _metadata_report(
+        _metadata_file_report(content="not json at all", keys=["firmware_version"])
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result.files == (
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="malformed"),
+    )
+    assert result.entries == (
+        MetadataEntry(
+            key="firmware_version",
+            value=None,
+            source_file="config/firmware.json",
+            status="source_unavailable",
+        ),
+    )

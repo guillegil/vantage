@@ -29,6 +29,7 @@ from pytest_vantage.boundary import _warn
 from pytest_vantage.config import (
     resolve_failure_text_capture,
     resolve_liveness_timeout,
+    resolve_metadata_capture,
     resolve_report_timeout,
     resolve_server_address,
 )
@@ -82,6 +83,19 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "cannot activate recording on its own (design.md D72). Stored failure "
             "text is unredacted and may contain any value a test printed or "
             "asserted, including credentials."
+        ),
+    )
+    group.addoption(
+        "--vantage-metadata",
+        action="store_true",
+        default=False,
+        help=(
+            "Read the files named by vantage-metadata.json in the project root and "
+            "record the declared keys with this session. Absent by default -- capture "
+            "never happens unless this flag is given, there is no ini equivalent, and "
+            "the flag cannot activate recording on its own (design.md D99). Declared "
+            "files are read from disk and their declared values are stored; a "
+            "configuration file is where credentials live by convention."
         ),
     )
     parser.addini(
@@ -162,6 +176,41 @@ def _failure_text_capture_requested(config: pytest.Config) -> bool:
     )
 
 
+def _metadata_capture_requested(config: pytest.Config) -> bool:
+    """Whether `Recorder` should attempt to read the metadata declaration
+    for this session (design.md D99, opt-in-activation's "Metadata capture
+    flag inertness" requirement, RQ-2 extended). Composes
+    `_activation_requested` with the sole opt-in surface -- the
+    `--vantage-metadata` invocation flag -- through `resolve_metadata_
+    capture`, the identical monotone conjunction `_failure_text_capture_
+    requested` uses above: it can only widen an activated session's
+    capture from absent to present, never enable recording itself. There
+    is deliberately no ini equivalent and no environment variable, so a
+    committed configuration file can never be the means by which a
+    filesystem read is enabled (ADR-0017's C3).
+
+    Short-circuits before reading the opt-in surface when the session was
+    never activated at all (RQ-2), exactly like `_failure_text_capture_
+    requested`: an unactivated session reads `"vantage"` alone.
+
+    Unlike `_failure_text_capture_requested`, this is called only from the
+    controller branch of `pytest_configure` -- there is no per-worker
+    consumer of it (no `EvidenceCollector` equivalent registers on a
+    worker for metadata), and `test_xdist_guard.py`'s `_WorkerConfigDouble`
+    raises on any option read outside its allow-list, so reading
+    `"vantage_metadata"` on a worker would be an unproven, untested read
+    with nothing to act on it. The declaration is still read exactly once
+    per session regardless of worker count, because no `Recorder` is ever
+    constructed on a worker at all (`plugin.py:214-217`).
+    """
+    if not _activation_requested(config):
+        return False
+    return resolve_metadata_capture(
+        activated=True,
+        cli_opt_in=bool(config.getoption("vantage_metadata")),
+    )
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """The always-imported hook (design.md D2, D6, D68; design decisions
     D38-D42 for the capability probe).
@@ -202,7 +251,11 @@ def pytest_configure(config: pytest.Config) -> None:
        previous release did (D41) rather than half-recording against a
        server that cannot finish the job. The `Recorder` is registered once
        activation and the preflight succeed, carrying whatever the
-       capability probe found.
+       capability probe found, plus `_metadata_capture_requested(config)`
+       (design.md D99) -- the second gate C2 names, computed here rather
+       than inside `Recorder.__init__` so the same short-circuit-on-
+       activation guarantee every other opt-in surface holds is visible at
+       the single call site that constructs a `Recorder` at all.
 
     A server that answers the preflight and later disappears, or starts
     failing partway through reporting, is not this function's concern --
@@ -235,5 +288,11 @@ def pytest_configure(config: pytest.Config) -> None:
     liveness_timeout = resolve_liveness_timeout(timeout)
     lifecycle_available = fetch_capabilities(address, timeout=liveness_timeout)
     config.pluginmanager.register(
-        Recorder(config, address, timeout, lifecycle_available=lifecycle_available)
+        Recorder(
+            config,
+            address,
+            timeout,
+            lifecycle_available=lifecycle_available,
+            metadata_requested=_metadata_capture_requested(config),
+        )
     )

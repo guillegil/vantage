@@ -7,7 +7,13 @@ from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
-from vantage.service.schemas import ResultReport, SessionReport, VcsReport
+from vantage.service.schemas import (
+    MetadataFileReport,
+    MetadataReport,
+    ResultReport,
+    SessionReport,
+    VcsReport,
+)
 
 
 def _well_formed_vcs(**overrides: object) -> dict[str, object]:
@@ -105,6 +111,131 @@ def test_session_report_carries_a_well_formed_vcs_section() -> None:
 
     assert report.vcs is not None
     assert report.vcs.commit == "a" * 40
+
+
+def _well_formed_metadata_file(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "path": "config/firmware.yaml",
+        "format": "yaml",
+        "status": "captured",
+        "keys": ["firmware_version", "board_revision"],
+        "content": 'firmware_version: "2.1"\nboard_revision: C\n',
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_metadata_file_report_accepts_a_declared_value_of_arbitrary_length_and_content() -> None:
+    """The D96 trap, made a falsifier before it can be committed by
+    accident: `VcsReport.commit` uses `max_length=64`, and a Pydantic
+    constraint that fails raises `InvalidReportError` -- a `422` that
+    rejects the WHOLE session report. No constraint of any kind -- no
+    `max_length`, no `pattern` -- may appear on any field in the metadata
+    section; every bound is applied by the normalizer (Phase 9), which
+    drops rather than rejects (design.md D96). A value bigger and stranger
+    than any real declared file could plausibly hold must still validate
+    without raising."""
+    huge_content = "\N{SNOWMAN}" * 100_000 + "\x00" * 1_000 + "a" * 500_000
+
+    report = MetadataFileReport.model_validate(
+        _well_formed_metadata_file(
+            path="p" * 10_000,
+            keys=["k" * 10_000],
+            content=huge_content,
+        )
+    )
+
+    assert report.content == huge_content
+    assert report.path == "p" * 10_000
+    assert report.keys == ["k" * 10_000]
+
+
+def test_metadata_file_report_accepts_a_null_content_for_a_non_captured_status() -> None:
+    """`content` is `None` whenever `status` is not `"captured"` -- the same
+    "declared-but-dropped is a row, not an absence" contract D95 states for
+    the storage side, kept on the wire too (design.md D96)."""
+    report = MetadataFileReport.model_validate(
+        _well_formed_metadata_file(status="too_large", content=None)
+    )
+
+    assert report.status == "too_large"
+    assert report.content is None
+
+
+def test_metadata_file_report_rejects_an_unknown_field() -> None:
+    """`extra="forbid"`, matching `VcsReport` (design.md D96)."""
+    with pytest.raises(ValidationError, match="extra"):
+        MetadataFileReport.model_validate(_well_formed_metadata_file(size=8192))
+
+
+def test_metadata_report_accepts_a_well_formed_section() -> None:
+    report = MetadataReport.model_validate(
+        {
+            "declaration": "vantage-metadata.json",
+            "files": [_well_formed_metadata_file(), _well_formed_metadata_file(status="not_found")],
+        }
+    )
+
+    assert report.declaration == "vantage-metadata.json"
+    assert len(report.files) == 2
+    assert report.files[0].content is not None
+    assert report.files[1].status == "not_found"
+
+
+def test_metadata_report_accepts_an_arbitrary_length_declaration_name() -> None:
+    """No constraint of any kind on `declaration` either (design.md D96)."""
+    report = MetadataReport.model_validate({"declaration": "d" * 10_000, "files": []})
+
+    assert report.declaration == "d" * 10_000
+
+
+def test_metadata_report_rejects_an_unknown_field() -> None:
+    """`extra="forbid"`, matching `VcsReport` (design.md D96)."""
+    with pytest.raises(ValidationError, match="extra"):
+        MetadataReport.model_validate(
+            {"declaration": "vantage-metadata.json", "files": [], "extra_field": 1}
+        )
+
+
+def test_session_report_metadata_defaults_to_none_when_the_section_is_absent() -> None:
+    """An older plugin's report shape -- no `metadata` key at all -- still
+    validates; `SessionReport.metadata` defaults to `None` (design.md D96)."""
+    report = SessionReport.model_validate(
+        {
+            "run": {
+                "id": "a" * 32,
+                "started_at": "2026-08-15T09:14:02.481930+00:00",
+                "finished_at": None,
+                "exit_status": None,
+                "interrupted": False,
+                "interrupt_reason": None,
+            }
+        }
+    )
+
+    assert report.metadata is None
+
+
+def test_session_report_carries_a_well_formed_metadata_section() -> None:
+    report = SessionReport.model_validate(
+        {
+            "run": {
+                "id": "a" * 32,
+                "started_at": "2026-08-15T09:14:02.481930+00:00",
+                "finished_at": None,
+                "exit_status": None,
+                "interrupted": False,
+                "interrupt_reason": None,
+            },
+            "metadata": {
+                "declaration": "vantage-metadata.json",
+                "files": [_well_formed_metadata_file()],
+            },
+        }
+    )
+
+    assert report.metadata is not None
+    assert report.metadata.files[0].path == "config/firmware.yaml"
 
 
 def _minimal_result_entry(**overrides: object) -> dict[str, object]:
