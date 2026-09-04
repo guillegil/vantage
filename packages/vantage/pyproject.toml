@@ -15,7 +15,16 @@ authors = [{ name = "Guillermo Gil" }]
 # ingestion endpoint and the `vantage` CLI onward. `vantage` is the one
 # package RQ-24 does not constrain: it is installed deliberately by someone
 # who wants to run a server.
-dependencies = ["fastapi>=0.115", "uvicorn>=0.30"]
+#
+# `PyYAML` (design.md D97, task 8.5) is declared here, and ONLY here: it is
+# imported exactly once, by `vantage.service.metadata_parse`, to parse a
+# YAML-encoded declared configuration document with `yaml.compose()`. It
+# must never be reachable from `pytest-vantage` (RQ-24 -- the plugin takes
+# pytest and the standard library, nothing else) or from `vantage.core`
+# (RQ-26). A real user installing the published `vantage` wheel alone --
+# not this workspace's dev extras -- needs this import to resolve, which is
+# exactly what the clean-environment install check (CLAUDE.md) proves.
+dependencies = ["fastapi>=0.115", "pyyaml>=6.0", "uvicorn>=0.30"]
 
 [project.scripts]
 vantage = "vantage.service.cli:main"

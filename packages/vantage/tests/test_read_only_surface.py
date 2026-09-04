@@ -165,6 +165,14 @@ def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...
         ("GET", "/runs"): (
             lambda: client.get("/api/v1/runs"),
             lambda: client.get("/api/v1/runs", params={"limit": 0}),  # 422 (D61)
+            # Widened, Phase 10 (design.md D100): the metadata filter, and
+            # its one both-or-neither rejection branch.
+            lambda: client.get(
+                "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
+            ),
+            lambda: client.get(
+                "/api/v1/runs", params={"metadata_key": "firmware_version"}
+            ),  # 422 (InvalidMetadataFilterError)
         ),
         ("GET", "/runs/{run_id}"): (
             lambda: client.get(run),

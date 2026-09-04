@@ -18,11 +18,16 @@ import socket
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from pytest_vantage import vcs
+from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.plugin import _failure_text_capture_requested, _metadata_capture_requested
+from pytest_vantage.recorder import Recorder
 
 _SAMPLE_TEST = "def test_it():\n    assert True\n"
+_METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
 
 
 def _tree_snapshot(root: Path) -> dict[str, bytes]:
@@ -221,14 +226,85 @@ def test_the_shipped_help_text_advertises_no_ini_equivalent(tmp_path: Path) -> N
 
 
 # --- Metadata capture flag inertness (opt-in-activation, RQ-2 extended, ------
-# --- design.md D99, task 5.4) ------------------------------------------------
+# --- design.md D99, tasks 5.3/5.5/5.6) ---------------------------------------
 #
 # `--vantage-metadata` is its own invocation flag, gated identically to
-# `--vantage` and `--vantage-failure-text`. This slice proves the gate's
-# short-circuit: `_metadata_capture_requested` must never touch the opt-in
-# surface at all when the session was never activated. The differential
-# (C1), the declaration-opened proof (C2), the `--help` denial (C3) and Q3's
-# warning land in the next slice, once the declaration itself is consulted.
+# `--vantage` and `--vantage-failure-text`: no ini equivalent, the shipped
+# `--help` actively denies one (C3), the declaration is opened only after
+# both gates pass (C2), and the whole surface stays byte-inert with the flag
+# absent even when a `vantage-metadata.json` sits in the project root (C1).
+
+
+@pytest.mark.req(id="RQ-2")
+def test_project_tree_is_byte_identical_with_a_metadata_declaration_present_but_the_flag_absent(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opt-in-activation: "No read or connection without the metadata flag"
+    (C1). The same differential `test_project_tree_is_byte_identical_with_
+    plugin_absent` uses above, with one deliberate addition: a
+    `vantage-metadata.json` sits in both project roots. Its mere presence
+    must not change a single byte the bare run produces relative to the
+    `-p no:vantage` control -- the flag, not the file, is what the
+    capability spec's inertness requirement gates on.
+    """
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+
+    bare_root = tmp_path_factory.mktemp("vantage-metadata-rq2-bare")
+    control_root = tmp_path_factory.mktemp("vantage-metadata-rq2-control")
+    declaration = '{"version": 1, "files": []}\n'
+    (bare_root / "test_sample.py").write_text(_SAMPLE_TEST)
+    (control_root / "test_sample.py").write_text(_SAMPLE_TEST)
+    (bare_root / _METADATA_DECLARATION_FILENAME).write_text(declaration)
+    (control_root / _METADATA_DECLARATION_FILENAME).write_text(declaration)
+
+    bare = _run_pytest(bare_root)
+    control = _run_pytest(control_root, "-p", "no:vantage")
+
+    assert bare.returncode == 0, bare.stdout + bare.stderr
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert _tree_snapshot(bare_root) == _tree_snapshot(control_root)
+
+
+@pytest.mark.req(id="RQ-2")
+def test_no_connection_is_attempted_with_a_metadata_declaration_present_but_no_flags(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """opt-in-activation (C1), the socket-level half: a `vantage-metadata.json`
+    present in the project root, with no `--vantage` or `--vantage-metadata`
+    given, must not cause even a single connection attempt. Same shape as
+    `test_no_connection_is_attempted_with_no_recording_option` above.
+    """
+    pytester.makepyfile(test_sample=_SAMPLE_TEST)
+    (pytester.path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
+    monkeypatch.setattr(socket, "create_connection", _forbidden_create_connection)
+
+    result = pytester.runpytest()
+
+    result.assert_outcomes(passed=1, warnings=0)
+
+
+@pytest.mark.req(id="RQ-2")
+def test_the_shipped_help_text_advertises_no_ini_equivalent_for_metadata(tmp_path: Path) -> None:
+    """opt-in-activation: "The shipped `--help` denies an ini equivalent for
+    the metadata flag" (C3). The identical assertion shape
+    `test_the_shipped_help_text_advertises_no_ini_equivalent` above proves
+    for `--vantage-failure-text`, inherited verbatim (design.md D99) for
+    `--vantage-metadata`.
+    """
+    result = _run_pytest(tmp_path, "--help")
+    assert result.returncode == 0, result.stderr
+
+    rendered = " ".join(result.stdout.split())
+    assert "--vantage-metadata" in rendered, (
+        "the metadata flag must appear in --help; without it this assertion proves nothing"
+    )
+    assert "or the ini equivalent is given" not in rendered, (
+        "--help must not offer an ini equivalent as a means of enabling metadata capture"
+    )
+    assert "there is no ini equivalent" in rendered, (
+        "--help must actively deny an ini equivalent rather than merely omit it: "
+        "silence invites someone to commit a file that would then do nothing"
+    )
 
 
 class _UnactivatedConfig:
@@ -252,3 +328,117 @@ def test_metadata_capture_requested_short_circuits_when_not_activated() -> None:
     exactly as `_failure_text_capture_requested` already does -- proves the
     gate is structural, not merely a happy-path default."""
     assert _metadata_capture_requested(_UnactivatedConfig()) is False  # type: ignore[arg-type]
+
+
+def _patch_path_open_recorder(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """Wraps the real `Path.open` to record every path it is called on
+    while still letting it execute for real -- the same non-fabricating
+    shape `test_vcs.py`'s `_CallRecorder` uses for `subprocess.run`.
+
+    Deliberately a plain function, not a callable class instance: `Path.open`
+    is looked up through the descriptor protocol (`instance.open(...)`
+    implicitly passes `instance` as the first argument only because a
+    *function* object implements `__get__`), and a callable instance does
+    not implement that protocol -- patching with one would silently drop
+    the `Path` instance the call was actually made on.
+    """
+    paths_opened: list[Path] = []
+    real_open = Path.open
+
+    def _record_open(path_self: Path, *args: object, **kwargs: object) -> object:
+        paths_opened.append(path_self)
+        return real_open(path_self, *args, **kwargs)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(Path, "open", _record_open)
+    return paths_opened
+
+
+def test_declaration_is_not_opened_when_metadata_capture_was_not_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C2 (design.md D99): "The declaration is read only after both gates
+    pass." A `Recorder` constructed with `metadata_requested=False` --
+    which is what either gate closed collapses to, since
+    `_metadata_capture_requested` has already combined both before this
+    keyword is ever set -- must never open the declaration file.
+    """
+    (tmp_path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
+    paths_opened = _patch_path_open_recorder(monkeypatch)
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+
+    Recorder(
+        config=SimpleNamespace(rootpath=str(tmp_path)),  # type: ignore[arg-type]
+        address="http://example.invalid",
+        timeout=1.0,
+        lifecycle_available=True,
+        metadata_requested=False,
+    )
+
+    assert not any(path.name == _METADATA_DECLARATION_FILENAME for path in paths_opened)
+
+
+def test_declaration_is_opened_when_metadata_capture_was_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of C2: once both gates pass, the declaration IS
+    consulted -- `metadata_requested=True` must reach the filesystem,
+    proving the earlier test's zero-calls result is not an implementation
+    that never opens anything at all."""
+    (tmp_path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
+    paths_opened = _patch_path_open_recorder(monkeypatch)
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+
+    Recorder(
+        config=SimpleNamespace(rootpath=str(tmp_path)),  # type: ignore[arg-type]
+        address="http://example.invalid",
+        timeout=1.0,
+        lifecycle_available=True,
+        metadata_requested=True,
+    )
+
+    assert any(path.name == _METADATA_DECLARATION_FILENAME for path in paths_opened)
+
+
+def test_recorder_warns_exactly_once_when_metadata_requested_and_declaration_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+) -> None:
+    """Q3 (design.md D92): setting `--vantage-metadata` is a deliberate
+    act, so a missing declaration warns once instead of silently capturing
+    nothing -- the one place this design departs from
+    `recording-fault-tolerance`'s silent posture, and bounded to the
+    declaration itself: a malformed *declared document* never warns and
+    never fails ingestion (D97), a different thing entirely.
+    """
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+
+    Recorder(
+        config=SimpleNamespace(rootpath=str(tmp_path)),  # type: ignore[arg-type]
+        address="http://example.invalid",
+        timeout=1.0,
+        lifecycle_available=True,
+        metadata_requested=True,
+    )
+
+    metadata_warnings = [w for w in recwarn.list if issubclass(w.category, VantageWarning)]
+    assert len(metadata_warnings) == 1
+    assert _METADATA_DECLARATION_FILENAME in str(metadata_warnings[0].message)
+
+
+def test_recorder_emits_no_warning_when_metadata_requested_and_declaration_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+) -> None:
+    """Q3's other half: a declaration that IS present emits no warning at
+    all -- the departure from silence is bounded to the declaration's own
+    absence, never triggered by its mere presence."""
+    (tmp_path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+
+    Recorder(
+        config=SimpleNamespace(rootpath=str(tmp_path)),  # type: ignore[arg-type]
+        address="http://example.invalid",
+        timeout=1.0,
+        lifecycle_available=True,
+        metadata_requested=True,
+    )
+
+    assert not any(issubclass(w.category, VantageWarning) for w in recwarn.list)
