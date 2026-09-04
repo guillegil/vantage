@@ -235,6 +235,7 @@ def test_vcs_section_is_identical_on_both_reports(
     assert call_count[0] == 1
 
 
+@pytest.mark.req(id="RQ-25")
 def test_metadata_section_is_identical_on_both_reports(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -248,6 +249,14 @@ def test_metadata_section_is_identical_on_both_reports(
     the two reports would disagree. They cannot, because there is only
     ever one call to disagree with itself -- the same proof
     `test_vcs_section_is_identical_on_both_reports` already uses for `vcs`.
+
+    `assert call_count[0] == 1` is also RQ-25's O(1)-per-session shape claim
+    (design.md D102): the declaration read and every file it names are read
+    exactly once per session, never once per test -- the same
+    process-count-does-not-scale proof `test_git_invocation_count_does_not_
+    scale_with_test_count` already carries for `vcs.capture`. The measured
+    number this shape claim predicts lives in `run-metadata/spec.md`'s own
+    Measurements paragraph (Analysis, not Test), not in an assertion here.
     """
     from pytest_vantage import metadata as metadata_module
 

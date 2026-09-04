@@ -188,14 +188,28 @@ _LIST_RUNS = """
 """
 
 # The `metadata_key`/`metadata_value`-filtered sibling of `_LIST_RUNS`
-# (design.md D100) -- same columns, same total order, one `WHERE EXISTS`
-# added rather than a second, diverging query. The subquery is served by
-# `idx_run_metadata_key_value`: SQLite can seek `rm.key = ?` and, within that,
-# `rm.value = ?` directly off the index without touching `run_metadata`'s
-# table rows at all. `rm.value = ?` also does the status filtering for free
-# -- `value` is NULL for any non-`'captured'` row (schema.sql), and SQL NULL
-# never equals a bound string, so a declared-but-dropped entry can never
-# satisfy this filter by accident.
+# (design.md D100) -- same columns, same total order, one filter added
+# rather than a second, diverging query.
+#
+# `IN (SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value
+# = ?)`, NOT `WHERE EXISTS (... WHERE rm.run_id = run.id AND ...)` (fixed
+# by sdd-verify CRITICAL-2). The `EXISTS` form correlates the subquery on
+# `rm.run_id = run.id` and SQLite's planner anchors there, preferring
+# `PRIMARY KEY (run_id, key)`'s autoindex over `idx_run_metadata_key_value`
+# -- one scalar subquery evaluated once per row of `run`, i.e. cost
+# proportional to the TOTAL run count, not the matching one, exactly the
+# outcome the index exists to prevent (schema.sql). The `IN` form has no
+# correlation to anchor on: the subquery runs once, seeks `idx_run_metadata_
+# key_value` directly on `(key, value)`, and the outer query then does one
+# indexed point lookup per returned `run_id`. No `DISTINCT` is needed --
+# `(run_id, key)` is `run_metadata`'s primary key, so at most one row per
+# `run_id` can carry a given `key`, and therefore at most one can match a
+# given `(key, value)` pair. `rm.value = ?` still does the status filtering
+# for free -- `value` is NULL for any non-`'captured'` row (schema.sql), and
+# SQL NULL never equals a bound string, so a declared-but-dropped entry can
+# never satisfy this filter by accident. See
+# `test_list_runs_by_metadata_uses_the_key_value_index` for the `EXPLAIN
+# QUERY PLAN` regression this rewrite is pinned against.
 _LIST_RUNS_BY_METADATA = """
     SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
            last_contact_at,
@@ -206,9 +220,8 @@ _LIST_RUNS_BY_METADATA = """
                 THEN 1 ELSE 0 END                                       AS commit_subject_truncated,
            vcs_dirty, vcs_root
     FROM run
-    WHERE EXISTS (
-        SELECT 1 FROM run_metadata rm
-        WHERE rm.run_id = run.id AND rm.key = ? AND rm.value = ?
+    WHERE id IN (
+        SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value = ?
     )
     ORDER BY started_at DESC, id DESC
     LIMIT ? OFFSET ?
