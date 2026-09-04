@@ -187,6 +187,63 @@ _LIST_RUNS = """
     LIMIT ? OFFSET ?
 """
 
+# The `metadata_key`/`metadata_value`-filtered sibling of `_LIST_RUNS`
+# (design.md D100) -- same columns, same total order, one filter added
+# rather than a second, diverging query.
+#
+# `IN (SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value
+# = ?)`, NOT `WHERE EXISTS (... WHERE rm.run_id = run.id AND ...)` (fixed
+# by sdd-verify CRITICAL-2). The `EXISTS` form correlates the subquery on
+# `rm.run_id = run.id` and SQLite's planner anchors there, preferring
+# `PRIMARY KEY (run_id, key)`'s autoindex over `idx_run_metadata_key_value`
+# -- one scalar subquery evaluated once per row of `run`, i.e. cost
+# proportional to the TOTAL run count, not the matching one, exactly the
+# outcome the index exists to prevent (schema.sql). The `IN` form has no
+# correlation to anchor on: the subquery runs once, seeks `idx_run_metadata_
+# key_value` directly on `(key, value)`, and the outer query then does one
+# indexed point lookup per returned `run_id`. No `DISTINCT` is needed --
+# `(run_id, key)` is `run_metadata`'s primary key, so at most one row per
+# `run_id` can carry a given `key`, and therefore at most one can match a
+# given `(key, value)` pair. `rm.value = ?` still does the status filtering
+# for free -- `value` is NULL for any non-`'captured'` row (schema.sql), and
+# SQL NULL never equals a bound string, so a declared-but-dropped entry can
+# never satisfy this filter by accident. See
+# `test_list_runs_by_metadata_uses_the_key_value_index` for the `EXPLAIN
+# QUERY PLAN` regression this rewrite is pinned against.
+_LIST_RUNS_BY_METADATA = """
+    SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
+           last_contact_at,
+           vcs_commit, vcs_branch,
+           substr(vcs_commit_subject, 1, ?)                             AS commit_subject,
+           CASE WHEN vcs_commit_subject_truncated = 1
+                  OR COALESCE(length(vcs_commit_subject) > ?, 0) = 1
+                THEN 1 ELSE 0 END                                       AS commit_subject_truncated,
+           vcs_dirty, vcs_root
+    FROM run
+    WHERE id IN (
+        SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value = ?
+    )
+    ORDER BY started_at DESC, id DESC
+    LIMIT ? OFFSET ?
+"""
+
+# Q2's horizon, first half (design.md D100): the earliest `started_at` among
+# runs holding ANY `run_metadata` row for `key`, of any status -- left-
+# anchored on `key` alone, so this is the same `idx_run_metadata_key_value`
+# seeked on its leading column only, not the two-column point lookup
+# `_LIST_RUNS_BY_METADATA` performs.
+_METADATA_KEY_FIRST_SEEN = """
+    SELECT MIN(run.started_at)
+    FROM run_metadata rm
+    JOIN run ON run.id = rm.run_id
+    WHERE rm.key = ?
+"""
+
+# Q2's horizon, second half: how many runs are strictly older than
+# `first_seen` -- served by `idx_run_started_at`, the same index `_LIST_RUNS`
+# already orders by.
+_COUNT_RUNS_BEFORE = "SELECT COUNT(*) FROM run WHERE started_at < ?"
+
 # Conflict target is `node_id` -- the Phase 1 identity key (schema.sql
 # comment). `stable_id` carries the identical string in Phase 1, so its own
 # UNIQUE index cannot be violated by the row this statement updates.
@@ -1027,23 +1084,51 @@ class SqliteExecutionStore:
             return None
         return _row_to_catalogue_entry(row)
 
-    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+    def list_runs(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        metadata_key: str | None = None,
+        metadata_value: str | None = None,
+    ) -> Page[RunListEntry]:
         # Fetch `min(limit, 200) + 1` rows (design.md D61): the extra row is
         # what distinguishes a truncated page from an exhausted one without
         # a second `COUNT` query that could race the first.
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        rows = self._conn.execute(
-            _LIST_RUNS,
-            (
-                LIST_COMMIT_SUBJECT_CHARS,
-                LIST_COMMIT_SUBJECT_CHARS,
-                page_limit + 1,
-                offset,
-            ),
-        ).fetchall()
+        if metadata_key is not None and metadata_value is not None:
+            rows = self._conn.execute(
+                _LIST_RUNS_BY_METADATA,
+                (
+                    LIST_COMMIT_SUBJECT_CHARS,
+                    LIST_COMMIT_SUBJECT_CHARS,
+                    metadata_key,
+                    metadata_value,
+                    page_limit + 1,
+                    offset,
+                ),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                _LIST_RUNS,
+                (
+                    LIST_COMMIT_SUBJECT_CHARS,
+                    LIST_COMMIT_SUBJECT_CHARS,
+                    page_limit + 1,
+                    offset,
+                ),
+            ).fetchall()
         has_more = len(rows) > page_limit
         items = tuple(_row_to_run_list_entry(row) for row in rows[:page_limit])
         return Page(items=items, has_more=has_more)
+
+    def count_runs_predating_metadata_key(self, key: str) -> int:
+        row = self._conn.execute(_METADATA_KEY_FIRST_SEEN, (key,)).fetchone()
+        first_seen = row[0] if row else None
+        if first_seen is None:
+            return self.count_executions()
+        before = self._conn.execute(_COUNT_RUNS_BEFORE, (first_seen,)).fetchone()
+        return int(before[0])
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         row = self._conn.execute(_SELECT_RUN_DETAIL, (execution_id,)).fetchone()

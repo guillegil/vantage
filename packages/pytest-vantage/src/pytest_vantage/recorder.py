@@ -49,7 +49,7 @@ from pathlib import Path
 
 import pytest
 
-from pytest_vantage import vcs
+from pytest_vantage import metadata, vcs
 from pytest_vantage.boundary import _warn, fault_isolated, liveness_isolated
 from pytest_vantage.budget import spend_failure_text_budget
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
@@ -84,41 +84,6 @@ def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
         return vcs.capture(rootpath)
     except Exception:  # the same outer net vcs.py's own docstring names, never BaseException
         return vcs.VcsSnapshot(warning=_VCS_CAPTURE_ESCAPED_WARNING)
-
-
-# design.md D92: the declaration's one fixed, well-known name, at the test
-# repository root. Not yet imported from `pytest_vantage.metadata` -- that
-# module, and the containment/parsing machinery around this filename, is a
-# later slice (design.md D93/D94); this constant exists here only so the
-# presence check below and its warning agree on one spelling.
-_METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
-
-
-def _metadata_declaration_missing_warning(rootpath: Path) -> str | None:
-    """`None` if `vantage-metadata.json` exists at `rootpath`; otherwise
-    the message Q3 (design.md D92) requires: setting `--vantage-metadata`
-    is a deliberate act, so a missing declaration warns once instead of
-    silently capturing nothing -- unlike a malformed *declared document*,
-    which never warns and never fails ingestion (D97), a different thing
-    entirely.
-
-    Opens the file directly, rather than checking existence and opening
-    separately, so this presence check needs no second read once a later
-    slice adds the real one -- the same attempt-first shape
-    `resolve_declared_path` will use for the files a declaration names
-    (design.md D93). Discards anything read: this proves presence, it does
-    not capture content -- reading and parsing the declaration is
-    `pytest_vantage.metadata`'s job, added in a later slice.
-    """
-    declaration_path = rootpath / _METADATA_DECLARATION_FILENAME
-    try:
-        declaration_path.open("rb").close()
-    except OSError:
-        return (
-            f"no {_METADATA_DECLARATION_FILENAME} found at {rootpath}, "
-            "metadata will not be captured"
-        )
-    return None
 
 
 # design.md D30: activity-driven, not a timer thread -- a beat is only ever
@@ -200,12 +165,16 @@ class Recorder:
     (design.md D99) -- both the base activation gate and the
     `--vantage-metadata` opt-in have already passed by the time this
     constructor runs, since a `Recorder` is never constructed at all
-    otherwise. When `True`, `_metadata_declaration_missing_warning` checks
-    the declaration's presence once here, exactly like `_vcs` above, so the
-    declaration is consulted exactly once per session regardless of worker
-    count -- no `Recorder` is ever constructed on an xdist worker. This
-    slice only proves the declaration is there; reading and parsing its
-    content is `pytest_vantage.metadata`'s job, added in a later slice.
+    otherwise. When `True`, `self._metadata` is `metadata.capture_metadata(...)`,
+    called exactly once here, exactly like `_vcs` above -- the declaration
+    is read, validated and every file it names bounded and captured exactly
+    once per session regardless of worker count, since no `Recorder` is
+    ever constructed on an xdist worker. `capture_metadata` warns at most
+    once, through the same `_warn` `_vcs` uses, and never raises (design.md
+    D97); when it returns `None` (no declaration, or an invalid one),
+    `self._metadata` stays `None` and `_metadata_section()` omits the
+    `metadata` key from both reports entirely, the same way an absent
+    `--vantage-metadata` flag does.
     """
 
     def __init__(
@@ -231,10 +200,9 @@ class Recorder:
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
             _warn(config, f"vantage: {self._vcs.warning}")
+        self._metadata: metadata.MetadataSection | None = None
         if metadata_requested:
-            missing_warning = _metadata_declaration_missing_warning(Path(str(config.rootpath)))
-            if missing_warning is not None:
-                _warn(config, f"vantage: {missing_warning}")
+            self._metadata = metadata.capture_metadata(config, Path(str(config.rootpath)))
 
     def _vcs_section(self) -> dict[str, object]:
         """Serialises the snapshot held since `__init__` (design.md D51) --
@@ -246,6 +214,34 @@ class Recorder:
             "commit_subject": self._vcs.commit_subject,
             "dirty": self._vcs.dirty,
             "root": self._vcs.root,
+        }
+
+    def _metadata_section(self) -> dict[str, object] | None:
+        """Serialises the section held since `__init__` (design.md D51's
+        freeze rule, extended to metadata by D96) -- never re-read, so the
+        start report and the finish report describe the identical metadata
+        capture, exactly like `_vcs_section()` above.
+
+        `None` when metadata capture was not requested, or `capture_metadata`
+        found no valid declaration to capture (it has already warned at most
+        once for that, in `__init__`) -- the caller omits the `metadata` key
+        entirely in that case, never sends it as `null`, the same additive-
+        section shape `vcs` and `results` already establish.
+        """
+        if self._metadata is None:
+            return None
+        return {
+            "declaration": self._metadata.declaration,
+            "files": [
+                {
+                    "path": entry.path,
+                    "format": entry.format,
+                    "status": entry.status,
+                    "keys": list(entry.keys),
+                    "content": entry.content,
+                }
+                for entry in self._metadata.files
+            ],
         }
 
     @liveness_isolated
@@ -282,6 +278,9 @@ class Recorder:
             },
             "vcs": self._vcs_section(),
         }
+        metadata_section = self._metadata_section()
+        if metadata_section is not None:
+            report["metadata"] = metadata_section
         send(self._address, report, timeout=self._liveness_timeout)
 
     @fault_isolated
@@ -352,6 +351,9 @@ class Recorder:
             "results": results,
             "vcs": self._vcs_section(),
         }
+        metadata_section = self._metadata_section()
+        if metadata_section is not None:
+            report["metadata"] = metadata_section
         send(self._address, report, timeout=self._timeout)
 
 
