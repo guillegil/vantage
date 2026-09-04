@@ -647,8 +647,14 @@ was too large would be miscounted as predating the declaration. Then `predating`
 is the count of runs with `started_at < first_seen`. When no run has ever carried
 the key, `first_seen` is undefined and `predating` is the **total** run count —
 honest, and it reads as "every run predates this key; it has never been declared".
-Both queries are served by `idx_run_metadata_key_value` left-anchored on `key`,
-joined to `run(started_at)` through `idx_run_started_at`.
+Both queries are served by `idx_run_metadata_key_value`, but not the same way:
+`list_runs`'s filter seeks the full `(key, value)` pair directly off the index
+(implemented as `WHERE id IN (SELECT run_id FROM run_metadata WHERE key = ? AND
+value = ?)`, not a correlated `WHERE EXISTS` — the latter lets the planner anchor
+on `run_metadata`'s own `(run_id, key)` primary key instead and never touch this
+index at all, found and fixed at `sdd-verify`), while `count_runs_predating_
+metadata_key` seeks the same index left-anchored on `key` alone and then joins to
+`run(started_at)` through `idx_run_started_at`.
 
 `RunListResponse` gains `metadata_horizon: {"key": …, "predating": N} | null`,
 `null` when no filter was given. Additive, and it inherits two obligations
