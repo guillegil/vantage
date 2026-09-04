@@ -70,6 +70,24 @@ def test_a_symlink_loop_is_rejected_not_crashed(tmp_path: Path) -> None:
     assert metadata.resolve_declared_path(root, "loop-a") is None
 
 
+def test_a_path_containing_a_nul_byte_is_rejected_not_crashed(tmp_path: Path) -> None:
+    # A third exception mechanism, found by `sdd-verify` after the module
+    # docstring's symlink-loop analysis had already enumerated two:
+    # `Path.resolve()` raises `ValueError` for a path containing a NUL
+    # byte, on every supported interpreter (confirmed 3.10.21, 3.13.15) --
+    # not `OSError` or `RuntimeError`. Before the fix this propagated
+    # straight out of `resolve_declared_path`, uncaught by anything on the
+    # `pytest_configure` -> `capture_metadata` -> `_read_declared_file`
+    # chain, and crashed the whole session with `INTERNALERROR`. This test
+    # asserts the outcome -- rejection, not a crash -- the same shape
+    # `test_a_symlink_loop_is_rejected_not_crashed` above already asserts
+    # for the other cross-version exception trap.
+    root = tmp_path / "project"
+    root.mkdir()
+
+    assert metadata.resolve_declared_path(root, "config\x00.json") is None
+
+
 def test_a_directory_is_rejected(tmp_path: Path) -> None:
     root = tmp_path / "project"
     (root / "subdir").mkdir(parents=True)

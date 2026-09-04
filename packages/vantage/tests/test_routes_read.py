@@ -223,9 +223,10 @@ def test_run_list_returns_items_and_has_more_envelope(
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body.keys()) == {"items", "has_more"}
+    assert set(body.keys()) == {"items", "has_more", "metadata_horizon"}
     assert isinstance(body["has_more"], bool)
     assert body["has_more"] is False
+    assert body["metadata_horizon"] is None
     item = body["items"][0]
     assert set(item.keys()) == {
         "id",
@@ -1391,8 +1392,11 @@ def test_run_list_metadata_filter_returns_only_matching_runs(
 ) -> None:
     """*(history-read-api -> Exact key=value equality filter -> A key=value
     filter returns matching runs)*. Served by `idx_run_metadata_key_value`,
-    left-anchored on `key` (design.md D100) -- a run declaring the same key
-    at a different value must not match."""
+    seeked on the full `(key, value)` pair rather than `key` alone
+    (design.md D100, `sdd-verify` CRITICAL-2 --
+    `test_list_runs_by_metadata_uses_the_key_value_index` pins the query
+    plan) -- a run declaring the same key at a different value must not
+    match."""
     now = datetime.now(timezone.utc)
     matching_run = _run_id(100)
     other_value_run = _run_id(101)
@@ -1450,3 +1454,135 @@ def test_run_list_unknown_metadata_key_yields_empty_match_not_an_error(
 
     assert response.status_code == 200
     assert response.json()["items"] == []
+
+
+# --- 10.4 -----------------------------------------------------------------
+
+
+def test_run_list_metadata_horizon_excludes_and_counts_predating_runs(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(history-read-api -> Exact key=value equality filter -> Runs
+    predating the key are excluded and counted)*."""
+    now = datetime.now(timezone.utc)
+    predating_one = _run_id(110)
+    predating_two = _run_id(111)
+    declared_run = _run_id(112)
+    store.record_session(
+        _execution(predating_one, started_at=now - timedelta(hours=3), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=3),
+    )
+    store.record_session(
+        _execution(predating_two, started_at=now - timedelta(hours=2), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=2),
+    )
+    store.record_session(
+        _execution(declared_run, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+        metadata=_captured_metadata("firmware_version", "2.1"),
+    )
+
+    response = client.get(
+        "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["id"] for item in body["items"]] == [declared_run]
+    assert body["metadata_horizon"] == {"key": "firmware_version", "predating": 2}
+
+
+def test_run_list_metadata_horizon_equals_total_when_key_never_declared(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(design.md D100, Q2 -- `first_seen` is undefined when no run has
+    ever carried the key, and `predating` is then the total run count: "every
+    run predates this key; it has never been declared.")*."""
+    now = datetime.now(timezone.utc)
+    for seed in range(3):
+        store.record_session(
+            _execution(
+                _run_id(120 + seed), started_at=now - timedelta(hours=seed + 1), finished_at=now
+            ),
+            results=[],
+            received_at=now - timedelta(hours=seed + 1),
+        )
+
+    response = client.get(
+        "/api/v1/runs", params={"metadata_key": "never_declared", "metadata_value": "x"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["metadata_horizon"] == {"key": "never_declared", "predating": 3}
+
+
+def test_run_list_metadata_horizon_is_null_without_a_filter(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(design.md D100 -- `metadata_horizon: null` when no filter is
+    given, so a query with no metadata filter has no horizon to report)*."""
+    now = datetime.now(timezone.utc)
+    store.record_session(
+        _execution(_run_id(130), started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+        metadata=_captured_metadata("firmware_version", "2.1"),
+    )
+
+    response = client.get("/api/v1/runs")
+
+    assert response.status_code == 200
+    assert response.json()["metadata_horizon"] is None
+
+
+def test_run_list_metadata_horizon_counts_a_declared_but_dropped_key(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """*(design.md D100 -- `first_seen` is `MIN(started_at)` over runs
+    holding ANY `run_metadata` row for this key, of ANY status. D95's
+    declared-but-dropped row is exactly what makes this observable: a run
+    whose value was captured but exceeded the per-value bound must still
+    count as "the key existed then," never be miscounted as predating its
+    own declaration.)*."""
+    now = datetime.now(timezone.utc)
+    predating_run = _run_id(140)
+    dropped_run = _run_id(141)
+    store.record_session(
+        _execution(predating_run, started_at=now - timedelta(hours=2), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=2),
+    )
+    store.record_session(
+        _execution(dropped_run, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+        metadata=RunMetadata(
+            files=(
+                MetadataFile(
+                    source_file="config/firmware.yaml", content_type="yaml", status="captured"
+                ),
+            ),
+            entries=(
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.yaml",
+                    status="value_too_large",
+                ),
+            ),
+        ),
+    )
+
+    response = client.get(
+        "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["items"] == []
+    assert body["metadata_horizon"] == {"key": "firmware_version", "predating": 1}

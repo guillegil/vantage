@@ -41,9 +41,11 @@ where `firmware_version` is 2.1." Two query parameters, never one
 or neither, one without the other is `InvalidMetadataFilterError`, the read
 path's only new rejection kind. `store.list_runs` is *extended* with the
 filter, not joined by a second method, so it stays the one page over the
-one total order D61 already settled. Q2's horizon -- how many runs predate
-the filtered key -- is a follow-on slice on top of this one (design.md D100
-still governs both).
+one total order D61 already settled. A run recorded before the filtered key
+was ever declared has no value for it and is correctly excluded -- but
+excluding it silently would read as "did not match" when the truth is "the
+question was not being asked yet," so `metadata_horizon` reports how many
+runs predate the key (Q2), `None` when no metadata filter was given at all.
 """
 
 from __future__ import annotations
@@ -70,6 +72,7 @@ from vantage.service.schemas import (
     FailureProjectionResponse,
     HistoryEntryResponse,
     HistoryResponse,
+    MetadataHorizonResponse,
     ResultDetailResponse,
     ResultListItemResponse,
     ResultsResponse,
@@ -262,8 +265,9 @@ async def list_runs(
     `metadata_key`/`metadata_value` (design.md D100) are both-or-neither --
     checked here, before either reaches the store, since it is a cross-field
     rule FastAPI's own parameter binding cannot express for two independently
-    optional query values. Q2's horizon is a follow-on slice on top of this
-    one (module docstring)."""
+    optional query values. `metadata_horizon` is populated only when a filter
+    was given (Q2); the module docstring's Phase 10 paragraph is this
+    route's own why."""
     if (metadata_key is None) != (metadata_value is None):
         raise InvalidMetadataFilterError(
             "metadata_value" if metadata_key is not None else "metadata_key"
@@ -275,7 +279,15 @@ async def list_runs(
     now = datetime.now(timezone.utc)
     grace = timedelta(seconds=request.app.state.grace_period)
     items = [_run_list_item(entry, now=now, grace=grace) for entry in page.items]
-    return RunListResponse(items=items, has_more=page.has_more)
+    horizon = (
+        MetadataHorizonResponse(
+            key=metadata_key,
+            predating=store.count_runs_predating_metadata_key(metadata_key),
+        )
+        if metadata_key is not None
+        else None
+    )
+    return RunListResponse(items=items, has_more=page.has_more, metadata_horizon=horizon)
 
 
 @router.get("/runs/{run_id}")
