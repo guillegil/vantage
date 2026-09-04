@@ -48,6 +48,7 @@ def test_the_walk_is_not_vacuous() -> None:
 
     assert len(result.modules_examined) >= 3
     assert "vantage/core/domain/execution.py" in examined_relative
+    assert "vantage/core/domain/metadata.py" in examined_relative
     assert "vantage/core/ports/storage.py" in examined_relative
 
 

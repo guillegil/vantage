@@ -47,7 +47,7 @@ redundant storage.
 
 ## Tables
 
-**Eleven tables, fourteen indexes.** `PRAGMA foreign_keys=ON` is set by every
+**Thirteen tables, fifteen indexes.** `PRAGMA foreign_keys=ON` is set by every
 connection in `vantage/storage/connection.py` (PR4), not by `schema.sql`
 itself — SQLite ignores unenforced foreign keys by default, so the
 `REFERENCES` clauses below only take effect once a connection turns the
@@ -334,9 +334,59 @@ equality on the primary key's leading column, already served by its
 implicit index — `test_case.file_path` gets no index either (design.md
 D86).
 
+### `run_metadata_file` (`run-metadata` — one row per DECLARED file, captured or not)
+
+| Column | Type | Driver | Populated |
+| --- | --- | --- | --- |
+| `run_id` | TEXT NOT NULL → `run(id)` | run-metadata (C5) | Phase 1, later PR |
+| `source_file` | TEXT NOT NULL | run-metadata (P-1) | Phase 1, later PR |
+| `content_type` | TEXT NOT NULL, `CHECK`'d (`json`, `yaml`, `toml`) | run-metadata | Phase 1, later PR |
+| `status` | TEXT NOT NULL, `CHECK`'d (`captured`, `not_found`, `path_rejected`, `too_large`, `not_text`, `unreadable`, `over_budget`, `malformed`) | run-metadata (D97) | Phase 1, later PR |
+
+`PRIMARY KEY (run_id, source_file)` — no separate index, same reasoning as
+`user_setting`: the only query is the equality on the leading column,
+already served by the implicit index (design.md D91). This table is the
+audit surface C5 requires: a file that was declared but contributed no
+captured key still gets a row here, so "declared and produced nothing" is
+distinguishable from "never declared" (design.md D91, D95). `source_file`
+is the declared, rootpath-relative path exactly as written — never the
+resolved, absolute one, which can carry a username (ADR-0016). `content_type`
+accepts `'toml'` now though no parser ships for it yet: RQ-29 and ADR-5 ask
+for the complete schema at first use, and widening the parsed formats later
+must not bump the schema version again (design.md D91).
+
+This table exists empty in this PR — no writer populates it yet. `run-id`
+above and below reads `run(id)`, matching every other table's convention;
+`Populated` says "Phase 1, later PR" rather than a milestone tag because
+the writer lands in a later PR of this same change, not a later milestone.
+
+### `run_metadata` (`run-metadata` — one row per DECLARED key)
+
+| Column | Type | Driver | Populated |
+| --- | --- | --- | --- |
+| `run_id` | TEXT NOT NULL → `run(id)` | run-metadata | Phase 1, later PR |
+| `key` | TEXT NOT NULL | run-metadata | Phase 1, later PR |
+| `value` | TEXT NULL | run-metadata (D95) | Phase 1, later PR |
+| `source_file` | TEXT NOT NULL | run-metadata | Phase 1, later PR |
+| `status` | TEXT NOT NULL, `CHECK`'d (`captured`, `absent`, `not_scalar`, `value_too_large`, `source_unavailable`) | run-metadata (D97) | Phase 1, later PR |
+
+`PRIMARY KEY (run_id, key)` — the flat, per-run-unique key space design.md
+D92 requires, stated in SQL. `value` is the one nullable column in either
+new table, deliberately: `NULL` is what makes "declared but not captured"
+representable at all, and `status` says which of the five reasons applies.
+Every value is stored as `TEXT`, numbers included — the declaration names
+keys, not types, and comparison is string equality (design.md D91).
+
+`idx_run_metadata_key_value` (index 15, below) is this table's whole point:
+`WHERE key = ? AND value = ?` is the feature the read filter exposes, and a
+`json_extract` scan over an unindexed blob is exactly what a `(key, value)`
+index avoids (design.md D91). The same index, left-anchored on `key` alone,
+also serves the horizon count a later PR's read filter needs (design.md
+D100). This table, like `run_metadata_file`, exists empty in this PR.
+
 ## Indexes
 
-Fourteen, all created `IF NOT EXISTS` in `schema.sql`:
+Fifteen, all created `IF NOT EXISTS` in `schema.sql`:
 
 1. `run(started_at)`
 2. **`run(received_at)`**
@@ -352,6 +402,7 @@ Fourteen, all created `IF NOT EXISTS` in `schema.sql`:
 12. `result_parameter(result_id)`
 13. `result_artifact(content_hash)`
 14. `run(last_contact_at)`
+15. **`run_metadata(key, value)`**
 
 The failure index (5) is not decoration: RQ-8's criterion is that twenty
 tests failing at one source line come back as one group, a
@@ -359,7 +410,10 @@ tests failing at one source line come back as one group, a
 arrival-order index the Milestone 4 read API needs, created now per
 ADR-5 rather than later. `run(last_contact_at)` (14) supports the
 liveness-derivation reads this change's schema makes expressible, added by
-`session-lifecycle` alongside the column it indexes.
+`session-lifecycle` alongside the column it indexes. `run_metadata(key,
+value)` (15) is `run-metadata`'s own index — without it, filtering runs by
+a declared key/value pair is a full scan over every captured key (design.md
+D91).
 
 <!-- RQ-29 -->
 ## Comparison recorded (RQ-29 verification of record)
