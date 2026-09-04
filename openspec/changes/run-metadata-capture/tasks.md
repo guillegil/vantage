@@ -201,14 +201,27 @@ threat-matrix` (9.7-9.8 → PR9b).
 
 ## Phase 10 (PR10 → PR2, PR9): Read filter
 
-- [ ] 10.1 RED: `test_routes_read.py` — `GET /api/v1/runs?metadata_key=K&metadata_value=V` returns only matching runs; one param without the other → `422 invalid_metadata_filter`; an unknown key/value yields zero matches, not an error.
-- [ ] 10.2 GREEN: `errors.py` — `InvalidMetadataFilterError` (422) + `__all__` entry.
-- [ ] 10.3 GREEN: `core/ports/storage.py` — `list_runs(..., metadata_key=None, metadata_value=None)`, `count_runs_predating_metadata_key(key)`; both adapters implement, served by `idx_run_metadata_key_value` left-anchored on `key` (D100).
-- [ ] 10.4 RED: `test_routes_read.py` — runs predating a declared key are excluded from the match and the response reports `metadata_horizon: {key, predating}`; `predating` equals total run count when the key was never declared; `metadata_horizon: null` when no filter given (Q2).
-- [ ] 10.5 GREEN: `RunListResponse.metadata_horizon` field; `routes/read.py` wiring.
-- [ ] 10.6 GREEN: hand-edit `service/openapi/v1.yaml` for the widened `GET /runs` operation; run the drift check.
-- [ ] 10.7 GREEN: add the binding-table entry in `test_read_only_surface.py` for the widened `read` path.
-- [ ] 10.8 Verify: `uv run pytest packages/vantage/tests/test_routes_read.py packages/vantage/tests/test_read_only_surface.py packages/vantage/tests/test_interface_document.py`.
+**Re-sliced at apply time into two PRs**, not one -- the combined diff
+measured 511 changed lines against PR9c, 28% over the 400-line budget,
+before any bookkeeping (this project's own ~1.9x historical under-forecast
+note: 220 forecast x 1.9 ≈ 418, and this measured higher still). An honest
+seam existed, the same shape Phases 7/8/9 already used: the `key=value`
+filter (task 10.3's `list_runs` half) is independently complete and
+independently testable without Q2's horizon count (task 10.3's
+`count_runs_predating_metadata_key` half) on top of it, only the reverse.
+Chain: `ft/run-metadata-capture-10-read-filter` (10.1-10.3's filter half →
+PR9c), `ft/run-metadata-capture-10b-horizon` (10.3's horizon half + 10.4-10.8
+→ PR10a). Both land comfortably under budget on their own (277 and 252
+changed lines respectively).
+
+- [x] 10.1 RED (PR10a): `test_routes_read.py` — `GET /api/v1/runs?metadata_key=K&metadata_value=V` returns only matching runs; one param without the other → `422 invalid_metadata_filter`; an unknown key/value yields zero matches, not an error.
+- [x] 10.2 GREEN (PR10a): `errors.py` — `InvalidMetadataFilterError` (422) + `__all__` entry.
+- [x] 10.3 GREEN, split across both PRs: `core/ports/storage.py` — `list_runs(..., metadata_key=None, metadata_value=None)` lands in PR10a, both adapters implementing the filter over `idx_run_metadata_key_value`'s two-column point lookup; `count_runs_predating_metadata_key(key)` lands in PR10b, both adapters implementing it over the same index left-anchored on `key` alone (D100).
+- [x] 10.4 RED (PR10b): `test_routes_read.py` — runs predating a declared key are excluded from the match and the response reports `metadata_horizon: {key, predating}`; `predating` equals total run count when the key was never declared; `metadata_horizon: null` when no filter given (Q2). **Completeness addition, not in this task's literal list but required by D95's own justification for D100's horizon rule**: a declared-but-dropped key (a value over the per-value bound, `status='value_too_large'`, `value IS NULL`) still counts towards `first_seen` — proven directly, since without it a run whose capture failed would be miscounted as predating its own key's declaration.
+- [x] 10.5 GREEN (PR10b): `RunListResponse.metadata_horizon` field; `routes/read.py` wiring.
+- [x] 10.6 GREEN (PR10b): hand-edit `service/openapi/v1.yaml` for the widened `GET /runs` operation; run the drift check.
+- [x] 10.7 GREEN (PR10a for the filter calls, PR10b's schema-binding table for `metadata_horizon`): add the binding-table entries in `test_read_only_surface.py` (PR10a) and `test_interface_document.py` (PR10b) for the widened `read` path.
+- [x] 10.8 Verify (PR10b): `uv run pytest packages/vantage/tests/test_routes_read.py packages/vantage/tests/test_read_only_surface.py packages/vantage/tests/test_interface_document.py` — 96 passed. `uv run pytest` (whole workspace) — 739 passed (was 731 after PR10a, 725 before Phase 10 started). `uv run ruff format . && uv run ruff check --fix .` — clean. `uv run mypy .` (strict) — clean, 93 files. `uv run deptry .` — clean.
 
 ## Phase 11 (PR11 → PR7): RQ-25 measurement + docs
 

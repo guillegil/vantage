@@ -747,32 +747,125 @@ None beyond the two completeness additions above.
 - None merged yet — chain merges in order once every slice up to this one
   is reviewed, per `feature-branch-chain`.
 
+## Batch: Phase 10 (PR10a/PR10b) — the read filter
+
+**Scope**: all of Phase 10 (read filter, tasks 10.1-10.8), per this
+launch's explicit scope narrowing to Phase 10 only. Phase 11 (RQ-25
+measurement + docs) not started.
+
+### Re-slicing rationale
+
+The combined diff measured 511 changed lines against
+`ft/run-metadata-capture-09c-threat-matrix`, 28% over the 400-line budget,
+before any bookkeeping (this project's own ~1.9x historical under-forecast
+note: 220 forecast x 1.9 ≈ 418, and this measured higher still). An honest
+seam existed, the same shape Phases 7/8/9 already used: task 10.3's
+`list_runs` filter half is independently complete and independently
+testable without its `count_runs_predating_metadata_key` (Q2's horizon)
+half, only the reverse. Cut into two PRs rather than accepting a
+`size:exception`:
+
+- `ft/run-metadata-capture-10-read-filter` (10.1-10.3's filter half → PR9c,
+  #103) — 277 changed lines
+- `ft/run-metadata-capture-10b-horizon` (10.3's horizon half + 10.4-10.8 →
+  PR10a) — 252 changed lines
+
+### Tasks completed
+
+- [x] 10.1 RED (PR10a): `test_routes_read.py` — 3 tests: the filter returns
+  only matching runs (served by `idx_run_metadata_key_value`'s two-column
+  point lookup — `rm.value = ?` also excludes any declared-but-dropped row
+  for free, since SQL NULL never equals a bound string); one param without
+  the other is `422 invalid_metadata_filter`, naming the missing field;
+  an unknown key/value yields `items: []`, not an error. Confirmed RED
+  (16 assertions failed, `AssertionError` not collection error) before
+  `errors.py`/`storage.py`/adapters/`read.py` were touched.
+- [x] 10.2 GREEN (PR10a): `errors.py` — `InvalidMetadataFilterError` (422).
+- [x] 10.3 GREEN, split: `list_runs(..., metadata_key=None,
+  metadata_value=None)` (PR10a, both adapters) and
+  `count_runs_predating_metadata_key(key)` (PR10b, both adapters), both
+  served by `idx_run_metadata_key_value` — the point lookup and the
+  key-only left-anchored seek respectively.
+- [x] 10.4 RED (PR10b): `test_routes_read.py` — 4 tests: predating runs
+  excluded and counted; `predating` equals total run count when the key
+  was never declared; `metadata_horizon: null` with no filter.
+  **Completeness addition**: a declared-but-dropped key
+  (`status='value_too_large'`, `value IS NULL`) still counts towards
+  `first_seen` — proven directly, since D95's whole reason for keeping a
+  dropped-key row is exactly to keep this count honest.
+- [x] 10.5 GREEN (PR10b): `MetadataHorizonResponse`;
+  `RunListResponse.metadata_horizon`; `routes/read.py` wiring.
+- [x] 10.6 GREEN (PR10b): `v1.yaml` — `MetadataHorizon` schema, widened
+  `RunListResponse`, `GET /runs` query params + description.
+- [x] 10.7 GREEN: `test_read_only_surface.py` binding entries for the
+  filter's happy/422 calls (PR10a); `test_interface_document.py`'s
+  schema-binding table for `MetadataHorizon` (PR10b).
+- [x] 10.8 Verify (PR10b): `uv run pytest packages/vantage/tests/test_
+  routes_read.py packages/vantage/tests/test_read_only_surface.py
+  packages/vantage/tests/test_interface_document.py` — 96 passed.
+
+### Full-suite regression per PR
+
+| PR | Full `uv run pytest` | mypy strict | deptry |
+|---|---|---|---|
+| PR10a | 731 passed (was 725) | clean, 93 files | clean |
+| PR10b | 739 passed (was 731) | clean, 93 files | clean |
+
+### Measured changed lines
+
+- **PR10a** (vs `ft/run-metadata-capture-09c-threat-matrix`): 254
+  insertions, 23 deletions = 277 changed lines — under budget.
+- **PR10b** (vs PR10a's branch): 238 insertions, 14 deletions = 252
+  changed lines — under budget.
+- **Total**: 511 changed lines across two PRs, neither individually over
+  budget.
+
+### Deviations from Design
+
+None. The `idx_run_metadata_key_value` seek shape and Q2's `first_seen`
+definition match D100 exactly; the one completeness addition (10.4's
+declared-but-dropped-key test) is coverage, not a behavioural deviation.
+
+### Issues Found
+
+None. `MAX_METADATA_KEY_CHARS` remains unenforced (flagged in the Phase 9
+batch record above) — left alone per this batch's explicit instruction to
+defer it to `sdd-verify`.
+
+### Git / PR state (this batch)
+
+- PR10a: https://github.com/guillegil/vantage/pull/103 — base
+  `ft/run-metadata-capture-09c-threat-matrix`, head
+  `ft/run-metadata-capture-10-read-filter`. Open.
+- PR10b: base PR10a's branch, head `ft/run-metadata-capture-10b-horizon`.
+  Opened this batch (see the apply-phase return summary for the URL).
+- None merged yet — chain merges in order once every slice up to this one
+  is reviewed, per `feature-branch-chain`.
+
 ## Workload / PR Boundary
 
-- Mode: chained PR slices (`feature-branch-chain`); Phase 9 re-sliced from
-  1 planned PR into 3 for size, not by launch instruction
-- Current work unit: Phase 9 (server ingest wiring), complete
-- Boundary: starts from PR8b's tip (server-side schemas and standalone
-  parse module, proven in isolation, nothing calling them yet) and ends
-  with `_to_run_metadata` wired into `record_session`, every D97 taxonomy
-  row proven end-to-end, RQ-44 proven, and the D96 quoting/CRLF threat
-  matrix closed. Phase 10 (read filter) and Phase 11 (RQ-25 measurement)
-  are explicitly out of scope for this batch
-- Estimated review budget impact: PR9a (266 lines), PR9b (269 lines) and
-  PR9c (147 lines) are all comfortably under budget; no `size:exception`
-  needed this batch
+- Mode: chained PR slices (`feature-branch-chain`); Phase 10 re-sliced
+  from 1 planned PR into 2 for size, not by launch instruction
+- Current work unit: Phase 10 (read filter), complete
+- Boundary: starts from PR9c's tip (metadata captured and stored, nothing
+  reading it back yet) and ends with the `key=value` filter and Q2's
+  horizon both live on `GET /api/v1/runs`, the interface document moved
+  with it, and the read-only surface proof covering the widened path.
+  Phase 11 (RQ-25 measurement) is explicitly out of scope for this batch
+- Estimated review budget impact: PR10a (277 lines) and PR10b (252 lines)
+  are both comfortably under budget; no `size:exception` needed this batch
 
 ## Remaining Tasks
 
-Phase 10 (read filter) and Phase 11 (RQ-25 measurement + docs) — see
-tasks.md. The next PR targets `ft/run-metadata-capture-09c-threat-matrix`
-(this batch's last branch) for Phase 10, which needs PR2's schema and
-PR9's wiring — both satisfied transitively by the chain.
+Phase 11 (RQ-25 measurement + docs) — see tasks.md. The next PR targets
+`ft/run-metadata-capture-10b-horizon` (this batch's last branch) for
+Phase 11, which needs PR7's wire section — satisfied transitively by the
+chain.
 
 ## Status
 
-54/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
-Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6), Phase 8 (6/6)
-and Phase 9 (8/8, this batch). PR1 through PR9c open and green, not merged
-(chain merges in order at the end). Ready for the next `sdd-apply` batch
-(Phase 10: read filter).
+62/67 tasks complete across Phase 1 (4/4), Phase 2 (7/7), Phase 3 (3/3),
+Phase 4 (6/6), Phase 5 (8/8), Phase 6 (6/6), Phase 7 (6/6), Phase 8 (6/6),
+Phase 9 (8/8) and Phase 10 (8/8, this batch). PR1 through PR10b open and
+green, not merged (chain merges in order at the end). Ready for the next
+`sdd-apply` batch (Phase 11: RQ-25 measurement + docs).
