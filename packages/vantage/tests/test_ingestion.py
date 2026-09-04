@@ -8,6 +8,7 @@ in here would reintroduce a dependency this slice is explicitly free of.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,9 +16,12 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES
+from vantage.core.ports.storage import MetadataEntry, MetadataFile
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
+from vantage_port_contract import _stored_metadata_entries, _stored_metadata_files
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -616,3 +620,415 @@ def test_capabilities_endpoint_is_not_mounted_unversioned(client: TestClient) ->
     response = client.get("/capabilities")
 
     assert response.status_code == 404
+
+
+# --- Phase 9: metadata section ingestion (design.md D96-D98) ---------------
+
+
+def _metadata_file(
+    path: str = "config/firmware.json",
+    *,
+    format: str = "json",  # noqa: A002
+    status: str = "captured",
+    keys: list[str] | None = None,
+    content: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "format": format,
+        "status": status,
+        "keys": [] if keys is None else keys,
+        "content": content,
+    }
+
+
+def _metadata_section(*files: dict[str, Any]) -> dict[str, Any]:
+    return {"declaration": "vantage-metadata.json", "files": list(files)}
+
+
+@pytest.mark.req(id="RQ-44")
+def test_a_report_whose_metadata_is_entirely_garbage_still_records_the_run(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """RQ-44: the run row is what makes an abandoned session observable at
+    all, so a malformed declared document MUST NOT block it (design.md
+    D97's governing rule). *(Scenario: A malformed document does not block
+    the run from being stored, `session-ingestion`)*."""
+    run_id = "6" + "0" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content="not json at all", keys=["anything"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert store.get_execution(run_id) is not None
+    assert _stored_metadata_files(store, run_id) == frozenset(
+        {MetadataFile(source_file="config/firmware.json", content_type="json", status="malformed")}
+    )
+    assert _stored_metadata_entries(store, run_id) == frozenset(
+        {
+            MetadataEntry(
+                key="anything",
+                value=None,
+                source_file="config/firmware.json",
+                status="source_unavailable",
+            )
+        }
+    )
+
+
+_VALUE_TOO_LARGE = "x" * (MAX_METADATA_VALUE_BYTES + 1)
+
+# design.md D97's eleven classes, one case per row: (id, file, expected
+# file row or None, expected entry rows). Class 11 (server-side shape
+# reject) expects no rows at all -- the entry is dropped in its entirety.
+_TAXONOMY_CASES: dict[str, tuple[dict[str, Any], MetadataFile | None, frozenset[MetadataEntry]]] = {
+    "not_found": (
+        _metadata_file(status="not_found", content=None, keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="not_found"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
+    "path_rejected": (
+        _metadata_file(status="path_rejected", content=None, keys=["firmware_version"]),
+        MetadataFile(
+            source_file="config/firmware.json", content_type="json", status="path_rejected"
+        ),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
+    "too_large": (
+        _metadata_file(status="too_large", content=None, keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="too_large"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
+    "not_text": (
+        _metadata_file(status="not_text", content=None, keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="not_text"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
+    "unreadable": (
+        _metadata_file(status="unreadable", content=None, keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="unreadable"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
+    "over_budget": (
+        _metadata_file(status="over_budget", content=None, keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="over_budget"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
+    "malformed": (
+        _metadata_file(content="not json at all", keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="malformed"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
+    "absent": (
+        _metadata_file(content=json.dumps({"other_key": "x"}), keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="captured"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="absent",
+                )
+            }
+        ),
+    ),
+    "not_scalar": (
+        _metadata_file(
+            content=json.dumps({"firmware_version": {"nested": True}}),
+            keys=["firmware_version"],
+        ),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="captured"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="not_scalar",
+                )
+            }
+        ),
+    ),
+    "value_too_large": (
+        _metadata_file(
+            content=json.dumps({"firmware_version": _VALUE_TOO_LARGE}),
+            keys=["firmware_version"],
+        ),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="captured"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="value_too_large",
+                )
+            }
+        ),
+    ),
+    "server_side_shape_reject": (
+        _metadata_file(
+            path="../escape.json",
+            content=json.dumps({"firmware_version": "2.1"}),
+            keys=["firmware_version"],
+        ),
+        None,
+        frozenset(),
+    ),
+}
+
+
+# `run_id` is derived from each case's position, never `hash()` -- Python
+# randomizes string hashing per-process, which would make the derived id
+# (and its hex-pattern validity) nondeterministic across runs.
+_TAXONOMY_PARAMS = [
+    (f"7{index:031x}", file_report, expected_file, expected_entries)
+    for index, (file_report, expected_file, expected_entries) in enumerate(_TAXONOMY_CASES.values())
+]
+
+
+@pytest.mark.parametrize(
+    ("run_id", "file_report", "expected_file", "expected_entries"),
+    _TAXONOMY_PARAMS,
+    ids=list(_TAXONOMY_CASES.keys()),
+)
+def test_metadata_taxonomy_class_produces_the_exact_status_pair(
+    client: TestClient,
+    store: InMemoryExecutionStore,
+    run_id: str,
+    file_report: dict[str, Any],
+    expected_file: MetadataFile | None,
+    expected_entries: frozenset[MetadataEntry],
+) -> None:
+    """design.md D97's eleven classes, one test per row -- proves the exact
+    `(file.status, key.status)` pair a client sees recorded, not merely that
+    ingestion did not crash. *(Scenarios: "An unsupported format is treated
+    as malformed" / "A malformed document does not block the run from being
+    stored" / "A declared key absent from a well-formed document is marked
+    absent" / "A non-scalar declared value is marked uncapturable, never
+    serialized" / "An oversized value is dropped whole, marked
+    uncapturable", `session-ingestion`)*."""
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(file_report)
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_files(store, run_id) == (
+        frozenset({expected_file}) if expected_file is not None else frozenset()
+    )
+    assert _stored_metadata_entries(store, run_id) == expected_entries
+
+
+def test_a_declared_key_within_bound_is_captured_whole(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Scenario: A value within bound is stored whole, `session-ingestion`)*."""
+    run_id = "9" + "5" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content=json.dumps({"firmware_version": "2.1"}), keys=["firmware_version"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_entries(store, run_id) == frozenset(
+        {
+            MetadataEntry(
+                key="firmware_version",
+                value="2.1",
+                source_file="config/firmware.json",
+                status="captured",
+            )
+        }
+    )
+
+
+def test_a_report_with_no_metadata_section_still_records_its_run(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Scenario: A report with no metadata section still records its run,
+    `session-ingestion`)*."""
+    run_id = "9" + "6" * 31
+    report = _well_formed_report(run_id)
+    assert "metadata" not in report
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert store.get_execution(run_id) is not None
+    assert _stored_metadata_files(store, run_id) == frozenset()
+    assert _stored_metadata_entries(store, run_id) == frozenset()
+
+
+def test_a_yaml_declared_document_is_parsed(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Scenario: A YAML declared document is parsed, `session-ingestion`)*."""
+    run_id = "9" + "7" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(
+            path="config/firmware.yaml",
+            format="yaml",
+            content='firmware_version: "2.1"\n',
+            keys=["firmware_version"],
+        )
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_entries(store, run_id) == frozenset(
+        {
+            MetadataEntry(
+                key="firmware_version",
+                value="2.1",
+                source_file="config/firmware.yaml",
+                status="captured",
+            )
+        }
+    )
+
+
+def test_an_unsupported_format_is_treated_as_malformed(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """*(Scenario: An unsupported format is treated as malformed,
+    `session-ingestion`)*. `toml` is a valid `run_metadata_file.content_type`
+    (schema.sql's own `CHECK`) that `metadata_parse.parse` does not
+    implement -- the same "server does not parse it" outcome D97 class 7
+    covers for a genuinely broken document."""
+    run_id = "9" + "8" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(format="toml", content="firmware_version = 2.1", keys=["firmware_version"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_files(store, run_id) == frozenset(
+        {MetadataFile(source_file="config/firmware.json", content_type="toml", status="malformed")}
+    )
+
+
+# --- Phase 9: threat matrix (design.md, task 9.7) ---------------------------
+
+
+def test_a_quoting_shaped_declared_key_round_trips_byte_identically(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Threat matrix: "Client-chosen text reaching SQL" -- bound parameters
+    only, mirroring `test_routes_sections.py`'s own proof for section names.
+    A declared key containing quote characters is stored and read back
+    through the port intact, never escaped or normalised."""
+    run_id = "8" + "0" * 31
+    key = 'He said "hi", didn\'t he?'
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content=json.dumps({key: "value"}), keys=[key])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_entries(store, run_id) == frozenset(
+        {
+            MetadataEntry(
+                key=key, value="value", source_file="config/firmware.json", status="captured"
+            )
+        }
+    )
+
+
+def test_a_crlf_shaped_metadata_key_never_appears_unescaped_in_a_rejection_body(
+    client: TestClient,
+) -> None:
+    """Threat matrix: "Client-chosen text reaching a rejection body" -- an
+    unknown field within the `metadata` section (`extra="forbid"`,
+    design.md D96) is client-chosen text of the same shape a declared key
+    could carry. `errors.py`'s pre-existing `safe_segment` allow-list, not
+    new code in this phase, is what keeps it out of the response body."""
+    run_id = "8" + "1" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = {
+        "declaration": "vantage-metadata.json",
+        "files": [],
+        "\r\n</script>\r\nX-Injected: 1": "hostile",
+    }
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 422
+    body = response.text
+    assert "\r\n</script>" not in body
+    assert "X-Injected" not in body
