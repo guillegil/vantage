@@ -15,9 +15,10 @@ A test's identity travels as a named query parameter (`?node_id=`), never a
 path segment: a node id contains `/`, an encoded slash in a path is decoded
 before routing and may be merged or rejected by a proxy, while a query value
 arrives intact. The parameter name also leaves room for another identity
-scheme as an additive sibling. `node_id` is bounded at
-`MAX_IDENTITY_CHARS`; a missing or over-long value is shaped by
-`InvalidIdentityError`, never a proxy `414`.
+scheme as an additive sibling. `node_id` has no length bound here: any
+node id already stored -- pytest never shortens a parametrize id -- must
+stay readable by the exact value `/results` lists. A missing value is
+shaped by `InvalidIdentityError`.
 
 `list_results` returns a lean `ResultListEntry` per result, never the full
 failure evidence or captured output; `get_result` returns every field of one
@@ -43,7 +44,6 @@ from vantage.core.domain.liveness import derive_presentation
 from vantage.core.domain.projection import FailureProjection, VcsProjection
 from vantage.core.domain.result import Result
 from vantage.core.ports.storage import (
-    MAX_IDENTITY_CHARS,
     MAX_PAGE_ITEMS,
     HistoryEntry,
     ResultListEntry,
@@ -303,7 +303,7 @@ async def list_results(
 async def get_result(
     request: Request,
     run_id: str = Path(pattern=_IDENTITY_PATTERN),
-    node_id: str = Query(..., max_length=MAX_IDENTITY_CHARS),
+    node_id: str = Query(...),
 ) -> ResultDetailResponse:
     """`GET /api/v1/runs/{run_id}/result?node_id=` -- `node_id` is a query
     value for the same reason as on `/tests/history`. An unknown `run_id` is
@@ -321,7 +321,7 @@ async def get_result(
 @router.get("/tests/history")
 async def list_history(
     request: Request,
-    node_id: str = Query(..., max_length=MAX_IDENTITY_CHARS),
+    node_id: str = Query(...),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0),
 ) -> HistoryResponse:

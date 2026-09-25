@@ -829,16 +829,49 @@ def test_result_detail_unknown_identifier_leaves_stored_data_unchanged(
     assert store.get_run_detail(run_id) == before_detail
 
 
-def test_result_detail_overlong_node_id_is_422_not_414(client: TestClient) -> None:
-    """An identifier over `MAX_IDENTITY_CHARS` is a `422`, shaped by
-    `InvalidIdentityError` -- never a proxy `414`."""
-    run_id = _run_id(76)
-    over_long = "x" * (MAX_IDENTITY_CHARS + 1)
-
-    response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": over_long})
+def test_result_detail_missing_node_id_is_422(client: TestClient) -> None:
+    response = client.get(f"/api/v1/runs/{_run_id(76)}/result")
 
     assert response.status_code == 422
     assert response.json()["error"] == "invalid_identity"
+
+
+def test_every_listed_node_id_is_readable_through_detail_and_history(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """A stored node id can be longer than `MAX_IDENTITY_CHARS`: pytest
+    never shortens a parametrize id, so a test parametrised with a long SQL
+    string gets one. Whatever `/results` lists must be readable back by
+    that exact value through `/result` and `/tests/history`, or a result's
+    traceback and history are stored but unreachable."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(77)
+    long_node_id = "tests/test_q.py::test_query[" + "SELECT 1 UNION ALL " * 60 + "]"
+    assert len(long_node_id) > MAX_IDENTITY_CHARS
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[
+            _result("tests/test_q.py::test_short"),
+            _result(
+                long_node_id, outcome="failed", failure=_failure(traceback=_SENTINEL_TRACEBACK)
+            ),
+        ],
+        received_at=now - timedelta(hours=1),
+    )
+
+    listed = client.get(f"/api/v1/runs/{run_id}/results").json()["items"]
+
+    assert long_node_id in {item["node_id"] for item in listed}
+    for item in listed:
+        node_id = item["node_id"]
+        detail = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": node_id})
+        history = client.get("/api/v1/tests/history", params={"node_id": node_id})
+        assert detail.status_code == 200
+        assert detail.json()["node_id"] == node_id
+        assert history.status_code == 200
+        assert [entry["run_id"] for entry in history.json()["items"]] == [run_id]
+    long_detail = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": long_node_id})
+    assert long_detail.json()["traceback"] == _SENTINEL_TRACEBACK
 
 
 def test_result_item_carries_every_stored_column_by_value(
@@ -1104,19 +1137,6 @@ def test_history_route_missing_node_id_is_422(client: TestClient) -> None:
     assert response.status_code == 422
     body = response.json()
     assert body["error"] == "invalid_identity"
-
-
-def test_history_route_overlong_identity_is_422_not_414(client: TestClient) -> None:
-    """A node id over the 1,024-character bound is a shaped `422`, never a
-    proxy-generated `414`, and the value is not echoed back."""
-    overlong = "a" * 1025
-
-    response = client.get("/api/v1/tests/history", params={"node_id": overlong})
-
-    assert response.status_code == 422
-    body = response.json()
-    assert body["error"] == "invalid_identity"
-    assert overlong not in response.text
 
 
 def test_absent_repository_run_appears_in_list_undistinguished(
