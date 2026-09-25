@@ -3,9 +3,11 @@ SQLite-specific checks that read the database directly."""
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 from vantage.core.ports.storage import ExecutionStore
@@ -153,3 +155,95 @@ def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
         assert "sqlite_autoindex_run_metadata_1" not in plan_text
     finally:
         store.close()
+
+
+def _write_run(store: SqliteExecutionStore, hex_id: str) -> bool:
+    return store.record_session(
+        _execution(hex_id), results=(), received_at=datetime.now(timezone.utc)
+    )
+
+
+def _write_setting(store: SqliteExecutionStore, key: str) -> bool:
+    return store.upsert_setting(
+        "test_sections", key, value="{}", updated_at=datetime.now(timezone.utc)
+    )
+
+
+def _was_written(store: SqliteExecutionStore, write: str, key: str) -> bool:
+    if write == "record_session":
+        return store.get_execution(key) is not None
+    return any(setting.key == key for setting in store.list_settings("test_sections"))
+
+
+@pytest.mark.parametrize("write", ["record_session", "upsert_setting"])
+def test_a_commit_refused_by_a_busy_reader_is_rolled_back_and_the_store_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, write: str
+) -> None:
+    """Without WAL -- a filesystem that cannot hold the shared-memory file
+    -- COMMIT needs an exclusive lock, and another process's open read
+    transaction makes it fail with SQLITE_BUSY while leaving the write
+    transaction open. The store must roll it back: otherwise its one shared
+    connection stays inside that transaction, every later write fails with
+    "cannot start a transaction within a transaction", and the rejected
+    write is visible to the store's own reads."""
+    monkeypatch.setattr("vantage.storage.connection._enable_wal", lambda _conn: None)
+    db_path = tmp_path / "store" / "vantage.db"
+    store = SqliteExecutionStore(db_path)
+    do_write = _write_run if write == "record_session" else _write_setting
+    first, second = ("a" * 32, "b" * 32) if write == "record_session" else ("Billing", "Checkout")
+    try:
+        conn = store._conn  # noqa: SLF001
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+        conn.execute("PRAGMA busy_timeout = 50")
+        reader = sqlite3.connect(str(db_path), isolation_level=None)
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM run").fetchone()
+
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            do_write(store, first)
+
+        assert conn.in_transaction is False
+        assert not _was_written(store, write, first)
+
+        reader.execute("COMMIT")
+        reader.close()
+        assert do_write(store, second) is True
+        other = sqlite3.connect(str(db_path), timeout=0)
+        try:
+            assert other.execute("SELECT COUNT(*) FROM user_setting").fetchone() is not None
+        finally:
+            other.close()
+    finally:
+        store.close()
+
+
+class _CommitRolledBackBySqlite:
+    """Forwards to a real connection, except that `COMMIT` fails the way a
+    disk I/O error does: SQLite has already rolled the transaction back."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+        if sql == "COMMIT":
+            self._conn.execute("ROLLBACK")
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._conn, name)
+
+
+def test_a_commit_sqlite_already_rolled_back_raises_its_own_error(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    real_conn = store._conn  # noqa: SLF001
+    try:
+        store._conn = _CommitRolledBackBySqlite(real_conn)  # type: ignore[assignment]  # noqa: SLF001
+
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            _write_run(store, "a" * 32)
+
+        store._conn = real_conn  # noqa: SLF001
+        assert _write_run(store, "a" * 32) is True
+    finally:
+        real_conn.close()

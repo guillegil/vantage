@@ -821,15 +821,22 @@ class SqliteExecutionStore:
     @contextmanager
     def _write_transaction(self) -> Iterator[sqlite3.Connection]:
         """Hold `self._lock` across one `BEGIN IMMEDIATE` transaction,
-        rolled back if the body raises."""
+        rolled back if the body or the `COMMIT` itself raises.
+
+        A `COMMIT` refused with SQLITE_BUSY leaves the transaction open, and
+        this connection is shared by every caller, so it must be rolled back
+        here or every later write fails. A `COMMIT` that fails any other way
+        has already been rolled back by SQLite, and a second `ROLLBACK` would
+        replace the real error with "no transaction is active"."""
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
                 yield self._conn
+                self._conn.execute("COMMIT")
             except BaseException:
-                self._conn.execute("ROLLBACK")
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
                 raise
-            self._conn.execute("COMMIT")
 
     def record_session(
         self,
