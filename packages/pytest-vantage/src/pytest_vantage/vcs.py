@@ -37,10 +37,10 @@ _CAPTURE_BUDGET_SECONDS = 5.0
 
 _MIN_TIMEOUT_SECONDS = 0.05  # floor so an expired deadline still times out positively
 
-# Inherit the caller's environment, override only the keys that make git
-# interactive/slow/mutating -- clearing it entirely drops `HOME`, so
-# `safe.directory` is never seen and a readable repository owned by another
-# uid becomes `fatal: detected dubious ownership`.
+# Inherit the caller's environment except the variables below, and override
+# only the keys that make git interactive/slow/mutating -- clearing it
+# entirely drops `HOME`, so `safe.directory` is never seen and a readable
+# repository owned by another uid becomes `fatal: detected dubious ownership`.
 _ENV_OVERRIDES: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ASKPASS": "",
@@ -49,6 +49,30 @@ _ENV_OVERRIDES: dict[str, str] = {
     "PAGER": "cat",
     "LC_ALL": "C",
 }
+
+# Removed so that git discovers the repository from `cwd=rootpath`. Once
+# GIT_DIR is set git skips discovery, so an exported one -- a dotfiles
+# manager's, or the one git itself gives a hook in a linked worktree --
+# would point every read at another repository, or make `rootpath` the top
+# of the work tree. These are git's `rev-parse --local-env-vars` minus the
+# config entries (they can carry `safe.directory`), plus the variables that
+# scope the refs or stop the upward search.
+_REPOSITORY_SELECTING_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+)
 
 _TIMEOUT_WARNING = "could not read the git repository (timed out)"
 _CORRUPT_WARNING = "could not read the git repository"
@@ -113,7 +137,7 @@ def _bounded_subject(value: str | None) -> str | None:
 
 
 def _build_env() -> dict[str, str]:
-    env = dict(os.environ)
+    env = {key: value for key, value in os.environ.items() if key not in _REPOSITORY_SELECTING_ENV}
     env.update(_ENV_OVERRIDES)
     env.pop("SSH_ASKPASS", None)  # removed, not overridden -- no ssh-safe empty value
     return env

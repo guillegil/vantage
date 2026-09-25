@@ -31,7 +31,14 @@ _GIT_IDENTITY_ENV = {
 
 
 def _fixture_env() -> dict[str, str]:
-    env = dict(os.environ)
+    # Drops the variables `vcs` drops: run from a hook in a linked worktree,
+    # the suite inherits GIT_DIR, and every fixture would be built inside
+    # the real repository.
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in vcs._REPOSITORY_SELECTING_ENV  # noqa: SLF001
+    }
     env.update(_GIT_IDENTITY_ENV)
     return env
 
@@ -228,6 +235,81 @@ def test_monorepo_subdirectory_records_toplevel(tmp_path: Path) -> None:
     snapshot = vcs.capture(subdirectory)
 
     assert snapshot.root == expected_toplevel and snapshot.commit is not None
+
+
+def test_an_inherited_git_dir_does_not_redirect_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A dotfiles manager (vcsh, yadm) exports GIT_DIR and GIT_WORK_TREE for
+    # another repository; the run must still describe the one holding
+    # rootpath.
+    project = _repo_with_one_commit(tmp_path / "project")
+    _git("checkout", "-q", "-b", "feature", cwd=project)
+    expected = vcs.VcsSnapshot(
+        commit=_independent_head(project),
+        branch="feature",
+        commit_subject="initial commit",
+        dirty=False,
+        root=_git("rev-parse", "--show-toplevel", cwd=project).stdout.strip(),
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("dotfile\n")
+    dotfiles = tmp_path / "dotfiles.git"
+    _git("init", "-q", "--bare", str(dotfiles), cwd=tmp_path)
+    dotfiles_env = {**_fixture_env(), "GIT_DIR": str(dotfiles), "GIT_WORK_TREE": str(home)}
+    _git("add", ".bashrc", cwd=home, env=dotfiles_env)
+    _git("commit", "-q", "-m", "dotfiles commit", cwd=home, env=dotfiles_env)
+    monkeypatch.setenv("GIT_DIR", str(dotfiles))
+    monkeypatch.setenv("GIT_WORK_TREE", str(home))
+
+    assert vcs.capture(project) == expected
+
+
+def test_a_hook_in_a_linked_worktree_still_records_the_worktree_from_a_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # git exports GIT_DIR and GIT_INDEX_FILE, but not GIT_WORK_TREE, to a
+    # hook in a linked worktree. Honoured, they make git take the sub-package
+    # for the top of the work tree and every file outside it for deleted.
+    main = _repo_with_one_commit(tmp_path / "main")
+    (main / "pkg").mkdir()
+    (main / "pkg" / "module.py").write_text("# nothing\n")
+    _git("add", "pkg", cwd=main)
+    _git("commit", "-q", "-m", "add pkg", cwd=main)
+    worktree = tmp_path / "worktree"
+    _git("worktree", "add", "-q", "-b", "side", str(worktree), cwd=main)
+    expected_root = _git("rev-parse", "--show-toplevel", cwd=worktree).stdout.strip()
+    git_dir = _git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+    monkeypatch.delenv("GIT_WORK_TREE", raising=False)
+    monkeypatch.setenv("GIT_DIR", git_dir)
+    monkeypatch.setenv("GIT_INDEX_FILE", str(Path(git_dir) / "index"))
+
+    snapshot = vcs.capture(worktree / "pkg")
+
+    assert snapshot.root == expected_root
+    assert snapshot.branch == "side"
+    assert snapshot.dirty is False
+
+
+def test_the_git_environment_drops_repository_selection_but_keeps_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Config passed through the environment can carry `safe.directory`;
+    # dropping it would refuse a readable repository owned by another uid.
+    monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/elsewhere")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/.git/index")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
+
+    env = vcs._build_env()  # noqa: SLF001
+
+    assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} & env.keys()
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert env["GIT_CONFIG_VALUE_0"] == "*"
 
 
 def test_argv_discipline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
