@@ -486,6 +486,9 @@ def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
 # already-bound TCP socket and drives it byte-for-byte instead.
 
 
+_SERVER_TIMEOUT_SECONDS = 5.0
+
+
 class _RawSocketServer:
     """A real `uvicorn` server bound to an ephemeral loopback port.
 
@@ -515,15 +518,30 @@ class _RawSocketServer:
 
     def __enter__(self) -> _RawSocketServer:
         self._thread.start()
+        # Bounded: a server thread that dies or hangs before it starts must
+        # fail this test, never hang the suite.
+        deadline = time.monotonic() + _SERVER_TIMEOUT_SECONDS
         while not self._server.started:
+            if not self._thread.is_alive() or time.monotonic() > deadline:
+                self._stop()
+                raise RuntimeError("the raw-socket test server did not start")
             time.sleep(0.001)
         return self
 
     def __exit__(self, *exc_info: object) -> None:
+        self._stop()
+
+    def _stop(self) -> None:
         self._server.should_exit = True
         # A failing assertion above must not leave a listener behind to
         # poison a later test -- join with a bound, not forever.
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=_SERVER_TIMEOUT_SECONDS)
+        assert not self._thread.is_alive(), "the raw-socket test server did not stop"
+        # Only once the thread has exited: closing a running loop raises.
+        # Left open, each is reported unclosed in whichever later test
+        # happens to trigger garbage collection.
+        self._loop.close()
+        self._sock.close()
 
 
 class _AsgiCompletionSignal:
