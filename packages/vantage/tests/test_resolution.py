@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 from vantage.core.config.resolution import (
-    ConfigSource,
     ServerConfig,
     ServerConfigError,
     resolve_server_config,
@@ -43,35 +42,24 @@ def test_cli_database_takes_precedence_over_env_and_default() -> None:
     config = _resolve(cli_database="/explicit/vantage.db", env_database="/env/vantage.db")
 
     assert config.database_path == Path("/explicit/vantage.db")
-    assert config.database_source is ConfigSource.CLI
 
 
 def test_env_database_used_when_no_cli_value() -> None:
     config = _resolve(env_database="/env/vantage.db")
 
     assert config.database_path == Path("/env/vantage.db")
-    assert config.database_source is ConfigSource.ENV
 
 
 def test_default_database_uses_xdg_data_home_when_set() -> None:
     config = _resolve(xdg_data_home="/xdg/data")
 
     assert config.database_path == Path("/xdg/data/vantage/vantage.db")
-    assert config.database_source is ConfigSource.DEFAULT
 
 
 def test_default_database_falls_back_to_home_when_xdg_data_home_unset() -> None:
     config = _resolve(home=Path("/home/nobody"), xdg_data_home=None)
 
     assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
-    assert config.database_source is ConfigSource.DEFAULT
-
-
-def test_config_source_is_a_str_enum_not_strenum() -> None:
-    # `StrEnum` is 3.11+; the supported floor is Python 3.10.
-    assert issubclass(ConfigSource, str)
-    assert isinstance(ConfigSource.CLI, str)
-    assert ConfigSource.CLI.value == "cli"
 
 
 def test_default_host_and_port() -> None:
@@ -88,21 +76,19 @@ def test_cli_host_and_port_override_the_default() -> None:
     assert config.port == 9000
 
 
-def test_default_grace_period_is_900_seconds_from_the_default_source() -> None:
+def test_default_grace_period_is_900_seconds() -> None:
     """900.0 seconds, expressed in source as `30 * 30.0` -- a multiple of the
     default heartbeat interval, not an invented round number. CLI-only, like
     `host` and `port`."""
     config = _resolve()
 
     assert config.grace_period_seconds == 900.0
-    assert config.grace_source is ConfigSource.DEFAULT
 
 
 def test_cli_grace_period_overrides_the_default() -> None:
     config = _resolve(cli_grace_period=60.0)
 
     assert config.grace_period_seconds == 60.0
-    assert config.grace_source is ConfigSource.CLI
 
 
 def test_cli_main_carries_the_resolved_grace_period_into_the_app(

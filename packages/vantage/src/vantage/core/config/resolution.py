@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 
 _DEFAULT_HOST = "127.0.0.1"
@@ -27,26 +26,14 @@ _DEFAULT_GRACE_BEATS = 30
 _DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_BEATS * _BEAT_INTERVAL_HINT_SECONDS  # 900.0
 
 
-class ConfigSource(str, Enum):
-    """Where a resolved value came from. **Never `StrEnum`** -- that is
-    3.11+ and the supported floor is Python 3.10.
-    """
-
-    CLI = "cli"
-    ENV = "env"
-    DEFAULT = "default"
-
-
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
-    """Everything `vantage serve` needs to start, already resolved."""
+    """Everything the `vantage` command needs to start, already resolved."""
 
     database_path: Path
-    database_source: ConfigSource
     host: str
     port: int
     grace_period_seconds: float
-    grace_source: ConfigSource
 
 
 def resolve_server_config(
@@ -71,17 +58,11 @@ def resolve_server_config(
     Host, port and the grace period each take only a CLI value or a fixed
     default; none has an environment variable.
     """
-    database_path, database_source = _resolve_database_path(
-        cli_database, env_database, home, xdg_data_home
-    )
-    grace_period_seconds, grace_source = _resolve_grace_period(cli_grace_period)
     return ServerConfig(
-        database_path=database_path,
-        database_source=database_source,
+        database_path=_resolve_database_path(cli_database, env_database, home, xdg_data_home),
         host=cli_host if cli_host is not None else _DEFAULT_HOST,
         port=cli_port if cli_port is not None else _DEFAULT_PORT,
-        grace_period_seconds=grace_period_seconds,
-        grace_source=grace_source,
+        grace_period_seconds=_resolve_grace_period(cli_grace_period),
     )
 
 
@@ -94,7 +75,7 @@ class ServerConfigError(ValueError):
     """
 
 
-def _resolve_grace_period(cli_grace_period: float | None) -> tuple[float, ConfigSource]:
+def _resolve_grace_period(cli_grace_period: float | None) -> float:
     if cli_grace_period is not None:
         # `argparse type=float` accepts 0, -1, nan and inf. Any of them breaks
         # abandonment derivation for every unfinished run, including sessions
@@ -104,8 +85,8 @@ def _resolve_grace_period(cli_grace_period: float | None) -> tuple[float, Config
             raise ServerConfigError(
                 f"--grace-period must be a positive number of seconds, got {cli_grace_period!r}"
             )
-        return cli_grace_period, ConfigSource.CLI
-    return _DEFAULT_GRACE_PERIOD_SECONDS, ConfigSource.DEFAULT
+        return cli_grace_period
+    return _DEFAULT_GRACE_PERIOD_SECONDS
 
 
 def _resolve_database_path(
@@ -113,13 +94,13 @@ def _resolve_database_path(
     env_database: str | None,
     home: Path,
     xdg_data_home: str | None,
-) -> tuple[Path, ConfigSource]:
+) -> Path:
     if cli_database is not None:
-        return Path(cli_database), ConfigSource.CLI
+        return Path(cli_database)
     if env_database is not None:
-        return Path(env_database), ConfigSource.ENV
+        return Path(env_database)
     data_home = Path(xdg_data_home) if xdg_data_home else home / ".local" / "share"
-    return data_home / "vantage" / "vantage.db", ConfigSource.DEFAULT
+    return data_home / "vantage" / "vantage.db"
 
 
 DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_PERIOD_SECONDS
@@ -127,7 +108,6 @@ DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_PERIOD_SECONDS
 derivation lives in one place rather than as a bare literal at the call site."""
 
 __all__ = [
-    "ConfigSource",
     "DEFAULT_GRACE_PERIOD_SECONDS",
     "ServerConfig",
     "ServerConfigError",
