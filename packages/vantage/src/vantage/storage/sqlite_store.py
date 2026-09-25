@@ -23,12 +23,10 @@ mid-statement is the classic two-writer deadlock.
 
 A session's run, catalogue, result and metadata rows are written in one
 transaction, without `RETURNING`: it needs SQLite >= 3.35, newer than some
-Python 3.10 builds link against. The catalogue
-takes `first_seen_at` with `MIN` and `last_seen_at` with `MAX`, so a report
-arriving out of start order moves neither the wrong way, and the result
-insert is `ON
-CONFLICT(run_id, node_id) DO NOTHING`, so a replayed report is a silent
-no-op.
+Python 3.10 builds link against. The catalogue takes `first_seen_at` with
+`MIN` and `last_seen_at` with `MAX`, so a report arriving out of start order
+moves neither the wrong way, and the result insert is `ON CONFLICT(run_id,
+node_id) DO NOTHING`, so a replayed report is a silent no-op.
 
 `last_contact_at` is set by the creating report only -- a finished or
 interrupted run is done, not stale -- and advanced by `touch_last_contact`'s

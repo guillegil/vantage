@@ -5,8 +5,9 @@ this and the SQLite adapter, so the port is proven by two independent
 mechanisms rather than one implementation agreeing with itself. It is a real
 implementation, not a stub: it mirrors the SQLite adapter's catalogue
 monotonicity, first-write-wins results keyed by ``(run_id, node_id)``, and
-the run upsert guard -- a finish-write (`exit_status` is not
-`None`) applies over a start-only row, never the reverse.
+the run upsert guard -- a finish-write (`exit_status` is not `None`) applies
+over a start-only row, never the reverse. It compares real `datetime`s where
+the SQLite adapter compares fixed-width UTC text; the two orders agree.
 
 ``_last_contact`` is a separate dict because ``Execution`` carries no
 ``last_contact_at`` field; that column is a storage concern. It is set on
