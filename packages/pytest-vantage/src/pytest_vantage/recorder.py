@@ -71,11 +71,13 @@ def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
 # tests finishes well inside one interval and sends none.
 _BEAT_INTERVAL_SECONDS = 30.0
 
-# `pytest.ExitCode.INTERRUPTED` (2) and `pytest.ExitCode.INTERNAL_ERROR` (3):
-# the session did not end in an orderly way, so `finished_at` is sent as null.
-# Plain ints, compared against `int(exitstatus)`.
-_NULL_FINISH_EXIT_STATUSES = frozenset({2, 3})
-_INTERRUPTED_EXIT_STATUS = 2
+# `pytest.ExitCode.INTERNAL_ERROR`: pytest itself broke, so the session has
+# no orderly finish time. A plain int, compared against `int(exitstatus)`.
+_INTERNAL_ERROR_EXIT_STATUS = 3
+
+# A `pytest.exit()` message is arbitrary text; bounding the reason keeps it
+# from crowding the results out of the report.
+_MAX_INTERRUPT_REASON_CHARS = 1024
 
 
 def isoformat_utc(moment: datetime) -> str:
@@ -93,7 +95,8 @@ class Recorder:
     reachability preflight both succeed.
 
     - `_results` accumulates every phase report; it is resolved into
-      `results[]` entries only in `pytest_sessionfinish`.
+      `results[]` entries only in `pytest_sessionfinish`. `_stop` is the
+      exception that ended the session early, if pytest reported one.
     - `_disabled` is the `fault_isolated` latch: once set, every reporting
       hook on this instance is a silent no-op. `_liveness_disabled` is the
       independent `liveness_isolated` latch for the start-write and the
@@ -149,6 +152,7 @@ class Recorder:
         self._liveness_disabled = False
         self._accumulation_warned = False
         self._results: dict[str, _Pending] = {}
+        self._stop: BaseException | None = None
         self._last_beat_at = time.monotonic()
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
@@ -258,11 +262,42 @@ class Recorder:
         self._last_beat_at = now
         send_heartbeat(self._address, self._run_id, timeout=self._liveness_timeout)
 
+    @accumulation_isolated
+    def pytest_keyboard_interrupt(self, excinfo: pytest.ExceptionInfo[BaseException]) -> None:
+        """Records what stopped the session early, for `_how_it_ended`.
+
+        pytest calls this for Ctrl-C and `pytest.exit()`, but also for its
+        own deliberate stops, which it raises as `KeyboardInterrupt`
+        subclasses: errors during collection, `--stepwise`, xdist's `-x`.
+        All of them end with exit status 2, so the status alone cannot tell
+        an interrupted session from one pytest ended on purpose.
+        """
+        self._stop = excinfo.value
+
+    def _how_it_ended(self, exit_status: int) -> tuple[datetime | None, bool, str | None]:
+        """`(finished_at, interrupted, interrupt_reason)` for the finish report.
+
+        - A bare `KeyboardInterrupt` (Ctrl-C) or `pytest.exit()` interrupted
+          the session: no finish time, `interrupted` true.
+        - pytest's internal error: no finish time, not interrupted.
+        - Anything else ran to an orderly end and gets its finish time,
+          including pytest's own stops with exit status 2.
+
+        The reason is the stop's message, when there is one: pytest's
+        `1 error during collection`, or the text given to `pytest.exit()`.
+        """
+        stop = self._stop
+        reason = None if stop is None else (str(stop)[:_MAX_INTERRUPT_REASON_CHARS] or None)
+        if type(stop) is KeyboardInterrupt or isinstance(stop, pytest.exit.Exception):
+            return None, True, reason
+        if exit_status == _INTERNAL_ERROR_EXIT_STATUS:
+            return None, False, None
+        return datetime.now(timezone.utc), False, reason
+
     @fault_isolated
     def pytest_sessionfinish(self, exitstatus: int) -> None:
         exit_status = int(exitstatus)
-        orderly = exit_status not in _NULL_FINISH_EXIT_STATUSES
-        finished_at = datetime.now(timezone.utc) if orderly else None
+        finished_at, interrupted, interrupt_reason = self._how_it_ended(exit_status)
 
         results = assemble_results(self._results)
         # Applied before the report is built: the server rejects an oversized
@@ -276,8 +311,8 @@ class Recorder:
                 "started_at": isoformat_utc(self._started_at),
                 "finished_at": isoformat_utc(finished_at) if finished_at else None,
                 "exit_status": exit_status,
-                "interrupted": exit_status == _INTERRUPTED_EXIT_STATUS,
-                "interrupt_reason": None,
+                "interrupted": interrupted,
+                "interrupt_reason": interrupt_reason,
             },
             "results": results,
             "vcs": self._vcs_section(),

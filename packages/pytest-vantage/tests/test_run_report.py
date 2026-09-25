@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 from pytest_vantage import vcs
+from pytest_vantage.recorder import Recorder
 from vantage.core.domain.execution import Execution
 from vantage.service.errors import MAX_REPORT_BYTES
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
@@ -41,6 +42,34 @@ def _wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> 
             return executions[0]
         time.sleep(0.02)
     raise TimeoutError(f"no run entry appeared within {timeout}s")
+
+
+class _ConfigDouble:
+    rootpath = "unused"
+
+    def getoption(self, name: str, default: object = None) -> object:
+        return None
+
+
+def _offline_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Recorder, list[dict[str, object]]]:
+    """A `Recorder` driven directly, hook by hook, whose every report is
+    captured instead of sent. VCS capture is neutralised rather than
+    spawning `git` for something these tests do not exercise.
+    """
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send", lambda address, report, *, timeout: sent.append(report)
+    )
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+    recorder = Recorder(
+        _ConfigDouble(),  # type: ignore[arg-type]
+        "http://127.0.0.1:1",
+        1.0,
+        lifecycle_available=True,
+    )
+    return recorder, sent
 
 
 # --- Unit: fixed-width ISO-8601 timestamps ----------------------------------
@@ -149,8 +178,6 @@ def test_recorder_registered_only_when_vantage_flag_is_present(
     registers none. The mirror image, activation with nothing reachable, is
     `test_failure_paths.py::test_recorder_is_not_registered_when_the_preflight_fails`.
     """
-    from pytest_vantage.recorder import Recorder
-
     monkeypatch.delenv("VANTAGE_SERVER", raising=False)
 
     active = pytester.parseconfigure("--vantage", f"--vantage-server={vantage_server.address}")
@@ -429,7 +456,120 @@ def test_failed_collection_still_writes_one_row(
     # just as well against a session that collected cleanly, and this test
     # is specifically about the one that did not.
     assert result.ret == pytest.ExitCode.INTERRUPTED
-    assert len(vantage_server.executions()) == 1
+    (execution,) = vantage_server.executions()
+    # pytest stopped the session on purpose, in order: it finished, it was
+    # not interrupted, and the reason says why it stopped.
+    assert execution.finished_at is not None
+    assert execution.interrupted is False
+    assert execution.interrupt_reason == "1 error during collection"
+
+
+@pytest.mark.parametrize(
+    ("args", "test_body", "finished", "interrupted", "reason"),
+    [
+        pytest.param(
+            ("--stepwise",),
+            "def test_a():\n    assert False\n\n\ndef test_b():\n    assert True\n",
+            True,
+            False,
+            "Test failed, continuing from this test next run.",
+            id="stepwise-stop",
+        ),
+        pytest.param(
+            (),
+            "import pytest\n\n\ndef test_a():\n    pytest.exit('stop here')\n",
+            False,
+            True,
+            "stop here",
+            id="pytest-exit",
+        ),
+    ],
+)
+def test_exit_status_two_is_recorded_by_what_stopped_the_session(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    args: tuple[str, ...],
+    test_body: str,
+    finished: bool,
+    interrupted: bool,
+    reason: str,
+) -> None:
+    """pytest ends with exit status 2 both when it stops a session on
+    purpose and when the session is interrupted. `--stepwise` stopping at a
+    failure ran to an orderly end; `pytest.exit()` cut the session short.
+    """
+    pytester.makepyfile(test_sample=test_body)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", *args
+    )
+
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    (execution,) = vantage_server.executions()
+    assert (execution.finished_at is not None) is finished
+    assert execution.interrupted is interrupted
+    assert execution.interrupt_reason == reason
+
+
+def _raised(exception: BaseException) -> pytest.ExceptionInfo[BaseException]:
+    try:
+        raise exception
+    except BaseException:
+        return pytest.ExceptionInfo.from_current()
+
+
+@pytest.mark.parametrize(
+    ("exit_status", "stop", "finished", "interrupted", "reason"),
+    [
+        pytest.param(0, None, True, False, None, id="passed"),
+        pytest.param(1, None, True, False, None, id="failed"),
+        pytest.param(
+            2,
+            pytest.Session.Interrupted("1 error during collection"),
+            True,
+            False,
+            "1 error during collection",
+            id="collection-errors",
+        ),
+        pytest.param(2, KeyboardInterrupt(), False, True, None, id="ctrl-c"),
+        pytest.param(
+            2, pytest.exit.Exception("stop here"), False, True, "stop here", id="pytest-exit"
+        ),
+        pytest.param(
+            0,
+            pytest.exit.Exception("done early", returncode=0),
+            False,
+            True,
+            "done early",
+            id="pytest-exit-with-a-return-code",
+        ),
+        pytest.param(3, None, False, False, None, id="internal-error"),
+    ],
+)
+def test_the_finish_report_records_how_the_session_ended(
+    monkeypatch: pytest.MonkeyPatch,
+    exit_status: int,
+    stop: BaseException | None,
+    finished: bool,
+    interrupted: bool,
+    reason: str | None,
+) -> None:
+    """Only a real interruption -- Ctrl-C or `pytest.exit()` -- is recorded
+    as interrupted with no finish time. pytest's internal error has no
+    orderly finish either, but nothing interrupted it. Every other ending
+    has a finish time, whatever its exit status.
+    """
+    recorder, sent = _offline_recorder(monkeypatch)
+    if stop is not None:
+        recorder.pytest_keyboard_interrupt(excinfo=_raised(stop))
+
+    recorder.pytest_sessionfinish(exitstatus=exit_status)
+
+    run = sent[-1]["run"]
+    assert run["exit_status"] == exit_status  # type: ignore[index]
+    assert (run["finished_at"] is not None) is finished  # type: ignore[index]
+    assert run["interrupted"] is interrupted  # type: ignore[index]
+    assert run["interrupt_reason"] == reason  # type: ignore[index]
 
 
 def test_sigint_leaves_start_time_and_null_end_time(
@@ -644,30 +784,12 @@ def test_a_fast_suite_emits_no_heartbeat(
     suppressed" from "the first attempt raised and latched". Asserting that
     no warning was emitted closes that gap.
     """
-    from pytest_vantage.recorder import Recorder
-
     beats: list[str] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send_heartbeat",
         lambda *args, **kwargs: beats.append("beat"),
     )
-    # This test is about the beat timing guard, not vcs capture -- neutralise
-    # it rather than spawning a real `git` subprocess for something this
-    # test does not exercise.
-    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
-
-    class _ConfigDouble:
-        rootpath = "unused"
-
-        def getoption(self, name: str, default: object = None) -> object:
-            return None
-
-    recorder = Recorder(
-        _ConfigDouble(),  # type: ignore[arg-type]
-        "http://127.0.0.1:1",
-        1.0,
-        lifecycle_available=True,
-    )
+    recorder, _sent = _offline_recorder(monkeypatch)
     for _ in range(1000):
         recorder._maybe_beat()
 
@@ -700,6 +822,31 @@ def test_xdist_run_leaves_exactly_one_run_entry(
 
     result.assert_outcomes(passed=8)
     assert len(vantage_server.executions()) == 1
+
+
+def test_an_xdist_maxfail_stop_is_recorded_as_finished(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """Under xdist, `-x` stops the session through xdist's own
+    `KeyboardInterrupt` subclass, so it ends with exit status 2 where the
+    same run without xdist ends with 1. Either way pytest stopped on
+    purpose: the run finished and was not interrupted.
+    """
+    pytest.importorskip("xdist")
+    pytester.makepyfile(
+        test_many="def test_fails():\n    assert False\n\n\n"
+        + "\n".join(f"def test_{i}():\n    assert True\n" for i in range(4))
+    )
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "-n", "2", "-x"
+    )
+
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert execution.interrupted is False
 
 
 # --- The per-report failure-text budget ------------------------------------

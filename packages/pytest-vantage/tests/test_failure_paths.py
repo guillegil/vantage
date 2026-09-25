@@ -1401,6 +1401,7 @@ def test_every_recorder_hook_is_under_the_isolation_meant_for_it() -> None:
     }
 
     assert isolation == {
+        "pytest_keyboard_interrupt": "_accumulation_warned",
         "pytest_report_header": "_disabled",
         "pytest_runtest_logreport": "_accumulation_warned",
         "pytest_sessionfinish": "_disabled",
