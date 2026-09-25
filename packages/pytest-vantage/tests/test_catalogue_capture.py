@@ -7,7 +7,7 @@ decides what goes on the wire, not the store.
 from __future__ import annotations
 
 import pytest
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import VantageTestServer
 
 _TWO_TESTS = "def test_stable():\n    assert True\n\n\ndef test_removable():\n    assert True\n"
 _ONE_TEST = "def test_stable():\n    assert True\n"
@@ -17,7 +17,7 @@ _NODE_ID = "test_catalogue.py::test_removable"
 
 def test_deleting_and_readding_a_test_preserves_and_advances_the_catalogue_entry(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Deleting `test_removable` from the file and re-running leaves its
     catalogue entry exactly unchanged -- a report that omits a node id must

@@ -4,12 +4,9 @@ end-to-end tests, and the `vantage_server` fixture that wraps it.
 A separate, non-`test_*` module rather than a `conftest.py`: a package-level
 `conftest.py` alongside the workspace-root one both resolve to the bare
 module name `conftest` under this project's plain (non-package) test
-layout, which mypy rejects as a duplicate module -- pytest itself tolerates
-it (each is loaded through its own path-keyed machinery), but a second
-`conftest.py` here would fail `mypy --strict` outright. Importing the
-fixture function directly into each test module that needs it sidesteps the
-collision entirely. `vantage_port_contract.py` and `importwalk.py` follow
-the same "shared, non-test module inside a `tests/` directory" pattern.
+layout, which mypy rejects as a duplicate module. The workspace-root
+conftest registers this module as a plugin instead, so any test can request
+`vantage_server` without importing it.
 
 Dev-only and never packaged, so it may import the server and `uvicorn`.
 """

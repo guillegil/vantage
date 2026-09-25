@@ -22,7 +22,7 @@ from pytest_vantage.budget import (
     split_results,
 )
 from vantage.service.errors import MAX_REPORT_BYTES
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import VantageTestServer
 
 # --- spend_failure_text_budget ------------------------------------------------
 
@@ -392,7 +392,7 @@ def wire_sizes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[dict[str, object],
 
 def test_a_suite_too_large_for_one_report_is_recorded_whole(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     wire_sizes: list[tuple[dict[str, object], int]],
 ) -> None:
     """A thousand passing tests with long parameter ids report well over
@@ -425,7 +425,7 @@ def test_a_suite_too_large_for_one_report_is_recorded_whole(
 
 def test_a_result_too_large_for_any_report_costs_only_itself_and_one_warning(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A skip reason is never charged against the failure-text budget, so
     one of over a megabyte makes a result no report can carry. That result
@@ -455,7 +455,7 @@ def test_a_result_too_large_for_any_report_costs_only_itself_and_one_warning(
 
 def test_a_long_session_with_failure_text_keeps_every_result_and_failure_message(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     wire_sizes: list[tuple[dict[str, object], int]],
 ) -> None:
     """A thousand passing tests that print, then twenty failures: the
@@ -497,7 +497,7 @@ def test_a_long_session_with_failure_text_keeps_every_result_and_failure_message
 
 def test_a_session_of_many_large_failures_stays_within_one_report(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     wire_sizes: list[tuple[dict[str, object], int]],
 ) -> None:
     """Ten tests each raising an 80,000-character message would, unbounded,

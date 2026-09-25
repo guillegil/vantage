@@ -15,7 +15,7 @@ import urllib.request
 
 import pytest
 from vantage.core.ports.storage import MetadataEntry, MetadataFile
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import VantageTestServer
 
 
 def _runs_matching(server: VantageTestServer, key: str, value: str) -> list[str]:
@@ -28,7 +28,7 @@ def _runs_matching(server: VantageTestServer, key: str, value: str) -> list[str]
 
 def test_declared_values_are_recorded_and_filter_the_run_list(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     (pytester.path / "board.json").write_text('{"board_revision": "rev-b", "ignored": 1}')
     (pytester.path / "firmware.yaml").write_text("firmware_version: '2.1.0'\n")

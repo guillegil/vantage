@@ -39,7 +39,7 @@ from pytest_vantage.plugin import (
     _metadata_capture_requested,
 )
 from pytest_vantage.recorder import Recorder
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import VantageTestServer
 
 _SAMPLE_TEST = "def test_it():\n    assert True\n"
 _METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
@@ -268,7 +268,7 @@ def test_nothing_but_a_typed_vantage_records(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
     recwarn: pytest.WarningsRecorder,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     source: str,
 ) -> None:
     """Every way of configuring the plugin short of typing ``--vantage``,
@@ -305,7 +305,7 @@ def test_nothing_but_a_typed_vantage_records(
 def test_a_typed_vantage_records_to_the_ini_address(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """The positive control for the test above: the same project and the
     same committed address record once ``--vantage`` is typed, so the empty
@@ -339,7 +339,7 @@ _CAPTURE_SOURCES = {
 def test_capture_is_enabled_only_by_its_typed_flag(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     kind: str,
     name: str,
 ) -> None:
@@ -508,7 +508,7 @@ def test_an_invocation_that_runs_tests_does_reach_for_the_server(
 def test_a_recorder_that_fails_to_start_leaves_the_suite_unrecorded_and_unharmed(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """`pytest_configure` has no fault-isolation boundary of its own, so an
     exception while constructing the recorder would otherwise end the

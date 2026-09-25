@@ -7,7 +7,7 @@ is present).
 from __future__ import annotations
 
 import pytest
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import VantageTestServer
 
 _SIX_TESTS = """
 def test_1():
@@ -37,7 +37,7 @@ def test_6():
 
 def test_six_tests_under_xdist_produce_six_results_and_one_run_entry(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Under `-n 2`, six tests distributed across two xdist workers still
     leave exactly six results and one run row -- the recorder is registered
@@ -78,7 +78,7 @@ def test_crashes_its_worker():
 
 def test_a_crashed_worker_leaves_every_other_result_recorded(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A worker that dies mid-test (a segfault, an OOM kill) makes xdist log
     that test with a report of no known phase and replace the worker. The
@@ -116,7 +116,7 @@ def test_platform_specific():
 
 def test_dist_each_keeps_a_failure_seen_on_one_worker(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Under `--dist each` every worker runs every test. The server keeps one
     result per node id, so the plugin sends the most severe execution, whole:
@@ -151,7 +151,7 @@ def test_with_subtests(subtests):
 )
 def test_a_failing_subtest_forwarded_by_a_worker_keeps_its_evidence(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Subtest reports cross the worker-to-controller hop as their own
     report type, evidence included, so a worker-run failing subtest is
@@ -192,7 +192,7 @@ def test_it_prints(noisy):
 
 def test_captured_output_forwarded_by_workers_is_stored_once(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Captured sections cross the worker-to-controller hop with the
     report, so each phase's output is still stored exactly once when a
@@ -215,7 +215,7 @@ def test_captured_output_forwarded_by_workers_is_stored_once(
 
 def test_six_tests_without_xdist_also_produce_six_results(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """The control for the xdist test above: the SAME six tests, run
     without `-n` at all, must still yield six results. This is the ONLY

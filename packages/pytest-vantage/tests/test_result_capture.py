@@ -12,7 +12,7 @@ import os
 
 import pytest
 from vantage.core.domain.result import Result
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import VantageTestServer
 
 
 def _by_function_name(results: list[Result], name: str) -> Result:
@@ -68,7 +68,7 @@ def test_passes_but_teardown_raises(raising_teardown_fixture):
 
 def test_five_outcome_shapes_recorded_end_to_end(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Setup failure -> error, `@pytest.mark.skip` -> skipped, failing
     xfail -> xfailed, passing non-strict xfail -> xpassed, and a test whose
@@ -127,7 +127,7 @@ def test_plain_skip():
 
 def test_an_xfail_raised_during_setup_is_xfailed(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """`xfail(run=False)`, `pytest.xfail()` in a fixture, and an xfail-marked
     test whose fixture raises all end in a skipped setup report carrying
@@ -160,7 +160,7 @@ def test_an_xfail_raised_during_setup_is_xfailed(
 @pytest.mark.parametrize("strict_from", ["mark", "ini"])
 def test_a_strict_xfail_that_passes_is_failed_with_pytests_reason(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     strict_from: str,
 ) -> None:
     """A strict xfail whose body passes is failed with no exception to
@@ -210,7 +210,7 @@ def test_with_slow_setup(slow_fixture):
 @pytest.mark.slow
 def test_setup_and_call_durations_are_measured_independently(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """`setup_duration` and `call_duration` are pytest's own per-phase
     timings, not one lump sum -- a half-second fixture body against an empty
@@ -245,7 +245,7 @@ def test_it(broken_fixture):
 
 def test_setup_failure_leaves_call_duration_null_not_zero(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A phase that never ran (`call`, here, because `setup` failed) is
     `None`, never `0.0`. The end-to-end hop of the same guard
@@ -275,7 +275,7 @@ def test_calls_helper():
 
 def test_failure_evidence_is_stored_end_to_end(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Every failure field the plugin extracts reaches storage under the
     name the server reads it by -- the server ignores unknown fields, so a
@@ -328,7 +328,7 @@ def test_plain_pass():
 
 def test_captured_output_is_stored_once(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Every line a test printed is stored exactly once, in setup -> call ->
     teardown order, the way `pytest -rA` shows it -- passing tests
@@ -363,7 +363,7 @@ def test_it_prints(unreadable):
 
 def test_one_unreadable_phase_costs_only_its_own_output(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A plugin that adds a non-text section breaks the read of one phase's
     output. That phase contributes nothing; the phases read fine are still
@@ -385,7 +385,7 @@ _TWO_TESTS_IN_ONE_FILE = "def test_one():\n    assert True\n\n\ndef test_two():\
 
 def test_filtering_by_file_path_returns_every_test_defined_in_that_file(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """`file_path` alone is enough to recover every test that file defines.
     Two files, two tests each, run in the same session -- filtering by one
@@ -414,7 +414,7 @@ def test_filtering_by_file_path_returns_every_test_defined_in_that_file(
 
 def test_module_level_test_stores_a_null_class_name(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A module-level test's `class_name` is `None`, never `""` --
     the two carry different meanings and the wire/storage hops must not
@@ -464,7 +464,7 @@ class Case(unittest.TestCase):
 
 def test_a_failing_unittest_subtest_fails_the_test(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """pytest reports the failing `subTest` and exits 1 while leaving the
     test's own report passed. The record follows pytest's verdict, with the
@@ -504,7 +504,7 @@ def test_with_a_skipped_subtest(subtests):
 @_needs_builtin_subtests
 def test_a_failing_subtest_is_recorded_with_its_evidence_and_output(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """With the `subtests` fixture pytest fails the test as "contains 1
     failed subtest", with no exception of its own. The failing subtest's
@@ -552,7 +552,7 @@ def pytest_collect_file(file_path, parent):
 
 def test_an_item_whose_node_id_has_no_double_colon_is_recorded(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Such an item is recorded like any other, and it never costs the rest
     of the session its results."""
@@ -588,7 +588,7 @@ def test_unparametrised():
 
 def test_empty_param_id_survives_the_real_server_hop_end_to_end(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A parametrised test whose parameter id is the empty string keeps
     `param_id == ""` through the WHOLE chain (pytest's own hooks, the plugin,
@@ -621,7 +621,7 @@ def test_reads_the_report():
 
 def test_names_that_are_not_utf8_are_recorded_not_lost(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A POSIX file name need not be UTF-8. Python decodes one with
     `surrogateescape`, so a test under a directory named `caf\\xe9` carries a

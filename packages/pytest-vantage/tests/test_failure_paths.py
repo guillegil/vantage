@@ -37,11 +37,7 @@ from pytest_vantage.boundary import (
 from pytest_vantage.plugin import _preflight_reachable
 from pytest_vantage.transport import Capabilities, fetch_capabilities, send
 from vantage.service.errors import RejectionError
-from vantage_test_server import (  # noqa: F401 -- fixture
-    VantageTestServer,
-    vantage_server,
-    wait_for_file,
-)
+from vantage_test_server import VantageTestServer, wait_for_file
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
 
@@ -548,7 +544,7 @@ def test_preflight_falls_back_to_the_scheme_default_port(
 
 def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """The preflight and the start-write reach the server; it is stopped
     while the test runs, so the finish-write fails and the failure surfaces
@@ -609,7 +605,7 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
 
 def test_reporting_error_preserves_passing_exit_status_and_warns_once(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """In-process (`pytester.runpytest`), not a subprocess: forcing a
@@ -643,7 +639,7 @@ def test_reporting_error_preserves_passing_exit_status_and_warns_once(
 
 def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def _raise(*args: object, **kwargs: object) -> None:
@@ -671,7 +667,7 @@ class _UnavailableError(RejectionError):
 
 def test_a_failing_start_write_warns_once_silences_the_heartbeats_and_keeps_every_result(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A server that advertises the lifecycle but refuses the start-write
@@ -948,7 +944,7 @@ def environment_proxy(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
 
 def test_reports_take_the_preflights_direct_route_not_an_environment_proxy(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     environment_proxy: list[str],
 ) -> None:
     """The preflight connects directly, so the requests must too: through
@@ -1011,7 +1007,7 @@ def test_a_server_that_trickles_its_answers_cannot_hold_the_session(
 
 def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still_recorded(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """`_last_beat_at` is assigned before the send, so a failing send is not
     retried on the very next report -- and `_maybe_beat` is
@@ -1132,7 +1128,7 @@ def test_fetch_capabilities_returns_true_for_the_one_explicit_positive_answer() 
 
 def test_the_probe_warning_names_the_url_an_address_with_a_path_doubles_into(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """`/api/v1` on the address doubles into the probed path, so a current
     server answers `404`. The warning names the URL actually probed, which
@@ -1315,7 +1311,7 @@ def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
 
 def test_git_failure_disables_nothing_else(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A git failure disables nothing else in the same session.
@@ -1367,7 +1363,7 @@ def test_git_failure_disables_nothing_else(
 @pytest.mark.slow
 def test_hung_git_does_not_delay_session(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A hung git is bounded by the whole-capture budget. A fake `git` on

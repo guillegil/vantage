@@ -21,9 +21,8 @@ import pytest
 from pytest_vantage import transport, vcs
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.recorder import Recorder
-from vantage_test_server import (  # noqa: F401 -- fixture
+from vantage_test_server import (
     VantageTestServer,
-    vantage_server,
     wait_for_execution,
     wait_for_file,
 )
@@ -65,7 +64,7 @@ def _offline_recorder(
 
 def test_session_start_sends_a_report_with_no_results_matching_the_finish_writes_started_at(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`pytest_sessionstart` sends a report with `finished_at: null`, no
@@ -100,7 +99,7 @@ def test_session_start_sends_a_report_with_no_results_matching_the_finish_writes
 
 def test_start_write_uses_the_liveness_timeout_not_the_report_timeout(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The start-write is bounded by `resolve_liveness_timeout(report_timeout)`,
@@ -131,7 +130,7 @@ def test_start_write_uses_the_liveness_timeout_not_the_report_timeout(
 def test_recorder_registered_only_when_vantage_flag_is_present(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Registration requires activation and a reachable server: `--vantage`
     against the real `vantage_server` registers a `Recorder`, no flag
@@ -160,7 +159,7 @@ def _corrupt_git_repo(rootpath: Path) -> None:
 
 def test_vcs_section_is_identical_on_both_reports(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The snapshot is captured once, in `__init__`, and never re-read, so
@@ -201,7 +200,7 @@ def test_vcs_section_is_identical_on_both_reports(
 
 def test_metadata_section_is_identical_on_both_reports(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The metadata section is captured once, in `__init__`, and never
@@ -256,7 +255,7 @@ def test_metadata_section_is_identical_on_both_reports(
 
 def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`capture_metadata` warns about every problem it expects and never
@@ -299,7 +298,7 @@ def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
 
 def test_no_metadata_section_when_capture_was_not_requested(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The `metadata` wire key is absent entirely -- not `null` -- on both
@@ -323,7 +322,7 @@ def test_no_metadata_section_when_capture_was_not_requested(
 
 def test_passing_suite_exit_status_survives_unreadable_repository(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     _corrupt_git_repo(pytester.path)
     pytester.makepyfile(test_sample=_PASSING_TEST)
@@ -343,7 +342,7 @@ def test_passing_suite_exit_status_survives_unreadable_repository(
 
 def test_failing_suite_exit_status_survives_unreadable_repository(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     _corrupt_git_repo(pytester.path)
     pytester.makepyfile(test_sample="def test_it():\n    assert False\n")
@@ -361,7 +360,7 @@ def test_failing_suite_exit_status_survives_unreadable_repository(
 
 def test_git_invocation_count_does_not_scale_with_test_count(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """VCS capture runs once per session, not once per test: a session with
@@ -402,7 +401,7 @@ def test_git_invocation_count_does_not_scale_with_test_count(
 
 def test_completed_session_writes_one_row_with_ordered_timestamps(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
@@ -420,7 +419,7 @@ def test_completed_session_writes_one_row_with_ordered_timestamps(
 
 def test_second_invocation_gets_a_distinct_identifier(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     pytester.makepyfile(test_sample=_PASSING_TEST)
     args = ("--vantage", f"--vantage-server={vantage_server.address}")
@@ -435,7 +434,7 @@ def test_second_invocation_gets_a_distinct_identifier(
 
 def test_failure_text_reaches_the_server_field_for_field(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """The failure text the plugin captures is what the server stores,
     read back from it: the server tolerates result keys it does not know,
@@ -472,7 +471,7 @@ def test_failure_text_reaches_the_server_field_for_field(
 
 def test_zero_test_collection_still_writes_one_row(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     result = pytester.runpytest_subprocess(
         "--vantage", f"--vantage-server={vantage_server.address}"
@@ -484,7 +483,7 @@ def test_zero_test_collection_still_writes_one_row(
 
 def test_failed_collection_still_writes_one_row(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     pytester.makepyfile(test_broken="import this_module_does_not_exist_anywhere_at_all\n")
 
@@ -527,7 +526,7 @@ def test_failed_collection_still_writes_one_row(
 )
 def test_exit_status_two_is_recorded_by_what_stopped_the_session(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     args: tuple[str, ...],
     test_body: str,
     finished: bool,
@@ -614,7 +613,7 @@ def test_the_finish_report_records_how_the_session_ended(
 
 def test_sigint_leaves_start_time_and_null_end_time(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """`pytest`'s `wrap_session` calls `pytest_sessionfinish` from a
     `finally` with `ExitCode.INTERRUPTED`, so the report is still sent, with
@@ -670,7 +669,7 @@ def test_sigint_leaves_start_time_and_null_end_time(
 
 def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_reason(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A still-running session already has a run entry, from the start-write
     alone: the row is observed while the child is still executing its
@@ -722,7 +721,7 @@ def _last_contact_at(server: VantageTestServer, run_id: str) -> datetime:
 
 def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_contact(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The server's last-contact time advances during a long suite, end to
@@ -797,7 +796,7 @@ def test_a_fast_suite_emits_no_heartbeat(
 
 def test_xdist_run_leaves_exactly_one_run_entry(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """A real `-n 4` run: four workers plus the controller all execute
     `pytest_configure`, and only the controller registers a `Recorder`, so
@@ -821,7 +820,7 @@ def test_xdist_run_leaves_exactly_one_run_entry(
 
 def test_an_xdist_maxfail_stop_is_recorded_as_finished(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Under xdist, `-x` stops the session through xdist's own
     `KeyboardInterrupt` subclass, so it ends with exit status 2 where the

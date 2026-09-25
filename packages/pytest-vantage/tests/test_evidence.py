@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 from pytest_vantage.boundary import VantageWarning
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import VantageTestServer
 
 
 def _closed_port_address() -> str:
@@ -195,7 +195,7 @@ def test_opt_in_flag_means_evidencecollector_is_registered(
 
 def test_absent_flag_does_not_suppress_outcome_timings_or_identity(
     pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    vantage_server: VantageTestServer,
 ) -> None:
     """Without failure capture the rest of the result is still recorded:
     `Recorder` never consults `EvidenceCollector` for outcome, timings or

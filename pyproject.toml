@@ -53,7 +53,7 @@ markers = [
     "slow: measures real elapsed time and cannot be made fast without ceasing to measure",
 ]
 addopts = "--strict-markers"
-pythonpath = ["packages/vantage/tests"]
+pythonpath = ["packages/vantage/tests", "packages/pytest-vantage/tests"]
 
 [tool.ruff]
 line-length = 100
@@ -74,6 +74,7 @@ mypy_path = [
     "packages/pytest-vantage/src",
     "packages/vantage/src",
     "packages/vantage/tests",
+    "packages/pytest-vantage/tests",
 ]
 
 [tool.deptry]
