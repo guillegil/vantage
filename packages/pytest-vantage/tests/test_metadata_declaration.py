@@ -7,7 +7,10 @@ of filesystem behaviour.
 
 from __future__ import annotations
 
+import codecs
 import json
+import os
+import threading
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -64,15 +67,131 @@ def test_an_absent_declaration_captures_nothing_and_warns_once(
     assert result is None
     warned = _metadata_warnings(recwarn)
     assert len(warned) == 1
+    assert f"no {metadata.DECLARATION_FILENAME} found" in str(warned[0].message)
+
+
+def test_a_directory_named_like_the_declaration_is_not_reported_as_absent(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    root = tmp_path / "project"
+    (root / metadata.DECLARATION_FILENAME).mkdir(parents=True)
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
     assert metadata.DECLARATION_FILENAME in str(warned[0].message)
+    assert "found" not in str(warned[0].message)
 
 
-def test_a_non_json_declaration_captures_nothing_and_warns_once(
+@pytest.mark.skipif(
+    os.geteuid() == 0 if hasattr(os, "geteuid") else True,
+    reason="chmod 000 is a no-op as root; skip rather than pass vacuously",
+)
+def test_an_unreadable_declaration_is_not_reported_as_absent(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    (root / metadata.DECLARATION_FILENAME).write_text("{not json")
+    declaration = root / metadata.DECLARATION_FILENAME
+    declaration.write_text(json.dumps({"version": 1, "files": []}))
+    os.chmod(declaration, 0o000)
+
+    try:
+        result = metadata.read_declaration(_config(), root)
+    finally:
+        os.chmod(declaration, 0o644)  # noqa: S103 -- restoring the fixture, not granting access
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "cannot read" in str(warned[0].message)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="os.mkfifo is POSIX-only")
+def test_a_fifo_declaration_is_refused_without_blocking(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # Opening a FIFO with no writer blocks, which would hang session start.
+    # Run in a thread so a regression fails the test rather than hanging it.
+    root = tmp_path / "project"
+    root.mkdir()
+    fifo = root / metadata.DECLARATION_FILENAME
+    os.mkfifo(fifo)
+    outcome: list[object] = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(metadata.read_declaration(_config(), root)), daemon=True
+    )
+
+    worker.start()
+    worker.join(timeout=5)
+    blocked = worker.is_alive()
+    if blocked:  # release it: opening the write end unblocks the reader
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(timeout=5)
+
+    assert not blocked, "read_declaration blocked opening a FIFO"
+    assert outcome == [None]
+    assert len(_metadata_warnings(recwarn)) == 1
+
+
+@pytest.mark.skipif(not Path(os.devnull).exists(), reason="needs a null device")
+def test_a_declaration_linked_to_a_device_is_refused_unread(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # The null device stands in for `/dev/zero`, which the same check stops
+    # before a read that would never end.
+    root = tmp_path / "project"
+    root.mkdir()
+    os.symlink(os.devnull, root / metadata.DECLARATION_FILENAME)
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "not a regular file" in str(warned[0].message)
+
+
+@pytest.mark.parametrize(
+    ("padding", "accepted"), [(0, True), (1, False)], ids=["at_the_bound", "one_byte_over"]
+)
+def test_the_declaration_is_read_only_up_to_its_byte_bound(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, padding: int, accepted: bool
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    document = json.dumps({"version": 1, "files": []})
+    # Trailing whitespace is valid JSON, so only the size decides.
+    size = metadata.MAX_DECLARATION_BYTES + padding
+    (root / metadata.DECLARATION_FILENAME).write_text(document.ljust(size))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert (result == ()) is accepted
+    assert len(_metadata_warnings(recwarn)) == (0 if accepted else 1)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"{not json",
+        # Past the interpreter's integer-string digit limit, which `json`
+        # raises as a plain `ValueError`. Without a limit it parses to an
+        # unsupported version, refused all the same.
+        b'{"version": ' + b"1" * 4301 + b', "files": []}',
+        b"[" * 100_000 + b"]" * 100_000,
+        b"\xff{}",
+    ],
+    ids=["syntax_error", "overlong_integer", "nested_too_deep", "not_utf8"],
+)
+def test_a_non_json_declaration_captures_nothing_and_warns_once(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, raw: bytes
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / metadata.DECLARATION_FILENAME).write_bytes(raw)
 
     result = metadata.read_declaration(_config(), root)
 
@@ -272,6 +391,22 @@ def test_a_well_formed_declaration_is_read_with_no_warning(
             path="config/firmware.yaml", format="yaml", keys=("firmware_version", "board_revision")
         ),
     )
+    assert len(_metadata_warnings(recwarn)) == 0
+
+
+def test_a_declaration_saved_with_a_utf8_bom_is_accepted(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # Several Windows editors and PowerShell write one by default.
+    root = tmp_path / "project"
+    root.mkdir()
+    files = [{"path": "f.json", "format": "json", "keys": ["k"]}]
+    document = json.dumps({"version": 1, "files": files}).encode()
+    (root / metadata.DECLARATION_FILENAME).write_bytes(codecs.BOM_UTF8 + document)
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result == (metadata.DeclaredFile(path="f.json", format="json", keys=("k",)),)
     assert len(_metadata_warnings(recwarn)) == 0
 
 

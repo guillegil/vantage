@@ -27,6 +27,7 @@ every declared path is recorded on the run.
 from __future__ import annotations
 
 import json
+import stat
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 
@@ -37,6 +38,11 @@ from pytest_vantage.budget import _encoded_cost
 
 DECLARATION_FILENAME = "vantage-metadata.json"
 """The declaration's fixed name, at the test repository root."""
+
+MAX_DECLARATION_BYTES = 1024 * 1024
+"""Largest declaration read, in raw bytes: far more than any declaration
+whose paths and keys fit `MAX_METADATA_SECTION_BYTES` needs, and small
+enough that a huge file cannot exhaust memory at session start."""
 
 MAX_DECLARED_FILES = 16
 """Bound on the number of declared files, and so on the `stat`/`open` calls
@@ -111,6 +117,48 @@ def _reject(config: pytest.Config, message: str) -> None:
     _warn(config, f"vantage: {message}")
 
 
+def _read_declaration_bytes(config: pytest.Config, rootpath: Path) -> bytes | None:
+    """The declaration's bytes, or `None` after one warning.
+
+    Read only if it is a regular file, and at most `MAX_DECLARATION_BYTES`
+    of it: opening a FIFO would hang session start, and a device such as
+    `/dev/zero` would be read until memory runs out. The type is checked
+    before the open, the same trade the declared files make: swapping
+    something else in between needs write access to the checkout.
+    """
+    declaration_path = rootpath / DECLARATION_FILENAME
+    try:
+        if not stat.S_ISREG(declaration_path.stat().st_mode):
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} at {rootpath} is not a regular file, "
+                "metadata will not be captured",
+            )
+            return None
+        with declaration_path.open("rb") as handle:
+            raw = handle.read(MAX_DECLARATION_BYTES + 1)
+    except FileNotFoundError:
+        _reject(
+            config, f"no {DECLARATION_FILENAME} found at {rootpath}, metadata will not be captured"
+        )
+        return None
+    except OSError as exc:
+        _reject(
+            config,
+            f"cannot read {DECLARATION_FILENAME} at {rootpath} "
+            f"({exc.strerror or type(exc).__name__}), metadata will not be captured",
+        )
+        return None
+    if len(raw) > MAX_DECLARATION_BYTES:
+        _reject(
+            config,
+            f"{DECLARATION_FILENAME} is larger than {MAX_DECLARATION_BYTES} bytes, "
+            "metadata will not be captured",
+        )
+        return None
+    return raw
+
+
 def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFile, ...] | None:
     """Parse and validate `vantage-metadata.json` at `rootpath`.
 
@@ -122,18 +170,17 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
 
     Reads only the declaration itself, never the files it names.
     """
-    declaration_path = rootpath / DECLARATION_FILENAME
-    try:
-        raw = declaration_path.read_bytes()
-    except OSError:
-        _reject(
-            config, f"no {DECLARATION_FILENAME} found at {rootpath}, metadata will not be captured"
-        )
+    raw = _read_declaration_bytes(config, rootpath)
+    if raw is None:
         return None
     try:
-        text = raw.decode("utf-8")
-        document = json.loads(text)
-    except (UnicodeDecodeError, RecursionError, json.JSONDecodeError):
+        # `utf-8-sig` drops one leading BOM, which several Windows editors
+        # write and `json.loads` refuses in a `str`.
+        document = json.loads(raw.decode("utf-8-sig"))
+    except (RecursionError, ValueError):
+        # `ValueError` covers `UnicodeDecodeError`, `JSONDecodeError` and an
+        # integer literal past the interpreter's digit limit, which `json`
+        # raises as a plain `ValueError`.
         _reject(config, f"{DECLARATION_FILENAME} is not valid JSON, metadata will not be captured")
         return None
     if not isinstance(document, dict):
@@ -351,6 +398,7 @@ def resolve_declared_path(rootpath: Path, declared: str) -> Path | None:
 
 __all__ = [
     "DECLARATION_FILENAME",
+    "MAX_DECLARATION_BYTES",
     "MAX_DECLARED_FILE_BYTES",
     "MAX_DECLARED_FILES",
     "MAX_DECLARED_KEY_CHARS",
