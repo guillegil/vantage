@@ -177,30 +177,6 @@ def test_to_result_a_field_within_bound_is_stored_whole_unflagged() -> None:
     assert result.failure.traceback_truncated is False
 
 
-def test_to_result_truncation_flag_is_a_disjunction_client_true_server_false() -> None:
-    """The client reports a budget drop (`failure_message_truncated=True`) on
-    a message that fits the server's bound, so `truncate()` reports `False`.
-    The stored flag keeps the client's `True`."""
-    item = _result_report(failure_message="short message", failure_message_truncated=True)
-
-    result = _to_result(item)
-
-    assert result.failure is not None
-    assert result.failure.failure_message == "short message"
-    assert result.failure.failure_message_truncated is True
-
-
-def test_to_result_disjunction_other_direction_server_flag_still_wins() -> None:
-    """The client sends `False` on a field the server itself must cut; the
-    stored flag is `True` regardless of what the client claimed."""
-    item = _result_report(traceback="x" * (MAX_TEXT_FIELD_BYTES + 1024), traceback_truncated=False)
-
-    result = _to_result(item)
-
-    assert result.failure is not None
-    assert result.failure.traceback_truncated is True
-
-
 # Every field with a client-side truncation flag, as `(wire value, wire flag,
 # container, stored flag)`. The plugin's report budget drops `traceback` and
 # captured output before `failure_message`, so the client's flag must survive

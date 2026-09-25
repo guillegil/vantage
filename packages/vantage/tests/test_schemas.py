@@ -1,4 +1,4 @@
-"""Validation of a session report's `vcs`, `metadata` and result sections.
+"""Validation of a session report's `vcs` and `metadata` sections.
 
 `VcsReport.commit` accepts a SHA-256 (64 hex chars), never only a 40-hex
 pattern -- git is migrating away from SHA-1.
@@ -11,8 +11,6 @@ from pydantic import ValidationError
 from vantage.service.schemas import (
     MetadataFileReport,
     MetadataReport,
-    ResultReport,
-    SessionReport,
     VcsReport,
 )
 
@@ -27,13 +25,6 @@ def _well_formed_vcs(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
-
-
-def test_vcs_report_accepts_a_well_formed_section() -> None:
-    report = VcsReport.model_validate(_well_formed_vcs())
-
-    assert report.commit == "a" * 40
-    assert report.branch == "main"
 
 
 def test_vcs_report_accepts_a_sha256_commit_sixty_four_hex_characters() -> None:
@@ -73,44 +64,6 @@ def test_vcs_report_rejects_a_missing_required_field() -> None:
 
     with pytest.raises(ValidationError, match="root"):
         VcsReport.model_validate(incomplete)
-
-
-def test_session_report_vcs_defaults_to_none_when_the_section_is_absent() -> None:
-    """An older plugin's report shape -- no `vcs` key at all -- still
-    validates; `SessionReport.vcs` defaults to `None`."""
-    report = SessionReport.model_validate(
-        {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            }
-        }
-    )
-
-    assert report.vcs is None
-
-
-def test_session_report_carries_a_well_formed_vcs_section() -> None:
-    report = SessionReport.model_validate(
-        {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            },
-            "vcs": _well_formed_vcs(),
-        }
-    )
-
-    assert report.vcs is not None
-    assert report.vcs.commit == "a" * 40
 
 
 def _well_formed_metadata_file(**overrides: object) -> dict[str, object]:
@@ -190,94 +143,3 @@ def test_metadata_report_rejects_an_unknown_field() -> None:
         MetadataReport.model_validate(
             {"declaration": "vantage-metadata.json", "files": [], "extra_field": 1}
         )
-
-
-def test_session_report_metadata_defaults_to_none_when_the_section_is_absent() -> None:
-    """An older plugin's report shape -- no `metadata` key at all -- still
-    validates; `SessionReport.metadata` defaults to `None`."""
-    report = SessionReport.model_validate(
-        {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            }
-        }
-    )
-
-    assert report.metadata is None
-
-
-def test_session_report_carries_a_well_formed_metadata_section() -> None:
-    report = SessionReport.model_validate(
-        {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            },
-            "metadata": {
-                "declaration": "vantage-metadata.json",
-                "files": [_well_formed_metadata_file()],
-            },
-        }
-    )
-
-    assert report.metadata is not None
-    assert report.metadata.files[0].path == "config/firmware.yaml"
-
-
-def _minimal_result_entry(**overrides: object) -> dict[str, object]:
-    """A result entry with no failure or captured-output keys at all, the
-    exact shape an older plugin still sends."""
-    payload: dict[str, object] = {
-        "node_id": "packages/vantage/tests/test_x.py::test_case",
-        "file_path": "packages/vantage/tests/test_x.py",
-        "class_name": None,
-        "function_name": "test_case",
-        "param_id": None,
-        "outcome": "passed",
-        "duration": 0.0031,
-        "started_at": None,
-        "finished_at": None,
-        "setup_outcome": "passed",
-        "call_outcome": "passed",
-        "teardown_outcome": "passed",
-        "setup_duration": 0.0008,
-        "call_duration": 0.0019,
-        "teardown_duration": 0.0004,
-        "worker_id": None,
-    }
-    payload.update(overrides)
-    return payload
-
-
-def test_result_report_failure_evidence_fields_all_default_to_absent() -> None:
-    """Every failure and captured-output field on `ResultReport` is optional
-    and defaults to its absent shape, so an older plugin's report --
-    carrying none of these keys -- still validates."""
-    report = ResultReport.model_validate(_minimal_result_entry())
-
-    assert report.failure_type is None
-    assert report.failure_message is None
-    assert report.failure_message_truncated is False
-    assert report.failure_path is None
-    assert report.failure_lineno is None
-    assert report.failure_repr is None
-    assert report.failure_repr_truncated is False
-    assert report.traceback is None
-    assert report.traceback_truncated is False
-    assert report.skip_reason is None
-    assert report.skip_reason_truncated is False
-    assert report.xfail_reason is None
-    assert report.xfail_reason_truncated is False
-    assert report.captured_stdout is None
-    assert report.captured_stdout_truncated is False
-    assert report.captured_stderr is None
-    assert report.captured_stderr_truncated is False

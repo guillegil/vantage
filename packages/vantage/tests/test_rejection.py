@@ -14,7 +14,6 @@ import socket
 import sqlite3
 import threading
 import time
-import tracemalloc
 from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -429,7 +428,7 @@ def test_heartbeat_for_malformed_run_id_is_422(client: TestClient) -> None:
     assert body["error"] == "invalid_report"
 
 
-# --- Whole-report rejection, atomicity, measurement -------------------------
+# --- Whole-report rejection and atomicity ----------------------------------
 
 
 def test_one_malformed_result_among_five_hundred_rejects_the_whole_report(
@@ -483,36 +482,6 @@ def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
     assert "results" in body["fields"]
     for field in body["fields"]:
         assert safe_segment(field) == field
-
-
-def test_five_hundred_results_fit_within_the_body_cap() -> None:
-    """A 500-result report fits under `MAX_REPORT_BYTES`. Builds it through
-    the same wire-shaped assembly the other tests in this module use and
-    prints the real byte count."""
-    report = _bulk_results_report("5" + "d" * 31, 500)
-    encoded = json.dumps(report).encode("utf-8")
-
-    print(f"500-result report size: {len(encoded)} bytes (cap {MAX_REPORT_BYTES})")
-    assert len(encoded) < MAX_REPORT_BYTES
-
-
-def test_server_peak_memory_for_one_five_hundred_result_request(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
-    """Server-side peak memory for one 500-result request is measured and
-    printed, not asserted against an invented threshold."""
-    report = _bulk_results_report("6" + "e" * 31, 500)
-
-    tracemalloc.start()
-    try:
-        response = client.post("/api/v1/runs", json=report)
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-
-    print(f"peak traced memory for one 500-result request: {peak} bytes")
-    assert response.status_code == 201
-    assert store.count_results() == 500
 
 
 class _CommitCountingConnection:

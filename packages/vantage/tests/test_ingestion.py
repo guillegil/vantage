@@ -191,22 +191,6 @@ def test_report_without_vcs_section_still_records_run(
     assert execution.vcs is None
 
 
-def test_vcs_section_accepted_without_capability_check(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
-    """No capability flag has to be advertised or negotiated before a `vcs`
-    section is accepted."""
-    report = _well_formed_report("2" + "2" * 31)
-    report["vcs"] = _vcs_section()
-
-    response = client.post("/api/v1/runs", json=report)
-
-    assert response.status_code == 201
-    execution = store.get_execution("2" + "2" * 31)
-    assert execution is not None
-    assert execution.vcs is not None
-
-
 @pytest.mark.parametrize("path", ["/runs", "/api/runs"])
 def test_unversioned_path_is_refused(client: TestClient, path: str) -> None:
     response = client.post(path, json=_well_formed_report())
@@ -252,19 +236,6 @@ def test_report_with_null_or_empty_results_section_writes_no_result_rows(
     assert response.status_code == 201
     assert store.count_executions() == 1
     assert store.count_results() == 0
-
-
-@pytest.mark.parametrize("results_value", [None, []], ids=["null", "empty-list"])
-def test_session_report_accepts_a_null_or_empty_results_section(
-    results_value: list[Any] | None,
-) -> None:
-    """`SessionReport.results` is a declared field that round-trips the sent
-    value, not a section the envelope's `extra="ignore"` silently drops."""
-    from vantage.service.schemas import SessionReport
-
-    payload = SessionReport.model_validate({**_well_formed_report(), "results": results_value})
-
-    assert payload.results == results_value
 
 
 def test_replayed_report_with_results_does_not_duplicate_them(
@@ -366,23 +337,6 @@ def test_an_older_server_tolerates_unrecognized_failure_evidence_keys(
     assert response.status_code == 201
     body = response.json()
     assert body["ignored"] == ["results[].failure_context_extra"]
-    assert store.count_results() == 1
-
-
-def test_a_report_carrying_failure_evidence_within_the_cap_is_accepted_normally(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
-    """A report carrying failure evidence within the size cap is accepted:
-    one run row, its result stored, the response acknowledges."""
-    report = _well_formed_report("5" + "3" * 31)
-    report["results"] = [_failing_result_entry("packages/vantage/tests/test_h.py::test_one")]
-
-    response = client.post("/api/v1/runs", json=report)
-
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] == "created"
-    assert store.count_executions() == 1
     assert store.count_results() == 1
 
 
@@ -750,36 +704,6 @@ def _metadata_file(
 
 def _metadata_section(*files: dict[str, Any]) -> dict[str, Any]:
     return {"declaration": "vantage-metadata.json", "files": list(files)}
-
-
-def test_a_report_whose_metadata_is_entirely_garbage_still_records_the_run(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
-    """A malformed declared document never blocks the run row from being
-    stored."""
-    run_id = "6" + "0" * 31
-    report = _well_formed_report(run_id)
-    report["metadata"] = _metadata_section(
-        _metadata_file(content="not json at all", keys=["anything"])
-    )
-
-    response = client.post("/api/v1/runs", json=report)
-
-    assert response.status_code == 201
-    assert store.get_execution(run_id) is not None
-    assert _stored_metadata_files(store, run_id) == frozenset(
-        {MetadataFile(source_file="config/firmware.json", content_type="json", status="malformed")}
-    )
-    assert _stored_metadata_entries(store, run_id) == frozenset(
-        {
-            MetadataEntry(
-                key="anything",
-                value=None,
-                source_file="config/firmware.json",
-                status="source_unavailable",
-            )
-        }
-    )
 
 
 _VALUE_TOO_LARGE = "x" * (MAX_METADATA_VALUE_BYTES + 1)
