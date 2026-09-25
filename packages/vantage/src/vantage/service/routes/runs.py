@@ -14,9 +14,17 @@ runs. Instead:
 2. `_read_bounded_body` streams the body and stops the moment the running
    total exceeds `MAX_REPORT_BYTES`; `Content-Length` is never trusted. A
    client disconnect mid-transfer becomes `IncompleteBodyError`.
-3. Only a complete, capped body is parsed as JSON and validated.
+3. Only a complete, capped body is decoded as UTF-8, parsed as JSON and
+   validated.
 
 Nothing is written unless all three succeed.
+
+**A lone surrogate is replaced, not rejected.** A `\\udXXX` escape with no
+partner is valid JSON, and pytest produces such text itself from file names
+decoded with `surrogateescape`. It cannot be encoded as UTF-8, so it would
+fail the first encode on the way to storage; rejecting the report instead
+would lose the whole session over one character. `_decode_body` replaces
+every one, in keys and values alike, with U+FFFD before validation.
 
 **`results` is optional.** `None` (section absent) and `[]` both mean zero
 result rows, not a rejection; the route always passes a list to
@@ -26,10 +34,11 @@ result rows, not a rejection; the route always passes a list to
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import PurePath
-from typing import overload
+from typing import Any, overload
 
 from fastapi import APIRouter, Path, Request
 from fastapi.responses import JSONResponse
@@ -66,6 +75,7 @@ router = APIRouter()
 
 _JSON_MEDIA_TYPE = "application/json"
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 _KNOWN_METADATA_CONTENT_TYPES = frozenset({"json", "yaml", "toml"})
 """Mirrors the SQL `CHECK` on `run_metadata_file.content_type` (schema.sql).
@@ -381,15 +391,57 @@ async def _read_bounded_body(request: Request) -> bytes:
     return bytes(buffer)
 
 
+def _without_lone_surrogates(text: str) -> str:
+    return text if text.isascii() else _LONE_SURROGATE.sub("�", text)
+
+
+def _decode_body(body: bytes) -> Any:
+    """Parse `body` as strict UTF-8 JSON, with every lone surrogate replaced.
+
+    Decoding first, strictly, refuses UTF-8-encoded surrogates, which
+    `json.loads(bytes)` would accept. Every parse failure is the same client
+    error: `json.loads` raises `JSONDecodeError`, `UnicodeDecodeError` and
+    the integer digit limit's plain `ValueError`, and `RecursionError` for
+    deep nesting.
+
+    The walk is iterative because `json.loads` accepts nesting deeper than
+    Python's recursion limit. Valid surrogate pairs were already combined by
+    `json.loads`, so any surrogate left is a lone one.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:
+        raise InvalidJsonError() from exc
+
+    if isinstance(payload, str):
+        return _without_lone_surrogates(payload)
+    pending: list[Any] = [payload]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            if not all(key.isascii() for key in node):
+                cleaned = {_without_lone_surrogates(key): value for key, value in node.items()}
+                node.clear()
+                node.update(cleaned)
+            for key, value in node.items():
+                if isinstance(value, str):
+                    node[key] = _without_lone_surrogates(value)
+                elif isinstance(value, (dict, list)):
+                    pending.append(value)
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                if isinstance(value, str):
+                    node[index] = _without_lone_surrogates(value)
+                elif isinstance(value, (dict, list)):
+                    pending.append(value)
+    return payload
+
+
 @router.post("/runs")
 async def create_run(request: Request) -> JSONResponse:
     _require_json_media_type(request)
     body = await _read_bounded_body(request)
-
-    try:
-        payload_dict = json.loads(body)
-    except json.JSONDecodeError as exc:
-        raise InvalidJsonError() from exc
+    payload_dict = _decode_body(body)
 
     try:
         payload = SessionReport.model_validate(payload_dict)

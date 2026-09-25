@@ -467,6 +467,120 @@ def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     assert result.finished_at == datetime(2026, 8, 18, 13, 0, 2, tzinfo=timezone.utc)
 
 
+# --- lone surrogates ----------------------------------------------------------
+
+# pytest builds node ids and exception text from `surrogateescape`-decoded
+# file names, and `json.dumps` escapes the resulting lone surrogate into valid
+# JSON, so a real plugin sends these.
+_LONE = "caf\udce9"
+_REPLACED = "caf�"
+_NODE_ID = f"tests/{_LONE}/test_a.py::test_one"
+
+
+def _surrogate_report(field: str) -> dict[str, Any]:
+    report = _well_formed_report("5" + "e" * 31)
+    result = _result_entry("tests/test_a.py::test_one")
+    if field == "node_id":
+        result = _result_entry(_NODE_ID)
+    elif field == "run.interrupt_reason":
+        report["run"]["interrupt_reason"] = _LONE
+    elif field.startswith("vcs."):
+        report["vcs"] = _vcs_section(**{field.removeprefix("vcs."): _LONE})
+    elif field == "metadata.path":
+        report["metadata"] = _metadata_section(
+            _metadata_file(path=f"{_LONE}.json", content="{}", keys=["k"])
+        )
+    elif field == "metadata.key":
+        report["metadata"] = _metadata_section(_metadata_file(content="{}", keys=[_LONE]))
+    else:
+        result[field] = _LONE
+    report["results"] = [result]
+    return report
+
+
+def _stored_surrogate_field(store: Any, field: str) -> object:
+    run_id = "5" + "e" * 31
+    execution = store.get_execution(run_id)
+    [result] = store.get_results(run_id)
+    if field == "node_id":
+        return (result.identity.node_id, result.identity.file_path)
+    if field == "run.interrupt_reason":
+        return execution.interrupt_reason
+    if field.startswith("vcs."):
+        return getattr(execution.vcs, field.removeprefix("vcs."))
+    if field == "metadata.path":
+        return {file.source_file for file in _stored_metadata_files(store, run_id)}
+    if field == "metadata.key":
+        return {entry.key for entry in _stored_metadata_entries(store, run_id)}
+    if field == "worker_id":
+        return result.worker_id
+    if field == "captured_stdout":
+        return result.captured.stdout
+    return getattr(result.failure, field)
+
+
+_SURROGATE_CASES: dict[str, object] = {
+    "node_id": (f"tests/{_REPLACED}/test_a.py::test_one", f"tests/{_REPLACED}/test_a.py"),
+    "worker_id": _REPLACED,
+    "failure_message": _REPLACED,
+    "skip_reason": _REPLACED,
+    "xfail_reason": _REPLACED,
+    "captured_stdout": _REPLACED,
+    "run.interrupt_reason": _REPLACED,
+    "vcs.branch": _REPLACED,
+    "vcs.commit_subject": _REPLACED,
+    "metadata.path": {f"{_REPLACED}.json"},
+    "metadata.key": {_REPLACED},
+}
+
+
+@pytest.fixture(params=["memory", "sqlite"])
+def any_store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Any]:
+    if request.param == "memory":
+        yield InMemoryExecutionStore()
+        return
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    yield adapter
+    adapter.close()
+
+
+@pytest.mark.parametrize(("field", "expected"), _SURROGATE_CASES.items(), ids=_SURROGATE_CASES)
+def test_a_lone_surrogate_in_any_string_is_stored_as_the_replacement_character(
+    any_store: Any, field: str, expected: object
+) -> None:
+    """A lone surrogate cannot be encoded as UTF-8, so the server replaces it
+    with U+FFFD before validation instead of failing the whole session at
+    the first encode. Both adapters store the same text."""
+    client = TestClient(create_app(any_store))
+
+    response = client.post(
+        "/api/v1/runs",
+        content=json.dumps(_surrogate_report(field)).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 201
+    assert _stored_surrogate_field(any_store, field) == expected
+
+
+def test_a_lone_surrogate_in_a_key_is_replaced_too(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Keys are client text as well: an unknown result key carrying a lone
+    surrogate is tolerated like any other unknown key, not refused."""
+    report = _well_formed_report("5" + "f" * 31)
+    report["results"] = [_result_entry("tests/test_a.py::test_one", **{_LONE: "x"})]
+
+    response = client.post(
+        "/api/v1/runs",
+        content=json.dumps(report).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["ignored"] == ["results[].<unnamed>"]
+
+
 # --- heartbeat endpoint -------------------------------------------------------
 
 

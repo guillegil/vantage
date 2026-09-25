@@ -154,6 +154,33 @@ def test_non_json_body_is_400(client: TestClient, store: InMemoryExecutionStore)
     assert store.count_executions() == 0
 
 
+_UNPARSEABLE_BODIES = {
+    "invalid_utf8": json.dumps(_well_formed_report()).encode().replace(b"null", b'"\xff"', 1),
+    "encoded_surrogate": json.dumps(_well_formed_report())
+    .encode()
+    .replace(b"null", b'"\xed\xa0\x80"', 1),
+    "nesting_deeper_than_the_recursion_limit": b"[" * 200_000,
+    "integer_over_the_digit_limit": b'{"run": {"exit_status": ' + b"1" * 5000 + b"}}",
+}
+
+
+@pytest.mark.parametrize("body", _UNPARSEABLE_BODIES.values(), ids=_UNPARSEABLE_BODIES.keys())
+def test_every_unparseable_body_is_400_invalid_json(
+    client: TestClient, store: InMemoryExecutionStore, body: bytes
+) -> None:
+    """`json.loads` fails with `UnicodeDecodeError`, `RecursionError` or a
+    plain `ValueError`, not only `JSONDecodeError`; each is the same client
+    error. A UTF-8-encoded surrogate is not UTF-8 at all, so it is refused
+    here rather than decoded into a lone surrogate."""
+    response = client.post(
+        "/api/v1/runs", content=body, headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+    assert store.count_executions() == 0
+
+
 def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore) -> None:
     from vantage.service.errors import MAX_REPORT_BYTES
 
