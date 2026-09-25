@@ -1,10 +1,10 @@
-"""The per-report failure-text budget: the cap mirrored from the server,
+"""The per-report failure-text budget: the caps mirrored from the server,
 pinned so a drift fails the build rather than causing 413s in production,
-and `spend_failure_text_budget`'s one-pass, execution-order, field-priority
-spending with drop-whole semantics.
+and `spend_failure_text_budget`'s failures-first, field-by-field spending,
+with the server's per-field cut applied before anything is charged.
 
-The import of `vantage.service.errors` is test-only; `budget.py` itself must
-not depend on the server package.
+The imports of `vantage.service` are test-only; `budget.py` itself must not
+depend on the server package.
 """
 
 from __future__ import annotations
@@ -14,21 +14,26 @@ import json
 import pytest
 import pytest_vantage.budget as budget_module
 from pytest_vantage.budget import (
+    _FIELD_BYTES_CAP,
     _REPORT_BYTES_CAP,
     MAX_FAILURE_TEXT_BYTES,
     _encoded_cost,
     spend_failure_text_budget,
 )
 from vantage.service.errors import MAX_REPORT_BYTES
+from vantage.service.truncation import MAX_TEXT_FIELD_BYTES
 
 
-def test_the_mirrored_cap_matches_the_server() -> None:
-    """`_REPORT_BYTES_CAP` mirrors the server's `MAX_REPORT_BYTES`, which the
-    plugin cannot import. A mirror that drifts high produces 413s that reject
-    whole sessions, so it is pinned against the server's real value.
+def test_the_mirrored_caps_match_the_server() -> None:
+    """`_REPORT_BYTES_CAP` and `_FIELD_BYTES_CAP` mirror the server's
+    `MAX_REPORT_BYTES` and `MAX_TEXT_FIELD_BYTES`, which the plugin cannot
+    import. A report cap that drifts high produces 413s that reject whole
+    sessions, and a field cap that drifts sends or drops text the server
+    would treat differently, so both are pinned against the server's values.
     """
     assert _REPORT_BYTES_CAP == MAX_REPORT_BYTES
     assert MAX_FAILURE_TEXT_BYTES * 2 == MAX_REPORT_BYTES
+    assert _FIELD_BYTES_CAP == MAX_TEXT_FIELD_BYTES
 
 
 # --- spend_failure_text_budget ------------------------------------------------
@@ -62,9 +67,10 @@ def test_spend_budget_charges_encoded_json_bytes_not_raw_len(
 
 
 def test_spend_budget_is_execution_order_first_come(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Allocation is first-come in the order `entries` already carries. Of
-    three identical results with room for exactly one, the first stays whole
-    and the other two drop because they come later.
+    """Among results of the same kind, allocation is first-come in the
+    order `entries` already carries. Of three identical results with room
+    for exactly one, the first stays whole and the other two drop because
+    they come later.
     """
     big = "T" * 100
     cost = len(json.dumps(big, ensure_ascii=False).encode("utf-8"))
@@ -99,6 +105,105 @@ def test_spend_budget_field_priority_within_a_result(monkeypatch: pytest.MonkeyP
     assert "failure_message_truncated" not in entries[0]
     assert entries[0]["traceback"] is None
     assert entries[0]["traceback_truncated"] is True
+
+
+def test_a_passing_tests_output_never_starves_a_later_failure_of_its_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Captured output is kept for every result that ran, passing ones
+    included. It is charged only after every failure's evidence, so a
+    chatty passing test earlier in the run cannot use up the budget a later
+    failure needs to say what broke.
+    """
+    chatter = "p" * 1000
+    message = "assert 3 == 4"
+    monkeypatch.setattr(
+        budget_module, "MAX_FAILURE_TEXT_BYTES", _encoded_cost(chatter) + _encoded_cost(message) - 1
+    )
+    entries: list[dict[str, object]] = [
+        {"outcome": "passed", "captured_stdout": chatter},
+        {"outcome": "failed", "failure_message": message},
+    ]
+
+    spend_failure_text_budget(entries)
+
+    assert entries[1] == {"outcome": "failed", "failure_message": message}
+    assert entries[0] == {
+        "outcome": "passed",
+        "captured_stdout": None,
+        "captured_stdout_truncated": True,
+    }
+
+
+def test_every_failure_message_is_charged_before_any_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Across results, not only within one. The budget has room for two
+    messages and one traceback; spent result by result, the first failure's
+    traceback and output would use it all before the second's message.
+    Spent field by field, both failures keep their message, the first keeps
+    its traceback, and the rest is dropped.
+    """
+    message = "M" * 50
+    traceback_text = "T" * 80
+    output = "S" * 50
+    monkeypatch.setattr(
+        budget_module,
+        "MAX_FAILURE_TEXT_BYTES",
+        2 * _encoded_cost(message) + _encoded_cost(traceback_text),
+    )
+    entries: list[dict[str, object]] = [
+        {
+            "outcome": "failed",
+            "failure_message": message,
+            "traceback": traceback_text,
+            "captured_stdout": output,
+        },
+        {"outcome": "error", "failure_message": message, "traceback": traceback_text},
+    ]
+
+    spend_failure_text_budget(entries)
+
+    assert entries[0] == {
+        "outcome": "failed",
+        "failure_message": message,
+        "traceback": traceback_text,
+        "captured_stdout": None,
+        "captured_stdout_truncated": True,
+    }
+    assert entries[1] == {
+        "outcome": "error",
+        "failure_message": message,
+        "traceback": None,
+        "traceback_truncated": True,
+    }
+
+
+def test_a_field_is_cut_to_the_servers_field_bound_before_it_is_charged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The server keeps at most `_FIELD_BYTES_CAP` bytes of any field, so
+    the rest is never sent and never charged. The cut falls on a character
+    boundary: the two-byte character straddling it is dropped whole. Only
+    the cut value's cost is charged, which leaves exactly enough of the
+    budget for a later field.
+    """
+    big_stdout = "a" + "é" * 100_000  # 200,001 bytes of UTF-8
+    kept = "a" + "é" * 32_767  # 65,535 bytes: the next "é" would straddle the bound
+    filler = "x" * 1000
+    monkeypatch.setattr(
+        budget_module, "MAX_FAILURE_TEXT_BYTES", _encoded_cost(kept) + _encoded_cost(filler)
+    )
+    entries: list[dict[str, object]] = [
+        {"outcome": "failed", "captured_stdout": big_stdout, "captured_stderr": filler}
+    ]
+
+    spend_failure_text_budget(entries)
+
+    assert entries[0]["captured_stdout"] == kept
+    assert entries[0]["captured_stdout_truncated"] is True
+    assert entries[0]["captured_stderr"] == filler
+    assert "captured_stderr_truncated" not in entries[0]
 
 
 def test_short_fields_are_never_charged_or_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
