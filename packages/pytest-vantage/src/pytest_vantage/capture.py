@@ -109,12 +109,16 @@ def _isoformat_utc(moment: datetime) -> str:
 _REPORT_OUTCOMES = frozenset({"passed", "failed", "skipped"})
 
 
-class _Pending:
-    """Accumulates the up-to-three reports pytest emits for one test's
-    lifecycle, keyed by node id in `Recorder._results`.
-    A `dict[str, _Pending]` gives insertion order for free, and a duplicate
-    report for the same node id and phase overwrites rather than duplicates,
-    so a report delivered twice never becomes a second result.
+# How much each verdict says went wrong, for choosing between several
+# complete executions of one node id.
+_SEVERITY = {"skipped": 0, "xfailed": 1, "passed": 2, "xpassed": 3, "failed": 4, "error": 5}
+
+
+class _Execution:
+    """The up-to-three reports pytest emits for one execution of a test: one
+    attempt, on one worker. A duplicate report for the same phase overwrites
+    rather than duplicates, so a report delivered twice never becomes a
+    second result.
     """
 
     __slots__ = ("setup", "call", "teardown")
@@ -142,6 +146,27 @@ class _Pending:
             self.call = report
         elif when == "teardown":
             self.teardown = report
+
+
+class _Pending:
+    """Every report pytest emitted for one node id, keyed by node id in
+    `Recorder._results`; a `dict[str, _Pending]` gives insertion order for
+    free.
+
+    Reports are grouped by the xdist worker that sent them: under `--dist
+    each` every worker runs every test and the controller receives their
+    reports interleaved, and phases from different workers must never be
+    stitched into one result. Without xdist the worker id is `None` and
+    there is one execution.
+    """
+
+    __slots__ = ("executions",)
+
+    def __init__(self) -> None:
+        self.executions: dict[str | None, _Execution] = {}
+
+    def record(self, report: pytest.TestReport) -> None:
+        self.executions.setdefault(_worker_id(report), _Execution()).record(report)
 
 
 def accumulate(pending: dict[str, _Pending], report: pytest.TestReport) -> None:
@@ -291,17 +316,36 @@ def _captured_output(
 
 def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
     """Build one wire-shape `results[]` entry from an accumulated `_Pending`.
-    Returns `None` -- dropped, never invented -- when the teardown report
-    was never seen: a half-observed test (e.g. one interrupted mid-call) is
-    worse reported as whole than not at all.
+    Returns `None` -- dropped, never invented -- when no execution of the
+    test was observed whole: a half-observed test (e.g. one interrupted
+    mid-call) is worse reported as whole than not at all.
+
+    Several complete executions of one node id come from xdist's `--dist
+    each`. The server keeps one result per node id, so the most severe one
+    is sent, whole, from the worker that produced it: a failure on one
+    worker is never hidden by a pass on another. Ties keep the execution
+    seen first.
     """
-    if pending.teardown is None:
+    results = [
+        result
+        for result in (_build_execution(node_id, e) for e in pending.executions.values())
+        if result is not None
+    ]
+    if not results:
         return None
-    setup = pending.setup
+    return max(results, key=lambda result: _SEVERITY[str(result["outcome"])])
+
+
+def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] | None:
+    """One execution's `results[]` entry, or `None` when its teardown report
+    was never seen."""
+    if execution.teardown is None:
+        return None
+    setup = execution.setup
     if setup is None:
         raise AssertionError("a teardown report implies a setup report was seen first")
-    call = pending.call
-    teardown = pending.teardown
+    call = execution.call
+    teardown = execution.teardown
 
     identity = decompose(node_id)
     outcome = derive_outcome(setup, call, teardown)

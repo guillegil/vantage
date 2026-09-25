@@ -100,6 +100,44 @@ def test_a_crashed_worker_leaves_every_other_result_recorded(
     assert recorded == {f"test_{n}" for n in range(1, 7)}
 
 
+# Fails on gw0 only. gw1 passes after a short sleep, so its passing call
+# report reaches the controller after gw0's failing one.
+_FAILS_ON_ONE_WORKER = """
+import os
+import time
+
+
+def test_platform_specific():
+    if os.environ["PYTEST_XDIST_WORKER"] == "gw0":
+        raise AssertionError("fails on gw0 only")
+    time.sleep(0.5)
+"""
+
+
+def test_dist_each_keeps_a_failure_seen_on_one_worker(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """Under `--dist each` every worker runs every test. The server keeps one
+    result per node id, so the plugin sends the most severe execution, whole:
+    the failure `--dist each` exists to find, with the worker it happened on,
+    rather than whichever report arrived last."""
+    pytest.importorskip("xdist")
+    pytester.makepyfile(test_each=_FAILS_ON_ONE_WORKER)
+
+    run = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "-n", "2", "--dist", "each"
+    )
+
+    run.assert_outcomes(passed=1, failed=1)
+    (execution,) = vantage_server.executions()
+    assert execution.exit_status == 1
+    (result,) = vantage_server.results()
+    assert result.outcome == "failed"
+    assert result.call_outcome == "failed"
+    assert result.worker_id == "gw0"
+
+
 _PRINTS_IN_EVERY_PHASE = """
 import pytest
 

@@ -57,6 +57,16 @@ def _report(
     return report
 
 
+def _pending(*reports: pytest.TestReport) -> _Pending:
+    """The accumulated state for one node id, built the way `Recorder` builds
+    it: every report goes through `accumulate`, in the order given."""
+    pending: dict[str, _Pending] = {}
+    for report in reports:
+        accumulate(pending, report)
+    (entry,) = pending.values()
+    return entry
+
+
 @pytest.mark.parametrize(
     (
         "node_id",
@@ -284,10 +294,11 @@ def test_build_result_phase_duration_null_vs_zero_survives_the_json_hop() -> Non
     genuine `0.0` survives as `0.0` -- never `x or None` -- checked at the
     actual `json.dumps` boundary, not just the Python dict.
     """
-    pending = _Pending()
-    pending.setup = _report("setup", "failed", duration=0.0)  # ran, genuinely instant
-    pending.teardown = _report("teardown", "passed", duration=0.0031)
-    # pending.call is deliberately never set -- setup failed, so call never ran.
+    # No call report -- setup failed, so call never ran.
+    pending = _pending(
+        _report("setup", "failed", duration=0.0),  # ran, genuinely instant
+        _report("teardown", "passed", duration=0.0031),
+    )
 
     result = build_result("test_nid.py::test_it", pending)
     assert result is not None
@@ -309,10 +320,8 @@ def test_build_result_returns_none_when_teardown_was_never_seen() -> None:
     """Setup+call with no teardown (e.g. interrupted mid-session) is
     DROPPED, not invented -- `assemble_results` relies on this `None` to skip
     the entry."""
-    pending = _Pending()
-    pending.setup = _report("setup", "passed")
-    pending.call = _report("call", "passed")
     # No teardown report was ever seen.
+    pending = _pending(_report("setup", "passed"), _report("call", "passed"))
 
     assert build_result("test_nid.py::test_it", pending) is None
 
@@ -320,18 +329,72 @@ def test_build_result_returns_none_when_teardown_was_never_seen() -> None:
 # --- accumulation mechanics -------------------------------------------------
 
 
+_ALL_PHASES_PASSING: tuple[tuple[_Phase, _ReportOutcome], ...] = (
+    ("setup", "passed"),
+    ("call", "passed"),
+    ("teardown", "passed"),
+)
+
+
 def test_accumulate_overwrites_a_duplicate_report_for_the_same_phase() -> None:
     """A duplicate report for the same node id and phase overwrites, never a
     second row."""
     pending: dict[str, _Pending] = {}
-    first_call = _report("call", "failed", nodeid="test_nid.py::test_it")
-    second_call = _report("call", "passed", nodeid="test_nid.py::test_it")
+    for report in (
+        _report("setup", "passed"),
+        _report("call", "failed"),
+        _report("call", "passed"),
+        _report("teardown", "passed"),
+    ):
+        accumulate(pending, report)
 
-    accumulate(pending, first_call)
-    accumulate(pending, second_call)
+    (result,) = assemble_results(pending)
 
-    assert len(pending) == 1
-    assert pending["test_nid.py::test_it"].call is second_call
+    assert result["call_outcome"] == "passed"
+
+
+def _on_worker(report: pytest.TestReport, worker_id: str) -> pytest.TestReport:
+    """The report as the xdist controller receives it from `worker_id`."""
+    report.worker_id = worker_id  # type: ignore[attr-defined]
+    return report
+
+
+def test_executions_on_different_workers_are_never_stitched_together() -> None:
+    """Under `--dist each` every worker runs every test, and the controller
+    receives their reports interleaved. Phases from different workers must
+    not merge into one result; the most severe execution is kept whole,
+    so a failure on one worker is never hidden by a pass on another."""
+    pending: dict[str, _Pending] = {}
+    for report in (
+        _on_worker(_report("setup", "passed", duration=0.5, start=20.0), "gw1"),
+        _on_worker(_report("setup", "passed", duration=0.25, start=10.0), "gw0"),
+        _on_worker(_report("call", "failed"), "gw0"),
+        _on_worker(_report("call", "passed"), "gw1"),
+        _on_worker(_report("teardown", "passed"), "gw0"),
+        _on_worker(_report("teardown", "passed"), "gw1"),
+    ):
+        accumulate(pending, report)
+
+    (result,) = assemble_results(pending)
+
+    assert result["outcome"] == "failed"
+    assert result["worker_id"] == "gw0"
+    assert result["call_outcome"] == "failed"
+    assert result["setup_duration"] == 0.25
+    assert result["started_at"] == "1970-01-01T00:00:10.000000+00:00"
+
+
+def test_executions_with_the_same_verdict_keep_the_first_one_seen() -> None:
+    """Between executions no worse than each other, the choice is stable:
+    the first worker to report the test."""
+    pending: dict[str, _Pending] = {}
+    for worker_id in ("gw1", "gw0"):
+        for when, outcome in _ALL_PHASES_PASSING:
+            accumulate(pending, _on_worker(_report(when, outcome), worker_id))
+
+    (result,) = assemble_results(pending)
+
+    assert result["worker_id"] == "gw1"
 
 
 def test_a_crashed_worker_report_is_ignored_and_the_rest_still_recorded() -> None:
@@ -423,22 +486,13 @@ def test_a_new_setup_report_starts_a_fresh_attempt(
     assert result["duration"] == 0.75  # the final attempt's setup and teardown only
 
 
-_ALL_PHASES_PASSING: tuple[tuple[_Phase, _ReportOutcome], ...] = (
-    ("setup", "passed"),
-    ("call", "passed"),
-    ("teardown", "passed"),
-)
-
-
 def test_assemble_results_preserves_execution_order() -> None:
     """A `dict` gives insertion order for free, so the emitted array is in
     execution order -- and skips any entry with no teardown report (the
     same drop `build_result` proves directly above)."""
-    pending: dict[str, _Pending] = {
-        "test_a.py::test_unresolved": _Pending(),  # setup+call only -- dropped
-    }
-    pending["test_a.py::test_unresolved"].setup = _report("setup", "passed")
-    pending["test_a.py::test_unresolved"].call = _report("call", "passed")
+    pending: dict[str, _Pending] = {}
+    for when, outcome in _ALL_PHASES_PASSING[:2]:  # setup+call only -- dropped
+        accumulate(pending, _report(when, outcome, nodeid="test_a.py::test_unresolved"))
     for node_id in ("test_a.py::test_1", "test_a.py::test_2", "test_a.py::test_3"):
         for when, outcome in _ALL_PHASES_PASSING:
             accumulate(pending, _report(when, outcome, nodeid=node_id))
@@ -477,16 +531,14 @@ def test_build_result_worker_id(
     stand-in unrelated to the real xdist classes. `None` when neither is
     present.
     """
-    pending = _Pending()
-    pending.setup = _report("setup", "passed")
-    if worker_id_attr is not None:
-        pending.setup.worker_id = worker_id_attr  # type: ignore[attr-defined]
-    if node_attr is not None:
-        pending.setup.node = node_attr  # type: ignore[attr-defined]
-    pending.call = _report("call", "passed")
-    pending.teardown = _report("teardown", "passed")
+    reports = [_report(when, outcome) for when, outcome in _ALL_PHASES_PASSING]
+    for report in reports:
+        if worker_id_attr is not None:
+            report.worker_id = worker_id_attr  # type: ignore[attr-defined]
+        if node_attr is not None:
+            report.node = node_attr  # type: ignore[attr-defined]
 
-    result = build_result("test_nid.py::test_it", pending)
+    result = build_result("test_nid.py::test_it", _pending(*reports))
 
     assert result is not None
     assert result["worker_id"] == expected
@@ -566,12 +618,7 @@ def test_captured_output_concatenates_phases_in_order_no_marker() -> None:
         "captured_stdout": "TEARDOWN_OUT",
         "captured_stderr": "TEARDOWN_ERR",
     }
-    pending = _Pending()
-    pending.setup = setup
-    pending.call = call
-    pending.teardown = teardown
-
-    result = build_result("test_nid.py::test_it", pending)
+    result = build_result("test_nid.py::test_it", _pending(setup, call, teardown))
 
     assert result is not None
     assert result["captured_stdout"] == "SETUP_OUTCALL_OUTTEARDOWN_OUT"
@@ -599,10 +646,7 @@ def test_captured_output_is_null_only_when_no_phase_was_read(
             "captured_stderr": value,
         }
         reports.append(report)
-    pending = _Pending()
-    pending.setup, pending.call, pending.teardown = reports
-
-    result = build_result("test_nid.py::test_it", pending)
+    result = build_result("test_nid.py::test_it", _pending(*reports))
 
     assert result is not None
     assert result["captured_stdout"] == expected
