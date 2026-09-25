@@ -4,8 +4,8 @@ The shared contract suite (``vantage_port_contract.py``) runs against both
 this and the SQLite adapter, so the port is proven by two independent
 mechanisms rather than one implementation agreeing with itself. It is a real
 implementation, not a stub: it mirrors the SQLite adapter's catalogue
-monotonicity, first-write-wins results keyed by ``(run_id, node_id,
-attempt)``, and the run upsert guard -- a finish-write (`exit_status` is not
+monotonicity, first-write-wins results keyed by ``(run_id, node_id)``, and
+the run upsert guard -- a finish-write (`exit_status` is not
 `None`) applies over a start-only row, never the reverse.
 
 ``_last_contact`` is a separate dict because ``Execution`` carries no
@@ -55,18 +55,13 @@ def _normalized_vcs(vcs: VcsContext | None) -> VcsContext | None:
     return vcs
 
 
-# `attempt` is not on the wire; every result is attempt 0, matching the
-# schema's `DEFAULT 0`.
-_ATTEMPT = 0
-
-
 class InMemoryExecutionStore:
     """Implements `vantage.core.ports.storage.ExecutionStore` with dicts."""
 
     def __init__(self) -> None:
         self._executions: dict[str, Execution] = {}
         self._catalogue: dict[str, CatalogueEntry] = {}
-        self._results: dict[tuple[str, str, int], Result] = {}
+        self._results: dict[tuple[str, str], Result] = {}
         self._last_contact: dict[str, datetime] = {}
         self._settings: dict[tuple[str, str], UserSetting] = {}
         self._metadata_files: dict[tuple[str, str], MetadataFile] = {}
@@ -109,7 +104,7 @@ class InMemoryExecutionStore:
 
         for result in results:
             self._upsert_catalogue_entry(execution, result.identity)
-            key = (identity, result.identity.node_id, _ATTEMPT)
+            key = (identity, result.identity.node_id)
             if key not in self._results:
                 self._results[key] = result
 
@@ -161,9 +156,7 @@ class InMemoryExecutionStore:
 
     def get_results(self, execution_id: str) -> Sequence[Result]:
         return [
-            result
-            for (run_id, _node_id, _attempt), result in self._results.items()
-            if run_id == execution_id
+            result for (run_id, _node_id), result in self._results.items() if run_id == execution_id
         ]
 
     def count_results(self) -> int:
@@ -250,9 +243,7 @@ class InMemoryExecutionStore:
         # is the reference the SQLite adapter's SQL must agree with.
         page_limit = min(limit, MAX_PAGE_ITEMS)
         matching = [
-            result
-            for (run_id, _node_id, _attempt), result in self._results.items()
-            if run_id == execution_id
+            result for (run_id, _node_id), result in self._results.items() if run_id == execution_id
         ]
         window = matching[offset : offset + page_limit + 1]
         has_more = len(window) > page_limit
@@ -277,7 +268,7 @@ class InMemoryExecutionStore:
         return Page(items=items, has_more=has_more)
 
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
-        return self._results.get((execution_id, node_id, _ATTEMPT))
+        return self._results.get((execution_id, node_id))
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
         # Mirrors `list_runs`' total order -- `(started_at, run_id)`
@@ -286,7 +277,7 @@ class InMemoryExecutionStore:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         matches = [
             (run_id, result)
-            for (run_id, result_node_id, _attempt), result in self._results.items()
+            for (run_id, result_node_id), result in self._results.items()
             if result_node_id == node_id
         ]
         ordered = sorted(
@@ -337,7 +328,7 @@ class InMemoryExecutionStore:
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
         return tuple(
             (result.identity.file_path, result.outcome)
-            for (run_id, _node_id, _attempt), result in self._results.items()
+            for (run_id, _node_id), result in self._results.items()
             if run_id == execution_id
         )
 

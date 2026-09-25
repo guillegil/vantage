@@ -62,19 +62,37 @@ def _spy_on_executescript(
     return captured
 
 
-def test_open_database_applies_schema_inside_one_begin_immediate_transaction(
+def test_a_fresh_database_is_stamped_with_the_current_schema_version(tmp_path: Path) -> None:
+    conn = open_database(tmp_path / "store" / "vantage.db")
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    finally:
+        conn.close()
+
+    assert row == (str(_SCHEMA_VERSION),)
+
+
+def test_the_tables_and_the_version_stamp_commit_together(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A stamp that fails after every table was created leaves no table
+    behind: a database with a schema but no stamp would be refused as
+    'absent' on every later open."""
     db_path = tmp_path / "store" / "vantage.db"
-    captured = _spy_on_executescript(monkeypatch)
+    monkeypatch.setattr(
+        "vantage.storage.connection._STAMP_SCHEMA_VERSION",
+        "INSERT INTO no_such_table (value) VALUES (?)",
+    )
 
-    conn = open_database(db_path)
-    conn.close()
+    with pytest.raises(sqlite3.OperationalError, match="no_such_table"):
+        open_database(db_path)
 
-    assert len(captured) == 1
-    script = captured[0].strip()
-    assert script.startswith("BEGIN IMMEDIATE")
-    assert script.rstrip().rstrip(";").endswith("COMMIT")
+    probe = sqlite3.connect(str(db_path))
+    try:
+        tables = probe.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    finally:
+        probe.close()
+    assert tables == []
 
 
 def test_every_ddl_statement_in_schema_sql_declares_if_not_exists() -> None:

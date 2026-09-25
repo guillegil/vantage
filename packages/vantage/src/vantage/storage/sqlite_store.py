@@ -24,8 +24,8 @@ transaction, without `RETURNING`: it needs SQLite >= 3.35, newer than some
 Python 3.10 builds link against. The catalogue
 advances `last_seen_at` with `MAX`, so a late report with an older
 `started_at` cannot move it backwards, and the result insert is `ON
-CONFLICT(run_id, node_id, attempt) DO NOTHING`, so a replayed report is a
-silent no-op.
+CONFLICT(run_id, node_id) DO NOTHING`, so a replayed report is a silent
+no-op.
 
 `last_contact_at` is set by the creating report only -- a finished or
 interrupted run is done, not stale -- and advanced by `touch_last_contact`'s
@@ -192,14 +192,12 @@ _METADATA_KEY_FIRST_SEEN = """
 # `idx_run_started_at`.
 _COUNT_RUNS_BEFORE = "SELECT COUNT(*) FROM run WHERE started_at < ?"
 
-# Conflict target is `node_id`, the catalogue's identity key. `stable_id` is
-# written with the same string, so its own UNIQUE constraint cannot be
-# violated by the row this statement updates.
+# Conflict target is `node_id`, the catalogue's identity key.
 _UPSERT_TEST_CASE = """
     INSERT INTO test_case (
-        stable_id, node_id, file_path, class_name, function_name,
+        node_id, file_path, class_name, function_name,
         param_id, first_seen_at, last_seen_at, last_seen_run_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(node_id) DO UPDATE SET
         file_path        = excluded.file_path,
         class_name       = excluded.class_name,
@@ -229,7 +227,7 @@ _INSERT_RESULT = """
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
     )
-    ON CONFLICT(run_id, node_id, attempt) DO NOTHING
+    ON CONFLICT(run_id, node_id) DO NOTHING
 """
 
 # `INSERT OR IGNORE` on the primary key makes metadata write-once: a replay,
@@ -762,7 +760,7 @@ def _row_to_catalogue_entry(row: tuple[object, ...]) -> CatalogueEntry:
 
 def _catalogue_rows(
     execution: Execution, results: Sequence[Result]
-) -> list[tuple[str, str, str, str | None, str, str | None, str, str, str]]:
+) -> list[tuple[str, str, str | None, str, str | None, str, str, str]]:
     started_at = execution.started_at.isoformat()
     run_id = execution.identity.value
     # Keyed by node_id so a report carrying the same node id twice (the
@@ -773,7 +771,6 @@ def _catalogue_rows(
     }
     return [
         (
-            identity.node_id,  # stable_id -- the same value as node_id
             identity.node_id,
             identity.file_path,
             identity.class_name,
@@ -945,7 +942,7 @@ class SqliteExecutionStore:
                     catalogue_rows = _catalogue_rows(execution, results)
                     self._conn.executemany(_UPSERT_TEST_CASE, catalogue_rows)
 
-                    node_ids = [row[1] for row in catalogue_rows]
+                    node_ids = [row[0] for row in catalogue_rows]
                     test_case_ids = _resolve_test_case_ids(self._conn, node_ids)
 
                     result_rows = _result_rows(execution, results, test_case_ids)

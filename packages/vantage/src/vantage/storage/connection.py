@@ -7,7 +7,7 @@ user can open it. The file is therefore created at 0600 before `sqlite3`
 ever sees the path.
 
 A database from a different schema version is refused, not migrated.
-`schema.sql` stamps `meta.schema_version` inside the same transaction that
+`_apply_schema` stamps `meta.schema_version` inside the same transaction that
 creates the tables, and the refusal reads that stamp without issuing any
 DDL, so a mismatched database is never altered.
 """
@@ -31,10 +31,14 @@ _SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
 # schema.sql's own `IF NOT EXISTS`.
 _SCHEMA_SENTINEL_TABLE = "meta"
 
-# Bumped whenever the schema gains or changes a column. `schema.sql`'s last
-# statement stamps the same value into `meta.schema_version`; the two must
-# move together, or `open_database` refuses its own fresh schema.
-_SCHEMA_VERSION = 4
+# Bumped whenever `schema.sql` changes shape. The only statement of the
+# version: `_apply_schema` stamps it and `_check_schema_version` compares
+# against it.
+_SCHEMA_VERSION = 5
+
+# `OR IGNORE` keeps a second process racing to create the same fresh
+# database from failing on the row the first one stamped.
+_STAMP_SCHEMA_VERSION = "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)"
 
 
 class SchemaVersionError(RuntimeError):
@@ -48,24 +52,21 @@ class SchemaVersionError(RuntimeError):
 def open_database(path: Path) -> sqlite3.Connection:
     """Open (creating if absent) the database at `path`.
 
-    Creates `path`'s parent directory and an `artifacts/` sibling at 0700,
-    creates the database file itself at 0600 before `sqlite3.connect` runs,
+    Creates `path`'s parent directory at 0700, creates the database file
+    itself at 0600 before `sqlite3.connect` runs,
     applies `schema.sql` inside one transaction on first creation only, and
     -- on POSIX -- warns without rewriting the mode of an existing database
     an operator deliberately widened.
     """
     path = Path(path)
     parent = path.parent
-    artifacts_dir = parent / "artifacts"
     is_posix = os.name == "posix"
 
     os.makedirs(parent, mode=0o700, exist_ok=True)
-    os.makedirs(artifacts_dir, mode=0o700, exist_ok=True)
 
     if is_posix:
         # `makedirs`' `mode` is masked by umask -- 022 would leave 0755.
         os.chmod(parent, 0o700)
-        os.chmod(artifacts_dir, 0o700)
         _create_database_file_or_warn(path)
 
     # `check_same_thread=False`: the server runs handlers in a threadpool, so
@@ -130,8 +131,17 @@ def _schema_already_applied(conn: sqlite3.Connection) -> bool:
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
+    """Create the tables and stamp the version in one transaction, so a
+    database never holds the one without the other.
+
+    `executescript` commits a pending transaction before it runs, never
+    after, so `BEGIN IMMEDIATE` opens the script and the parameterised stamp
+    and the `COMMIT` follow it on the same, still-open transaction.
+    """
     schema_sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
-    conn.executescript(f"BEGIN IMMEDIATE;\n{schema_sql}\nCOMMIT;")
+    conn.executescript(f"BEGIN IMMEDIATE;\n{schema_sql}")
+    conn.execute(_STAMP_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
+    conn.execute("COMMIT")
 
 
 def _parse_schema_version(raw: str | None) -> int | None:
