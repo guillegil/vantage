@@ -6,6 +6,11 @@ report, by which point the plugin that sent it has exited and the report is
 lost. Resolution itself (`core/config/resolution.py`) is pure and creates
 nothing.
 
+**Every startup refusal is one line.** A setting resolution refuses, a
+database this process cannot open or create, and a database from another
+schema version all end as a single `vantage: ...` line on stderr and exit
+status 1, never a traceback.
+
 **Network exposure.** Binding wider than the loopback default warns that
 there is no authentication in front of this server. The default warns about
 nothing: a warning on every normal start trains people to ignore the one
@@ -17,12 +22,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sqlite3
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import uvicorn
 
-from vantage.core.config.resolution import resolve_server_config
+from vantage.core.config.resolution import ServerConfigError, resolve_server_config
 from vantage.service.app import create_app
 from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -75,35 +82,44 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
-    """Resolve configuration, fail fast on an unusable path, warn on a wide bind, then serve."""
-    args = _parse_args(argv)
-    config = resolve_server_config(
-        cli_database=args.database,
-        env_database=os.environ.get("VANTAGE_DATABASE"),
-        cli_host=args.host,
-        cli_port=args.port,
-        cli_grace_period=args.grace_period,
-        home=Path.home(),
-        xdg_data_home=os.environ.get("XDG_DATA_HOME"),
-    )
+def _refuse(message: str) -> NoReturn:
+    print(f"vantage: {message}", file=sys.stderr)
+    raise SystemExit(1)
 
+
+def main(argv: list[str] | None = None) -> None:
+    """Resolve configuration, refuse anything unusable, warn on a wide bind, serve, then close."""
+    args = _parse_args(argv)
     try:
+        config = resolve_server_config(
+            cli_database=args.database,
+            env_database=os.environ.get("VANTAGE_DATABASE"),
+            cli_host=args.host,
+            cli_port=args.port,
+            cli_grace_period=args.grace_period,
+            home=Path.home(),
+            xdg_data_home=os.environ.get("XDG_DATA_HOME"),
+        )
         ensure_database_directory_writable(config.database_path)
-    except DatabaseDirectoryNotWritableError as exc:
-        print(f"vantage: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+    except (ServerConfigError, DatabaseDirectoryNotWritableError) as exc:
+        _refuse(str(exc))
 
     warn_if_bound_wide(config.host)
 
     try:
         store = SqliteExecutionStore(config.database_path)
     except SchemaVersionError as exc:
-        print(f"vantage: {exc}", file=sys.stderr)
-        raise SystemExit(1) from exc
+        _refuse(str(exc))
+    except (OSError, sqlite3.Error) as exc:
+        # An unwritable ancestor, a directory at the path, a file that is not
+        # a database: the OS or sqlite3 message already says what is wrong.
+        _refuse(f"cannot open the database at {config.database_path}: {exc}")
 
-    app = create_app(store, grace_period_seconds=config.grace_period_seconds)
-    uvicorn.run(app, host=config.host, port=config.port)
+    try:
+        app = create_app(store, grace_period_seconds=config.grace_period_seconds)
+        uvicorn.run(app, host=config.host, port=config.port)
+    finally:
+        store.close()
 
 
 __all__ = [

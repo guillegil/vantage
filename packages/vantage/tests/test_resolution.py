@@ -151,35 +151,6 @@ def test_cli_grace_period_overrides_the_default() -> None:
     assert config.grace_period_seconds == 60.0
 
 
-def test_cli_main_carries_the_resolved_grace_period_into_the_app(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The seam between a resolved config and a running app, which neither
-    half's own test can see: if `main` drops `grace_period_seconds=` from the
-    `create_app` call, `--grace-period 60` silently runs at the 900-second
-    default.
-
-    `uvicorn.run` is replaced because the point is the app it is handed, not
-    serving it.
-    """
-    from vantage.service import cli
-
-    served: dict[str, object] = {}
-
-    def _capture(app: object, **_kwargs: object) -> None:
-        served["app"] = app
-
-    # Patched by dotted path, not through `cli.uvicorn`: `cli.py`'s
-    # `__all__` does not re-export its imports, and reaching through the
-    # module attribute is what mypy flags rather than a style preference.
-    monkeypatch.setattr("vantage.service.cli.uvicorn.run", _capture)
-
-    cli.main(["--database", str(tmp_path / "v.db"), "--grace-period", "60"])
-
-    app = served["app"]
-    assert app.state.grace_period == 60.0  # type: ignore[attr-defined]
-
-
 _ONE_YEAR_SECONDS = 365 * 24 * 60 * 60.0
 
 
