@@ -65,11 +65,27 @@ jobs:
       - name: Set up Python 3.9
         run: uv python install 3.9
 
+      # Any install failure is not enough: a missing wheel or an unreachable
+      # index fails too, and would pass a check that only wants a failure.
       - name: Assert install is refused, not broken at import
         run: |
           uv venv /tmp/py39-refused-check --python 3.9
-          if uv pip install --python /tmp/py39-refused-check/bin/python dist/pytest_vantage-*.whl; then
+          shopt -s nullglob
+          wheels=(dist/pytest_vantage-*.whl)
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "expected exactly one plugin wheel in dist/, found ${#wheels[@]}" >&2
+            exit 1
+          fi
+          if out="$(uv pip install --color never --python /tmp/py39-refused-check/bin/python "${wheels[0]}" 2>&1)"; then
+            printf '%s\n' "$out"
             echo "expected the Python 3.9 install to be refused by requires-python, but it succeeded" >&2
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          # uv wraps its message, so whitespace is collapsed before matching.
+          reason="$(printf '%s' "$out" | tr -s '[:space:]' ' ')"
+          if ! grep -qE 'pytest-vantage==[^ ]+ depends on Python>=3\.10' <<<"$reason"; then
+            echo "the install failed, but not because requires-python refused Python 3.9" >&2
             exit 1
           fi
 
