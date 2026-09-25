@@ -95,7 +95,6 @@ def walk_package(
     src_root: Path,
     allowed_top_levels: frozenset[str],
     allowed_internal_prefixes: tuple[str, ...] = (),
-    allowed_internal_prefix: str | None = None,
 ) -> WalkResult:
     """Walk every ``.py`` file under ``package_dir`` and report disallowed imports.
 
@@ -103,10 +102,7 @@ def walk_package(
     optionally plus ``pytest``). ``allowed_internal_prefixes`` gates both
     absolute and relative imports that resolve inside the package's own
     dependency-inward tree (e.g. ``("vantage.core", "vantage.storage")``).
-    ``allowed_internal_prefix`` is the one-prefix spelling of the same thing.
     """
-    if allowed_internal_prefix is not None:
-        allowed_internal_prefixes = (*allowed_internal_prefixes, allowed_internal_prefix)
     modules_examined: list[Path] = []
     violations: list[ImportViolation] = []
 

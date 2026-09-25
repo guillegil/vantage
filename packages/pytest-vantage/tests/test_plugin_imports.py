@@ -29,7 +29,7 @@ def test_every_plugin_import_resolves_to_stdlib_or_pytest() -> None:
         _PLUGIN_DIR,
         src_root=_SRC_ROOT,
         allowed_top_levels=_ALLOWED,
-        allowed_internal_prefix="pytest_vantage",
+        allowed_internal_prefixes=("pytest_vantage",),
     )
 
     assert result.is_clean, [
@@ -42,7 +42,7 @@ def test_the_walk_is_not_vacuous() -> None:
         _PLUGIN_DIR,
         src_root=_SRC_ROOT,
         allowed_top_levels=_ALLOWED,
-        allowed_internal_prefix="pytest_vantage",
+        allowed_internal_prefixes=("pytest_vantage",),
     )
 
     examined_relative = {p.relative_to(_SRC_ROOT).as_posix() for p in result.modules_examined}
