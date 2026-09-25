@@ -18,13 +18,16 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import pytest
 from pytest_vantage import vcs
 from pytest_vantage.boundary import VantageWarning, _warn, fault_isolated, liveness_isolated
 from pytest_vantage.plugin import _preflight_reachable
+from pytest_vantage.transport import fetch_capabilities, send
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
@@ -109,6 +112,51 @@ class _StubServer:
         self._sock.close()
 
 
+def _read_request(conn: socket.socket) -> tuple[str, bytes]:
+    """Read one whole HTTP request and return its request line and body.
+    `("", b"")` for the bare TCP preflight, which connects and closes
+    without sending a byte.
+    """
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(65536)
+        if not chunk:
+            return "", b""
+        data += chunk
+    head, _separator, body = data.partition(b"\r\n\r\n")
+    request_line, *header_lines = head.decode("latin-1").split("\r\n")
+    length = 0
+    for line in header_lines:
+        name, _colon, value = line.partition(":")
+        if name.strip().lower() == "content-length":
+            length = int(value)
+    while len(body) < length:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        body += chunk
+    return request_line, body
+
+
+def _http_response(status: str, body: bytes = b"", headers: tuple[str, ...] = ()) -> bytes:
+    lines = [f"HTTP/1.1 {status}", f"Content-Length: {len(body)}", "Connection: close", *headers]
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
+
+
+def _acknowledgement_of(report_body: bytes) -> bytes:
+    """The real ingestion route's answer to `report_body`: `201` with an
+    acknowledgement naming the run the report carried.
+    """
+    run_id = json.loads(report_body)["run"]["id"]
+    ack = json.dumps({"run_id": run_id, "status": "created", "ignored": []}).encode()
+    return _http_response("201 Created", ack, ("Content-Type: application/json",))
+
+
+_LIFECYCLE_ADVERTISED = _http_response(
+    "200 OK", b'{"session_lifecycle": true}', ("Content-Type: application/json",)
+)
+
+
 def _accept_then_close(conn: socket.socket) -> None:
     """Accepts the connection and closes it without responding: no bytes
     back at all, not even a partial header.
@@ -154,6 +202,30 @@ def _respond_with_non_json_body(conn: socket.socket) -> None:
 def _respond_with_bare_500(conn: socket.socket) -> None:
     conn.recv(65536)
     conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+
+
+def _drip_response(interval: float, byte_count: int) -> Callable[[socket.socket], None]:
+    """Answers correctly -- the lifecycle advertised to a GET, an
+    acknowledgement to a report -- but sends the answer's first `byte_count`
+    bytes one at a time, `interval` seconds apart. Every byte arrives well
+    inside a per-operation socket timeout; the whole answer arrives long
+    after any deadline a test sets.
+    """
+
+    def _handler(conn: socket.socket) -> None:
+        request_line, body = _read_request(conn)
+        if not request_line:
+            return
+        answer = (
+            _LIFECYCLE_ADVERTISED if request_line.startswith("GET") else _acknowledgement_of(body)
+        )
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        for index in range(byte_count):
+            conn.sendall(answer[index : index + 1])
+            time.sleep(interval)
+        conn.sendall(answer[byte_count:])
+
+    return _handler
 
 
 # --- Unit: the preflight probe itself -------------------------------------
@@ -566,14 +638,8 @@ def test_failing_start_write_warns_once_and_the_session_still_completes(
         connection_number = next(connections_seen)
         if connection_number < 3:
             return  # 1: the preflight (no response needed); 2: the start-write (fails)
-        conn.recv(65536)
-        body = b'{"run_id": "x", "status": "created", "ignored": []}'
-        conn.sendall(
-            b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: "
-            + str(len(body)).encode()
-            + b"\r\n\r\n"
-            + body
-        )
+        _request_line, body = _read_request(conn)
+        conn.sendall(_acknowledgement_of(body))
 
     with _StubServer(_fail_second_connection_only) as server:
         pytester.makepyfile(test_sample=_PASSING_TEST)
@@ -660,6 +726,198 @@ def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
     # Two warnings, not one -- see
     # `test_server_accepts_then_closes_without_responding` above.
     assert _combined_output(result).count("VantageWarning:") == 2
+
+
+_A_REPORT: dict[str, object] = {"run": {"id": "a" * 32}}
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        b'{"items": [], "has_more": false}',
+        b'{"run_id": "' + b"b" * 32 + b'", "status": "created", "ignored": []}',
+        b'{"run_id": "' + b"a" * 32 + b'", "status": "acknowledged"}',
+        b"[]",
+    ],
+    ids=["run-list", "another-run", "unknown-status", "not-an-object"],
+)
+def test_a_2xx_answer_that_does_not_acknowledge_the_report_raises(answer: bytes) -> None:
+    """Only an acknowledgement of the run just sent counts as delivered.
+    Any other JSON a 2xx carries -- a proxy's page, another endpoint's
+    answer -- would otherwise pass for success and lose the session with no
+    warning.
+    """
+
+    def _answer(conn: socket.socket) -> None:
+        if _read_request(conn)[0]:
+            conn.sendall(_http_response("200 OK", answer, ("Content-Type: application/json",)))
+
+    with _StubServer(_answer) as server, pytest.raises(ValueError, match="without acknowledging"):
+        send(server.address, _A_REPORT, timeout=1.0)
+
+
+# --- Redirects, environment proxies and trickled answers --------------------
+
+
+def _redirecting_handler(status: int, targets_seen: list[str]) -> Callable[[socket.socket], None]:
+    """Answers every request under `/old` with a `status` redirect to the
+    same path without the prefix, the shape of a canonical-host or
+    http-to-https redirect. The redirect target answers the way the real
+    server would a GET -- the capability route advertises the lifecycle,
+    the run list is JSON -- so following the redirect would look like
+    success.
+    """
+
+    def _handler(conn: socket.socket) -> None:
+        request_line, _body = _read_request(conn)
+        if not request_line:
+            return
+        target = request_line.split(" ")[1]
+        targets_seen.append(target)
+        if target.startswith("/old/"):
+            location = target.removeprefix("/old")
+            conn.sendall(_http_response(f"{status} Redirect", headers=(f"Location: {location}",)))
+        elif target == "/api/v1/capabilities":
+            conn.sendall(_LIFECYCLE_ADVERTISED)
+        else:
+            body = b'{"items": [], "has_more": false}'
+            conn.sendall(_http_response("200 OK", body, ("Content-Type: application/json",)))
+
+    return _handler
+
+
+@pytest.mark.parametrize("status", [301, 302, 303])
+def test_a_redirected_report_is_a_warning_never_a_silent_get(
+    pytester: pytest.Pytester, status: int
+) -> None:
+    """urllib re-issues a POST answered 301/302/303 as a bodiless GET, which
+    the run list answers 2xx: the session would be lost with no warning.
+    No redirect is followed, so the report fails loudly instead.
+    """
+    targets_seen: list[str] = []
+    with _StubServer(_redirecting_handler(status, targets_seen)) as server:
+        pytester.makepyfile(test_sample=_PASSING_TEST)
+        result = pytester.runpytest_subprocess(
+            "--vantage", f"--vantage-server={server.address}/old"
+        )
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    assert f"error while reporting: HTTP Error {status}" in _combined_output(result)
+    assert [target for target in targets_seen if not target.startswith("/old/")] == []
+
+
+def test_the_capability_probe_does_not_follow_a_redirect() -> None:
+    targets_seen: list[str] = []
+    with _StubServer(_redirecting_handler(302, targets_seen)) as server:
+        assert not fetch_capabilities(f"{server.address}/old", timeout=1.0)
+
+    assert targets_seen == ["/old/api/v1/capabilities"]
+
+
+def test_a_redirect_to_another_scheme_is_never_followed() -> None:
+    """The address passed an http/https check; a `Location: ftp://...` must
+    not take the report anywhere that check never saw.
+    """
+    ftp_connections: list[bool] = []
+    with _StubServer(lambda conn: ftp_connections.append(True)) as ftp_listener:
+        location = f"Location: ftp://127.0.0.1:{ftp_listener.port}/ack.json"
+
+        def _redirect_to_ftp(conn: socket.socket) -> None:
+            if _read_request(conn)[0]:
+                conn.sendall(_http_response("302 Found", headers=(location,)))
+
+        with _StubServer(_redirect_to_ftp) as server:
+            with pytest.raises(urllib.error.HTTPError, match="302"):
+                send(server.address, _A_REPORT, timeout=1.0)
+
+    assert ftp_connections == []
+
+
+@pytest.fixture
+def environment_proxy(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[str]]:
+    """An `http_proxy` in the environment pointing at a proxy that records
+    every request and answers `502`, as a remote proxy asked for the
+    client's loopback would. Yields the request lines it received.
+    """
+    requests_seen: list[str] = []
+
+    def _bad_gateway(conn: socket.socket) -> None:
+        request_line, _body = _read_request(conn)
+        if request_line:
+            requests_seen.append(request_line)
+            conn.sendall(_http_response("502 Bad Gateway"))
+
+    with _StubServer(_bad_gateway) as proxy:
+        for name in ("no_proxy", "NO_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "VANTAGE_SERVER"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("http_proxy", proxy.address)
+        monkeypatch.setenv("https_proxy", proxy.address)
+        # urllib's default opener reads the proxy variables once, when first
+        # built; dropping any cached one lets a regression back to it see
+        # this proxy.
+        monkeypatch.setattr(urllib.request, "_opener", None)
+        yield requests_seen
+
+
+def test_reports_take_the_preflights_direct_route_not_an_environment_proxy(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    environment_proxy: list[str],
+) -> None:
+    """The preflight connects directly, so the requests must too: through
+    the proxy, the probe and the report would fail against a server the
+    preflight just reached, after handing the failure text to the proxy.
+    """
+    pytester.makepyfile(test_sample="def test_it():\n    assert 'PROXY-MARKER' == ''\n")
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    result.assert_outcomes(failed=1)
+    assert result.ret == 1
+    assert "VantageWarning" not in _combined_output(result)
+    assert len(vantage_server.executions()) == 1
+    assert environment_proxy == []
+
+
+def test_send_is_bounded_by_its_timeout_as_a_whole() -> None:
+    """A per-operation socket timeout restarts with every byte received, so
+    an answer trickled one byte at a time is bounded by nothing. The
+    timeout is a deadline on the whole exchange instead.
+    """
+    with _StubServer(_drip_response(interval=0.25, byte_count=40)) as server:
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            send(server.address, _A_REPORT, timeout=1.0)
+        elapsed = time.monotonic() - started
+
+    assert elapsed < 2.5
+
+
+def test_a_server_that_trickles_its_answers_cannot_hold_the_session(
+    pytester: pytest.Pytester,
+) -> None:
+    """Every request of the session is trickled: the probe and the
+    finish-write are each abandoned at their one-second deadline, and the
+    abandoned finish-write is a warning, not a silent delay.
+    """
+    with _StubServer(_drip_response(interval=0.25, byte_count=40)) as server:
+        pytester.makepyfile(test_sample=_PASSING_TEST)
+        started = time.monotonic()
+        result = pytester.runpytest_subprocess(
+            "--vantage",
+            f"--vantage-server={server.address}",
+            "--vantage-timeout=1.0",
+            timeout=30,
+        )
+        elapsed = time.monotonic() - started
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == 0
+    assert elapsed < 2 * 1.0 + 5.0
+    assert "error while reporting: no complete answer within 1s" in _combined_output(result)
 
 
 # --- Activity-driven heartbeats --------------------------------------------
@@ -767,6 +1025,7 @@ _FAIL_CLOSED_CASES: list[tuple[str, Callable[[socket.socket], None]]] = [
     ("empty-body", _respond_capability_with(b"")),
     ("http-500", _respond_with_bare_500),
     ("hangs-past-liveness-timeout", _accept_and_hang),
+    ("drips-past-liveness-timeout", _drip_response(interval=0.1, byte_count=40)),
 ]
 
 
@@ -784,7 +1043,6 @@ def test_fetch_capabilities_fails_closed_on_every_non_positive_answer(
     `false`, an empty response, a `500`, and a connection that hangs past
     the timeout -- and every one must answer `False`, never raise.
     """
-    from pytest_vantage.transport import fetch_capabilities
 
     with _StubServer(handle_connection) as server:
         assert fetch_capabilities(server.address, timeout=0.3) is False
@@ -793,7 +1051,6 @@ def test_fetch_capabilities_fails_closed_on_every_non_positive_answer(
 def test_fetch_capabilities_returns_true_for_the_one_explicit_positive_answer() -> None:
     """The fail-closed cases above prove every negative answer degrades;
     this proves the positive answer is not also accidentally degraded."""
-    from pytest_vantage.transport import fetch_capabilities
 
     with _StubServer(_respond_capability_with(b'{"session_lifecycle": true}')) as server:
         assert fetch_capabilities(server.address, timeout=1.0) is True
@@ -802,41 +1059,30 @@ def test_fetch_capabilities_returns_true_for_the_one_explicit_positive_answer() 
 def test_fetch_capabilities_returns_false_when_the_route_is_missing() -> None:
     """An older server's `404` degrades exactly like every fail-closed case
     above."""
-    from pytest_vantage.transport import fetch_capabilities
 
     with _StubServer(_respond_capability_404) as server:
         assert fetch_capabilities(server.address, timeout=1.0) is False
 
 
-def _capturing_handler(requests_seen: list[bytes]) -> Callable[[socket.socket], None]:
-    """Records the raw bytes of every connection this stub server accepts,
-    in order, and answers as an older `vantage` would: the bare TCP
-    preflight gets nothing back (none is needed), the capability probe is
-    answered `404`, and anything else -- the finish-write -- is acknowledged
-    `201 Created`.
+def _capturing_handler(
+    requests_seen: list[tuple[str, bytes]],
+) -> Callable[[socket.socket], None]:
+    """Records the request line and body of every connection this stub
+    server accepts, in order, and answers as an older `vantage` would: the
+    bare TCP preflight gets nothing back (none is needed), the capability
+    probe is answered `404`, and anything else -- the finish-write -- is
+    acknowledged `201 Created`.
     """
 
     def _handler(conn: socket.socket) -> None:
-        data = conn.recv(65536)
-        requests_seen.append(data)
-        if not data:
+        request_line, body = _read_request(conn)
+        requests_seen.append((request_line, body))
+        if not request_line:
             return  # the bare TCP preflight: connects, sends nothing, closes
-        if b"GET /api/v1/capabilities" in data:
-            body = b"Not Found"
-            conn.sendall(
-                b"HTTP/1.1 404 Not Found\r\nContent-Length: "
-                + str(len(body)).encode()
-                + b"\r\n\r\n"
-                + body
-            )
+        if request_line.startswith("GET /api/v1/capabilities"):
+            conn.sendall(_http_response("404 Not Found", b"Not Found"))
             return
-        body = b'{"run_id": "x", "status": "created", "ignored": []}'
-        conn.sendall(
-            b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: "
-            + str(len(body)).encode()
-            + b"\r\n\r\n"
-            + body
-        )
+        conn.sendall(_acknowledgement_of(body))
 
     return _handler
 
@@ -851,20 +1097,19 @@ def test_capability_probe_404_sends_no_start_write_and_no_heartbeat(
     JSON body has exactly the ordinary report shape, with no lifecycle field
     added by the degraded path.
     """
-    requests_seen: list[bytes] = []
+    requests_seen: list[tuple[str, bytes]] = []
     with _StubServer(_capturing_handler(requests_seen)) as server:
         pytester.makepyfile(test_sample=_PASSING_TEST)
         result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    assert len(requests_seen) == 3
-    assert requests_seen[0] == b""
-    assert b"GET /api/v1/capabilities" in requests_seen[1]
-    finish_request = requests_seen[2]
-    assert b"POST /api/v1/runs " in finish_request
-    _headers, _sep, finish_body = finish_request.partition(b"\r\n\r\n")
-    payload = json.loads(finish_body)
+    assert [request_line for request_line, _body in requests_seen] == [
+        "",
+        "GET /api/v1/capabilities HTTP/1.1",
+        "POST /api/v1/runs HTTP/1.1",
+    ]
+    payload = json.loads(requests_seen[2][1])
     assert set(payload) == {"run", "results", "vcs"}
     assert set(payload["run"]) == {
         "id",
@@ -884,7 +1129,7 @@ def test_capability_probe_404_warns_once_and_still_records_the_result(
     address -- and does not disable result recording: the finish-write's
     `results` array still carries the one test that ran.
     """
-    requests_seen: list[bytes] = []
+    requests_seen: list[tuple[str, bytes]] = []
     with _StubServer(_capturing_handler(requests_seen)) as server:
         pytester.makepyfile(test_sample=_PASSING_TEST)
         result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
@@ -895,9 +1140,7 @@ def test_capability_probe_404_warns_once_and_still_records_the_result(
         assert output.count("VantageWarning:") == 1
         assert f"{server.address} predates the session lifecycle" in output
 
-    finish_request = requests_seen[2]
-    _headers, _sep, finish_body = finish_request.partition(b"\r\n\r\n")
-    payload = json.loads(finish_body)
+    payload = json.loads(requests_seen[2][1])
     assert len(payload["results"]) == 1
 
 
@@ -919,14 +1162,8 @@ def test_capability_probe_is_bounded_by_the_liveness_timeout_not_the_report_time
         if connection_number == 2:
             time.sleep(30)  # the capability probe: must trip well before this
             return
-        conn.recv(65536)
-        body = b'{"run_id": "x", "status": "created", "ignored": []}'
-        conn.sendall(
-            b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: "
-            + str(len(body)).encode()
-            + b"\r\n\r\n"
-            + body
-        )
+        _request_line, body = _read_request(conn)
+        conn.sendall(_acknowledgement_of(body))
 
     with _StubServer(_hang_the_capability_probe_only) as server:
         pytester.makepyfile(test_sample=_PASSING_TEST)
