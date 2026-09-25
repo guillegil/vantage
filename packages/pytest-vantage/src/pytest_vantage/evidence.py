@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from pytest_vantage.boundary import _warn
+from pytest_vantage.boundary import warn
 from pytest_vantage.capture import is_subtest
 
 
@@ -52,7 +52,7 @@ class EvidenceCollector:
             report.vantage_evidence = _extract(item, call, report, self._capture_disabled)
         except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
             self._disabled = True
-            _warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
+            warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
@@ -72,7 +72,7 @@ class EvidenceCollector:
                 evidence.update(_captured_fields(report, self._capture_disabled))
         except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
             self._disabled = True
-            _warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
+            warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
 
 
 def _skip_reason(

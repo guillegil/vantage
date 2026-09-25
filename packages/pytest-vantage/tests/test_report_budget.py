@@ -20,7 +20,7 @@ from pytest_vantage.budget import (
     _FIELD_BYTES_CAP,
     _REPORT_BYTES_CAP,
     MAX_FAILURE_TEXT_BYTES,
-    _encoded_cost,
+    encoded_cost,
     spend_failure_text_budget,
     split_results,
 )
@@ -123,7 +123,7 @@ def test_a_passing_tests_output_never_starves_a_later_failure_of_its_message(
     chatter = "p" * 1000
     message = "assert 3 == 4"
     monkeypatch.setattr(
-        budget_module, "MAX_FAILURE_TEXT_BYTES", _encoded_cost(chatter) + _encoded_cost(message) - 1
+        budget_module, "MAX_FAILURE_TEXT_BYTES", encoded_cost(chatter) + encoded_cost(message) - 1
     )
     entries: list[dict[str, object]] = [
         {"outcome": "passed", "captured_stdout": chatter},
@@ -155,7 +155,7 @@ def test_every_failure_message_is_charged_before_any_traceback(
     monkeypatch.setattr(
         budget_module,
         "MAX_FAILURE_TEXT_BYTES",
-        2 * _encoded_cost(message) + _encoded_cost(traceback_text),
+        2 * encoded_cost(message) + encoded_cost(traceback_text),
     )
     entries: list[dict[str, object]] = [
         {
@@ -197,7 +197,7 @@ def test_a_field_is_cut_to_the_servers_field_bound_before_it_is_charged(
     kept = "a" + "é" * 32_767  # 65,535 bytes: the next "é" would straddle the bound
     filler = "x" * 1000
     monkeypatch.setattr(
-        budget_module, "MAX_FAILURE_TEXT_BYTES", _encoded_cost(kept) + _encoded_cost(filler)
+        budget_module, "MAX_FAILURE_TEXT_BYTES", encoded_cost(kept) + encoded_cost(filler)
     )
     entries: list[dict[str, object]] = [
         {"outcome": "failed", "captured_stdout": big_stdout, "captured_stderr": filler}
@@ -313,7 +313,7 @@ def test_a_field_is_dropped_whole_never_cut(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_the_budget_charges_exactly_what_transport_will_put_on_the_wire() -> None:
-    """`_encoded_cost` must encode the way `transport.send` does:
+    """`encoded_cost` must encode the way `transport.send` does:
     `json.dumps(report)` with the default `ensure_ascii=True`.
 
     Measuring with `ensure_ascii=False` understates every code point above
@@ -324,13 +324,13 @@ def test_the_budget_charges_exactly_what_transport_will_put_on_the_wire() -> Non
     encodings; the ASCII case is a baseline.
     """
     ascii_value = "assertion failed: expected 3, got 4"
-    assert _encoded_cost(ascii_value) == len(json.dumps(ascii_value).encode("utf-8"))
+    assert encoded_cost(ascii_value) == len(json.dumps(ascii_value).encode("utf-8"))
 
     # Synthetic, deliberately spanning the three widening cases: two-byte
     # accents, three-byte CJK, and an astral pair encoded as two escapes.
     non_ascii_value = "aserción fallida: año 2026 -- 期待値 3 -- boom 🔥"
     wire_cost = len(json.dumps(non_ascii_value).encode("utf-8"))
-    assert _encoded_cost(non_ascii_value) == wire_cost
+    assert encoded_cost(non_ascii_value) == wire_cost
     assert wire_cost > len(json.dumps(non_ascii_value, ensure_ascii=False).encode("utf-8"))
 
 

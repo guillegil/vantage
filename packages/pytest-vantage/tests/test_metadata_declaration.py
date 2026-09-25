@@ -26,7 +26,7 @@ from vantage.core.domain.metadata import MAX_METADATA_KEY_CHARS as _SERVER_MAX_M
 
 
 def _config() -> pytest.Config:
-    # `_warn` only reaches `config.pluginmanager` when `warnings.warn`
+    # `warn` only reaches `config.pluginmanager` when `warnings.warn`
     # itself raises (an active `-W error` filter) -- never the case in
     # these tests, so a bare `SimpleNamespace` is enough, the same
     # duck-typed shape `test_opt_in.py` already passes to `Recorder`.

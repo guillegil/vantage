@@ -56,7 +56,7 @@ _BUDGETED_FIELDS = (
 _FAILING_OUTCOMES = frozenset({"failed", "error"})
 
 
-def _encoded_cost(value: object) -> int:
+def encoded_cost(value: object) -> int:
     """The JSON-encoded byte cost of `value` alone -- what the wire will
     carry for this field, escapes and quotes included. A traceback is
     newline- and quote-heavy, so a raw `len(str)` understates it.
@@ -115,7 +115,7 @@ def spend_failure_text_budget(entries: list[dict[str, object]]) -> None:
                     if cut:
                         entry[field] = value
                         entry[f"{field}_truncated"] = True
-                cost = _encoded_cost(value)
+                cost = encoded_cost(value)
                 if cost <= remaining:
                     remaining -= cost
                 else:
@@ -146,7 +146,7 @@ def split_results(
     used = 0
     left_out = 0
     for entry in results:
-        cost = _encoded_cost(entry) + len(", ")
+        cost = encoded_cost(entry) + len(", ")
         if cost > room:
             left_out += 1
             continue
@@ -158,4 +158,9 @@ def split_results(
     return slices, left_out
 
 
-__all__ = ["MAX_FAILURE_TEXT_BYTES", "spend_failure_text_budget", "split_results"]
+__all__ = [
+    "MAX_FAILURE_TEXT_BYTES",
+    "encoded_cost",
+    "spend_failure_text_budget",
+    "split_results",
+]

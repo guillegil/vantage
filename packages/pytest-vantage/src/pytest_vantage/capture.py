@@ -100,12 +100,16 @@ def decompose(node_id: str) -> DecomposedIdentity:
     )
 
 
-def _isoformat_utc(moment: datetime) -> str:
-    """Fixed-width ISO-8601 UTC text, matching `recorder.py`'s
-    `isoformat_utc` exactly -- duplicated rather than imported, since
-    `recorder.py` imports from this module and the reverse would be circular.
+def isoformat_utc(moment: datetime) -> str:
+    """Fixed-width ISO-8601 UTC text: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`,
+    the same text the server stores.
+
+    Converted to UTC first, whatever offset `moment` carries, and always
+    with six fractional digits -- plain `isoformat()` drops them when they
+    are zero -- so lexicographic order is chronological order. Not
+    `strftime`, whose `%Y` leaves a year below 1000 unpadded on glibc.
     """
-    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 # The only outcomes pytest itself gives a phase report. A rerun plugin logs an
@@ -170,10 +174,10 @@ class _Execution:
             self.teardown = report
 
 
-class _Pending:
+class PendingResult:
     """Every report pytest emitted for one node id, keyed by node id in
-    `Recorder._results`; a `dict[str, _Pending]` gives insertion order for
-    free.
+    `Recorder._results`; a `dict[str, PendingResult]` gives insertion order
+    for free.
 
     Reports are grouped by the xdist worker that sent them: under `--dist
     each` every worker runs every test and the controller receives their
@@ -191,11 +195,11 @@ class _Pending:
         self.executions.setdefault(_worker_id(report), _Execution()).record(report)
 
 
-def accumulate(pending: dict[str, _Pending], report: pytest.TestReport) -> None:
+def accumulate(pending: dict[str, PendingResult], report: pytest.TestReport) -> None:
     """Record one phase report into `pending`, keyed by `report.nodeid`.
     Called from `Recorder.pytest_runtest_logreport`, once per phase report
     pytest fires -- never sends anything itself."""
-    pending.setdefault(report.nodeid, _Pending()).record(report)
+    pending.setdefault(report.nodeid, PendingResult()).record(report)
 
 
 def derive_outcome(
@@ -251,7 +255,7 @@ def _phase_timestamp(report: pytest.TestReport, attribute: str) -> str | None:
     epoch = getattr(report, attribute, None)
     if epoch is None:
         return None
-    return _isoformat_utc(datetime.fromtimestamp(epoch, timezone.utc))
+    return isoformat_utc(datetime.fromtimestamp(epoch, timezone.utc))
 
 
 def _worker_id(report: pytest.TestReport) -> str | None:
@@ -343,9 +347,9 @@ def _describes_a_failure(evidence: object) -> bool:
     )
 
 
-def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
-    """Build one wire-shape `results[]` entry from an accumulated `_Pending`.
-    Returns `None` -- dropped, never invented -- when no execution of the
+def build_result(node_id: str, pending: PendingResult) -> dict[str, object] | None:
+    """Build one wire-shape `results[]` entry from an accumulated
+    `PendingResult`. Returns `None` -- dropped, never invented -- when no execution of the
     test was observed whole: a half-observed test (e.g. one interrupted
     mid-call) is worse reported as whole than not at all.
 
@@ -445,7 +449,7 @@ class AssembledResults(list[dict[str, object]]):
     dropped: int = 0
 
 
-def assemble_results(pending: dict[str, _Pending]) -> AssembledResults:
+def assemble_results(pending: dict[str, PendingResult]) -> AssembledResults:
     """Build the `results` array in insertion (execution) order. Entries
     that were never observed whole are left out (`build_result` returning
     `None`).
@@ -469,10 +473,12 @@ def assemble_results(pending: dict[str, _Pending]) -> AssembledResults:
 __all__ = [
     "AssembledResults",
     "DecomposedIdentity",
+    "PendingResult",
     "accumulate",
     "assemble_results",
     "build_result",
     "decompose",
     "derive_outcome",
     "is_subtest",
+    "isoformat_utc",
 ]

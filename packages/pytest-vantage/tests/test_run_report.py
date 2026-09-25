@@ -4,7 +4,7 @@ The end-to-end tests use a real `vantage` server (the `vantage_server`
 fixture in `vantage_test_server.py`) and a real subprocess pytest
 invocation, never a mock of either side of the HTTP boundary. The file also
 covers the start-write, `Recorder` registration, VCS and metadata wiring,
-heartbeats, how the session ended and timestamp formatting.
+heartbeats and how the session ended.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -79,34 +79,6 @@ def _offline_recorder(
         lifecycle_available=True,
     )
     return recorder, sent
-
-
-# --- Unit: fixed-width ISO-8601 timestamps ----------------------------------
-#
-# A variable-width timestamp breaks lexicographic ordering. Neither the
-# end-to-end tests nor the server's pydantic parsing (which tolerates variable
-# width) would catch that regression, so it is tested directly.
-
-
-def test_isoformat_utc_is_fixed_width_even_at_zero_microseconds() -> None:
-    from pytest_vantage.recorder import isoformat_utc
-
-    moment = datetime(2026, 8, 15, 9, 14, 2, 0, tzinfo=timezone.utc)
-
-    formatted = isoformat_utc(moment)
-
-    assert formatted == "2026-08-15T09:14:02.000000+00:00"
-    assert len(formatted) == len("2026-08-15T09:14:02.481930+00:00")
-
-
-def test_isoformat_utc_preserves_nonzero_microseconds() -> None:
-    from pytest_vantage.recorder import isoformat_utc
-
-    moment = datetime(2026, 8, 15, 9, 14, 2, 481930, tzinfo=timezone.utc)
-
-    formatted = isoformat_utc(moment)
-
-    assert formatted == "2026-08-15T09:14:02.481930+00:00"
 
 
 # --- The start-write -------------------------------------------------------

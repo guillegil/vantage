@@ -34,8 +34,8 @@ from pathlib import Path, PurePath
 
 import pytest
 
-from pytest_vantage.boundary import _warn
-from pytest_vantage.budget import _encoded_cost
+from pytest_vantage.boundary import warn
+from pytest_vantage.budget import encoded_cost
 
 DECLARATION_FILENAME = "vantage-metadata.json"
 """The declaration's fixed name, at the test repository root."""
@@ -72,7 +72,7 @@ captured (a control character costs six bytes on the wire)."""
 
 MAX_METADATA_SECTION_BYTES = 32 * 1024
 """Budget for the whole wire `metadata` section: 1/32 of the server's 1 MiB
-report cap. Spent on JSON-encoded bytes via `budget._encoded_cost` (see
+report cap. Spent on JSON-encoded bytes via `budget.encoded_cost` (see
 there for why `ensure_ascii` stays default). Every declared file's entry --
 its path, keys and status -- is charged first, because each reaches the
 wire whatever happens to the file; content is charged from what is left,
@@ -137,9 +137,9 @@ def _fixed_section_cost(declared_files: Iterable[DeclaredFile]) -> int:
     budget.
     """
     longest_status = max(_FILE_STATUSES, key=len)
-    envelope = _encoded_cost({"declaration": DECLARATION_FILENAME, "files": []})
+    envelope = encoded_cost({"declaration": DECLARATION_FILENAME, "files": []})
     entries = sum(
-        _encoded_cost(
+        encoded_cost(
             {
                 "path": declared.path,
                 "format": declared.format,
@@ -155,11 +155,11 @@ def _fixed_section_cost(declared_files: Iterable[DeclaredFile]) -> int:
 
 
 def _reject(config: pytest.Config, message: str) -> None:
-    """Warn once, through `_warn`, that the declaration is refused. Callers
+    """Warn once, through `warn`, that the declaration is refused. Callers
     follow it with `return None` rather than `return _reject(...)`, which
     mypy flags as `func-returns-value`.
     """
-    _warn(config, f"vantage: {message}")
+    warn(config, f"vantage: {message}")
 
 
 def _read_declaration_bytes(config: pytest.Config, rootpath: Path) -> bytes | None:
@@ -408,7 +408,7 @@ def capture_metadata(config: pytest.Config, rootpath: Path) -> MetadataSection |
     for declared in declared_files:
         status, content = _read_declared_file(rootpath, declared.path)
         if status == "captured" and content is not None:
-            cost = _encoded_cost(content)
+            cost = encoded_cost(content)
             if cost > content_budget:
                 status, content = "too_large", None
             elif cost > remaining_budget:

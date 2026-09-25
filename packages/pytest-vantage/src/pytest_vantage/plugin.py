@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from pytest_vantage.boundary import _warn
+from pytest_vantage.boundary import warn
 from pytest_vantage.config import VantageConfigError, resolve_liveness_timeout, resolve_settings
 
 # The preflight probe waits at most min(2.0, report timeout): it must not
@@ -225,7 +225,7 @@ def _warn_about_untyped_flags(config: pytest.Config) -> None:
         if config.getoption(name) and not _typed_on_command_line(config, flag)
     ]
     if ignored:
-        _warn(
+        warn(
             config,
             f"vantage: ignoring {', '.join(ignored)} from addopts or PYTEST_ADDOPTS; "
             "recording and capture are enabled only by flags typed on the command line",
@@ -298,9 +298,7 @@ def pytest_configure(config: pytest.Config) -> None:
         config.pluginmanager.register(EvidenceCollector(config))
     connect_timeout = min(_MAX_CONNECT_TIMEOUT, settings.timeout)
     if not _preflight_reachable(settings.address, connect_timeout):
-        _warn(
-            config, f"vantage: cannot reach {settings.address}, this session will not be recorded"
-        )
+        warn(config, f"vantage: cannot reach {settings.address}, this session will not be recorded")
         return
     from pytest_vantage.recorder import Recorder
     from pytest_vantage.transport import fetch_capabilities
@@ -316,7 +314,7 @@ def pytest_configure(config: pytest.Config) -> None:
             metadata_requested=_metadata_capture_requested(config),
         )
     except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
-        _warn(
+        warn(
             config, f"vantage: could not start recording: {exc}, this session will not be recorded"
         )
         return

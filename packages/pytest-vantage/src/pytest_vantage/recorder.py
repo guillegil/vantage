@@ -37,13 +37,18 @@ import pytest
 
 from pytest_vantage import metadata, vcs
 from pytest_vantage.boundary import (
-    _warn,
     accumulation_isolated,
     fault_isolated,
     liveness_isolated,
+    warn,
 )
-from pytest_vantage.budget import _encoded_cost, spend_failure_text_budget, split_results
-from pytest_vantage.capture import _Pending, accumulate, assemble_results
+from pytest_vantage.budget import encoded_cost, spend_failure_text_budget, split_results
+from pytest_vantage.capture import (
+    PendingResult,
+    accumulate,
+    assemble_results,
+    isoformat_utc,
+)
 from pytest_vantage.config import resolve_liveness_timeout
 from pytest_vantage.transport import Capabilities, send, send_heartbeat
 
@@ -81,16 +86,6 @@ _INTERNAL_ERROR_EXIT_STATUS = 3
 # A `pytest.exit()` message is arbitrary text; bounding the reason keeps it
 # from crowding the results out of the report.
 _MAX_INTERRUPT_REASON_CHARS = 1024
-
-
-def isoformat_utc(moment: datetime) -> str:
-    """Fixed-width ISO-8601 UTC text: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`.
-
-    `datetime.isoformat()` omits the microseconds when they are exactly zero;
-    `strftime("%f")` always emits six digits. Fixed width keeps lexicographic
-    order equal to chronological order.
-    """
-    return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
 class Recorder:
@@ -154,12 +149,12 @@ class Recorder:
         self._disabled = False
         self._liveness_disabled = False
         self._accumulation_warned = False
-        self._results: dict[str, _Pending] = {}
+        self._results: dict[str, PendingResult] = {}
         self._stop: BaseException | None = None
         self._last_beat_at = time.monotonic()
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
-            _warn(config, f"vantage: {self._vcs.warning}")
+            warn(config, f"vantage: {self._vcs.warning}")
         self._metadata: metadata.MetadataSection | None = None
         if metadata_requested:
             self._metadata = metadata.capture_metadata(config, Path(str(config.rootpath)))
@@ -230,7 +225,7 @@ class Recorder:
         """
         if not self._lifecycle_available:
             self._liveness_disabled = True
-            _warn(
+            warn(
                 self._config,
                 f"vantage: {self._lifecycle_problem}, "
                 "this session's start and heartbeats will not be recorded",
@@ -330,12 +325,12 @@ class Recorder:
         in_progress_run = self._in_progress_run()
         sections = self._sections()
         envelope_bytes = max(
-            _encoded_cost({"run": run, "results": [], **sections})
+            encoded_cost({"run": run, "results": [], **sections})
             for run in (finish_run, in_progress_run)
         )
         slices, left_out = split_results(results, envelope_bytes=envelope_bytes)
         if left_out:
-            _warn(
+            warn(
                 self._config,
                 f"vantage: {left_out} test result(s) too large for any report were left out",
             )
@@ -351,4 +346,4 @@ class Recorder:
         send(self._address, report, timeout=self._timeout)
 
 
-__all__ = ["Recorder", "isoformat_utc"]
+__all__ = ["Recorder"]

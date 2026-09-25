@@ -1,7 +1,7 @@
 """Fault isolation for the reporting and liveness paths.
 
 A recording failure is reported once, as a warning, and the suite finishes
-exactly as it would have otherwise. `_warn` emits that warning;
+exactly as it would have otherwise. `warn` emits that warning;
 `fault_isolated`, `liveness_isolated` and `accumulation_isolated` wrap
 `Recorder` hooks, each on its own flag, so neither a failed start-write or
 heartbeat nor an unexpected test report disables the finish report.
@@ -30,7 +30,7 @@ class VantageWarning(UserWarning):
     """
 
 
-def _warn(config: pytest.Config, message: str) -> None:
+def warn(config: pytest.Config, message: str) -> None:
     """Emit `message` as a `VantageWarning`.
 
     `warnings.warn` raises the warning instance itself when the active
@@ -93,7 +93,7 @@ def _isolated(flag: str, description: str, *, latch: bool = True) -> Callable[[F
             except Exception as exc:  # deliberately broad, never BaseException
                 if not getattr(self, flag):
                     setattr(self, flag, True)
-                    _warn(self._config, f"vantage: {description}: {exc}")
+                    warn(self._config, f"vantage: {description}: {exc}")
                 return None
 
         setattr(wrapper, "isolation_flag", flag)  # a function attribute mypy cannot type
@@ -130,8 +130,8 @@ it neither reads nor sets.
 
 __all__ = [
     "VantageWarning",
-    "_warn",
     "accumulation_isolated",
     "fault_isolated",
     "liveness_isolated",
+    "warn",
 ]

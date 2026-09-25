@@ -7,19 +7,21 @@ instances stand in for what `Recorder` receives at runtime.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Literal
 
 import pytest
 from pytest_vantage import vcs
 from pytest_vantage.capture import (
-    _Pending,
+    PendingResult,
     _select_evidence_phase,
     accumulate,
     assemble_results,
     build_result,
     decompose,
     derive_outcome,
+    isoformat_utc,
 )
 
 _Phase = Literal["setup", "call", "teardown"]
@@ -57,10 +59,10 @@ def _report(
     return report
 
 
-def _pending(*reports: pytest.TestReport) -> _Pending:
+def _pending(*reports: pytest.TestReport) -> PendingResult:
     """The accumulated state for one node id, built the way `Recorder` builds
     it: every report goes through `accumulate`, in the order given."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     for report in reports:
         accumulate(pending, report)
     (entry,) = pending.values()
@@ -343,6 +345,44 @@ def test_build_result_phase_duration_null_vs_zero_survives_the_json_hop() -> Non
     assert '"setup_duration": 0.0' in serialised
 
 
+# --- fixed-width ISO-8601 timestamps ---------------------------------------
+#
+# A variable-width timestamp breaks lexicographic ordering, and the server's
+# parsing tolerates variable width, so no end-to-end test would notice.
+
+
+@pytest.mark.parametrize(
+    ("moment", "expected"),
+    [
+        pytest.param(
+            datetime(2026, 8, 15, 9, 14, 2, 0, tzinfo=timezone.utc),
+            "2026-08-15T09:14:02.000000+00:00",
+            id="zero-microseconds",
+        ),
+        pytest.param(
+            datetime(2026, 8, 15, 9, 14, 2, 481930, tzinfo=timezone.utc),
+            "2026-08-15T09:14:02.481930+00:00",
+            id="nonzero-microseconds",
+        ),
+        pytest.param(
+            datetime(999, 1, 2, 3, 4, 5, 6, tzinfo=timezone.utc),
+            "0999-01-02T03:04:05.000006+00:00",
+            id="year-below-1000",
+        ),
+        pytest.param(
+            datetime(2026, 8, 15, 11, 14, 2, 0, tzinfo=timezone(timedelta(hours=2))),
+            "2026-08-15T09:14:02.000000+00:00",
+            id="converted-to-utc",
+        ),
+    ],
+)
+def test_isoformat_utc_is_fixed_width_utc(moment: datetime, expected: str) -> None:
+    formatted = isoformat_utc(moment)
+
+    assert formatted == expected
+    assert len(formatted) == len("YYYY-MM-DDTHH:MM:SS.ffffff+00:00")
+
+
 # --- a result without a teardown report is dropped -------------------------
 
 
@@ -369,7 +409,7 @@ _ALL_PHASES_PASSING: tuple[tuple[_Phase, _ReportOutcome], ...] = (
 def test_accumulate_overwrites_a_duplicate_report_for_the_same_phase() -> None:
     """A duplicate report for the same node id and phase overwrites, never a
     second row."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     for report in (
         _report("setup", "passed"),
         _report("call", "failed"),
@@ -394,7 +434,7 @@ def test_executions_on_different_workers_are_never_stitched_together() -> None:
     receives their reports interleaved. Phases from different workers must
     not merge into one result; the most severe execution is kept whole,
     so a failure on one worker is never hidden by a pass on another."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     for report in (
         _on_worker(_report("setup", "passed", duration=0.5, start=20.0), "gw1"),
         _on_worker(_report("setup", "passed", duration=0.25, start=10.0), "gw0"),
@@ -417,7 +457,7 @@ def test_executions_on_different_workers_are_never_stitched_together() -> None:
 def test_executions_with_the_same_verdict_keep_the_first_one_seen() -> None:
     """Between executions no worse than each other, the choice is stable:
     the first worker to report the test."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     for worker_id in ("gw1", "gw0"):
         for when, outcome in _ALL_PHASES_PASSING:
             accumulate(pending, _on_worker(_report(when, outcome), worker_id))
@@ -433,7 +473,7 @@ def test_a_crashed_worker_report_is_ignored_and_the_rest_still_recorded() -> Non
     phase of a result: it must neither raise (which would disable recording
     for the whole session) nor count as one, and every other test is still
     recorded."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     for when, outcome in _ALL_PHASES_PASSING:
         accumulate(pending, _report(when, outcome, nodeid="t.py::test_ok"))
     accumulate(pending, _report("setup", "passed", nodeid="t.py::test_crashed"))
@@ -504,7 +544,7 @@ def test_a_new_setup_report_starts_a_fresh_attempt(
     one: a stale call report would carry the old attempt's outcome, duration
     and output, and a `"rerun"` phase outcome is outside the vocabulary the
     server accepts, so it would reject the whole session."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     for report in attempts:
         accumulate(pending, report)
 
@@ -597,7 +637,7 @@ def test_an_entry_that_cannot_be_built_costs_only_itself() -> None:
     """One report shape the plugin does not expect must cost that test its
     result, never the rest of the session's; how many were dropped is
     exposed so the caller can say so."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     accumulate(pending, _report("teardown", "passed", nodeid="t.py::test_no_setup"))
     for when, outcome in _ALL_PHASES_PASSING:
         accumulate(pending, _report(when, outcome, nodeid="t.py::test_ok"))
@@ -611,7 +651,7 @@ def test_an_entry_that_cannot_be_built_costs_only_itself() -> None:
 def test_a_test_whose_call_never_ran_is_left_out_without_error() -> None:
     """`--setup-only` and `--setup-plan` run setup and teardown but never the
     test itself. There is no verdict to record, which is not an error."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     accumulate(pending, _report("setup", "passed"))
     accumulate(pending, _report("teardown", "passed"))
 
@@ -625,7 +665,7 @@ def test_assemble_results_preserves_execution_order() -> None:
     """A `dict` gives insertion order for free, so the emitted array is in
     execution order -- and skips any entry with no teardown report (the
     same drop `build_result` proves directly above)."""
-    pending: dict[str, _Pending] = {}
+    pending: dict[str, PendingResult] = {}
     for when, outcome in _ALL_PHASES_PASSING[:2]:  # setup+call only -- dropped
         accumulate(pending, _report(when, outcome, nodeid="test_a.py::test_unresolved"))
     for node_id in ("test_a.py::test_1", "test_a.py::test_2", "test_a.py::test_3"):

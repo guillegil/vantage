@@ -29,10 +29,10 @@ import pytest
 from pytest_vantage import vcs
 from pytest_vantage.boundary import (
     VantageWarning,
-    _warn,
     accumulation_isolated,
     fault_isolated,
     liveness_isolated,
+    warn,
 )
 from pytest_vantage.plugin import _preflight_reachable
 from pytest_vantage.transport import Capabilities, fetch_capabilities, send
@@ -283,7 +283,7 @@ def test_fault_isolated_catches_exception_and_latches_after_first_failure(
 ) -> None:
     warnings_seen: list[str] = []
     monkeypatch.setattr(
-        "pytest_vantage.boundary._warn",
+        "pytest_vantage.boundary.warn",
         lambda config, message: warnings_seen.append(message),
     )
     instance = _Instrumented(config=None)
@@ -335,7 +335,7 @@ def test_liveness_isolated_latches_its_own_flag_and_leaves_disabled_untouched(
 ) -> None:
     warnings_seen: list[str] = []
     monkeypatch.setattr(
-        "pytest_vantage.boundary._warn",
+        "pytest_vantage.boundary.warn",
         lambda config, message: warnings_seen.append(message),
     )
     instance = _DualInstrumented(config=None)
@@ -355,7 +355,7 @@ def test_liveness_isolated_latches_its_own_flag_and_leaves_disabled_untouched(
 def test_liveness_isolated_and_fault_isolated_flags_never_read_or_set_each_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("pytest_vantage.boundary._warn", lambda config, message: None)
+    monkeypatch.setattr("pytest_vantage.boundary.warn", lambda config, message: None)
     instance = _DualInstrumented(config=None)
 
     instance.liveness_raises()
@@ -391,7 +391,7 @@ def test_accumulation_isolated_warns_once_but_never_stops_running_the_body(
 ) -> None:
     warnings_seen: list[str] = []
     monkeypatch.setattr(
-        "pytest_vantage.boundary._warn",
+        "pytest_vantage.boundary.warn",
         lambda config, message: warnings_seen.append(message),
     )
     instance = _AccumulationInstrumented(config=None)
@@ -405,12 +405,12 @@ def test_accumulation_isolated_warns_once_but_never_stops_running_the_body(
     assert instance._disabled is False
 
 
-# --- Unit: `_warn`'s fallback chain ------------------------------------------
+# --- Unit: `warn`'s fallback chain ------------------------------------------
 
 
 def test_warn_emits_a_vantage_warning_by_default() -> None:
     with pytest.warns(VantageWarning, match="something went wrong"):
-        _warn(None, "vantage: something went wrong")  # type: ignore[arg-type]
+        warn(None, "vantage: something went wrong")  # type: ignore[arg-type]
 
 
 def test_warn_falls_back_to_the_terminal_reporter_when_warnings_are_errors() -> None:
@@ -438,7 +438,7 @@ def test_warn_falls_back_to_the_terminal_reporter_when_warnings_are_errors() -> 
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _warn(_ConfigDouble(), "vantage: something went wrong")  # type: ignore[arg-type]
+        warn(_ConfigDouble(), "vantage: something went wrong")  # type: ignore[arg-type]
 
     assert lines == ["vantage: something went wrong"]
 
@@ -455,7 +455,7 @@ def test_warn_falls_back_to_stderr_when_no_terminal_reporter_is_registered(
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        _warn(_ConfigDouble(), "vantage: something went wrong")  # type: ignore[arg-type]
+        warn(_ConfigDouble(), "vantage: something went wrong")  # type: ignore[arg-type]
 
     assert "vantage: something went wrong" in capsys.readouterr().err
 

@@ -14,12 +14,12 @@ from types import SimpleNamespace
 import pytest
 from pytest_vantage import metadata
 from pytest_vantage.boundary import VantageWarning
-from pytest_vantage.budget import _encoded_cost
+from pytest_vantage.budget import encoded_cost
 from pytest_vantage.recorder import Recorder
 
 
 def _config() -> pytest.Config:
-    # `_warn` only reaches `config.pluginmanager` when `warnings.warn`
+    # `warn` only reaches `config.pluginmanager` when `warnings.warn`
     # itself raises (an active `-W error` filter) -- never the case in
     # these tests, so a bare `SimpleNamespace` is enough, the same
     # duck-typed shape `test_opt_in.py` already passes to `Recorder`.
@@ -137,7 +137,7 @@ def test_an_accepted_section_stays_within_its_budget_on_the_wire(tmp_path: Path,
     # Paths, keys and content together, measured as the recorder serialises
     # the section. Sizes are in wire bytes, so every character set fills the
     # budget alike: one byte, six as `\uXXXX`, twelve as a surrogate pair.
-    wire_bytes_per_char = _encoded_cost(char) - len('""')
+    wire_bytes_per_char = encoded_cost(char) - len('""')
     root = tmp_path / "project"
     root.mkdir()
     files: list[dict[str, object]] = []
@@ -155,7 +155,7 @@ def test_an_accepted_section_stays_within_its_budget_on_the_wire(tmp_path: Path,
     # The budget was actually reached, not merely never approached.
     assert {"captured", "over_budget"} <= {f.status for f in section.files}
     wire = Recorder._metadata_section(SimpleNamespace(_metadata=section))  # type: ignore[arg-type]
-    assert _encoded_cost(wire) <= metadata.MAX_METADATA_SECTION_BYTES
+    assert encoded_cost(wire) <= metadata.MAX_METADATA_SECTION_BYTES
 
 
 def test_a_non_utf8_file_is_marked_not_text_before_json_encoding(tmp_path: Path) -> None:
