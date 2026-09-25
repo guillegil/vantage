@@ -11,7 +11,7 @@ not tag `read` is not checked at all.
 **Why rows, not file bytes.** The store opens WAL: a write lands in `-wal`
 and leaves the main file's bytes as they were, while a checkpoint rewrites
 them with no row changing. A file hash therefore neither catches a write nor
-stays stable across reads. The digest is taken over every table's rows,
+is reliably stable across reads. The digest is taken over every table's rows,
 through the store's own connection, with `count_executions()` and
 `count_results()` held unchanged beside it.
 
@@ -71,7 +71,7 @@ def _table_names(conn: sqlite3.Connection) -> list[str]:
 
 
 def _logical_content_digest(conn: sqlite3.Connection) -> bytes:
-    """The strong half of the digest pair (module docstring)."""
+    """Every table's rows, in rowid order (module docstring)."""
     hasher = hashlib.sha256()
     for table in _table_names(conn):
         hasher.update(table.encode("utf-8"))
@@ -186,7 +186,7 @@ def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...
 def test_a_writing_endpoint_tagged_read_fails_the_harness(tmp_path: Path) -> None:
     """**The falsifier.** A test-local copy of the binding table with
     `POST /api/v1/runs` temporarily registered as if it were `read`; the
-    digest-pair harness must report a mismatch -- proving the check is not
+    harness must report a mismatch -- proving the check is not
     vacuously green before it is trusted with the real document."""
     db_path = tmp_path / "store" / "vantage.db"
     _seed_database(db_path)

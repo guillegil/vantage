@@ -170,16 +170,24 @@ def test_pass_percentage_reads_100_or_0_only_when_exactly_true(
 
 def test_pass_percentage_satisfies_the_published_client_check() -> None:
     """The check `summarize_sections` documents holds for every bucket of
-    up to 100 measured results -- the exact float equality
+    up to 100 measured results, and at the pinned ends, where it is
+    tightest -- the exact float equality
     `passing / measured == pass_percentage / 100` would not, since the
     percentage is rounded (85/90 publishes 94.4)."""
-    for measured in range(1, 101):
-        for passing in range(measured + 1):
-            percentage = _single_bucket(passing, measured - passing).pass_percentage
-            assert percentage is not None
-            assert abs(100 * passing / measured - percentage) < 0.1
-            assert (percentage == 100.0) == (passing == measured)
-            assert (percentage == 0.0) == (passing == 0)
+    every_small = [
+        (passing, measured) for measured in range(1, 101) for passing in range(measured + 1)
+    ]
+    pinned_ends = [
+        (passing, measured)
+        for measured in (2000, 2001, 19999, 200_000)
+        for passing in (1, measured - 1)
+    ]
+    for passing, measured in every_small + pinned_ends:
+        percentage = _single_bucket(passing, measured - passing).pass_percentage
+        assert percentage is not None
+        assert abs(100 * passing / measured - percentage) < 0.1
+        assert (percentage == 100.0) == (passing == measured)
+        assert (percentage == 0.0) == (passing == 0)
 
 
 def test_summarize_sections_measured_zero_yields_none_never_zero_or_hundred() -> None:
