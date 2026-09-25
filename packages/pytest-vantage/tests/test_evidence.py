@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import socket
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -455,6 +456,146 @@ def test_recorded_location_is_the_raising_helper_not_the_test_function(
     path = call_evidence["failure_path"]
     assert isinstance(path, str)
     assert path.endswith("test_helper_location.py")
+
+
+def test_recorded_path_is_relative_to_the_rootdir(pytester: pytest.Pytester) -> None:
+    """Inside the rootdir, the recorded path is relative to it -- the base
+    node ids already use -- so the same failing line has the same location
+    on every machine, and the checkout's absolute path (often a home
+    directory) is never sent."""
+    pytester.makepyfile(
+        **{
+            "tests/helpers": """
+            def boom():
+                raise AssertionError("synthetic failure inside a helper module")
+            """,
+            "tests/test_uses_helper": """
+            from helpers import boom
+
+
+            def test_calls_helper():
+                boom()
+            """,
+        }
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["tests/test_uses_helper.py::test_calls_helper::call"]
+    assert call_evidence is not None
+    assert call_evidence["failure_path"] == "tests/helpers.py"
+    assert call_evidence["failure_lineno"] == 2
+
+
+def test_a_failure_outside_the_rootdir_keeps_its_absolute_path(pytester: pytest.Pytester) -> None:
+    """A crash site outside the rootdir (here the standard library) has no
+    relative form, so its path stays absolute."""
+    pytester.makepyfile(
+        test_outside="""
+        import json
+
+
+        def test_parses_garbage():
+            json.loads("{")
+        """
+    )
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["test_outside.py::test_parses_garbage::call"]
+    assert call_evidence is not None
+    path = call_evidence["failure_path"]
+    assert isinstance(path, str)
+    assert Path(path).is_absolute()
+    assert Path(path).parts[-2:] == ("json", "decoder.py")
+
+
+_TWO_FAILING_DOCTESTS = """
+def f():
+    \"\"\"
+    >>> 1 + 1
+    3
+    \"\"\"
+
+
+def g():
+    \"\"\"
+    >>> 2 + 2
+    5
+    \"\"\"
+"""
+
+
+@pytest.mark.parametrize("continue_on_failure", [False, True])
+def test_doctest_failures_are_located_at_their_example(
+    pytester: pytest.Pytester, continue_on_failure: bool
+) -> None:
+    """A doctest failure is raised inside pytest's doctest runner, the same
+    line for every doctest in every project. The recorded location is the
+    failing example's, as pytest reports it, and the traceback is pytest's
+    doctest rendering with the Expected/Got diff."""
+    pytester.makepyfile(mod=_TWO_FAILING_DOCTESTS)
+    extra = ("--doctest-continue-on-failure",) if continue_on_failure else ()
+
+    evidence = _capture_evidence(pytester, "--doctest-modules", *extra)
+
+    locations = []
+    for name in ("f", "g"):
+        call_evidence = evidence[f"mod.py::mod.{name}::call"]
+        assert call_evidence is not None
+        locations.append((call_evidence["failure_path"], call_evidence["failure_lineno"]))
+        traceback = call_evidence["traceback"]
+        assert isinstance(traceback, str)
+        assert "Expected:" in traceback
+        assert "Got:" in traceback
+    assert locations == [("mod.py", 3), ("mod.py", 10)]
+
+
+def test_an_item_with_its_own_failure_rendering_keeps_it(pytester: pytest.Pytester) -> None:
+    """A non-Python test item that overrides `repr_failure` (the pattern
+    pytest documents for them) is recorded with its own rendering, located
+    at the item, not at the line in its `runtest` that raised."""
+    pytester.makepyfile(
+        **{
+            "specs/conftest": """
+            import pytest
+
+
+            class SpecError(Exception):
+                pass
+
+
+            class SpecItem(pytest.Item):
+                def runtest(self):
+                    raise SpecError("beta")
+
+                def repr_failure(self, excinfo):
+                    return f"SPEC FAILED: {excinfo.value} expected ok, got broken"
+
+                def reportinfo(self):
+                    return self.path, 0, f"spec: {self.name}"
+
+
+            class SpecFile(pytest.File):
+                def collect(self):
+                    yield SpecItem.from_parent(self, name="beta")
+
+
+            def pytest_collect_file(file_path, parent):
+                if file_path.suffix == ".spec":
+                    return SpecFile.from_parent(parent, path=file_path)
+            """,
+        }
+    )
+    pytester.makefile(".spec", **{"specs/beta": "beta: ok\n"})
+
+    evidence = _capture_evidence(pytester)
+
+    call_evidence = evidence["specs/beta.spec::beta::call"]
+    assert call_evidence is not None
+    assert call_evidence["traceback"] == "SPEC FAILED: beta expected ok, got broken"
+    assert call_evidence["failure_path"] == "specs/beta.spec"
+    assert call_evidence["failure_lineno"] == 1
 
 
 def test_skipped_test_records_skip_reason_not_failure_fields(pytester: pytest.Pytester) -> None:

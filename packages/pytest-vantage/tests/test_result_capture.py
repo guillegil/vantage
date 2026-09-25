@@ -258,6 +258,47 @@ def test_setup_failure_leaves_call_duration_null_not_zero(
     assert result.call_outcome is None
 
 
+# --- failure evidence, end to end -------------------------------------------
+
+_FAILS_IN_A_HELPER = """
+def helper():
+    raise ValueError("synthetic failure in a helper")
+
+
+def test_calls_helper():
+    print("before the failure")
+    helper()
+"""
+
+
+def test_failure_evidence_is_stored_end_to_end(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """Every failure field the plugin extracts reaches storage under the
+    name the server reads it by -- the server ignores unknown fields, so a
+    name drifting on either side would otherwise drop it silently. The path
+    is stored relative to the rootdir."""
+    pytester.makepyfile(test_evidence_e2e=_FAILS_IN_A_HELPER)
+
+    pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    result = _by_function_name(vantage_server.results(), "test_calls_helper")
+    assert result.outcome == "failed"
+    failure = result.failure
+    assert failure is not None
+    assert failure.failure_type == "ValueError"
+    assert failure.failure_message == "ValueError: synthetic failure in a helper"
+    assert failure.failure_repr == "ValueError('synthetic failure in a helper')"
+    assert failure.failure_path == "test_evidence_e2e.py"
+    assert failure.failure_lineno == 2
+    assert failure.traceback is not None
+    assert "def helper():" in failure.traceback
+    assert result.captured.stdout == "before the failure\n"
+
+
 # --- captured output, end to end --------------------------------------------
 
 _PRINTS_IN_EVERY_PHASE = """

@@ -13,6 +13,8 @@ never imports `pytest_vantage.recorder`.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -103,13 +105,9 @@ def _failure_fields(
     unreadable source file) costs the one field it broke, never the rest --
     `EvidenceCollector`'s outer latch is the net for what escapes here.
 
-    `traceback`/`failure_path`/`failure_lineno` are rendered together via
-    one call to `item._repr_failure_py(excinfo, style="long")`. The public
-    `Function.repr_failure` takes no `style` and reads `--tb` instead, which
-    would make the stored traceback depend on the user's display flag.
-    `_repr_failure_py` is what both `Node.repr_failure` and
-    `Function.repr_failure` delegate to; it is a private method on a public
-    class, so no private pytest module is imported.
+    `traceback`/`failure_path`/`failure_lineno` come from one rendering
+    (`_render`), located by `_failure_location`, with the path made
+    relative to the rootdir (`_relative_to_rootdir`).
     """
     fields: dict[str, object] = {}
     try:
@@ -126,7 +124,7 @@ def _failure_fields(
         fields["failure_repr"] = None
 
     try:
-        repr_obj: object = item._repr_failure_py(excinfo, style="long")  # noqa: SLF001
+        repr_obj = _render(item, excinfo)
     except Exception:  # deliberately broad, same reason
         repr_obj = None
     try:
@@ -134,13 +132,88 @@ def _failure_fields(
     except Exception:  # deliberately broad, same reason
         fields["traceback"] = None
     try:
-        reprcrash = getattr(repr_obj, "reprcrash", None)
-        fields["failure_path"] = reprcrash.path if reprcrash is not None else None
-        fields["failure_lineno"] = reprcrash.lineno if reprcrash is not None else None
+        path, lineno = _failure_location(item, excinfo, repr_obj)
+        fields["failure_path"] = _relative_to_rootdir(item, path) if path is not None else None
+        fields["failure_lineno"] = lineno
     except Exception:  # deliberately broad, same reason
         fields["failure_path"] = None
         fields["failure_lineno"] = None
     return fields
+
+
+# What an item renders failures with unless its class overrides `repr_failure`.
+_DEFAULT_RENDERERS = (pytest.Function.repr_failure, pytest.Item.repr_failure)
+
+
+def _render(item: pytest.Item, excinfo: pytest.ExceptionInfo[BaseException]) -> object:
+    """The failure as pytest renders it for this item.
+
+    A plain test renders through `_repr_failure_py(excinfo, style="long")`,
+    what `Function.repr_failure` delegates to: the public method reads
+    `--tb` instead, which would make the stored traceback depend on the
+    user's display flag. It is a private method on a public class, so no
+    private pytest module is imported.
+
+    An item that overrides `repr_failure` (doctests, non-Python test items)
+    renders through its override: that is what turns the raw exception into
+    the report pytest shows, such as a doctest's Expected/Got diff at the
+    failing example.
+    """
+    if type(item).repr_failure in _DEFAULT_RENDERERS:
+        return item._repr_failure_py(excinfo, style="long")  # noqa: SLF001
+    return item.repr_failure(excinfo)
+
+
+def _failure_location(
+    item: pytest.Item, excinfo: pytest.ExceptionInfo[BaseException], repr_obj: object
+) -> tuple[str | None, int | None]:
+    """Where the failure happened: the rendering's crash location when it
+    has one, which for a plain test is the raising line.
+
+    A doctest's rendering has none, and the raising frame is inside pytest's
+    doctest runner, the same line for every doctest in every project; its
+    location is the failing example's (`_doctest_example_location`). Any
+    other rendering without one is located at the item itself.
+    """
+    reprcrash = getattr(repr_obj, "reprcrash", None)
+    if reprcrash is not None:
+        return reprcrash.path, reprcrash.lineno
+    example = _doctest_example_location(excinfo.value)
+    if example is not None:
+        return example
+    path, lineno, _ = item.reportinfo()
+    return os.fspath(path), (lineno + 1 if lineno is not None else None)
+
+
+def _doctest_example_location(error: BaseException) -> tuple[str, int] | None:
+    """The first failing example of a stdlib doctest failure, or of the list
+    pytest raises under `--doctest-continue-on-failure`, at the one-based
+    line pytest reports for it. Both line numbers doctest gives are
+    zero-based: the docstring's in the file, the example's in the docstring.
+    """
+    import doctest  # only reached for a failure rendered without a crash location
+
+    failures = getattr(error, "failures", None)
+    for failure in [error, *(failures if isinstance(failures, list) else [])]:
+        if isinstance(failure, (doctest.DocTestFailure, doctest.UnexpectedException)):
+            test = failure.test
+            if test.filename is None or test.lineno is None:
+                return None
+            return test.filename, test.lineno + failure.example.lineno + 1
+    return None
+
+
+def _relative_to_rootdir(item: pytest.Item, path: str) -> str:
+    """`path` relative to the rootdir -- the base node ids and `file_path`
+    use -- when the file is inside it: the same failing line then has the
+    same location on every machine, and the checkout's absolute path, often
+    under a home directory, is never sent. A file outside the rootdir has no
+    relative form and keeps its absolute path.
+    """
+    try:
+        return Path(path).relative_to(item.config.rootpath).as_posix()
+    except ValueError:
+        return path
 
 
 def _phase_output(report: pytest.TestReport, stream: str) -> str:
