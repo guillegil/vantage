@@ -235,6 +235,16 @@ class ExecutionStore(Protocol):
         key that was never declared."""
         ...
 
+    def list_runs_with_metadata_horizon(
+        self, *, key: str, value: str, limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], int]:
+        """`list_runs` narrowed to runs holding `(key, value)`, together with
+        `count_runs_predating_metadata_key(key)`, both read from one
+        snapshot of the store. Two separate calls can straddle a session
+        another process records, and then describe two different sets of
+        runs."""
+        ...
+
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         """Return the full record for one run, or None if `execution_id` is
         unknown. The whole stored commit subject is reachable here -- the

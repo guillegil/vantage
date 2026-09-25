@@ -76,8 +76,9 @@ def open_database(path: Path) -> sqlite3.Connection:
     if is_posix:
         _create_database_file_or_warn(path)
 
-    # `check_same_thread=False`: the server runs handlers in a threadpool, so
-    # several threads share one connection object. `timeout=5.0`: a second
+    # `check_same_thread=False`: the store may be called from any thread, so
+    # several can share this one connection; `SqliteExecutionStore`'s lock
+    # serialises them. `timeout=5.0`: a second
     # process contending for the write lock waits rather than failing
     # instantly with `SQLITE_BUSY`.
     conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False, timeout=5.0)

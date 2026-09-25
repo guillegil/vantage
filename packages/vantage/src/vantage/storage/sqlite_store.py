@@ -12,12 +12,14 @@ update, so `created` comes from a `SELECT 1 FROM run WHERE id = ?` probe run
 right after `BEGIN IMMEDIATE`. The transaction already holds the `RESERVED`
 lock and `self._lock`, so no other write can land between probe and upsert.
 
-Concurrency needs two layers: `self._lock`, held across every write
-transaction, serialises the server's threadpool threads, which share one
-connection; WAL mode and the connection's busy timeout cover a second process
-on the same file, which no in-process lock can reach. Multi-statement writes
-start with `BEGIN IMMEDIATE` because a deferred transaction that upgrades to a
-write mid-statement is the classic two-writer deadlock.
+Concurrency needs two layers. `self._lock` is held across every statement
+and transaction, reads included: every thread shares one connection, and a
+read issued while another thread is inside a write transaction would run
+inside it and see rows that are not committed yet, or never will be. WAL mode
+and the connection's busy timeout cover a second process on the same file,
+which no in-process lock can reach. Multi-statement writes start with `BEGIN
+IMMEDIATE` because a deferred transaction that upgrades to a write
+mid-statement is the classic two-writer deadlock.
 
 A session's run, catalogue, result and metadata rows are written in one
 transaction, without `RETURNING`: it needs SQLite >= 3.35, newer than some
@@ -185,19 +187,24 @@ _LIST_RUNS_BY_METADATA = f"""
     LIMIT ? OFFSET ?
 """  # noqa: S608
 
-# `count_runs_predating_metadata_key`, step one: the earliest `started_at`
-# among runs holding any `run_metadata` row for `key`, whatever its status.
-# Seeks `idx_run_metadata_key_value` on its leading column.
-_METADATA_KEY_FIRST_SEEN = """
-    SELECT MIN(run.started_at)
-    FROM run_metadata rm
-    JOIN run ON run.id = rm.run_id
-    WHERE rm.key = ?
+# How many runs started before `key` was first declared, as one statement so
+# it reads one state of the database. `first_seen` is the earliest
+# `started_at` among runs holding any `run_metadata` row for `key`, whatever
+# its status, found through `idx_run_metadata_key_value`; the count is served
+# by `idx_run_started_at`. A key never declared has no `first_seen`, and
+# every run predates it.
+_COUNT_RUNS_PREDATING_KEY = """
+    SELECT CASE WHEN first_seen.started_at IS NULL
+                THEN (SELECT COUNT(*) FROM run)
+                ELSE (SELECT COUNT(*) FROM run WHERE run.started_at < first_seen.started_at)
+           END
+    FROM (
+        SELECT MIN(run.started_at) AS started_at
+        FROM run_metadata rm
+        JOIN run ON run.id = rm.run_id
+        WHERE rm.key = ?
+    ) AS first_seen
 """
-
-# Step two: how many runs are strictly older than that, served by
-# `idx_run_started_at`.
-_COUNT_RUNS_BEFORE = "SELECT COUNT(*) FROM run WHERE started_at < ?"
 
 # Conflict target is `node_id`, the catalogue's identity key.
 _UPSERT_TEST_CASE = """
@@ -808,8 +815,8 @@ class SqliteExecutionStore:
 
     One connection per process, shared across threads
     (`check_same_thread=False`) and opened via `open_database`, which sets
-    file permissions and WAL. Every write holds `self._lock` for its whole
-    transaction to serialise this process's threads; `BEGIN IMMEDIATE` and
+    file permissions and WAL. Every read and every write transaction holds
+    `self._lock` to serialise this process's threads; `BEGIN IMMEDIATE` and
     the busy timeout handle a second process sharing the file. Neither
     substitutes for the other.
     """
@@ -837,6 +844,33 @@ class SqliteExecutionStore:
                 if self._conn.in_transaction:
                     self._conn.execute("ROLLBACK")
                 raise
+
+    @contextmanager
+    def _read_snapshot(self) -> Iterator[sqlite3.Connection]:
+        """Hold `self._lock` across one deferred read transaction. Under WAL
+        its first read pins a snapshot, so every statement inside it sees
+        the same committed state, whatever another process commits
+        meanwhile."""
+        with self._lock:
+            self._conn.execute("BEGIN")
+            try:
+                yield self._conn
+            finally:
+                # Nothing was written, so ending it either way is the same.
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
+
+    def _fetchone(self, sql: str, params: Sequence[object] = ()) -> tuple[object, ...] | None:
+        with self._lock:
+            return cast("tuple[object, ...] | None", self._conn.execute(sql, params).fetchone())
+
+    def _fetchall(self, sql: str, params: Sequence[object]) -> list[tuple[object, ...]]:
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    def _count(self, sql: str, params: Sequence[object] = ()) -> int:
+        row = self._fetchone(sql, params)
+        return int(cast(int, row[0])) if row is not None else 0
 
     def record_session(
         self,
@@ -883,7 +917,7 @@ class SqliteExecutionStore:
         return created
 
     def get_execution(self, execution_id: str) -> Execution | None:
-        row = self._conn.execute(_SELECT_RUN, (execution_id,)).fetchone()
+        row = self._fetchone(_SELECT_RUN, (execution_id,))
         return None if row is None else _decode_execution(row[:12])
 
     def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
@@ -893,19 +927,17 @@ class SqliteExecutionStore:
             return cursor.rowcount == 1
 
     def count_executions(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM run").fetchone()
-        return int(row[0])
+        return self._count("SELECT COUNT(*) FROM run")
 
     def get_results(self, execution_id: str) -> Sequence[Result]:
-        rows = self._conn.execute(_SELECT_RESULTS_FOR_RUN, (execution_id,)).fetchall()
+        rows = self._fetchall(_SELECT_RESULTS_FOR_RUN, (execution_id,))
         return [_row_to_result(row) for row in rows]
 
     def count_results(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM result").fetchone()
-        return int(row[0])
+        return self._count("SELECT COUNT(*) FROM result")
 
     def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
-        row = self._conn.execute(_SELECT_TEST_CASE, (node_id,)).fetchone()
+        row = self._fetchone(_SELECT_TEST_CASE, (node_id,))
         return None if row is None else _row_to_catalogue_entry(row)
 
     def list_runs(
@@ -919,24 +951,31 @@ class SqliteExecutionStore:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         width = (LIST_COMMIT_SUBJECT_CHARS, LIST_COMMIT_SUBJECT_CHARS)
         if metadata_key is not None and metadata_value is not None:
-            rows = self._conn.execute(
+            rows = self._fetchall(
                 _LIST_RUNS_BY_METADATA,
                 (*width, metadata_key, metadata_value, page_limit + 1, offset),
-            ).fetchall()
+            )
         else:
-            rows = self._conn.execute(_LIST_RUNS, (*width, page_limit + 1, offset)).fetchall()
+            rows = self._fetchall(_LIST_RUNS, (*width, page_limit + 1, offset))
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def count_runs_predating_metadata_key(self, key: str) -> int:
-        row = self._conn.execute(_METADATA_KEY_FIRST_SEEN, (key,)).fetchone()
-        first_seen = row[0] if row else None
-        if first_seen is None:
-            return self.count_executions()
-        before = self._conn.execute(_COUNT_RUNS_BEFORE, (first_seen,)).fetchone()
-        return int(before[0])
+        return self._count(_COUNT_RUNS_PREDATING_KEY, (key,))
+
+    def list_runs_with_metadata_horizon(
+        self, *, key: str, value: str, limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], int]:
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        width = (LIST_COMMIT_SUBJECT_CHARS, LIST_COMMIT_SUBJECT_CHARS)
+        with self._read_snapshot() as conn:
+            rows = conn.execute(
+                _LIST_RUNS_BY_METADATA, (*width, key, value, page_limit + 1, offset)
+            ).fetchall()
+            (predating,) = conn.execute(_COUNT_RUNS_PREDATING_KEY, (key,)).fetchone()
+        return _page(rows, page_limit, _row_to_run_list_entry), int(predating)
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
-        row = self._conn.execute(_SELECT_RUN, (execution_id,)).fetchone()
+        row = self._fetchone(_SELECT_RUN, (execution_id,))
         if row is None:
             return None
         return RunDetail(
@@ -945,7 +984,7 @@ class SqliteExecutionStore:
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        rows = self._conn.execute(
+        rows = self._fetchall(
             _LIST_RESULTS,
             (
                 LIST_FAILURE_MESSAGE_CHARS,
@@ -954,16 +993,16 @@ class SqliteExecutionStore:
                 page_limit + 1,
                 offset,
             ),
-        ).fetchall()
+        )
         return _page(rows, page_limit, _row_to_result_list_entry)
 
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
-        row = self._conn.execute(_SELECT_RESULT, (execution_id, node_id)).fetchone()
+        row = self._fetchone(_SELECT_RESULT, (execution_id, node_id))
         return None if row is None else _row_to_result(row)
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        rows = self._conn.execute(
+        rows = self._fetchall(
             _LIST_HISTORY,
             (
                 LIST_COMMIT_SUBJECT_CHARS,
@@ -972,11 +1011,11 @@ class SqliteExecutionStore:
                 page_limit + 1,
                 offset,
             ),
-        ).fetchall()
+        )
         return _page(rows, page_limit, _row_to_history_entry)
 
     def list_settings(self, namespace: str) -> Sequence[UserSetting]:
-        rows = self._conn.execute(_LIST_SETTINGS, (namespace,)).fetchall()
+        rows = self._fetchall(_LIST_SETTINGS, (namespace,))
         return tuple(_row_to_user_setting(row) for row in rows)
 
     def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
@@ -994,7 +1033,7 @@ class SqliteExecutionStore:
             return cursor.rowcount == 1
 
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
-        rows = self._conn.execute(_SELECT_RUN_CASE_OUTCOMES, (execution_id,)).fetchall()
+        rows = self._fetchall(_SELECT_RUN_CASE_OUTCOMES, (execution_id,))
         return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
 
     def close(self) -> None:

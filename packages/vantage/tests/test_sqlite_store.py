@@ -10,7 +10,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from vantage.core.ports.storage import ExecutionStore
+from vantage.core.ports.storage import (
+    ExecutionStore,
+    MetadataEntry,
+    MetadataFile,
+    RunMetadata,
+)
 from vantage.storage.sqlite_store import _LIST_RUNS_BY_METADATA, SqliteExecutionStore
 from vantage_port_contract import ExecutionStoreContract, _execution, _start_only_execution
 
@@ -247,3 +252,50 @@ def test_a_commit_sqlite_already_rolled_back_raises_its_own_error(tmp_path: Path
         assert _write_run(store, "a" * 32) is True
     finally:
         real_conn.close()
+
+
+def test_the_filtered_page_and_its_horizon_are_read_from_one_snapshot(tmp_path: Path) -> None:
+    """A second server process on the same file commits a keyed run while
+    this one is between the page and the horizon. Both must describe the
+    same state of the database: before the commit, no match and every run
+    predating the never-declared key; after it, one match and nothing
+    older than it. Never the page from before and the count from after."""
+    db_path = tmp_path / "store" / "vantage.db"
+    store = SqliteExecutionStore(db_path)
+    other_process = SqliteExecutionStore(db_path)
+    base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+    keyed = RunMetadata(
+        files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+        entries=(MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured"),),
+    )
+    fired: list[str] = []
+
+    def _commit_a_keyed_run_during_the_horizon_read(statement: str) -> None:
+        if not fired and "MIN(" in statement:
+            fired.append(statement)
+            other_process.record_session(
+                _execution("f" * 32, started=base - timedelta(hours=1)),
+                results=(),
+                received_at=base,
+                metadata=keyed,
+            )
+
+    try:
+        for i in range(3):
+            other_process.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
+                results=(),
+                received_at=base,
+            )
+        store._conn.set_trace_callback(_commit_a_keyed_run_during_the_horizon_read)  # noqa: SLF001
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            key="fw", value="2.1", limit=10, offset=0
+        )
+
+        assert fired, "the horizon statement never ran"
+        assert (len(page.items), predating) in {(0, 3), (1, 0)}
+    finally:
+        store._conn.set_trace_callback(None)  # noqa: SLF001
+        other_process.close()
+        store.close()

@@ -1321,3 +1321,73 @@ class ExecutionStoreContract:
 
         assert _stored_metadata_files(store, execution.identity.value) == frozenset()
         assert _stored_metadata_entries(store, execution.identity.value) == frozenset()
+
+    # -- list_runs_with_metadata_horizon --
+
+    def test_the_horizon_of_a_key_never_declared_is_every_run(self, store: ExecutionStore) -> None:
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+        for i in range(3):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
+                results=(),
+                received_at=base,
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            key="fw", value="2.1", limit=10, offset=0
+        )
+
+        assert page.items == ()
+        assert page.has_more is False
+        assert predating == 3
+
+    def test_the_horizon_counts_the_runs_started_before_the_key_was_first_declared(
+        self, store: ExecutionStore
+    ) -> None:
+        """The first declaration is the earliest run holding a row for the
+        key in any status: a value too large to capture still declares it,
+        though it never matches the filter."""
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+        def _declaring(value: str | None, status: str) -> RunMetadata:
+            return RunMetadata(
+                files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+                entries=(
+                    MetadataEntry(key="fw", value=value, source_file="m.json", status=status),
+                ),
+            )
+
+        for i in range(2):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
+                results=(),
+                received_at=base,
+            )
+        store.record_session(
+            _execution("a" * 32, started=base + timedelta(minutes=5)),
+            results=(),
+            received_at=base,
+            metadata=_declaring(None, "value_too_large"),
+        )
+        store.record_session(
+            _execution("b" * 32, started=base + timedelta(minutes=6)),
+            results=(),
+            received_at=base,
+            metadata=_declaring("2.1", "captured"),
+        )
+        store.record_session(
+            _execution("c" * 32, started=base + timedelta(minutes=7)),
+            results=(),
+            received_at=base,
+            metadata=_declaring("2.1", "captured"),
+        )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            key="fw", value="2.1", limit=1, offset=0
+        )
+
+        assert [entry.execution.identity.value for entry in page.items] == ["c" * 32]
+        assert page.has_more is True
+        assert predating == 2
+        assert page == store.list_runs(limit=1, offset=0, metadata_key="fw", metadata_value="2.1")
+        assert predating == store.count_runs_predating_metadata_key("fw")

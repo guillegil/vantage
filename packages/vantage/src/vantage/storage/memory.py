@@ -227,6 +227,14 @@ class InMemoryExecutionStore:
             1 for execution in self._executions.values() if execution.started_at < first_seen
         )
 
+    def list_runs_with_metadata_horizon(
+        self, *, key: str, value: str, limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], int]:
+        # Nothing can change the dicts between the two reads, so they already
+        # describe one state.
+        page = self.list_runs(limit=limit, offset=offset, metadata_key=key, metadata_value=value)
+        return page, self.count_runs_predating_metadata_key(key)
+
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         execution = self._executions.get(execution_id)
         if execution is None:

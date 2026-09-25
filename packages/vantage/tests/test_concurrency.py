@@ -1,5 +1,5 @@
-"""Concurrent sessions recorded through one `SqliteExecutionStore` do not
-corrupt or drop each other's writes.
+"""Threads sharing one `SqliteExecutionStore` neither corrupt or drop each
+other's writes nor read each other's writes half-done.
 
 Every thread is joined with a timeout: a deadlock is exactly what these tests
 look for, and an unbounded `join` would hang the suite instead of failing it.
@@ -7,13 +7,17 @@ look for, and an unbounded `join` would hang the suite instead of failing it.
 
 from __future__ import annotations
 
+import contextlib
+import sqlite3
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
 
+import pytest
 from vantage.core.domain.execution import Execution, Identity
+from vantage.storage import sqlite_store
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _result
 
@@ -128,5 +132,109 @@ def test_ten_simultaneous_sessions_leave_ten_run_entries_and_raise_nothing(
 
         assert errors == []
         assert store.count_executions() == 10
+    finally:
+        store.close()
+
+
+def _park_the_writer_inside_its_transaction(
+    monkeypatch: pytest.MonkeyPatch, *, then_fail: bool
+) -> tuple[threading.Event, threading.Event]:
+    """Stop `record_session` after its run row is written and before its
+    results are: `inside` is set once it is parked, and it carries on (or
+    raises, rolling everything back) once `release` is set."""
+    inside = threading.Event()
+    release = threading.Event()
+    resolve = sqlite_store._resolve_test_case_ids
+
+    def _parked(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, int]:
+        inside.set()
+        release.wait(_JOIN_TIMEOUT_SECONDS)
+        if then_fail:
+            raise RuntimeError("the write fails after its run row")
+        return resolve(conn, node_ids)
+
+    monkeypatch.setattr(sqlite_store, "_resolve_test_case_ids", _parked)
+    return inside, release
+
+
+@pytest.mark.parametrize("then_fail", [False, True], ids=["commits", "rolls-back"])
+def test_a_read_never_sees_another_threads_write_in_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, then_fail: bool
+) -> None:
+    """Every thread shares one connection, so a read that ran while another
+    thread was inside `BEGIN IMMEDIATE` would run inside that transaction:
+    it would see the run before its results, or a run that is then rolled
+    back. A read must wait for the write to finish instead."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    inside, release = _park_the_writer_inside_its_transaction(monkeypatch, then_fail=then_fail)
+    run_id = "a" * 32
+    results = [_result(f"t.py::test_{i}") for i in range(5)]
+    observed: list[tuple[bool, int, int, int]] = []
+
+    def _write() -> None:
+        with contextlib.suppress(RuntimeError):
+            store.record_session(
+                _execution(run_id), results=results, received_at=datetime.now(timezone.utc)
+            )
+
+    def _read() -> None:
+        observed.append(
+            (
+                store.get_execution(run_id) is not None,
+                len(store.get_results(run_id)),
+                store.count_executions(),
+                len(store.list_runs(limit=10, offset=0).items),
+            )
+        )
+
+    try:
+        writer = threading.Thread(target=_write)
+        writer.start()
+        assert inside.wait(_JOIN_TIMEOUT_SECONDS)
+        reader = threading.Thread(target=_read)
+        reader.start()
+        # A reader that does not wait for the writer has finished by now.
+        reader.join(timeout=0.2)
+        release.set()
+        writer.join(timeout=_JOIN_TIMEOUT_SECONDS)
+        reader.join(timeout=_JOIN_TIMEOUT_SECONDS)
+        assert not writer.is_alive()
+        assert not reader.is_alive()
+
+        assert observed == [(False, 0, 0, 0) if then_fail else (True, 5, 1, 1)]
+    finally:
+        release.set()
+        store.close()
+
+
+def test_every_read_returns_rather_than_waiting_on_the_stores_own_lock(tmp_path: Path) -> None:
+    """Each read takes the store's lock; one that called another locking
+    read while holding it would wait on itself forever."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    run_id = "a" * 32
+    store.record_session(
+        _execution(run_id),
+        results=[_result("t.py::test_a")],
+        received_at=datetime.now(timezone.utc),
+    )
+    reads: list[Callable[[], object]] = [
+        partial(store.get_execution, run_id),
+        store.count_executions,
+        partial(store.get_results, run_id),
+        store.count_results,
+        partial(store.get_catalogue_entry, "t.py::test_a"),
+        partial(store.list_runs, limit=10, offset=0),
+        partial(store.list_runs, limit=10, offset=0, metadata_key="k", metadata_value="v"),
+        partial(store.count_runs_predating_metadata_key, "k"),
+        partial(store.list_runs_with_metadata_horizon, key="k", value="v", limit=10, offset=0),
+        partial(store.get_run_detail, run_id),
+        partial(store.list_results, run_id, limit=10, offset=0),
+        partial(store.get_result, run_id, node_id="t.py::test_a"),
+        partial(store.list_history, node_id="t.py::test_a", limit=10, offset=0),
+        partial(store.list_settings, "test_sections"),
+        partial(store.get_run_case_outcomes, run_id),
+    ]
+    try:
+        assert _run_concurrently(reads) == []
     finally:
         store.close()
