@@ -102,22 +102,14 @@ fewer than the UTF-8 bytes spent here, so a file it captured always fits."""
 
 def _to_vcs_context(vcs: VcsReport | None) -> VcsContext | None:
     """Normalise the `vcs` section: `None` when the section is absent or
-    every field in it is null, so a session recorded outside a repository
-    reads back as `execution.vcs is None`, never as a `VcsContext` full of
-    nulls. `commit_subject` is truncated here, together with its flag.
+    `VcsContext.is_empty`, so a session recorded outside a repository reads
+    back as `execution.vcs is None`, never as a `VcsContext` full of nulls.
+    `commit_subject` is truncated here, together with its flag.
     """
     if vcs is None:
         return None
     commit_subject, commit_subject_truncated = truncate(vcs.commit_subject)
-    if (
-        vcs.commit is None
-        and vcs.branch is None
-        and commit_subject is None
-        and vcs.dirty is None
-        and vcs.root is None
-    ):
-        return None
-    return VcsContext(
+    context = VcsContext(
         commit=vcs.commit,
         branch=vcs.branch,
         commit_subject=commit_subject,
@@ -125,6 +117,7 @@ def _to_vcs_context(vcs: VcsReport | None) -> VcsContext | None:
         dirty=vcs.dirty,
         root=vcs.root,
     )
+    return None if context.is_empty() else context
 
 
 def _declared_path_shape_is_valid(path: str) -> bool:
@@ -153,8 +146,11 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
     declared keys one `MetadataEntry` row, captured or not. Values are never
     truncated, and this function never raises, so bad metadata cannot block
     the run from being stored. A file whose path fails the shape re-check,
-    or whose `status` or `format` this server cannot store, is dropped with
-    all its keys; a well-behaved plugin never sends one.
+    repeats an earlier file's path, or has a `status` or `format` this
+    server cannot store is dropped with all its keys; a well-behaved plugin
+    never sends one. A repeated path is dropped rather than merged because
+    the store keeps one file row per path, and the later file's keys would
+    be stored under a status that describes a different document.
 
     The plugin's bounds are applied again, by dropping rather than
     rejecting: a key over `MAX_METADATA_KEY_CHARS`, a key already declared
@@ -167,17 +163,20 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
 
     files: list[MetadataFile] = []
     entries: list[MetadataEntry] = []
+    accepted_paths: set[str] = set()
     accepted_keys: set[str] = set()
     remaining_budget = _MAX_METADATA_SECTION_BYTES
     budget_exhausted = False
 
     for file_report in metadata.files:
         if (
-            not _declared_path_shape_is_valid(file_report.path)
+            file_report.path in accepted_paths
+            or not _declared_path_shape_is_valid(file_report.path)
             or file_report.format not in METADATA_CONTENT_TYPES
             or file_report.status not in FILE_STATUSES
         ):
             continue
+        accepted_paths.add(file_report.path)
 
         keys: list[str] = []
         for key in file_report.keys:
@@ -235,20 +234,23 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
 
 
 def _to_execution(run: RunReport, vcs: VcsReport | None) -> Execution:
+    # The plugin sends at most a short line here, so the bound only binds on
+    # another client, and no column records the cut.
+    interrupt_reason, _ = truncate(run.interrupt_reason)
     return Execution(
         identity=Identity(run.id),
         started_at=run.started_at,
         finished_at=run.finished_at,
         exit_status=run.exit_status,
         interrupted=run.interrupted,
-        interrupt_reason=run.interrupt_reason,
+        interrupt_reason=interrupt_reason,
         vcs=_to_vcs_context(vcs),
     )
 
 
 def _to_failure_evidence(item: ResultReport) -> FailureEvidence | None:
-    """Normalise the failure evidence fields: `None` when every field is
-    null or false.
+    """Normalise the failure evidence fields: `None` when
+    `FailureEvidence.is_empty`.
 
     Every string field is truncated to the server's 64 KiB bound. Each
     stored flag is the client's flag OR the server's own: the client is the
@@ -267,24 +269,7 @@ def _to_failure_evidence(item: ResultReport) -> FailureEvidence | None:
     xfail_reason, xfail_cut = truncate(item.xfail_reason)
     xfail_reason_truncated = bool(item.xfail_reason_truncated) or xfail_cut
 
-    if (
-        item.failure_type is None
-        and failure_message is None
-        and not failure_message_truncated
-        and item.failure_path is None
-        and item.failure_lineno is None
-        and failure_repr is None
-        and not failure_repr_truncated
-        and traceback is None
-        and not traceback_truncated
-        and skip_reason is None
-        and not skip_reason_truncated
-        and xfail_reason is None
-        and not xfail_reason_truncated
-    ):
-        return None
-
-    return FailureEvidence(
+    failure = FailureEvidence(
         failure_type=item.failure_type,
         failure_message=failure_message,
         failure_message_truncated=failure_message_truncated,
@@ -299,6 +284,7 @@ def _to_failure_evidence(item: ResultReport) -> FailureEvidence | None:
         xfail_reason=xfail_reason,
         xfail_reason_truncated=xfail_reason_truncated,
     )
+    return None if failure.is_empty() else failure
 
 
 def _to_captured_output(item: ResultReport) -> CapturedOutput:

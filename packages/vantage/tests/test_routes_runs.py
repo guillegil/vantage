@@ -106,6 +106,19 @@ def test_to_execution_truncates_an_oversized_commit_subject_and_sets_the_flag() 
     assert execution.vcs.commit_subject_truncated is True
 
 
+def test_to_execution_truncates_an_oversized_interrupt_reason() -> None:
+    """Stored like every other text field: cut to the byte bound. A reason
+    within it is kept whole."""
+    oversized = _to_execution(
+        _run_report(interrupt_reason="x" * (MAX_TEXT_FIELD_BYTES + 1024)), vcs=None
+    )
+    short = _to_execution(_run_report(interrupt_reason="KeyboardInterrupt"), vcs=None)
+
+    assert oversized.interrupt_reason is not None
+    assert len(oversized.interrupt_reason.encode("utf-8")) == MAX_TEXT_FIELD_BYTES
+    assert short.interrupt_reason == "KeyboardInterrupt"
+
+
 def test_to_execution_a_partial_vcs_section_is_not_all_null_and_maps_through() -> None:
     """Only commit and branch present -- a detached HEAD or no-commits
     shape -- is NOT the all-null case, so it must map to a real
@@ -336,6 +349,31 @@ def test_to_run_metadata_drops_an_entry_with_an_unrecognised_format() -> None:
     result = _to_run_metadata(metadata)
 
     assert result == EMPTY_RUN_METADATA
+
+
+def test_to_run_metadata_drops_a_file_repeating_an_earlier_path_with_its_keys() -> None:
+    """The store keeps one row per path, so the repeat's keys would be
+    stored under the first file's status. Neither its file row nor any of
+    its keys is kept, and the first file is untouched."""
+    first = _metadata_file_report()
+    repeat = _metadata_file_report(
+        content=json.dumps({"firmware_version": "9.9", "board": "C"}),
+        keys=["firmware_version", "board"],
+    )
+
+    result = _to_run_metadata(_metadata_report(first, repeat))
+
+    assert result.files == (
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="captured"),
+    )
+    assert result.entries == (
+        MetadataEntry(
+            key="firmware_version",
+            value="2.1",
+            source_file="config/firmware.json",
+            status="captured",
+        ),
+    )
 
 
 def test_to_run_metadata_marks_a_non_captured_file_and_all_its_keys_source_unavailable() -> None:
