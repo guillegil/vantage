@@ -1,4 +1,4 @@
-"""`resolve_server_config` precedence.
+"""`resolve_server_config`: precedence, and the values it refuses.
 
 Plain function calls throughout -- no server, no filesystem I/O, no pytest
 session. Purity itself (no directory ever created) is proved separately in
@@ -163,8 +163,9 @@ def test_a_nonsensical_grace_period_is_refused_at_resolution(value: float) -> No
     0 and -1 make every unfinished run derive as abandoned the instant it is
     read -- including sessions heartbeating normally. nan, inf and 1e14
     cannot become the `timedelta` the read routes build on every request, so
-    every run list and run detail would fail. The server must refuse to
-    start rather than run and answer wrong.
+    every run list and run detail would fail; the cap sits at one year, far
+    below where that happens. The server must refuse to start rather than
+    run and answer wrong.
     """
     with pytest.raises(ServerConfigError, match="--grace-period"):
         _resolve(cli_grace_period=value)

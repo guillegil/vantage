@@ -2,9 +2,9 @@
 
 Used by ``vantage``'s layer guards (``test_architecture.py``: the core and
 the storage adapter) and ``pytest-vantage``'s zero-dependency guard (stdlib
-or pytest). It
-lives outside either package's ``src/`` tree because it must never ship in a
-wheel. Reached through the root ``pythonpath = ["packages/vantage/tests"]``.
+or pytest). It lives outside either package's ``src/`` tree because it must
+never ship in a wheel. Reached through the root
+``pythonpath = ["packages/vantage/tests"]``.
 """
 
 from __future__ import annotations
