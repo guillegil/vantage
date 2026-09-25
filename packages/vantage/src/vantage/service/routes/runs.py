@@ -37,7 +37,7 @@ import json
 import re
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from pathlib import PurePath
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
 from fastapi import APIRouter, Path, Request
@@ -46,7 +46,11 @@ from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
 from vantage.core.domain.execution import Execution, Identity, VcsContext
-from vantage.core.domain.metadata import FILE_STATUSES
+from vantage.core.domain.metadata import (
+    FILE_STATUSES,
+    MAX_METADATA_ENTRIES,
+    MAX_METADATA_KEY_CHARS,
+)
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.core.ports.storage import EMPTY_RUN_METADATA, MetadataEntry, MetadataFile, RunMetadata
 from vantage.service import metadata_parse
@@ -84,9 +88,23 @@ with any other format -- which the schema cannot store -- is dropped here,
 with its keys, before it reaches the store. A well-behaved plugin never
 sends one."""
 
+# The three bounds below mirror `pytest_vantage.metadata`. The two
+# distributions cannot import each other, so each carries its own copy;
+# `test_routes_runs.py` pins them equal. The plugin never exceeds them, so
+# they only ever bind on another HTTP client.
+
 _MAX_DECLARED_PATH_CHARS = 1024
-"""Mirrors `pytest_vantage.metadata.MAX_DECLARED_PATH_CHARS`. The two
-distributions cannot import each other, so each carries its own copy."""
+"""Mirrors `MAX_DECLARED_PATH_CHARS`."""
+
+_MAX_DECLARED_FILE_BYTES = 8 * 1024
+"""Mirrors `MAX_DECLARED_FILE_BYTES`. Composing YAML costs CPU per byte on
+the event loop every route shares, so a larger document is recorded
+`too_large` without being parsed."""
+
+_MAX_METADATA_SECTION_BYTES = 32 * 1024
+"""Mirrors `MAX_METADATA_SECTION_BYTES`, bounding what one report makes the
+server parse in total. The plugin spends it on JSON-encoded bytes, never
+fewer than the UTF-8 bytes spent here, so a file it captured always fits."""
 
 
 def _to_vcs_context(vcs: VcsReport | None) -> VcsContext | None:
@@ -121,13 +139,18 @@ def _declared_path_shape_is_valid(path: str) -> bool:
 
     The server cannot see the client's filesystem, so it cannot re-verify
     containment -- only the shape `pytest_vantage.metadata` also enforces.
-    A path failing this is dropped, never rejected."""
-    if len(path) > _MAX_DECLARED_PATH_CHARS:
+    Nor does it know the client's platform, so the path must pass both as a
+    POSIX and as a Windows path, and a backslash -- a separator to one, a
+    name character to the other -- is refused outright. A path failing this
+    is dropped, never rejected."""
+    if len(path) > _MAX_DECLARED_PATH_CHARS or "\\" in path:
         return False
-    candidate = PurePath(path)
-    if candidate.is_absolute() or candidate.drive or candidate.anchor:
-        return False
-    return ".." not in candidate.parts
+    for candidate in (PurePosixPath(path), PureWindowsPath(path)):
+        if candidate.is_absolute() or candidate.drive or candidate.anchor:
+            return False
+        if ".." in candidate.parts:
+            return False
+    return True
 
 
 def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
@@ -139,12 +162,21 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
     the run from being stored. A file whose path fails the shape re-check,
     or whose `status` or `format` this server cannot store, is dropped with
     all its keys; a well-behaved plugin never sends one.
+
+    The plugin's bounds are applied again, by dropping rather than
+    rejecting: a key over `MAX_METADATA_KEY_CHARS`, a key already declared
+    by an earlier file, and every key past `MAX_METADATA_ENTRIES` are left
+    out, and a captured document over the per-file bound or past the section
+    budget is recorded `too_large` or `over_budget` without being parsed.
     """
     if metadata is None:
         return EMPTY_RUN_METADATA
 
     files: list[MetadataFile] = []
     entries: list[MetadataEntry] = []
+    accepted_keys: set[str] = set()
+    remaining_budget = _MAX_METADATA_SECTION_BYTES
+    budget_exhausted = False
 
     for file_report in metadata.files:
         if (
@@ -154,62 +186,57 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
         ):
             continue
 
-        if file_report.status != "captured" or file_report.content is None:
-            # The plugin's own status is trusted verbatim -- the server has
-            # no way to verify it.
-            files.append(
-                MetadataFile(
-                    source_file=file_report.path,
-                    content_type=file_report.format,
-                    status=file_report.status,
-                )
-            )
-            entries.extend(
-                MetadataEntry(
-                    key=key,
-                    value=None,
-                    source_file=file_report.path,
-                    status="source_unavailable",
-                )
-                for key in file_report.keys
-            )
-            continue
+        keys: list[str] = []
+        for key in file_report.keys:
+            if (
+                len(key) <= MAX_METADATA_KEY_CHARS
+                and key not in accepted_keys
+                and len(accepted_keys) < MAX_METADATA_ENTRIES
+            ):
+                accepted_keys.add(key)
+                keys.append(key)
 
-        parsed = metadata_parse.parse(file_report.content, file_report.format, file_report.keys)
-        if parsed is None:
-            # The server could not parse the document.
-            files.append(
-                MetadataFile(
-                    source_file=file_report.path,
-                    content_type=file_report.format,
-                    status="malformed",
-                )
-            )
-            entries.extend(
-                MetadataEntry(
-                    key=key,
-                    value=None,
-                    source_file=file_report.path,
-                    status="source_unavailable",
-                )
-                for key in file_report.keys
-            )
-            continue
+        # A status other than `captured` is the plugin's own and is trusted
+        # verbatim -- the server has no way to verify it.
+        status = file_report.status
+        parsed: dict[str, metadata_parse.KeyResult] | None = None
+        if status == "captured":
+            content = file_report.content
+            size = 0 if content is None else len(content.encode("utf-8", "surrogatepass"))
+            if content is None:
+                # Nothing to parse; `captured` would contradict every key.
+                status = "malformed"
+            elif size > _MAX_DECLARED_FILE_BYTES:
+                status = "too_large"
+            elif budget_exhausted or size > remaining_budget:
+                # Spent in declaration order, as the plugin spends it.
+                status = "over_budget"
+                budget_exhausted = True
+            else:
+                remaining_budget -= size
+                parsed = metadata_parse.parse(content, file_report.format, keys)
+                if parsed is None:
+                    status = "malformed"
 
-        # `metadata_parse.parse` already classified every declared key.
         files.append(
             MetadataFile(
-                source_file=file_report.path,
-                content_type=file_report.format,
-                status="captured",
+                source_file=file_report.path, content_type=file_report.format, status=status
             )
         )
-        entries.extend(
-            MetadataEntry(
-                key=key, value=result.value, source_file=file_report.path, status=result.status
+        if parsed is None:
+            entries.extend(
+                MetadataEntry(
+                    key=key, value=None, source_file=file_report.path, status="source_unavailable"
+                )
+                for key in keys
             )
-            for key, result in parsed.items()
-        )
+        else:
+            entries.extend(
+                MetadataEntry(
+                    key=key, value=result.value, source_file=file_report.path, status=result.status
+                )
+                for key, result in parsed.items()
+            )
 
     return RunMetadata(files=tuple(files), entries=tuple(entries))
 

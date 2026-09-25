@@ -14,7 +14,11 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES
+from vantage.core.domain.metadata import (
+    MAX_METADATA_ENTRIES,
+    MAX_METADATA_KEY_CHARS,
+    MAX_METADATA_VALUE_BYTES,
+)
 from vantage.core.ports.storage import MetadataEntry, MetadataFile
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
@@ -941,6 +945,27 @@ _TAXONOMY_CASES: dict[str, tuple[dict[str, Any], MetadataFile | None, frozenset[
         None,
         frozenset(),
     ),
+    "server_side_shape_reject_windows": (
+        _metadata_file(
+            path="..\\escape.json", status="path_rejected", content=None, keys=["firmware_version"]
+        ),
+        None,
+        frozenset(),
+    ),
+    "captured_without_content": (
+        _metadata_file(content=None, keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="malformed"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
 }
 
 
@@ -1099,6 +1124,50 @@ def test_a_declared_document_the_server_cannot_store_still_records_the_run(
             )
         }
     )
+
+
+def test_a_near_cap_yaml_document_is_stored_too_large_rather_than_parsed(
+    any_store: Any,
+) -> None:
+    """Composing YAML costs seconds per megabyte on the event loop every
+    route shares; a document only a non-plugin client could send is
+    refused by size, and the run is still recorded."""
+    run_id = "6" + "3" * 31
+    report = _well_formed_report(run_id)
+    content = "k: [" + "1," * 480_000 + "1]\n"
+    report["metadata"] = _metadata_section(
+        _metadata_file(path="config/big.yaml", format="yaml", content=content, keys=["k"])
+    )
+
+    response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_files(any_store, run_id) == frozenset(
+        {MetadataFile(source_file="config/big.yaml", content_type="yaml", status="too_large")}
+    )
+
+
+def test_the_server_stores_at_most_the_metadata_entry_bound(any_store: Any) -> None:
+    """The plugin refuses a declaration over the entry and key bounds, but
+    any HTTP client can report here; the excess is dropped, never the
+    session."""
+    run_id = "6" + "4" * 31
+    report = _well_formed_report(run_id)
+    keys = [f"key_{index}" for index in range(MAX_METADATA_ENTRIES + 50)]
+    report["metadata"] = _metadata_section(
+        _metadata_file(content="{}", keys=keys[:100]),
+        _metadata_file(path="config/b.json", content="{}", keys=keys[100:]),
+        _metadata_file(
+            path="config/c.json", content="{}", keys=["k" * (MAX_METADATA_KEY_CHARS + 1)]
+        ),
+    )
+
+    response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    stored = _stored_metadata_entries(any_store, run_id)
+    assert {entry.key for entry in stored} == set(keys[:MAX_METADATA_ENTRIES])
+    assert len(_stored_metadata_files(any_store, run_id)) == 3
 
 
 def test_a_json_declared_number_is_stored_as_the_text_the_file_holds(

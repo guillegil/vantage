@@ -9,8 +9,12 @@ import json
 from datetime import datetime, timezone
 
 import pytest
+from pytest_vantage import metadata as plugin_metadata
+from vantage.core.domain.metadata import MAX_METADATA_ENTRIES, MAX_METADATA_KEY_CHARS
 from vantage.core.domain.result import CapturedOutput
 from vantage.core.ports.storage import EMPTY_RUN_METADATA, MetadataEntry, MetadataFile
+from vantage.service import metadata_parse
+from vantage.service.routes import runs as runs_route
 from vantage.service.routes.runs import _to_execution, _to_result, _to_run_metadata
 from vantage.service.schemas import (
     MetadataFileReport,
@@ -297,17 +301,43 @@ def test_to_run_metadata_captures_a_well_formed_declared_key() -> None:
     )
 
 
-@pytest.mark.parametrize("bad_path", ["/etc/passwd", "../escape.json", "x" * 1025])
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        "/etc/passwd",
+        "../escape.json",
+        "config/../../escape.json",
+        "x" * 1025,
+        "C:\\x.json",
+        "C:/x.json",
+        "C:x.json",
+        "..\\escape.json",
+        "config\\..\\..\\escape.json",
+        "\\\\server\\share\\x.json",
+        "//server/share/x.json",
+        "\\x.json",
+        "config\\firmware.json",
+    ],
+)
 def test_to_run_metadata_drops_an_entry_whose_source_file_fails_the_shape_recheck(
     bad_path: str,
 ) -> None:
     """An oversized, absolute or `..` `source_file` is dropped whole, never
-    rejected: no file row and no key row, and no exception."""
+    rejected: no file row and no key row, and no exception. The client's
+    platform is unknown, so Windows forms -- a drive, a UNC share, a
+    backslash separator -- are refused on any server."""
     metadata = _metadata_report(_metadata_file_report(path=bad_path))
 
     result = _to_run_metadata(metadata)
 
     assert result == EMPTY_RUN_METADATA
+
+
+@pytest.mark.parametrize("path", ["config/firmware.json", "x..y.json", "...json", "a b.json"])
+def test_to_run_metadata_keeps_a_relative_path_with_dots_in_its_names(path: str) -> None:
+    result = _to_run_metadata(_metadata_report(_metadata_file_report(path=path)))
+
+    assert result.files == (MetadataFile(source_file=path, content_type="json", status="captured"),)
 
 
 def test_to_run_metadata_drops_an_entry_with_an_unrecognised_status() -> None:
@@ -374,3 +404,140 @@ def test_to_run_metadata_marks_an_unparseable_document_malformed() -> None:
             status="source_unavailable",
         ),
     )
+
+
+def test_to_run_metadata_marks_a_captured_file_without_content_malformed() -> None:
+    """`captured` with nothing to parse would store a file row that
+    contradicts its own keys; the server records what it found instead."""
+    metadata = _metadata_report(_metadata_file_report(content=None, keys=["a", "b"]))
+
+    result = _to_run_metadata(metadata)
+
+    assert result.files == (
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="malformed"),
+    )
+    assert set(result.entries) == {
+        MetadataEntry(
+            key=key, value=None, source_file="config/firmware.json", status="source_unavailable"
+        )
+        for key in ("a", "b")
+    }
+
+
+# --- server-side metadata bounds ---------------------------------------------
+
+
+def _document_of_size(size: int) -> str:
+    """A JSON document of exactly `size` UTF-8 bytes holding one key."""
+    shell = '{"firmware_version": "2.1", "pad": ""}'
+    return shell[:-2] + "x" * (size - len(shell)) + '"}'
+
+
+def _file(index: int, content: str | None, **overrides: object) -> MetadataFileReport:
+    return _metadata_file_report(
+        path=f"config/file_{index}.json", content=content, keys=[f"key_{index}"], **overrides
+    )
+
+
+def test_to_run_metadata_marks_a_document_over_the_file_bound_too_large_without_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The plugin never ships a declared file over its per-file bound, and
+    parsing YAML costs CPU per byte on the request's event loop, so any
+    other client's oversized document is refused before the parser sees
+    it."""
+
+    def _never_called(*_args: object) -> None:
+        raise AssertionError("an oversized document reached the parser")
+
+    monkeypatch.setattr(metadata_parse, "parse", _never_called)
+    content = _document_of_size(runs_route._MAX_DECLARED_FILE_BYTES + 1)
+
+    result = _to_run_metadata(_metadata_report(_metadata_file_report(content=content)))
+
+    assert result.files == (
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="too_large"),
+    )
+    assert result.entries == (
+        MetadataEntry(
+            key="firmware_version",
+            value=None,
+            source_file="config/firmware.json",
+            status="source_unavailable",
+        ),
+    )
+
+
+def test_to_run_metadata_parses_a_document_exactly_at_the_file_bound() -> None:
+    content = _document_of_size(runs_route._MAX_DECLARED_FILE_BYTES)
+    assert len(content.encode("utf-8")) == runs_route._MAX_DECLARED_FILE_BYTES
+
+    result = _to_run_metadata(_metadata_report(_metadata_file_report(content=content)))
+
+    assert [file.status for file in result.files] == ["captured"]
+    assert [entry.value for entry in result.entries] == ["2.1"]
+
+
+def test_to_run_metadata_marks_every_document_past_the_section_budget_over_budget() -> None:
+    """The budget is spent in order, as the plugin spends it: once one
+    document does not fit, it and every later captured document are
+    `over_budget`; a file the client already reported uncaptured keeps its
+    own status."""
+    per_file = runs_route._MAX_DECLARED_FILE_BYTES
+    fitting = runs_route._MAX_METADATA_SECTION_BYTES // per_file
+    files = [_file(index, _document_of_size(per_file)) for index in range(fitting)]
+    files.append(_file(fitting, "{}"))
+    files.append(_file(fitting + 1, None, status="not_found"))
+    files.append(_file(fitting + 2, "{}"))
+
+    result = _to_run_metadata(_metadata_report(*files))
+
+    assert [file.status for file in result.files] == [
+        *["captured"] * fitting,
+        "over_budget",
+        "not_found",
+        "over_budget",
+    ]
+    assert {entry.key: entry.status for entry in result.entries}[f"key_{fitting}"] == (
+        "source_unavailable"
+    )
+
+
+def test_to_run_metadata_drops_a_key_over_the_key_bound_and_keeps_one_at_it() -> None:
+    at_bound = "k" * MAX_METADATA_KEY_CHARS
+    over_bound = "k" * (MAX_METADATA_KEY_CHARS + 1)
+    content = json.dumps({at_bound: "a", over_bound: "b"})
+
+    result = _to_run_metadata(
+        _metadata_report(_metadata_file_report(content=content, keys=[at_bound, over_bound]))
+    )
+
+    assert [(entry.key, entry.value) for entry in result.entries] == [(at_bound, "a")]
+    assert [file.status for file in result.files] == ["captured"]
+
+
+def test_to_run_metadata_keeps_at_most_the_entry_bound_across_files() -> None:
+    """Keys are counted per run, across files, first declared first kept;
+    a key declared twice is stored once, as the store's primary key would
+    keep it. Every file still gets its row."""
+    first = [f"a_{index}" for index in range(MAX_METADATA_ENTRIES - 1)]
+    second = ["a_0", "b_0", "b_1"]
+    metadata = _metadata_report(
+        _metadata_file_report(path="config/a.json", content="{}", keys=first),
+        _metadata_file_report(path="config/b.json", content="{}", keys=second),
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert len(result.files) == 2
+    assert [entry.key for entry in result.entries] == [*first, "b_0"]
+    assert result.entries[0].source_file == "config/a.json"
+
+
+def test_the_mirrored_plugin_bounds_equal_the_plugins_own() -> None:
+    """The two distributions cannot import each other at runtime, so the
+    server carries copies; a plugin bound raised alone would make the
+    server drop files the plugin captured."""
+    assert runs_route._MAX_DECLARED_PATH_CHARS == plugin_metadata.MAX_DECLARED_PATH_CHARS
+    assert runs_route._MAX_DECLARED_FILE_BYTES == plugin_metadata.MAX_DECLARED_FILE_BYTES
+    assert runs_route._MAX_METADATA_SECTION_BYTES == plugin_metadata.MAX_METADATA_SECTION_BYTES
