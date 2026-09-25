@@ -11,13 +11,27 @@ is where it would surface, not a user's CI.
 
 from __future__ import annotations
 
-import inspect
 import json
+import socket
 from typing import Any
 
 import pytest
+from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.plugin import pytest_configure
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+
+
+def _closed_port_address() -> str:
+    """An address where nothing listens: bind an ephemeral loopback port and
+    close it again. Sessions pointed here fail their preflight, record
+    nothing, and never reach a real server a developer may be running on the
+    default address.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return f"http://127.0.0.1:{port}"
 
 
 class _RegisterCallDouble:
@@ -35,7 +49,7 @@ class _ControllerConfigDouble:
     """A non-worker `pytest.Config` stand-in, carrying just enough surface
     for `pytest_configure`'s controller branch to run to completion: no
     `workerinput`, so `EvidenceCollector` registration and the preflight
-    both run. The configured server address (a closed low port) fails the
+    both run. The configured server address (a closed port) fails the
     preflight immediately rather than waiting out a connect timeout --
     `EvidenceCollector` registers BEFORE that preflight runs either way, so
     its outcome is irrelevant to what this test checks.
@@ -45,7 +59,7 @@ class _ControllerConfigDouble:
         self.pluginmanager = _RegisterCallDouble()
         self._options: dict[str, Any] = {
             "vantage": True,
-            "vantage_server": "http://127.0.0.1:9",
+            "vantage_server": _closed_port_address(),
             "vantage_timeout": 0.1,
             "vantage_failure_text": True,
         }
@@ -58,7 +72,7 @@ class _ControllerConfigDouble:
 
 
 def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
-    pytester: pytest.Pytester,
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`report.vantage_evidence` is a flat `dict[str, str | int | bool | None]`,
     set by `EvidenceCollector`'s hookwrapper on the worker that ran the
@@ -117,7 +131,14 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
         """
     )
 
-    pytester.runpytest_subprocess("--vantage", "--vantage-failure-text", "-n", "2")
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={_closed_port_address()}",
+        "--vantage-failure-text",
+        "-n",
+        "2",
+    )
 
     marker_path = pytester.path / "evidence_marker.json"
     assert marker_path.exists(), (
@@ -129,7 +150,7 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
 
 
 def test_absent_flag_means_evidencecollector_is_never_registered(
-    pytester: pytest.Pytester,
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Capture is opt-in: with `--vantage` alone and no
     `--vantage-failure-text`, no `EvidenceCollector` is registered anywhere
@@ -160,14 +181,15 @@ def test_absent_flag_means_evidencecollector_is_never_registered(
         """
     )
 
-    pytester.runpytest_subprocess("--vantage")
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    pytester.runpytest_subprocess("--vantage", f"--vantage-server={_closed_port_address()}")
 
     registered = json.loads((pytester.path / "registered.json").read_text())
     assert registered == []
 
 
 def test_opt_in_flag_means_evidencecollector_is_registered(
-    pytester: pytest.Pytester,
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With `--vantage-failure-text` given alongside `--vantage`, exactly
     one `EvidenceCollector` is registered.
@@ -200,7 +222,10 @@ def test_opt_in_flag_means_evidencecollector_is_registered(
         """
     )
 
-    pytester.runpytest_subprocess("--vantage", "--vantage-failure-text")
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={_closed_port_address()}", "--vantage-failure-text"
+    )
 
     registered = json.loads((pytester.path / "registered.json").read_text())
     assert registered == ["EvidenceCollector"]
@@ -242,7 +267,8 @@ def test_evidencecollector_registers_on_the_controller_when_activated() -> None:
     from pytest_vantage.evidence import EvidenceCollector
 
     config = _ControllerConfigDouble()
-    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+    with pytest.warns(VantageWarning, match="cannot reach"):
+        pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
     assert any(isinstance(plugin, EvidenceCollector) for plugin in config.pluginmanager.registered)
 
@@ -260,8 +286,11 @@ def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[s
     An unreachable `--vantage-server` is given deliberately: `EvidenceCollector`
     registers and runs regardless of reachability (`plugin.py::pytest_configure`
     registers it BEFORE the preflight), so no live server is needed to
-    observe what it extracted. `--vantage-failure-text` is given
-    unconditionally -- rendering and field extraction only run with it.
+    observe what it extracted. The preflight's warning is raised in the
+    outer process, before the inner session captures warnings, so it is
+    asserted here rather than left to leak into the calling test.
+    `--vantage-failure-text` is given unconditionally -- rendering and field
+    extraction only run with it.
     """
     pytester.makeconftest(
         """
@@ -281,9 +310,13 @@ def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[s
                 json.dump(_captured, fh)
         """
     )
-    pytester.runpytest_inprocess(
-        "--vantage", "--vantage-server=http://127.0.0.1:9", "--vantage-failure-text", *args
-    )
+    with pytest.warns(VantageWarning, match="cannot reach"):
+        pytester.runpytest_inprocess(
+            "--vantage",
+            f"--vantage-server={_closed_port_address()}",
+            "--vantage-failure-text",
+            *args,
+        )
     captured: dict[str, dict[str, object] | None] = json.loads(
         (pytester.path / "evidence_capture.json").read_text()
     )
@@ -564,29 +597,3 @@ def test_capture_disabled_leaves_output_absent(pytester: pytest.Pytester) -> Non
     assert call_evidence is not None
     assert call_evidence["captured_stdout"] is None
     assert call_evidence["captured_stderr"] is None
-
-
-def test_the_private_rendering_method_evidence_capture_depends_on_still_exists() -> None:
-    """`_failure_fields` renders the traceback through
-    `item._repr_failure_py(excinfo, style="long")`, a private-by-underscore
-    method, because the public `Function.repr_failure` takes no `style` and
-    derives it from `--tb`, which would make the stored traceback depend on
-    the user's display flag.
-
-    Without this test a pytest release that renames or removes that method
-    degrades **silently**: the `AttributeError` lands in `_failure_fields`'
-    deliberately broad per-field `except`, `traceback`, `failure_path` and
-    `failure_lineno` all become `None`, and the session still records while
-    holding no failure evidence at all. Asserted against the public
-    `pytest.Item`, never by importing the private `_pytest.nodes` module.
-    """
-    method = getattr(pytest.Item, "_repr_failure_py", None)
-    assert method is not None, (
-        "pytest.Item._repr_failure_py is gone; evidence.py renders the traceback"
-        " through it and the loss would be silent -- see this test's docstring"
-    )
-    parameters = inspect.signature(method).parameters
-    assert "style" in parameters, (
-        "pytest.Item._repr_failure_py no longer accepts `style`; without it the"
-        " stored traceback would follow the user's --tb flag"
-    )

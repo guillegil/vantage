@@ -8,8 +8,6 @@ in-memory store -- never a stub of either side of that boundary.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 from vantage.core.domain.result import Result
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
@@ -101,12 +99,11 @@ import pytest
 
 @pytest.fixture
 def slow_fixture():
-    time.sleep(8)
+    time.sleep(0.5)
     yield
 
 
 def test_with_slow_setup(slow_fixture):
-    time.sleep(0.1)
     assert True
 """
 
@@ -117,9 +114,9 @@ def test_setup_and_call_durations_are_measured_independently(
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     """`setup_duration` and `call_duration` are pytest's own per-phase
-    timings, not one lump sum -- an 8-second fixture body against a
-    0.1-second test body proves the split is real and not two aliases of the
-    same number. The sleep is real because a mocked clock would not measure
+    timings, not one lump sum -- a half-second fixture body against an empty
+    test body proves the split is real and not two aliases of the same
+    number. The sleep is real because a mocked clock would not measure
     anything; hence the `slow` marker.
     """
     pytester.makepyfile(test_slow_setup=_SLOW_SETUP_FAST_BODY)
@@ -128,9 +125,9 @@ def test_setup_and_call_durations_are_measured_independently(
 
     result = _by_function_name(vantage_server.results(), "test_with_slow_setup")
     assert result.setup_duration is not None
-    assert result.setup_duration >= 8
+    assert result.setup_duration >= 0.5
     assert result.call_duration is not None
-    assert result.call_duration < 1
+    assert result.call_duration < 0.25
 
 
 _SETUP_FAILURE_ONLY = """
@@ -232,43 +229,37 @@ def test_module_level():
 
 # --- empty parameter id, end to end -----------------------------------------
 
-# The repo's OWN test suite, not a hand-built payload: `test_execution.py`'s
-# own parametrize list includes `""` among its "bad value" cases, so
-# `...test_identity_rejects_anything_but_32_lowercase_hex_characters[]` is a
-# real, already-existing parametrised test whose id is the empty string.
-_TEST_EXECUTION_FILE = (
-    Path(__file__).resolve().parents[3] / "packages/vantage/tests/test_execution.py"
-)
+_EMPTY_PARAM_ID = """
+import pytest
+
+
+@pytest.mark.parametrize("value", [""], ids=[""])
+def test_empty_id(value):
+    assert value == ""
+
+
+def test_unparametrised():
+    assert True
+"""
 
 
 def test_empty_param_id_survives_the_real_server_hop_end_to_end(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """A real parametrised test whose parameter id is the empty string keeps
+    """A parametrised test whose parameter id is the empty string keeps
     `param_id == ""` through the WHOLE chain (pytest's own hooks, the plugin,
-    HTTP, the server). Runs alongside a genuinely unparametrised test from
-    the same file, in the same session, so both ends of the
-    absent-versus-empty distinction are proven together.
+    HTTP, the server). Runs alongside an unparametrised test in the same
+    session, so both ends of the absent-versus-empty distinction are proven
+    together.
     """
-    empty_param_case = (
-        f"{_TEST_EXECUTION_FILE}::test_identity_rejects_anything_but_32_lowercase_hex_characters[]"
-    )
-    unparametrised_case = (
-        f"{_TEST_EXECUTION_FILE}::test_identity_accepts_32_lowercase_hex_characters"
-    )
+    pytester.makepyfile(test_empty_param=_EMPTY_PARAM_ID)
 
-    pytester.runpytest_subprocess(
-        "--vantage",
-        f"--vantage-server={vantage_server.address}",
-        empty_param_case,
-        unparametrised_case,
-    )
+    pytester.runpytest_subprocess("--vantage", f"--vantage-server={vantage_server.address}")
 
     results = vantage_server.results()
-    empty_param = _by_function_name(
-        results, "test_identity_rejects_anything_but_32_lowercase_hex_characters"
-    )
-    unparametrised = _by_function_name(results, "test_identity_accepts_32_lowercase_hex_characters")
+    empty_param = _by_function_name(results, "test_empty_id")
+    unparametrised = _by_function_name(results, "test_unparametrised")
+    assert empty_param.identity.node_id == "test_empty_param.py::test_empty_id[]"
     assert empty_param.identity.param_id == ""
     assert unparametrised.identity.param_id is None
