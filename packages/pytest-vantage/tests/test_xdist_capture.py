@@ -138,6 +138,42 @@ def test_dist_each_keeps_a_failure_seen_on_one_worker(
     assert result.worker_id == "gw0"
 
 
+_FAILING_SUBTEST = """
+def test_with_subtests(subtests):
+    for i in range(3):
+        with subtests.test(i=i):
+            assert i != 2, "i must not be two"
+"""
+
+
+@pytest.mark.skipif(
+    not hasattr(pytest, "Subtests"), reason="the subtests fixture is built into pytest from 9"
+)
+def test_a_failing_subtest_forwarded_by_a_worker_keeps_its_evidence(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """Subtest reports cross the worker-to-controller hop as their own
+    report type, evidence included, so a worker-run failing subtest is
+    recorded the same as a local one."""
+    pytest.importorskip("xdist")
+    pytester.makepyfile(test_fixture=_FAILING_SUBTEST)
+
+    pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={vantage_server.address}",
+        "--vantage-failure-text",
+        "-n",
+        "2",
+    )
+
+    (result,) = vantage_server.results()
+    assert result.worker_id is not None
+    assert result.outcome == "failed"
+    assert result.failure is not None
+    assert result.failure.failure_type == "AssertionError"
+
+
 _PRINTS_IN_EVERY_PHASE = """
 import pytest
 

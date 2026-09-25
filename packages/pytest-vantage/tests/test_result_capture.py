@@ -401,6 +401,90 @@ def test_module_level():
     assert in_class.identity.class_name == "TestInClass"
 
 
+# --- subtests, end to end ---------------------------------------------------
+
+_needs_builtin_subtests = pytest.mark.skipif(
+    not hasattr(pytest, "Subtests"), reason="the subtests fixture is built into pytest from 9"
+)
+
+_UNITTEST_SUBTEST_FAILS = """
+import unittest
+
+
+class Case(unittest.TestCase):
+    def test_numbers(self):
+        for i in range(3):
+            with self.subTest(i=i):
+                self.assertNotEqual(i, 2)
+"""
+
+
+def test_a_failing_unittest_subtest_fails_the_test(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """pytest reports the failing `subTest` and exits 1 while leaving the
+    test's own report passed. The record follows pytest's verdict, with the
+    subtest's exception as the evidence."""
+    pytester.makepyfile(test_ut=_UNITTEST_SUBTEST_FAILS)
+
+    run = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    assert run.ret == pytest.ExitCode.TESTS_FAILED
+    result = _by_function_name(vantage_server.results(), "test_numbers")
+    assert result.outcome == "failed"
+    assert result.failure is not None
+    assert result.failure.failure_type == "AssertionError"
+
+
+_SUBTESTS_FIXTURE = """
+import pytest
+
+
+def test_with_subtests(subtests):
+    for i in range(3):
+        with subtests.test(i=i):
+            print(f"inside-subtest-{i}")
+            assert i != FAILING, "i must not be two"
+
+
+def test_with_a_skipped_subtest(subtests):
+    with subtests.test():
+        pytest.skip("not today")
+    with subtests.test():
+        pass
+"""
+
+
+@_needs_builtin_subtests
+def test_a_failing_subtest_is_recorded_with_its_evidence_and_output(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """With the `subtests` fixture pytest fails the test as "contains 1
+    failed subtest", with no exception of its own. The failing subtest's
+    exception is the evidence, and the output printed inside the subtest
+    blocks, captured on the subtest reports, is kept. A skipped subtest
+    leaves a passing test passed."""
+    pytester.makepyfile(test_fixture=_SUBTESTS_FIXTURE.replace("FAILING", "2"))
+
+    pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    results = vantage_server.results()
+    result = _by_function_name(results, "test_with_subtests")
+    assert result.outcome == "failed"
+    assert result.failure is not None
+    assert result.failure.failure_type == "AssertionError"
+    assert result.failure.failure_message is not None
+    assert "i must not be two" in result.failure.failure_message
+    assert result.captured.stdout == "inside-subtest-0\ninside-subtest-1\ninside-subtest-2\n"
+    assert _by_function_name(results, "test_with_a_skipped_subtest").outcome == "passed"
+
+
 # --- an item that is its own file, end to end -------------------------------
 
 # A node that is both a File and an Item, as older lint plugins build them:

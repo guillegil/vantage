@@ -516,6 +516,83 @@ def test_a_new_setup_report_starts_a_fresh_attempt(
     assert result["duration"] == 0.75  # the final attempt's setup and teardown only
 
 
+def _subtest(outcome: _ReportOutcome, evidence: dict[str, object]) -> pytest.TestReport:
+    """A subtest's report, duck-typed the way the plugin recognises one: the
+    parent's node id, `when="call"`, and the subtest's `context`."""
+    report = _report("call", outcome)
+    report.context = SimpleNamespace(msg=None, kwargs={"i": "2"})  # type: ignore[attr-defined]
+    report.vantage_evidence = evidence  # type: ignore[attr-defined]
+    return report
+
+
+def test_a_failed_subtest_fails_its_passing_test_and_supplies_the_evidence() -> None:
+    """Subtest reports carry the parent's node id and `when="call"`, and the
+    parent's own call report arrives after them. They must not take the
+    call slot, or the parent's verdict overwrites a failing subtest's. As
+    pytest does, a passing test containing a failed subtest is failed; its
+    call report has no exception of its own, so the first failing
+    subtest's evidence is recorded."""
+    call = _report("call", "passed")
+    call.vantage_evidence = {"captured_stdout": "", "captured_stderr": ""}  # type: ignore[attr-defined]
+    pending = _pending(
+        _report("setup", "passed"),
+        _subtest("passed", {"captured_stdout": "", "captured_stderr": ""}),
+        _subtest(
+            "failed",
+            {
+                "failure_type": "AssertionError",
+                "failure_message": "AssertionError: first",
+                "captured_stdout": "",
+                "captured_stderr": "",
+            },
+        ),
+        _subtest("failed", {"failure_type": "ValueError", "failure_message": "ValueError: second"}),
+        call,
+        _report("teardown", "passed"),
+    )
+
+    result = build_result("test_nid.py::test_it", pending)
+
+    assert result is not None
+    assert result["outcome"] == "failed"
+    assert result["call_outcome"] == "passed"
+    assert result["failure_type"] == "AssertionError"
+    assert result["failure_message"] == "AssertionError: first"
+
+
+def test_passing_and_skipped_subtests_leave_the_verdict_alone() -> None:
+    pending = _pending(
+        _report("setup", "passed"),
+        _subtest("passed", {}),
+        _subtest("skipped", {}),
+        _report("call", "passed"),
+        _report("teardown", "passed"),
+    )
+
+    result = build_result("test_nid.py::test_it", pending)
+
+    assert result is not None
+    assert result["outcome"] == "passed"
+
+
+def test_subtest_output_is_recorded_between_setup_and_call() -> None:
+    """Output printed inside a subtest block is captured on the subtest's
+    own report, not the parent's call report."""
+    reports = [
+        _report("setup", "passed"),
+        _subtest("passed", {}),
+        _report("call", "passed"),
+        _report("teardown", "passed"),
+    ]
+    for report, text in zip(reports, ("S", "U", "C", "T"), strict=True):
+        report.vantage_evidence = {"captured_stdout": text, "captured_stderr": ""}  # type: ignore[attr-defined]
+
+    result = build_result("test_nid.py::test_it", _pending(*reports))
+
+    assert result is not None
+    assert result["captured_stdout"] == "SUCT"
+
+
 def test_an_entry_that_cannot_be_built_costs_only_itself() -> None:
     """One report shape the plugin does not expect must cost that test its
     result, never the rest of the session's; how many were dropped is

@@ -18,10 +18,11 @@ from typing import Any
 import pytest
 
 from pytest_vantage.boundary import _warn
+from pytest_vantage.capture import is_subtest
 
 
 class EvidenceCollector:
-    """One hookwrapper, no I/O, no state beyond two session-constant values.
+    """Two hooks, no I/O, no state beyond two session-constant values.
 
     `_disabled` is this instance's OWN fault-isolation latch -- deliberately
     not `pytest_vantage.boundary.fault_isolated`, which wraps an ordinary
@@ -47,6 +48,26 @@ class EvidenceCollector:
         try:
             report = outcome.get_result()
             report.vantage_evidence = _extract(item, call, report, self._capture_disabled)
+        except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+            self._disabled = True
+            _warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        """Reads a subtest's captured output again, from the finished report.
+
+        pytest's `subtests` fixture captures each subtest block on its own
+        and attaches that output to the subtest report only after
+        `pytest_runtest_makereport` has returned, so the value read there is
+        always empty. `tryfirst` so a worker updates the report before xdist
+        serialises it for the controller.
+        """
+        if self._disabled or not is_subtest(report):
+            return
+        try:
+            evidence = getattr(report, "vantage_evidence", None)
+            if isinstance(evidence, dict):
+                evidence.update(_captured_fields(report, self._capture_disabled))
         except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
             self._disabled = True
             _warn(self._config, f"vantage: error while capturing failure evidence: {exc}")

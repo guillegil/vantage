@@ -119,19 +119,33 @@ _REPORT_OUTCOMES = frozenset({"passed", "failed", "skipped"})
 _SEVERITY = {"skipped": 0, "xfailed": 1, "passed": 2, "xpassed": 3, "failed": 4, "error": 5}
 
 
+def is_subtest(report: pytest.TestReport) -> bool:
+    """Whether `report` is one subtest's report (pytest's `subtests` fixture,
+    unittest's `subTest`, or the pytest-subtests plugin on pytest 8). It
+    carries the parent test's node id and `when="call"`, and is told apart
+    by the subtest `context` it carries -- duck-typed, so no private pytest
+    module is imported.
+    """
+    return report.when == "call" and getattr(report, "context", None) is not None
+
+
 class _Execution:
-    """The up-to-three reports pytest emits for one execution of a test: one
-    attempt, on one worker. A duplicate report for the same phase overwrites
-    rather than duplicates, so a report delivered twice never becomes a
-    second result.
+    """The reports pytest emits for one execution of a test: one attempt, on
+    one worker. A duplicate report for the same phase overwrites rather than
+    duplicates, so a report delivered twice never becomes a second result.
+
+    Subtest reports are kept apart, in arrival order. They arrive before the
+    parent's own call report, so storing them as `call` would let the
+    parent's report overwrite every subtest verdict.
     """
 
-    __slots__ = ("setup", "call", "teardown")
+    __slots__ = ("setup", "call", "teardown", "subtests")
 
     def __init__(self) -> None:
         self.setup: pytest.TestReport | None = None
         self.call: pytest.TestReport | None = None
         self.teardown: pytest.TestReport | None = None
+        self.subtests: list[pytest.TestReport] = []
 
     def record(self, report: pytest.TestReport) -> None:
         """Explicit dispatch on the three phases. Any other `when` is ignored:
@@ -143,10 +157,13 @@ class _Execution:
             # A setup report starts a new attempt at the test (a rerun plugin
             # retrying it), so nothing from an earlier attempt may survive.
             self.setup = self.call = self.teardown = None
+            self.subtests = []
         if report.outcome not in _REPORT_OUTCOMES:
             return
         if when == "setup":
             self.setup = report
+        elif is_subtest(report):
+            self.subtests.append(report)
         elif when == "call":
             self.call = report
         elif when == "teardown":
@@ -282,14 +299,12 @@ def _select_evidence_phase(
     return None  # xpassed, passed
 
 
-def _captured_output(
-    setup: pytest.TestReport,
-    call: pytest.TestReport | None,
-    teardown: pytest.TestReport,
-) -> dict[str, object]:
+def _captured_output(reports: list[pytest.TestReport]) -> dict[str, object]:
     """`captured_stdout`/`captured_stderr`, concatenated across every phase
-    that ran, in setup->call->teardown order, with no delimiter (an in-band
-    phase header could be forged by a test printing that exact line).
+    that ran, in setup -> subtests -> call -> teardown order, with no
+    delimiter (an in-band phase header could be forged by a test printing
+    that exact line). Output printed inside a `subtests` block is captured
+    on that subtest's own report, not on the call report.
     Independent of `_select_evidence_phase`, because captured output is a
     record of what ran, not of what went wrong: even a passing test's output
     is included.
@@ -307,8 +322,7 @@ def _captured_output(
     """
     evidences = [
         evidence
-        for report in (setup, call, teardown)
-        if report is not None
+        for report in reports
         for evidence in (getattr(report, "vantage_evidence", None),)
         if isinstance(evidence, dict)
     ]
@@ -320,6 +334,13 @@ def _captured_output(
         parts = [str(value) for value in (e.get(field) for e in evidences) if value is not None]
         fields[field] = "".join(parts) if parts else None
     return fields
+
+
+def _describes_a_failure(evidence: object) -> bool:
+    return isinstance(evidence, dict) and any(
+        evidence.get(field) is not None
+        for field in ("failure_type", "failure_message", "traceback")
+    )
 
 
 def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
@@ -360,6 +381,13 @@ def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] |
 
     identity = decompose(node_id)
     outcome = derive_outcome(setup, call, teardown)
+    failed_subtests = [report for report in execution.subtests if report.outcome == "failed"]
+    if outcome == "passed" and failed_subtests:
+        # pytest's own rule: a test that passed but contains a failed subtest
+        # is failed. pytest applies it to the report for the `subtests`
+        # fixture but not for unittest's `subTest`, whose failures still fail
+        # the session, so it is applied here to both.
+        outcome = "failed"
 
     setup_duration = _phase_duration(setup)
     call_duration = _phase_duration(call)
@@ -391,13 +419,19 @@ def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] |
     # carries none, e.g. without `--vantage-failure-text`.
     evidence_report = _select_evidence_phase(setup, call, teardown, outcome)
     evidence = getattr(evidence_report, "vantage_evidence", None)
+    if outcome == "failed" and failed_subtests and not _describes_a_failure(evidence):
+        # Failed through its subtests: their exceptions were caught, so the
+        # call report has none to describe. The first failing subtest's is
+        # the evidence.
+        evidence = getattr(failed_subtests[0], "vantage_evidence", None)
     if isinstance(evidence, dict):
         result.update(evidence)
 
     # Captured output spans ALL phases, not just the one selected above --
     # applied after the evidence merge so it overrides the single-phase
     # captured_stdout/captured_stderr that merge carried in.
-    result.update(_captured_output(setup, call, teardown))
+    phase_reports = [setup, *execution.subtests, call, teardown]
+    result.update(_captured_output([report for report in phase_reports if report is not None]))
 
     return result
 
@@ -440,4 +474,5 @@ __all__ = [
     "build_result",
     "decompose",
     "derive_outcome",
+    "is_subtest",
 ]
