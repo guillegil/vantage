@@ -17,7 +17,7 @@ paths:
       operationId: create_run
       tags: [write]
       summary: Report a session's run and its results.
-      description: Declared metadata never rejects a report. The server bounds it the way the plugin does and drops what exceeds the bounds -- over-long or repeated keys, keys past the per-run entry bound, and documents past the per-file or per-report size -- recording why on the file.
+      description: Declared metadata never rejects a report. The server bounds it the way the plugin does -- it drops over-long and repeated keys and every key past the per-run entry bound, and records a document past the per-file or per-report size as too_large or over_budget without parsing it.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReport'}}}}
       responses:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}

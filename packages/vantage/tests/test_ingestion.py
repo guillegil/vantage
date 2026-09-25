@@ -1112,6 +1112,25 @@ def test_a_json_declared_number_is_stored_as_the_text_the_file_holds(
     assert entry.value == "2.10"
 
 
+def test_a_json_integer_past_the_digit_limit_still_records_the_run(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Converting a literal over the interpreter's int digit limit raises,
+    and a file under the plugin's per-file bound can hold one. Kept as text,
+    it is only a value too large to store."""
+    run_id = "6" + "5" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content='{"build": 1' + "0" * 4999 + "}", keys=["build"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    [entry] = _stored_metadata_entries(store, run_id)
+    assert (entry.value, entry.status) == (None, "value_too_large")
+
+
 # --- hostile client-chosen text -----------------------------------------------
 
 
