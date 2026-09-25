@@ -997,24 +997,31 @@ def test_a_yaml_declared_document_is_parsed(
     )
 
 
-def test_an_unsupported_format_is_treated_as_malformed(
+def test_a_file_in_a_format_the_server_cannot_parse_is_dropped_with_its_keys(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """`toml` is a storable `run_metadata_file.content_type` that
-    `metadata_parse.parse` does not implement, so it is recorded as
-    `malformed`, like a broken document."""
+    """The server parses json and yaml only, and stores no other format, so
+    a `toml` file never reaches the store; a sibling file and the run are
+    still recorded."""
     run_id = "9" + "8" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(
-        _metadata_file(format="toml", content="firmware_version = 2.1", keys=["firmware_version"])
+        _metadata_file(
+            path="config/firmware.toml",
+            format="toml",
+            content="firmware_version = 2.1",
+            keys=["firmware_version"],
+        ),
+        _metadata_file(content=json.dumps({"board": "C"}), keys=["board"]),
     )
 
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
     assert _stored_metadata_files(store, run_id) == frozenset(
-        {MetadataFile(source_file="config/firmware.json", content_type="toml", status="malformed")}
+        {MetadataFile(source_file="config/firmware.json", content_type="json", status="captured")}
     )
+    assert {entry.key for entry in _stored_metadata_entries(store, run_id)} == {"board"}
 
 
 _UNUSABLE_DOCUMENTS = {

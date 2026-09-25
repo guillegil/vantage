@@ -14,7 +14,6 @@ import re
 import pytest
 from vantage.core.domain.metadata import FILE_STATUSES, KEY_STATUSES, METADATA_CONTENT_TYPES
 from vantage.core.ports.storage import MetadataEntry, MetadataFile
-from vantage.service.routes.runs import _KNOWN_METADATA_CONTENT_TYPES
 
 _SCHEMA_SQL = importlib.resources.files("vantage.storage").joinpath("schema.sql").read_text("utf-8")
 
@@ -39,9 +38,8 @@ def test_key_statuses_match_the_run_metadata_status_check() -> None:
     assert _check_values("run_metadata", "status") == KEY_STATUSES
 
 
-def test_content_types_match_the_content_type_check_and_what_the_service_admits() -> None:
+def test_content_types_match_the_run_metadata_file_content_type_check() -> None:
     assert _check_values("run_metadata_file", "content_type") == METADATA_CONTENT_TYPES
-    assert _KNOWN_METADATA_CONTENT_TYPES == METADATA_CONTENT_TYPES
 
 
 @pytest.mark.parametrize(

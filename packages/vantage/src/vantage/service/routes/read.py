@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Path, Query, Request, Response
 
-from vantage.core.domain.execution import VcsContext
+from vantage.core.domain.execution import IDENTITY_PATTERN, VcsContext
 from vantage.core.domain.liveness import derive_presentation
 from vantage.core.domain.projection import FailureProjection, VcsProjection
 from vantage.core.domain.result import Result
@@ -66,8 +66,6 @@ from vantage.service.schemas import (
 )
 
 router = APIRouter()
-
-_IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 
 # SQLite binds an integer as signed 64-bit and raises past it, so a larger
 # offset is refused here as a shaped 422 rather than failing in the query.
@@ -270,7 +268,7 @@ async def list_runs(
 
 @router.get("/runs/{run_id}")
 async def get_run_detail(
-    request: Request, run_id: str = Path(pattern=_IDENTITY_PATTERN)
+    request: Request, run_id: str = Path(pattern=IDENTITY_PATTERN)
 ) -> RunDetailResponse:
     """`GET /api/v1/runs/{run_id}`. An unknown run is the same
     `UnknownRunError` the heartbeat route raises: one rejection shape per
@@ -288,7 +286,7 @@ async def get_run_detail(
 @router.get("/runs/{run_id}/results")
 async def list_results(
     request: Request,
-    run_id: str = Path(pattern=_IDENTITY_PATTERN),
+    run_id: str = Path(pattern=IDENTITY_PATTERN),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
 ) -> ResultsResponse:
@@ -306,7 +304,7 @@ async def list_results(
 @router.get("/runs/{run_id}/result")
 async def get_result(
     request: Request,
-    run_id: str = Path(pattern=_IDENTITY_PATTERN),
+    run_id: str = Path(pattern=IDENTITY_PATTERN),
     node_id: str = Query(...),
 ) -> ResultDetailResponse:
     """`GET /api/v1/runs/{run_id}/result?node_id=` -- `node_id` is a query

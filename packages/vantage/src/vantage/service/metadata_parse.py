@@ -46,13 +46,7 @@ from dataclasses import dataclass
 import yaml
 from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
-from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES
-
-_ADMISSIBLE_CONTENT_TYPES = frozenset({"json", "yaml"})
-"""Deliberately narrower than `routes/runs.py`'s
-`_KNOWN_METADATA_CONTENT_TYPES`, which also admits `"toml"` to match the
-`schema.sql` CHECK. This parser has no TOML branch, so `toml` is treated as
-malformed; adding it here would make `parse()` hand TOML to the YAML parser."""
+from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES, METADATA_CONTENT_TYPES
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 """The tag `compose()` resolves a plain `<<` key to. A quoted `'<<'` keeps
@@ -80,8 +74,10 @@ def parse(content: str, content_type: str, keys: Sequence[str]) -> dict[str, Key
     Otherwise returns one `KeyResult` per entry of `keys`, with status
     `absent`, `not_scalar`, `value_too_large` or `captured`.
     """
-    if content_type not in _ADMISSIBLE_CONTENT_TYPES:
+    if content_type not in METADATA_CONTENT_TYPES:
         return None
+    # `METADATA_CONTENT_TYPES` is exactly json and yaml; `test_metadata_parse.py`
+    # fails if a format is added there without a parser here.
     try:
         document = _parse_json(content) if content_type == "json" else _parse_yaml(content)
     except (ValueError, yaml.YAMLError, RecursionError):

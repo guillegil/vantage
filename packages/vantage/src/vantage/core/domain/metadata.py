@@ -13,8 +13,10 @@ mirrors one of ``schema.sql``'s ``CHECK`` constraints exactly;
 
 from __future__ import annotations
 
-METADATA_CONTENT_TYPES = frozenset({"json", "yaml", "toml"})
-"""The formats `run_metadata_file.content_type`'s `CHECK` constraint accepts."""
+METADATA_CONTENT_TYPES = frozenset({"json", "yaml"})
+"""The formats `run_metadata_file.content_type`'s `CHECK` constraint accepts:
+the ones the plugin declares and the server can parse. A file reported in
+any other format is dropped, with its keys, before it reaches the store."""
 
 FILE_STATUSES = frozenset(
     {

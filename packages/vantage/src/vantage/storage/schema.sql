@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS user_setting (
 CREATE TABLE IF NOT EXISTS run_metadata_file (
     run_id       TEXT NOT NULL REFERENCES run (id),
     source_file  TEXT NOT NULL,
-    content_type TEXT NOT NULL CHECK (content_type IN ('json', 'yaml', 'toml')),
+    content_type TEXT NOT NULL CHECK (content_type IN ('json', 'yaml')),
     status       TEXT NOT NULL CHECK (status IN (
                      'captured', 'not_found', 'path_rejected', 'too_large',
                      'not_text', 'unreadable', 'over_budget', 'malformed')),

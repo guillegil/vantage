@@ -45,11 +45,12 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
 
-from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.domain.execution import IDENTITY_PATTERN, Execution, Identity, VcsContext
 from vantage.core.domain.metadata import (
     FILE_STATUSES,
     MAX_METADATA_ENTRIES,
     MAX_METADATA_KEY_CHARS,
+    METADATA_CONTENT_TYPES,
 )
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.core.ports.storage import EMPTY_RUN_METADATA, MetadataEntry, MetadataFile, RunMetadata
@@ -78,15 +79,7 @@ from vantage.service.truncation import truncate
 router = APIRouter()
 
 _JSON_MEDIA_TYPE = "application/json"
-_IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
-
-_KNOWN_METADATA_CONTENT_TYPES = frozenset({"json", "yaml", "toml"})
-"""Mirrors the SQL `CHECK` on `run_metadata_file.content_type` (schema.sql).
-`MetadataFileReport.format` is unconstrained on the wire, so a file entry
-with any other format -- which the schema cannot store -- is dropped here,
-with its keys, before it reaches the store. A well-behaved plugin never
-sends one."""
 
 # The three bounds below mirror `pytest_vantage.metadata`. The two
 # distributions cannot import each other, so each carries its own copy;
@@ -181,7 +174,7 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
     for file_report in metadata.files:
         if (
             not _declared_path_shape_is_valid(file_report.path)
-            or file_report.format not in _KNOWN_METADATA_CONTENT_TYPES
+            or file_report.format not in METADATA_CONTENT_TYPES
             or file_report.status not in FILE_STATUSES
         ):
             continue
@@ -475,7 +468,7 @@ async def create_run(request: Request) -> JSONResponse:
 
 @router.post("/runs/{run_id}/heartbeat")
 async def heartbeat(
-    request: Request, run_id: str = Path(pattern=_IDENTITY_PATTERN)
+    request: Request, run_id: str = Path(pattern=IDENTITY_PATTERN)
 ) -> HeartbeatAcknowledgement:
     """Advance `run_id`'s last contact.
 

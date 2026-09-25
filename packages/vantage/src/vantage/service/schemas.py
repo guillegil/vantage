@@ -37,7 +37,7 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
-_IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
+from vantage.core.domain.execution import IDENTITY_PATTERN
 
 # SQLite stores an integer as signed 64 bits and refuses a larger one at
 # parameter binding, after validation, as a 500 that loses the whole report.
@@ -87,7 +87,7 @@ class RunReport(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    id: str = Field(pattern=_IDENTITY_PATTERN)
+    id: str = Field(pattern=IDENTITY_PATTERN)
     started_at: _UtcDatetime
     finished_at: _UtcDatetime | None
     exit_status: int | None = Field(ge=INT64_MIN, le=INT64_MAX)

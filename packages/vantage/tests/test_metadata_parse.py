@@ -15,7 +15,7 @@ import time
 
 import pytest
 import yaml
-from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES
+from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES, METADATA_CONTENT_TYPES
 from vantage.service.metadata_parse import KeyResult, parse
 
 
@@ -166,6 +166,18 @@ def test_unsupported_content_type_is_treated_the_same_as_malformed() -> None:
     result = parse('{"k": "v"}', "toml", ["k"])
 
     assert result is None
+
+
+_DOCUMENT_PER_FORMAT = {"json": '{"k": "v"}', "yaml": "k: v\n"}
+
+
+def test_every_storable_content_type_has_a_parser() -> None:
+    """`parse` hands every storable format but json to the YAML parser, so a
+    format added to `METADATA_CONTENT_TYPES` alone would be parsed as YAML.
+    Adding one here, with a sample document, is what makes that a choice."""
+    assert set(_DOCUMENT_PER_FORMAT) == METADATA_CONTENT_TYPES
+    for content_type, content in _DOCUMENT_PER_FORMAT.items():
+        assert parse(content, content_type, ["k"]) == {"k": KeyResult(status="captured", value="v")}
 
 
 def test_json_top_level_that_is_not_an_object_yields_none() -> None:

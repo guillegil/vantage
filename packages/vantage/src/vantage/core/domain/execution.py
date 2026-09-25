@@ -11,7 +11,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-_IDENTITY_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
+"""A run identifier's shape: 32 lowercase hex characters, a dashless `uuid4`.
+Text rather than a compiled pattern, so the service can hand the same value
+to FastAPI and Pydantic as their `pattern`."""
+
+_IDENTITY_RE = re.compile(IDENTITY_PATTERN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +26,7 @@ class Identity:
     value: str
 
     def __post_init__(self) -> None:
-        if not _IDENTITY_PATTERN.fullmatch(self.value):
+        if not _IDENTITY_RE.fullmatch(self.value):
             raise ValueError(f"Identity must be 32 lowercase hex characters, got {self.value!r}")
 
 

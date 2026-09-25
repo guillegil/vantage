@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import JSONResponse, Response
 
+from vantage.core.domain.execution import IDENTITY_PATTERN
 from vantage.core.domain.sections import (
     MAX_SECTIONS,
     SECTION_NAME_MAX_CHARS,
@@ -50,8 +51,6 @@ from vantage.service.schemas import (
     SectionUpsertRequest,
     SectionValue,
 )
-
-_IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 
 router = APIRouter()
 
@@ -158,7 +157,7 @@ def _section_summary_response(summary: SectionSummary) -> SectionSummaryResponse
 
 @router.get("/runs/{run_id}/sections")
 async def get_run_sections(
-    request: Request, run_id: str = Path(pattern=_IDENTITY_PATTERN)
+    request: Request, run_id: str = Path(pattern=IDENTITY_PATTERN)
 ) -> RunSectionSummaryResponse:
     """`GET /api/v1/runs/{run_id}/sections`. An unknown `run_id` is
     `404 unknown_run`, checked the same cheap way `list_results` does
