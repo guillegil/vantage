@@ -1,6 +1,8 @@
 """`Recorder`: the hook implementation `plugin.py` registers once activation
 and the reachability preflight both succeed. It assembles the session report
-in memory and sends it once, from `pytest_sessionfinish`, never per test.
+in memory and sends it from `pytest_sessionfinish`, never per test: in one
+report, or split over several for the same run when the results alone are
+more than the server accepts in one body.
 
 `pytest_sessionstart` sends a narrower start report before the first test
 runs (the run's identity and start time, `finished_at: null`, no `results`)
@@ -15,7 +17,8 @@ its own when no start row exists.
 never the finish-write. The beat is a separately `liveness_isolated` helper
 rather than a decorator on the hook, so a failing beat latches only the
 liveness path. The start-write and the beats share `_liveness_disabled`, so
-the whole liveness path warns at most once.
+the whole liveness path warns at most once. `pytest_keyboard_interrupt` only
+records what stopped the session, and shares `accumulation_isolated`.
 
 Every other hook is wrapped in `fault_isolated`: an error anywhere in the
 reporting path becomes one warning and never changes the suite's exit status.
@@ -39,7 +42,7 @@ from pytest_vantage.boundary import (
     fault_isolated,
     liveness_isolated,
 )
-from pytest_vantage.budget import spend_failure_text_budget
+from pytest_vantage.budget import _encoded_cost, spend_failure_text_budget, split_results
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.config import resolve_liveness_timeout
 from pytest_vantage.transport import Capabilities, send, send_heartbeat
@@ -192,6 +195,30 @@ class Recorder:
             ],
         }
 
+    def _sections(self) -> dict[str, object]:
+        """The report sections every report of the session carries alike:
+        `vcs`, and `metadata` when it was captured.
+        """
+        sections: dict[str, object] = {"vcs": self._vcs_section()}
+        metadata_section = self._metadata_section()
+        if metadata_section is not None:
+            sections["metadata"] = metadata_section
+        return sections
+
+    def _in_progress_run(self) -> dict[str, object]:
+        """The `run` section of a report sent while the session is still
+        open: the server records its start, and its results if it carries
+        any, but never finishes the run from it.
+        """
+        return {
+            "id": self._run_id,
+            "started_at": isoformat_utc(self._started_at),
+            "finished_at": None,
+            "exit_status": None,
+            "interrupted": False,
+            "interrupt_reason": None,
+        }
+
     @liveness_isolated
     def pytest_sessionstart(self) -> None:
         """Reports the session's identity and start time before the first
@@ -209,20 +236,7 @@ class Recorder:
                 "this session's start and heartbeats will not be recorded",
             )
             return
-        report: dict[str, object] = {
-            "run": {
-                "id": self._run_id,
-                "started_at": isoformat_utc(self._started_at),
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            },
-            "vcs": self._vcs_section(),
-        }
-        metadata_section = self._metadata_section()
-        if metadata_section is not None:
-            report["metadata"] = metadata_section
+        report = {"run": self._in_progress_run(), **self._sections()}
         send(self._address, report, timeout=self._liveness_timeout)
 
     @fault_isolated
@@ -300,26 +314,40 @@ class Recorder:
         finished_at, interrupted, interrupt_reason = self._how_it_ended(exit_status)
 
         results = assemble_results(self._results)
-        # Applied before the report is built: the server rejects an oversized
-        # body whole, losing the entire session, so failure text has to be
-        # bounded client-side.
+        # The server rejects an oversized body whole, losing the entire
+        # session: failure text is bounded first, then the results are split
+        # over as many reports as they need.
         spend_failure_text_budget(results)
 
-        report: dict[str, object] = {
-            "run": {
-                "id": self._run_id,
-                "started_at": isoformat_utc(self._started_at),
-                "finished_at": isoformat_utc(finished_at) if finished_at else None,
-                "exit_status": exit_status,
-                "interrupted": interrupted,
-                "interrupt_reason": interrupt_reason,
-            },
-            "results": results,
-            "vcs": self._vcs_section(),
+        finish_run: dict[str, object] = {
+            "id": self._run_id,
+            "started_at": isoformat_utc(self._started_at),
+            "finished_at": isoformat_utc(finished_at) if finished_at else None,
+            "exit_status": exit_status,
+            "interrupted": interrupted,
+            "interrupt_reason": interrupt_reason,
         }
-        metadata_section = self._metadata_section()
-        if metadata_section is not None:
-            report["metadata"] = metadata_section
+        in_progress_run = self._in_progress_run()
+        sections = self._sections()
+        envelope_bytes = max(
+            _encoded_cost({"run": run, "results": [], **sections})
+            for run in (finish_run, in_progress_run)
+        )
+        slices, left_out = split_results(results, envelope_bytes=envelope_bytes)
+        if left_out:
+            _warn(
+                self._config,
+                f"vantage: {left_out} test result(s) too large for any report were left out",
+            )
+        # Every slice but the last goes out in an in-progress report, so the
+        # server stores its results without finishing the run. The run reads
+        # as finished only once the last report, carrying the rest, arrives:
+        # a report lost on the way leaves an unfinished run, never a finished
+        # one with results silently missing.
+        for chunk in slices[:-1]:
+            report = {"run": in_progress_run, "results": chunk, **sections}
+            send(self._address, report, timeout=self._timeout)
+        report = {"run": finish_run, "results": slices[-1], **sections}
         send(self._address, report, timeout=self._timeout)
 
 

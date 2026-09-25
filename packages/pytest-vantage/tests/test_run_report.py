@@ -22,7 +22,6 @@ import pytest
 from pytest_vantage import vcs
 from pytest_vantage.recorder import Recorder
 from vantage.core.domain.execution import Execution
-from vantage.service.errors import MAX_REPORT_BYTES
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
@@ -847,42 +846,3 @@ def test_an_xdist_maxfail_stop_is_recorded_as_finished(
     (execution,) = vantage_server.executions()
     assert execution.finished_at is not None
     assert execution.interrupted is False
-
-
-# --- The per-report failure-text budget ------------------------------------
-
-
-def test_a_session_of_many_large_failures_stays_within_the_report_size_cap(
-    pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A session of many large failures stays within the report size cap.
-    Ten tests each raising an 80,000-character message would, unbudgeted,
-    carry roughly 2.4 MB of failure text -- the message is rendered into
-    `failure_message`, `failure_repr` and `traceback` independently -- well
-    over the server's 1 MiB `MAX_REPORT_BYTES`, and rejected outright.
-
-    `send` is patched to capture the report while the preflight still runs
-    against `vantage_server`. The captured dict is encoded with the same
-    `json.dumps(...).encode("utf-8")` `transport.send` uses, so the byte
-    count is exactly what would have gone on the wire.
-    """
-    sent: list[dict[str, object]] = []
-
-    def _capture(address: str, report: dict[str, object], *, timeout: float) -> None:
-        sent.append(report)
-
-    monkeypatch.setattr("pytest_vantage.recorder.send", _capture)
-    body = "\n".join(
-        f"def test_{i}():\n    raise AssertionError('X' * 80_000)\n" for i in range(10)
-    )
-    pytester.makepyfile(test_many_large_failures=body)
-
-    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
-
-    result.assert_outcomes(failed=10)
-    assert len(sent) == 2  # the start-write, then the finish-write
-    _, finish_report = sent
-    finish_body = json.dumps(finish_report).encode("utf-8")
-    assert len(finish_body) <= MAX_REPORT_BYTES

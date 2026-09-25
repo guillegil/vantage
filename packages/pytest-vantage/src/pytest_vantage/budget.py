@@ -1,10 +1,16 @@
-"""The per-report failure-text budget.
+"""The report's size: the failure-text budget, and the split of a large
+session's results over several reports.
 
 The server rejects a report body larger than
 `vantage.service.errors.MAX_REPORT_BYTES` outright, losing the whole
 session. `_REPORT_BYTES_CAP` mirrors that value because the plugin must not
 import the server package; `test_report_budget.py` pins the two together,
 since a mirror that drifts high produces rejections of whole sessions.
+
+Every result costs a few hundred bytes before any failure text, so a large
+enough suite exceeds the cap on results alone. `split_results` divides them
+into slices that each fit one report, and `recorder.py` sends one report
+per slice for the same run.
 
 `MAX_FAILURE_TEXT_BYTES` is half the cap, a total across the session.
 `spend_failure_text_budget` runs between `assemble_results(...)` and
@@ -113,4 +119,39 @@ def spend_failure_text_budget(entries: list[dict[str, object]]) -> None:
                     entry[f"{field}_truncated"] = True
 
 
-__all__ = ["MAX_FAILURE_TEXT_BYTES", "spend_failure_text_budget"]
+def split_results(
+    results: list[dict[str, object]], *, envelope_bytes: int
+) -> tuple[list[list[dict[str, object]]], int]:
+    """Split `results`, in order, into consecutive slices that each fit one
+    report under `_REPORT_BYTES_CAP`, next to report sections that encode
+    to `envelope_bytes` with an empty `results` list.
+
+    `json.dumps` joins list items with `", "`, so a report carrying n
+    results costs `envelope_bytes`, plus each result's own cost, plus two
+    bytes per separator; charging a separator to every result overstates
+    that by two bytes at most.
+
+    Returns the slices -- at least one, possibly empty, so a finish report
+    always goes out -- and how many results were left out because they
+    cannot fit even in a report of their own.
+
+    Reads `_REPORT_BYTES_CAP` at call time, so a test can `monkeypatch` it.
+    """
+    room = _REPORT_BYTES_CAP - envelope_bytes
+    slices: list[list[dict[str, object]]] = [[]]
+    used = 0
+    left_out = 0
+    for entry in results:
+        cost = _encoded_cost(entry) + len(", ")
+        if cost > room:
+            left_out += 1
+            continue
+        if used + cost > room:
+            slices.append([])
+            used = 0
+        slices[-1].append(entry)
+        used += cost
+    return slices, left_out
+
+
+__all__ = ["MAX_FAILURE_TEXT_BYTES", "spend_failure_text_budget", "split_results"]

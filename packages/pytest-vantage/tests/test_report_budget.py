@@ -1,10 +1,12 @@
-"""The per-report failure-text budget: the caps mirrored from the server,
-pinned so a drift fails the build rather than causing 413s in production,
-and `spend_failure_text_budget`'s failures-first, field-by-field spending,
-with the server's per-field cut applied before anything is charged.
+"""The report's size: the caps mirrored from the server, pinned so a drift
+fails the build rather than causing 413s in production;
+`spend_failure_text_budget`'s failures-first, field-by-field spending, with
+the server's per-field cut applied before anything is charged; and
+`split_results`, which spreads a large session over several reports.
 
-The imports of `vantage.service` are test-only; `budget.py` itself must not
-depend on the server package.
+The end-to-end tests run a real session against a real server
+(`vantage_server`) and read back what it stored. The imports of `vantage`
+are test-only; `budget.py` itself must not depend on the server package.
 """
 
 from __future__ import annotations
@@ -13,15 +15,18 @@ import json
 
 import pytest
 import pytest_vantage.budget as budget_module
+from pytest_vantage import transport
 from pytest_vantage.budget import (
     _FIELD_BYTES_CAP,
     _REPORT_BYTES_CAP,
     MAX_FAILURE_TEXT_BYTES,
     _encoded_cost,
     spend_failure_text_budget,
+    split_results,
 )
 from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.service.truncation import MAX_TEXT_FIELD_BYTES
+from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 
 def test_the_mirrored_caps_match_the_server() -> None:
@@ -309,3 +314,177 @@ def test_the_budget_charges_exactly_what_transport_will_put_on_the_wire() -> Non
     wire_cost = len(json.dumps(non_ascii_value).encode("utf-8"))
     assert _encoded_cost(non_ascii_value) == wire_cost
     assert wire_cost > len(json.dumps(non_ascii_value, ensure_ascii=False).encode("utf-8"))
+
+
+# --- split_results -----------------------------------------------------------
+
+_ENVELOPE: dict[str, object] = {"run": {"id": "a" * 32, "exit_status": None}}
+
+
+def _report_bytes(results: list[dict[str, object]]) -> int:
+    """What `transport.send` would put on the wire for `results` inside
+    `_ENVELOPE`."""
+    return len(json.dumps({**_ENVELOPE, "results": results}).encode("utf-8"))
+
+
+def test_split_results_fills_each_report_up_to_the_cap_keeping_execution_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every slice fits one report, the slices together hold every result
+    in its original order, and each slice is full: the next result would
+    not have fit in it.
+    """
+    cap = 2_000
+    monkeypatch.setattr(budget_module, "_REPORT_BYTES_CAP", cap)
+    results: list[dict[str, object]] = [
+        {"node_id": f"test_x.py::test_{i}", "captured_stdout": "o" * (i * 37 % 150)}
+        for i in range(60)
+    ]
+
+    slices, left_out = split_results(results, envelope_bytes=_report_bytes([]))
+
+    assert left_out == 0
+    assert len(slices) > 1
+    assert [entry for chunk in slices for entry in chunk] == results
+    assert all(_report_bytes(chunk) <= cap for chunk in slices)
+    # Up to the two bytes the separator accounting overstates by.
+    assert all(
+        _report_bytes(chunk + following[:1]) > cap - len(", ")
+        for chunk, following in zip(slices, slices[1:])
+    )
+
+
+def test_a_result_too_large_for_any_report_is_left_out_and_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(budget_module, "_REPORT_BYTES_CAP", 1_000)
+    first: dict[str, object] = {"node_id": "test_x.py::test_a"}
+    oversized: dict[str, object] = {"node_id": "test_x.py::test_b[" + "b" * 2_000 + "]"}
+    last: dict[str, object] = {"node_id": "test_x.py::test_c"}
+
+    slices, left_out = split_results([first, oversized, last], envelope_bytes=_report_bytes([]))
+
+    assert slices == [[first, last]]
+    assert left_out == 1
+
+
+def test_a_session_without_results_still_gets_one_report() -> None:
+    assert split_results([], envelope_bytes=_report_bytes([])) == ([[]], 0)
+
+
+# --- End to end: what the server stores ------------------------------------
+
+
+@pytest.fixture
+def wire_sizes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[dict[str, object], int]]:
+    """Every report the session sends, with its size on the wire, recorded
+    on its way through the real `transport.send`."""
+    sent: list[tuple[dict[str, object], int]] = []
+
+    def _measure_then_send(address: str, report: dict[str, object], *, timeout: float) -> None:
+        sent.append((report, len(json.dumps(report).encode("utf-8"))))
+        transport.send(address, report, timeout=timeout)
+
+    monkeypatch.setattr("pytest_vantage.recorder.send", _measure_then_send)
+    return sent
+
+
+def test_a_suite_too_large_for_one_report_is_recorded_whole(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    wire_sizes: list[tuple[dict[str, object], int]],
+) -> None:
+    """A thousand passing tests with long parameter ids report well over
+    the server's body cap on results alone, with no failure text at all.
+    The results are split over several reports for the same run, each
+    within the cap; only the last one finishes the run.
+    """
+    pytester.makepyfile(
+        test_large="import pytest\n\n\n"
+        "@pytest.mark.parametrize('n', range(1000), ids=lambda n: f'{n:04d}-' + 'x' * 400)\n"
+        "def test_p(n):\n    assert True\n"
+    )
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=1000)
+    assert "VantageWarning" not in result.stdout.str()
+    _start, *finish_parts = wire_sizes
+    assert len(finish_parts) > 1
+    assert all(size <= MAX_REPORT_BYTES for _report, size in finish_parts)
+    assert [report["run"]["exit_status"] for report, _size in finish_parts] == [  # type: ignore[index]
+        *[None] * (len(finish_parts) - 1),
+        0,
+    ]
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert execution.exit_status == 0
+    assert len(vantage_server.results()) == 1000
+
+
+def test_a_long_session_with_failure_text_keeps_every_result_and_failure_message(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    wire_sizes: list[tuple[dict[str, object], int]],
+) -> None:
+    """A thousand passing tests that print, then twenty failures: the
+    passing output alone is more than the failure-text budget, and the
+    session more than one report. Every result is stored, and every failure
+    keeps its message whole, because failures are charged before the
+    output of the tests that passed.
+    """
+    pytester.makepyfile(
+        test_chatty="import pytest\n\n\n"
+        "@pytest.mark.parametrize('n', range(1000))\n"
+        "def test_p(n):\n    print('p' * 700)\n",
+        test_zz_failing="import pytest\n\n\n"
+        "@pytest.mark.parametrize('n', range(20))\n"
+        "def test_f(n):\n    assert False, f'failure {n}: ' + 'm' * 1400\n",
+    )
+
+    result = pytester.runpytest(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    result.assert_outcomes(passed=1000, failed=20)
+    assert "VantageWarning" not in result.stdout.str()
+    assert all(size <= MAX_REPORT_BYTES for _report, size in wire_sizes)
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    stored = vantage_server.results()
+    assert len(stored) == 1020
+    failures = [entry.failure for entry in stored if entry.outcome == "failed"]
+    assert len(failures) == 20
+    assert all(
+        failure is not None
+        and failure.failure_message is not None
+        and "failure " in failure.failure_message
+        and not failure.failure_message_truncated
+        for failure in failures
+    )
+
+
+def test_a_session_of_many_large_failures_stays_within_one_report(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    wire_sizes: list[tuple[dict[str, object], int]],
+) -> None:
+    """Ten tests each raising an 80,000-character message would, unbounded,
+    carry about 2.4 MB of failure text: the message is rendered into
+    `failure_message`, `failure_repr` and `traceback` independently. The
+    budget holds it to half the cap, so the session still fits one report.
+    """
+    body = "\n".join(
+        f"def test_{i}():\n    raise AssertionError('X' * 80_000)\n" for i in range(10)
+    )
+    pytester.makepyfile(test_many_large_failures=body)
+
+    result = pytester.runpytest(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    result.assert_outcomes(failed=10)
+    _start, (finish_report, finish_size) = wire_sizes
+    assert finish_size <= MAX_REPORT_BYTES
+    assert any(entry.get("failure_message") for entry in finish_report["results"])  # type: ignore[attr-defined]
+    assert len(vantage_server.results()) == 10
