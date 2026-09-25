@@ -8,15 +8,15 @@ example by CI. An allow-list of exactly two schemes, ``http`` and
 ``urllib``'s ``file:``/``ftp:`` handlers are ever reached.
 
 `resolve_settings` is the one place a configured value is checked. Every
-problem -- a bad scheme, no host, an unusable port, a timeout that is not a
-finite positive number of seconds -- is a `VantageConfigError` naming the
-option it came from, so nothing malformed ever reaches the socket layer.
+problem -- a bad scheme, no host, an unusable port, a timeout the socket
+layer cannot use -- is a `VantageConfigError` naming the option it came
+from, so nothing malformed ever reaches the socket layer.
 """
 
 from __future__ import annotations
 
-import math
 import os
+import threading
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -114,15 +114,19 @@ def resolve_server_address(*, cli_url: str | None, env_url: str | None, ini_url:
 
 def _positive_seconds(raw: str | float, option: str) -> float:
     """A zero timeout makes the connect non-blocking, a negative one makes
-    the socket layer raise, and NaN or infinity get past the preflight's
-    ``min(2.0, t)`` only to fail the finish report -- none is usable."""
+    the socket layer raise, and NaN, infinity or anything above
+    ``threading.TIMEOUT_MAX`` (the largest timeout Python's blocking calls
+    accept) get past the preflight's ``min(2.0, t)`` only to fail the
+    finish report -- none is usable."""
     try:
         seconds = float(raw)
     except ValueError:
         raise VantageConfigError(f"{option} must be a number of seconds (got {raw!r})") from None
-    if not math.isfinite(seconds) or seconds <= 0:
+    # A chained comparison is False for NaN, so NaN is refused here too.
+    if not 0 < seconds <= threading.TIMEOUT_MAX:
         raise VantageConfigError(
-            f"{option} must be a finite number of seconds above zero (got {raw!r})"
+            f"{option} must be a number of seconds above zero and at most "
+            f"{threading.TIMEOUT_MAX:.0f} (got {raw!r})"
         )
     return seconds
 

@@ -66,24 +66,25 @@ def test_timeout_precedence_is_cli_then_ini_then_default(
 # --- Timeout validation ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("ini_timeout", [5, 5.5, "2.5", "0.001"])
+@pytest.mark.parametrize("ini_timeout", [5, 5.5, "2.5", "0.001", "86400"])
 def test_an_ini_timeout_may_be_a_number_or_numeric_text(ini_timeout: str | float) -> None:
     """pytest's native TOML table hands `getini` an int or a float; the
     ini-file forms hand it text. Both mean seconds."""
     assert resolve_report_timeout(cli_timeout=None, ini_timeout=ini_timeout) == float(ini_timeout)
 
 
-@pytest.mark.parametrize("cli_timeout", [-1.0, -0.5, 0.0, math.nan, math.inf])
-def test_a_cli_timeout_that_is_not_finite_and_positive_is_refused(cli_timeout: float) -> None:
+@pytest.mark.parametrize("cli_timeout", [-1.0, -0.5, 0.0, math.nan, math.inf, 99999999999.0])
+def test_a_cli_timeout_the_socket_layer_cannot_use_is_refused(cli_timeout: float) -> None:
     """A negative timeout makes the socket layer raise, zero makes the
     connect non-blocking so a listening server reads as unreachable, and
-    NaN or infinity get past the preflight only to fail the finish report."""
+    NaN, infinity or a value too large for the socket layer's clock get
+    past the preflight only to fail the finish report."""
     with pytest.raises(VantageConfigError, match="--vantage-timeout"):
         resolve_report_timeout(cli_timeout=cli_timeout, ini_timeout=None)
 
 
-@pytest.mark.parametrize("ini_timeout", ["-1", "0", "nan", "inf", "ten", "5s", ""])
-def test_an_ini_timeout_that_is_not_a_finite_positive_number_is_refused(ini_timeout: str) -> None:
+@pytest.mark.parametrize("ini_timeout", ["-1", "0", "nan", "inf", "99999999999", "ten", "5s", ""])
+def test_an_ini_timeout_that_is_not_a_usable_number_is_refused(ini_timeout: str) -> None:
     with pytest.raises(VantageConfigError, match="vantage_timeout"):
         resolve_report_timeout(cli_timeout=None, ini_timeout=ini_timeout)
 
@@ -163,6 +164,12 @@ _INVALID_CONFIGURATIONS = {
     "negative timeout on the command line": ("", {}, ["--vantage-timeout=-1"], "--vantage-timeout"),
     "zero timeout on the command line": ("", {}, ["--vantage-timeout=0"], "--vantage-timeout"),
     "nan timeout on the command line": ("", {}, ["--vantage-timeout=nan"], "--vantage-timeout"),
+    "oversized timeout on the command line": (
+        "",
+        {},
+        ["--vantage-timeout=99999999999"],
+        "--vantage-timeout",
+    ),
     "non-numeric timeout in the ini file": ("vantage_timeout = ten", {}, [], "vantage_timeout"),
     "negative timeout in the ini file": ("vantage_timeout = -1", {}, [], "vantage_timeout"),
 }
