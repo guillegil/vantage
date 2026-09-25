@@ -17,7 +17,7 @@ from typing import Any, TypeVar
 
 import pytest
 
-F = TypeVar("F", bound=Callable[..., Any])
+_F = TypeVar("_F", bound=Callable[..., Any])
 
 
 class VantageWarning(UserWarning):
@@ -59,7 +59,7 @@ def warn(config: pytest.Config, message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def _isolated(flag: str, description: str, *, latch: bool = True) -> Callable[[F], F]:
+def _isolated(flag: str, description: str, *, latch: bool = True) -> Callable[[_F], _F]:
     """Build a fault-isolation decorator keyed off its own instance flag.
 
     Catches `Exception`, never `BaseException` -- `KeyboardInterrupt` and
@@ -83,7 +83,7 @@ def _isolated(flag: str, description: str, *, latch: bool = True) -> Callable[[F
     module, or the hook it wraps, touches the suite's verdict.
     """
 
-    def decorator(hook: F) -> F:
+    def decorator(hook: _F) -> _F:
         @functools.wraps(hook)
         def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
             if latch and getattr(self, flag):
