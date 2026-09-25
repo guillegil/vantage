@@ -3,7 +3,7 @@
 (`vantage_server` -- `vantage_test_server.py`), proving the five outcome
 shapes, duration measurement and identity storage survive the whole hop from
 pytest's own hooks through the plugin, over HTTP, and into the server's
-in-memory store -- never a stub of either side of that boundary.
+SQLite store -- never a stub of either side of that boundary.
 """
 
 from __future__ import annotations
