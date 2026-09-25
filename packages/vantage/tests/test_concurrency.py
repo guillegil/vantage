@@ -1,5 +1,5 @@
-"""Threads sharing one `SqliteExecutionStore` neither corrupt or drop each
-other's writes nor read each other's writes half-done.
+"""Concurrent writers on one database file never corrupt or drop each
+other's writes, and a thread never reads another's write half-done.
 
 Every thread is joined with a timeout: a deadlock is exactly what these tests
 look for, and an unbounded `join` would hang the suite instead of failing it.
@@ -57,7 +57,7 @@ def _run_concurrently(targets: list[Callable[[], object]]) -> list[BaseException
         thread.start()
     for thread in threads:
         thread.join(timeout=_JOIN_TIMEOUT_SECONDS)
-    assert not any(thread.is_alive() for thread in threads), "a writer thread never finished"
+    assert not any(thread.is_alive() for thread in threads), "a thread never finished"
     return errors
 
 

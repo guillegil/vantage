@@ -207,13 +207,14 @@ def test_a_commit_refused_by_a_busy_reader_is_rolled_back_and_the_store_recovers
     monkeypatch.setattr("vantage.storage.connection._enable_wal", lambda _conn: None)
     db_path = tmp_path / "store" / "vantage.db"
     store = SqliteExecutionStore(db_path)
+    reader = sqlite3.connect(str(db_path), isolation_level=None)
     do_write = _write_run if write == "record_session" else _write_setting
+    table = "run" if write == "record_session" else "user_setting"
     first, second = ("a" * 32, "b" * 32) if write == "record_session" else ("Billing", "Checkout")
     try:
         conn = store._conn  # noqa: SLF001
         assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
         conn.execute("PRAGMA busy_timeout = 50")
-        reader = sqlite3.connect(str(db_path), isolation_level=None)
         reader.execute("BEGIN")
         reader.execute("SELECT COUNT(*) FROM run").fetchone()
 
@@ -224,14 +225,14 @@ def test_a_commit_refused_by_a_busy_reader_is_rolled_back_and_the_store_recovers
         assert not _was_written(store, write, first)
 
         reader.execute("COMMIT")
-        reader.close()
         assert do_write(store, second) is True
-        other = sqlite3.connect(str(db_path), timeout=0)
-        try:
-            assert other.execute("SELECT COUNT(*) FROM user_setting").fetchone() is not None
-        finally:
-            other.close()
+        # Another connection, as another process has, reads without waiting
+        # -- the store holds no lock any more -- and sees only the write
+        # that landed.
+        reader.execute("PRAGMA busy_timeout = 0")
+        assert reader.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (1,)  # noqa: S608
     finally:
+        reader.close()
         store.close()
 
 
@@ -373,6 +374,9 @@ def _forced(row: _Row, **fields: str) -> _Row:
 _VALID_FILE = MetadataFile(source_file="m.json", content_type="json", status="captured")
 _VALID_ENTRY = MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured")
 
+# Every table `record_session` writes.
+_SESSION_TABLES = ("run", "test_case", "result", "run_metadata_file", "run_metadata")
+
 
 @pytest.mark.parametrize(
     ("files", "entries"),
@@ -402,12 +406,9 @@ def test_a_metadata_row_the_schema_refuses_rolls_back_the_whole_session(
         conn = store._conn  # noqa: SLF001
         counts = {
             table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
-            for table in _TABLES
+            for table in _SESSION_TABLES
         }
-        assert counts == dict.fromkeys(_TABLES, 0)
+        assert counts == dict.fromkeys(_SESSION_TABLES, 0)
         assert _write_run(store, "b" * 32) is True
     finally:
         store.close()
-
-
-_TABLES = ("run", "test_case", "result", "run_metadata_file", "run_metadata")

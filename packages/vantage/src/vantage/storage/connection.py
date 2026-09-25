@@ -79,8 +79,8 @@ def open_database(path: Path) -> sqlite3.Connection:
 
     # An existing directory -- a home directory, a shared checkout, `/tmp` --
     # is never re-moded: its owner chose the mode, and `chmod` on one owned
-    # by another user fails outright. A created one is 0700 under any umask,
-    # which can only take bits away.
+    # by another user fails outright. A created one is never wider than
+    # 0700, since the umask can only take bits away.
     try:
         os.makedirs(parent, mode=0o700)
     except FileExistsError:
@@ -91,9 +91,8 @@ def open_database(path: Path) -> sqlite3.Connection:
 
     # `check_same_thread=False`: the store may be called from any thread, so
     # several can share this one connection; `SqliteExecutionStore`'s lock
-    # serialises them. `timeout=5.0`: a second
-    # process contending for the write lock waits rather than failing
-    # instantly with `SQLITE_BUSY`.
+    # serialises them. `timeout=5.0`: a second process contending for the
+    # write lock waits rather than failing instantly with `SQLITE_BUSY`.
     conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False, timeout=5.0)
     try:
         conn.execute("PRAGMA foreign_keys = ON")

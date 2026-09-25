@@ -32,10 +32,10 @@ node_id) DO NOTHING`, so a replayed report is a silent no-op.
 interrupted run is done, not stale -- and advanced by `touch_last_contact`'s
 monotonic `last_contact_at < ?` update.
 
-Timestamps are compared as TEXT -- that update, the catalogue's `MAX`, every
-`ORDER BY started_at` -- so every one is written through `isoformat_utc`:
-fixed-width UTC, whose text order is chronological order whatever offset
-the caller's `datetime` carried.
+Timestamps are compared as TEXT -- that update, the catalogue's `MIN` and
+`MAX`, the metadata horizon's `<`, every `ORDER BY started_at` -- so every
+one is written through `isoformat_utc`: fixed-width UTC, whose text order
+is chronological order whatever offset the caller's `datetime` carried.
 """
 
 from __future__ import annotations
