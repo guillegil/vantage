@@ -377,8 +377,10 @@ def _write_sleeping_git_shim(directory: Path, *, sleep_seconds: float, forward: 
 
 
 @pytest.mark.slow
-@pytest.mark.slow
 def test_hung_git_bounded_at_capture_level(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # `capture` reads the budget at call time; a short one keeps the test
+    # quick while still measuring that the hang is cut off.
+    monkeypatch.setattr(vcs, "_CAPTURE_BUDGET_SECONDS", 0.5)
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     _write_sleeping_git_shim(shim_dir, sleep_seconds=30, forward=False)
@@ -395,24 +397,25 @@ def test_hung_git_bounded_at_capture_level(tmp_path: Path, monkeypatch: pytest.M
 
 
 @pytest.mark.slow
-@pytest.mark.slow
 def test_whole_capture_budget_not_per_invocation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A 3s-per-invocation shim that forwards to real git. Per-invocation 5s
-    # timeouts would let all five succeed (15s); one shared 5s budget cannot.
+    # A shim that sleeps 0.3s per invocation, then forwards to real git.
+    # Per-invocation 1s timeouts would let all five succeed (1.5s); one
+    # shared 1s budget cannot. The gate still has ample room to succeed.
+    monkeypatch.setattr(vcs, "_CAPTURE_BUDGET_SECONDS", 1.0)
     repo = _repo_with_one_commit(tmp_path / "slow-git-repo")
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
-    _write_sleeping_git_shim(shim_dir, sleep_seconds=3.0, forward=True)
+    _write_sleeping_git_shim(shim_dir, sleep_seconds=0.3, forward=True)
     monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ.get("PATH", ""))
 
     started = time.monotonic()
     snapshot = vcs.capture(repo)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 10.0  # five independent 5s timeouts would tolerate up to 25s
-    assert snapshot.root is not None  # the gate succeeds (3s < the initial 5s budget)
+    assert elapsed < vcs._CAPTURE_BUDGET_SECONDS + 1.0
+    assert snapshot.root is not None  # the gate succeeds
     # ...but not every later invocation fits inside the shared budget.
     assert not (snapshot.commit and snapshot.branch and snapshot.dirty is not None)
 
