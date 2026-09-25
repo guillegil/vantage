@@ -270,6 +270,22 @@ def test_derive_outcome_strict_xfail_that_passes_is_failed_not_xpassed() -> None
     assert derive_outcome(setup, call, teardown) == "failed"
 
 
+@pytest.mark.parametrize("reason", ["[NOTRUN] never run", ""])
+def test_an_xfail_raised_during_setup_is_xfailed_with_its_evidence_from_setup(
+    reason: str,
+) -> None:
+    """`xfail(run=False)` and `pytest.xfail()` in a fixture end the test in a
+    skipped setup carrying `wasxfail`, so call never runs. That is
+    `xfailed`, and its reason lives on the setup report."""
+    setup = _report("setup", "skipped", wasxfail=reason)
+    teardown = _report("teardown", "passed")
+
+    outcome = derive_outcome(setup, None, teardown)
+
+    assert outcome == "xfailed"
+    assert _select_evidence_phase(setup, None, teardown, outcome) is setup
+
+
 # --- teardown downgrades only a passed result --------------------------------
 
 # Row 8 (in the table above) already proves the positive case -- `passed` IS

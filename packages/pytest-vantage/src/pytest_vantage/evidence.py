@@ -193,6 +193,14 @@ def _extract(
     excinfo = call.excinfo
     if excinfo is None:
         fields: dict[str, object] = {}
+        if report.failed:
+            # Failed with no exception: a strict xfail whose body passed.
+            # pytest's own text (`[XPASS(strict)] <reason>`) is the only
+            # statement of why; no exception type is invented for it.
+            try:
+                fields["failure_message"] = report.longreprtext or None
+            except Exception:  # deliberately broad -- one field lost, not the rest
+                fields["failure_message"] = None
     elif hasattr(report, "wasxfail"):
         fields = {"xfail_reason": report.wasxfail}
     elif report.outcome == "skipped":

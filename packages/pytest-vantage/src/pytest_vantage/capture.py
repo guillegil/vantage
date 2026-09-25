@@ -195,11 +195,14 @@ def derive_outcome(
     `wasxfail` entirely absent (see `_pytest/skipping.py`), so it is
     `failed`, not `xpassed`. `wasxfail`'s presence (`hasattr`), never its
     truthiness, is what matters -- pytest sometimes sets the reason to `""`.
+    An xfail raised during setup (`xfail(run=False)`, `pytest.xfail()` in a
+    fixture, an xfail-marked test whose fixture raises) arrives as a skipped
+    setup carrying `wasxfail`, and pytest counts it as xfailed.
     """
     if setup.outcome == "failed":
         return "error"
     if setup.outcome == "skipped":
-        return "skipped"
+        return "xfailed" if hasattr(setup, "wasxfail") else "skipped"
     if call is None:
         raise AssertionError("setup passed but no call report was recorded")
     if call.outcome == "skipped":
@@ -257,24 +260,24 @@ def _select_evidence_phase(
     result, keyed off the DERIVED outcome, never restated as an independent
     condition:
 
-    | Derived outcome    | Evidence taken from                          |
-    | ------------------- | --------------------------------------------- |
-    | `error`             | setup if setup failed, else teardown          |
-    | `failed`, `xfailed` | call                                          |
-    | `skipped`           | setup if setup skipped, else call             |
-    | `xpassed`, `passed` | none                                          |
+    | Derived outcome      | Evidence taken from                          |
+    | -------------------- | --------------------------------------------- |
+    | `error`              | setup if setup failed, else teardown          |
+    | `failed`             | call                                          |
+    | `skipped`, `xfailed` | setup if setup skipped, else call             |
+    | `xpassed`, `passed`  | none                                          |
 
     `call` is `None` only when `setup.outcome` is not `"passed"`
     (`derive_outcome`'s own precondition) -- exactly the cases this
-    function never needs `call` for (`error`/`skipped` with a skipped
-    setup), so the `pytest.TestReport | None` signature never needs a
-    runtime `None` check.
+    function never needs `call` for (`error`, or `skipped`/`xfailed` with a
+    skipped setup), so the `pytest.TestReport | None` signature never needs
+    a runtime `None` check.
     """
     if outcome == "error":
         return setup if setup.outcome == "failed" else teardown
-    if outcome in ("failed", "xfailed"):
+    if outcome == "failed":
         return call
-    if outcome == "skipped":
+    if outcome in ("skipped", "xfailed"):
         return setup if setup.outcome == "skipped" else call
     return None  # xpassed, passed
 

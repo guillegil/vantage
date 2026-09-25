@@ -89,6 +89,103 @@ def test_five_outcome_shapes_recorded_end_to_end(
     assert teardown_raised.teardown_outcome == "failed"
 
 
+_XFAIL_RAISED_IN_SETUP = """
+import pytest
+
+
+@pytest.fixture
+def xfails_in_setup():
+    pytest.xfail("fixture says xfail")
+
+
+@pytest.fixture
+def broken():
+    raise RuntimeError("setup is broken")
+
+
+@pytest.mark.xfail(run=False, reason="never run")
+def test_not_run():
+    pass
+
+
+def test_xfail_in_fixture(xfails_in_setup):
+    pass
+
+
+@pytest.mark.xfail(reason="setup is known broken")
+def test_xfail_marked_setup_error(broken):
+    pass
+
+
+@pytest.mark.skip(reason="plain skip")
+def test_plain_skip():
+    pass
+"""
+
+
+def test_an_xfail_raised_during_setup_is_xfailed(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """`xfail(run=False)`, `pytest.xfail()` in a fixture, and an xfail-marked
+    test whose fixture raises all end in a skipped setup report carrying
+    `wasxfail`. pytest counts them as xfailed, and so does the record, with
+    pytest's reason; a plain skip stays skipped."""
+    pytester.makepyfile(test_setup_xfail=_XFAIL_RAISED_IN_SETUP)
+
+    run = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    run.assert_outcomes(skipped=1, xfailed=3)
+    results = vantage_server.results()
+    for name, reason in (
+        ("test_not_run", "[NOTRUN] never run"),
+        ("test_xfail_in_fixture", "fixture says xfail"),
+        ("test_xfail_marked_setup_error", "setup is known broken"),
+    ):
+        result = _by_function_name(results, name)
+        assert result.outcome == "xfailed", name
+        assert result.failure is not None
+        assert result.failure.xfail_reason == reason
+        assert result.failure.skip_reason is None
+    plain_skip = _by_function_name(results, "test_plain_skip")
+    assert plain_skip.outcome == "skipped"
+    assert plain_skip.failure is not None
+    assert plain_skip.failure.skip_reason == "Skipped: plain skip"
+
+
+@pytest.mark.parametrize("strict_from", ["mark", "ini"])
+def test_a_strict_xfail_that_passes_is_failed_with_pytests_reason(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    strict_from: str,
+) -> None:
+    """A strict xfail whose body passes is failed with no exception to
+    describe. The reason pytest reports, `[XPASS(strict)] <reason>`, is the
+    only statement of why, so it is stored as the failure message; no
+    exception type is invented. Covers `strict=True` and the
+    `xfail_strict` ini value."""
+    if strict_from == "ini":
+        pytester.makeini("[pytest]\nxfail_strict = true\n")
+        mark = '@pytest.mark.xfail(reason="synthetic strict reason")'
+    else:
+        mark = '@pytest.mark.xfail(reason="synthetic strict reason", strict=True)'
+    pytester.makepyfile(
+        test_strict=f"import pytest\n\n\n{mark}\ndef test_passes_unexpectedly():\n    pass\n"
+    )
+
+    pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    result = _by_function_name(vantage_server.results(), "test_passes_unexpectedly")
+    assert result.outcome == "failed"
+    assert result.failure is not None
+    assert result.failure.failure_message == "[XPASS(strict)] synthetic strict reason"
+    assert result.failure.failure_type is None
+
+
 # --- duration measurement, end to end ---------------------------------------
 
 _SLOW_SETUP_FAST_BODY = """
