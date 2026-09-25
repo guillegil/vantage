@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from vantage.storage.connection import SchemaVersionError, open_database
+from vantage.storage.connection import _SCHEMA_VERSION, SchemaVersionError, open_database
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCHEMA_SQL = _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"
@@ -130,55 +130,31 @@ def _seed_meta_only_database(db_path: Path, *, schema_version_value: str | None)
         conn.close()
 
 
-def test_opening_a_database_with_no_schema_version_row_is_refused(tmp_path: Path) -> None:
-    db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value=None)
-
-    with pytest.raises(SchemaVersionError) as exc_info:
-        open_database(db_path)
-
-    message = str(exc_info.value)
-    assert "schema_version is absent" in message
-    assert "requires schema_version 4" in message
-
-
-def test_opening_a_database_with_an_older_schema_version_is_refused(tmp_path: Path) -> None:
-    db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="1")
-
-    with pytest.raises(SchemaVersionError) as exc_info:
-        open_database(db_path)
-
-    message = str(exc_info.value)
-    assert "schema_version is 1," in message
-    assert "requires schema_version 4" in message
-
-
-def test_opening_a_database_with_a_newer_schema_version_is_refused(tmp_path: Path) -> None:
-    db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="5")
-
-    with pytest.raises(SchemaVersionError) as exc_info:
-        open_database(db_path)
-
-    message = str(exc_info.value)
-    assert "schema_version is 5," in message
-    assert "requires schema_version 4" in message
-
-
-# `3` is the schema version immediately before the current one.
-def test_opening_a_database_created_by_the_previous_schema_version_is_refused(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("stamped", "found"),
+    [
+        (None, "absent"),
+        (str(_SCHEMA_VERSION - 1), str(_SCHEMA_VERSION - 1)),
+        (str(_SCHEMA_VERSION + 1), str(_SCHEMA_VERSION + 1)),
+        ("not-a-number", "absent"),
+    ],
+    ids=["absent", "older", "newer", "unparseable"],
+)
+def test_a_database_stamped_with_any_other_schema_version_is_refused(
+    tmp_path: Path, stamped: str | None, found: str
 ) -> None:
+    """Older and newer are both refused: a build cannot honour an invariant
+    it does not know about. The message names what was found, what is
+    required, and which file."""
     db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="3")
+    _seed_meta_only_database(db_path, schema_version_value=stamped)
 
     with pytest.raises(SchemaVersionError) as exc_info:
         open_database(db_path)
 
     message = str(exc_info.value)
-    assert "schema_version is 3," in message
-    assert "requires schema_version 4" in message
+    assert f"schema_version is {found}," in message
+    assert f"requires schema_version {_SCHEMA_VERSION};" in message
     assert str(db_path) in message
 
 
@@ -228,7 +204,7 @@ def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="4")
+    _seed_meta_only_database(db_path, schema_version_value=str(_SCHEMA_VERSION))
 
     captured = _spy_on_executescript(monkeypatch)
 
@@ -260,5 +236,5 @@ def test_creating_a_database_survives_a_username_lookup_failure(
         conn.close()
 
     # The database exists and is usable; only the convenience row is absent.
-    assert stored["schema_version"] == "4"
+    assert stored["schema_version"] == str(_SCHEMA_VERSION)
     assert "created_by" not in stored

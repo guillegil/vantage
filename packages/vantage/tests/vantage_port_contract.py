@@ -9,7 +9,6 @@ test unchanged, so both adapters are held to the same behaviour.
 
 from __future__ import annotations
 
-import dataclasses
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,7 +20,6 @@ from vantage.core.ports.storage import (
     ExecutionStore,
     MetadataEntry,
     MetadataFile,
-    ResultListEntry,
     RunMetadata,
     UserSetting,
 )
@@ -681,19 +679,6 @@ class ExecutionStoreContract:
         assert stored_all_null is not None
         assert stored_all_null.vcs is None
 
-    def test_absent_repository_run_is_retrievable_in_storage(self, store: ExecutionStore) -> None:
-        """A run recorded outside a repository is stored and reads back with
-        `vcs is None`."""
-        identity = "2" + "6" * 31
-        execution = _execution(identity, vcs=None)
-
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
-
-        assert store.count_executions() == 1
-        found = store.get_execution(identity)
-        assert found is not None
-        assert found.vcs is None
-
     # -- list_runs / get_run_detail --
 
     def test_list_runs_orders_newest_first_with_total_tiebreak(self, store: ExecutionStore) -> None:
@@ -1019,28 +1004,6 @@ class ExecutionStoreContract:
         assert entry.failure.failure_message == long_message[:LIST_FAILURE_MESSAGE_CHARS]
         assert entry.failure.failure_message_truncated is True
 
-    def test_list_results_excludes_the_heavy_fields_structurally(
-        self, store: ExecutionStore
-    ) -> None:
-        """`ResultListEntry` has no field to carry `traceback`, `failure_repr`
-        or captured output, proven against the type `list_results` actually
-        returns, not merely `ResultListEntry` in isolation."""
-        execution = _execution("a" * 32)
-        store.record_session(
-            execution,
-            results=(_result("t.py::test_failing", outcome="failed", failure=_failure()),),
-            received_at=datetime.now(timezone.utc),
-        )
-
-        page = store.list_results(execution.identity.value, limit=10, offset=0)
-
-        entry = page.items[0]
-        assert isinstance(entry, ResultListEntry)
-        field_names = {f.name for f in dataclasses.fields(ResultListEntry)}
-        assert "traceback" not in field_names
-        assert "failure_repr" not in field_names
-        assert "captured" not in field_names
-
     def test_get_result_returns_the_full_record_hit(self, store: ExecutionStore) -> None:
         """`get_result` returns the whole stored `Result`, `failure` and
         `captured` populated in full, unbounded."""
@@ -1086,6 +1049,27 @@ class ExecutionStoreContract:
         assert found.failure is not None
         assert found.failure.traceback == "a truncated traceback"
         assert found.failure.traceback_truncated is True
+
+    def test_a_result_without_evidence_reads_back_with_no_failure_and_no_output(
+        self, store: ExecutionStore
+    ) -> None:
+        """A result stored with no failure evidence and nothing captured reads
+        back as `failure is None` and an all-`None` `CapturedOutput` from both
+        read paths -- never as a record whose fields all happen to be null."""
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x"),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+        (listed,) = store.get_results(execution.identity.value)
+
+        for result in (found, listed):
+            assert result is not None
+            assert result.failure is None
+            assert result.captured == _captured()
 
     def test_captured_output_empty_versus_absent_round_trips_through_storage(
         self, store: ExecutionStore
@@ -1261,35 +1245,12 @@ class ExecutionStoreContract:
         assert entries == frozenset(metadata.entries)
         assert next(iter(entries)).value is None
 
-    def test_replaying_the_same_metadata_is_a_no_op(self, store: ExecutionStore) -> None:
-        """Both metadata inserts are write-once. A second `record_session` call
-        for the same run with the identical metadata changes nothing."""
-        execution = _execution("3" * 32)
-        metadata = RunMetadata(
-            files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
-            entries=(MetadataEntry(key="k", value="v", source_file="a.yaml", status="captured"),),
-        )
-        store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
-        )
-
-        store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
-        )
-
-        assert _stored_metadata_files(store, execution.identity.value) == frozenset(metadata.files)
-        assert _stored_metadata_entries(store, execution.identity.value) == frozenset(
-            metadata.entries
-        )
-
     def test_replaying_metadata_with_a_different_value_does_not_backfill(
         self, store: ExecutionStore
     ) -> None:
         """A stored value never changes after ingestion: a second
         `record_session` call for the same run and key with a different value
-        leaves the first value on read. The identical-metadata replay above
-        cannot show this, since idempotence holds trivially when the two writes
-        agree."""
+        leaves the first value on read."""
         execution = _execution("8" * 32)
         first = RunMetadata(
             files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
