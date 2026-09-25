@@ -40,6 +40,10 @@ def test_resolution_creates_no_directory(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file-mode semantics only")
+@pytest.mark.skipif(
+    os.geteuid() == 0 if hasattr(os, "geteuid") else True,
+    reason="root may write to a 0500 directory; skip rather than fail",
+)
 def test_ensure_database_directory_writable_raises_on_read_only_parent(tmp_path: Path) -> None:
     parent = tmp_path / "readonly"
     parent.mkdir(mode=0o500)
