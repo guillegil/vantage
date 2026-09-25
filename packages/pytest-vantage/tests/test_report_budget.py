@@ -440,6 +440,36 @@ def test_a_suite_too_large_for_one_report_is_recorded_whole(
     assert len(vantage_server.results()) == 1000
 
 
+def test_a_result_too_large_for_any_report_costs_only_itself_and_one_warning(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """A skip reason is never charged against the failure-text budget, so
+    one of over a megabyte makes a result no report can carry. That result
+    is left out with one warning; the rest of the session is recorded and
+    the run finishes, instead of the whole report being refused.
+    """
+    pytester.makepyfile(
+        test_sample="import pytest\n\n\n"
+        "def test_kept():\n    assert True\n\n\n"
+        "def test_huge_skip():\n    pytest.skip('s' * 1_100_000)\n"
+    )
+
+    result = pytester.runpytest(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    result.assert_outcomes(passed=1, skipped=1)
+    output = result.stdout.str()
+    assert output.count("VantageWarning:") == 1
+    assert "1 test result(s) too large for any report were left out" in output
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert [stored.identity.node_id for stored in vantage_server.results()] == [
+        "test_sample.py::test_kept"
+    ]
+
+
 def test_a_long_session_with_failure_text_keeps_every_result_and_failure_message(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
