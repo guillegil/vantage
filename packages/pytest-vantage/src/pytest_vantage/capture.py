@@ -55,9 +55,10 @@ def decompose(node_id: str) -> DecomposedIdentity:
     1. Partition on the FIRST ``"::"`` only. The part before it is
        ``file_path``; pytest node ids do not put ``"::"`` inside a file
        path, so this is unambiguous. A ``node_id`` with no ``"::"`` at all
-       is not a real pytest node id (every one has a file path and at
-       least one test-path segment) and raises ``ValueError`` rather than
-       silently inventing a function name.
+       belongs to an item that is itself a file (a node that is both
+       ``pytest.File`` and ``pytest.Item``, which pytest warns about but
+       runs): the whole id is ``file_path`` and the file's name is
+       ``function_name``.
     2. In that remainder: if it ends with ``"]"`` and contains ``"["``,
        slice on the FIRST ``"["`` and the LAST ``"]"`` -- not
        ``partition``/``rpartition`` symmetry -- to pull out ``param_id``,
@@ -70,8 +71,12 @@ def decompose(node_id: str) -> DecomposedIdentity:
     """
     file_path, separator, remainder = node_id.partition("::")
     if not separator:
-        raise ValueError(
-            f"not a pytest node id (missing '::' between file path and test path): {node_id!r}"
+        return DecomposedIdentity(
+            node_id=node_id,
+            file_path=node_id,
+            class_name=None,
+            function_name=node_id.rpartition("/")[2],
+            param_id=None,
         )
 
     if remainder.endswith("]") and "[" in remainder:
@@ -338,13 +343,16 @@ def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
 
 def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] | None:
     """One execution's `results[]` entry, or `None` when its teardown report
-    was never seen."""
+    was never seen, or when setup passed and the test itself never ran
+    (`--setup-only`, `--setup-plan`): there is no verdict to record."""
     if execution.teardown is None:
         return None
     setup = execution.setup
     if setup is None:
         raise AssertionError("a teardown report implies a setup report was seen first")
     call = execution.call
+    if call is None and setup.outcome == "passed":
+        return None
     teardown = execution.teardown
 
     identity = decompose(node_id)
@@ -391,19 +399,38 @@ def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] |
     return result
 
 
-def assemble_results(pending: dict[str, _Pending]) -> list[dict[str, object]]:
-    """Build the `results` array in insertion (execution) order. Entries
-    with no teardown report are dropped (`build_result` returning `None`).
+class AssembledResults(list[dict[str, object]]):
+    """The `results` array, plus `dropped`: how many tests had reports that
+    could not be built into a result. Still a plain list to everything that
+    serialises or budgets it.
     """
-    results: list[dict[str, object]] = []
+
+    dropped: int = 0
+
+
+def assemble_results(pending: dict[str, _Pending]) -> AssembledResults:
+    """Build the `results` array in insertion (execution) order. Entries
+    that were never observed whole are left out (`build_result` returning
+    `None`).
+
+    Each entry is built on its own: a report shape this module does not
+    expect costs that one test its result and is counted in `dropped`,
+    never the whole session's finish report.
+    """
+    results = AssembledResults()
     for entry_node_id, entry in pending.items():
-        result = build_result(entry_node_id, entry)
+        try:
+            result = build_result(entry_node_id, entry)
+        except Exception:  # deliberately broad -- one result lost, not the session's
+            results.dropped += 1
+            continue
         if result is not None:
             results.append(result)
     return results
 
 
 __all__ = [
+    "AssembledResults",
     "DecomposedIdentity",
     "accumulate",
     "assemble_results",

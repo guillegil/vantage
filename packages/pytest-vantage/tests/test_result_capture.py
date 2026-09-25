@@ -304,6 +304,67 @@ def test_module_level():
     assert in_class.identity.class_name == "TestInClass"
 
 
+# --- an item that is its own file, end to end -------------------------------
+
+# A node that is both a File and an Item, as older lint plugins build them:
+# pytest warns and runs it, and its node id is the bare file path.
+_FILE_ITEM_CONFTEST = """
+import pytest
+
+
+class StyleItem(pytest.File, pytest.Item):
+    def collect(self):
+        return []
+
+    def runtest(self):
+        pass
+
+
+def pytest_collect_file(file_path, parent):
+    if file_path.name.startswith("style_") and file_path.suffix == ".txt":
+        return StyleItem.from_parent(parent, path=file_path)
+"""
+
+
+def test_an_item_whose_node_id_has_no_double_colon_is_recorded(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """Such an item is recorded like any other, and it never costs the rest
+    of the session its results."""
+    pytester.makeconftest(_FILE_ITEM_CONFTEST)
+    pytester.makefile(".txt", style_z="x = 1\n")
+    pytester.makepyfile(test_ok="def test_ok():\n    assert True\n")
+
+    run = pytester.runpytest_subprocess("--vantage", f"--vantage-server={vantage_server.address}")
+
+    run.assert_outcomes(passed=2)
+    assert "error while reporting" not in run.stdout.str() + run.stderr.str()
+    recorded = {result.identity.node_id for result in vantage_server.results()}
+    assert recorded == {"style_z.txt", "test_ok.py::test_ok"}
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+
+
+def test_a_setup_only_session_still_finishes_its_run(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """`--setup-only` runs no test body, so there is no result to record,
+    but the run itself still finishes rather than being left looking
+    abandoned."""
+    pytester.makepyfile(test_ok="def test_ok():\n    assert True\n")
+
+    run = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--setup-only"
+    )
+
+    assert "error while reporting" not in run.stdout.str() + run.stderr.str()
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert vantage_server.results() == []
+
+
 # --- empty parameter id, end to end -----------------------------------------
 
 _EMPTY_PARAM_ID = """

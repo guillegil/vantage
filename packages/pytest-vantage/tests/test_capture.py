@@ -193,15 +193,29 @@ def test_decompose_identity_directory_containing_brackets_is_not_mistaken_for_a_
     assert identity.param_id == "x"
 
 
-def test_decompose_identity_rejects_a_string_with_no_double_colon_at_all() -> None:
-    """Every real pytest node id has at least one `"::"` separating the
-    file path from the test path. A string with none is not a node id at
-    all, and silently treating the whole string as a function name (or as a
-    bare file path with no test) would hide that malformed input rather
-    than surface it -- so this raises instead.
+@pytest.mark.parametrize(
+    ("node_id", "expected_function_name"),
+    [
+        pytest.param("style_z.txt", "style_z.txt", id="at-the-rootdir"),
+        pytest.param("lint/style_z.txt", "style_z.txt", id="in-a-directory"),
+    ],
+)
+def test_decompose_identity_of_an_item_that_is_its_own_file(
+    node_id: str, expected_function_name: str
+) -> None:
+    """An item that is also a `pytest.File` (the pattern older lint plugins
+    use; pytest warns but runs it) has the bare file path as its node id,
+    with no `"::"`. It is still a test pytest ran, so it decomposes rather
+    than raising: the whole id is the file, and the file's name is the
+    function name.
     """
-    with pytest.raises(ValueError, match="::"):
-        decompose("not_a_node_id_at_all.py")
+    identity = decompose(node_id)
+
+    assert identity.node_id == node_id
+    assert identity.file_path == node_id
+    assert identity.class_name is None
+    assert identity.function_name == expected_function_name
+    assert identity.param_id is None
 
 
 # --- outcome derivation: the nine precedence rows ----------------------------
@@ -484,6 +498,34 @@ def test_a_new_setup_report_starts_a_fresh_attempt(
     assert result["call_outcome"] is None
     assert result["call_duration"] is None
     assert result["duration"] == 0.75  # the final attempt's setup and teardown only
+
+
+def test_an_entry_that_cannot_be_built_costs_only_itself() -> None:
+    """One report shape the plugin does not expect must cost that test its
+    result, never the rest of the session's; how many were dropped is
+    exposed so the caller can say so."""
+    pending: dict[str, _Pending] = {}
+    accumulate(pending, _report("teardown", "passed", nodeid="t.py::test_no_setup"))
+    for when, outcome in _ALL_PHASES_PASSING:
+        accumulate(pending, _report(when, outcome, nodeid="t.py::test_ok"))
+
+    results = assemble_results(pending)
+
+    assert [result["node_id"] for result in results] == ["t.py::test_ok"]
+    assert results.dropped == 1
+
+
+def test_a_test_whose_call_never_ran_is_left_out_without_error() -> None:
+    """`--setup-only` and `--setup-plan` run setup and teardown but never the
+    test itself. There is no verdict to record, which is not an error."""
+    pending: dict[str, _Pending] = {}
+    accumulate(pending, _report("setup", "passed"))
+    accumulate(pending, _report("teardown", "passed"))
+
+    results = assemble_results(pending)
+
+    assert results == []
+    assert results.dropped == 0
 
 
 def test_assemble_results_preserves_execution_order() -> None:
