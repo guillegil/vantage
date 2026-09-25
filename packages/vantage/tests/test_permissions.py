@@ -63,6 +63,49 @@ def test_database_file_created_0600_before_connect(
     assert captured_modes == [0o600]
 
 
+def test_a_directory_it_creates_is_owner_only(tmp_path: Path, permissive_umask: None) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+
+    conn = open_database(db_path)
+    conn.close()
+
+    assert _mode(db_path.parent) == 0o700
+
+
+def test_an_existing_directory_keeps_its_mode(tmp_path: Path, permissive_umask: None) -> None:
+    """`--database ~/vantage.db` or `./vantage.db` names a directory that
+    belongs to the user, who chose its mode; narrowing it to 0700 would lock
+    out everyone else the user shares it with."""
+    project = tmp_path / "project"
+    project.mkdir()
+    os.chmod(project, 0o755)  # noqa: S103 -- the shared mode under test
+
+    conn = open_database(project / "vantage.db")
+    conn.close()
+
+    assert _mode(project) == 0o755
+
+
+def test_an_existing_directory_owned_by_someone_else_is_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A writable directory another user owns (the sticky `/tmp`) refuses
+    `chmod` with EPERM. Opening a database in it must not try."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    real_chmod = os.chmod
+
+    def _chmod(path: Any, mode: int, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == shared:
+            raise PermissionError(1, "Operation not permitted", str(path))
+        real_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(os, "chmod", _chmod)
+
+    conn = open_database(shared / "vantage.db")
+    conn.close()
+
+
 def test_existing_permissive_database_still_records_and_warns(
     tmp_path: Path, permissive_umask: None, caplog: pytest.LogCaptureFixture
 ) -> None:

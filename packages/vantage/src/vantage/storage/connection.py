@@ -4,7 +4,8 @@ idempotent schema application.
 `sqlite3.connect` creates a missing database file itself, at 0644 under a
 permissive umask, so a `chmod` afterwards leaves a window in which another
 user can open it. The file is therefore created at 0600 before `sqlite3`
-ever sees the path.
+ever sees the path. Only what this module creates is made owner-only: an
+existing directory or database file keeps the mode its owner chose.
 
 A database from a different schema version is refused, not migrated.
 `_apply_schema` stamps `meta.schema_version` inside the same transaction that
@@ -52,21 +53,27 @@ class SchemaVersionError(RuntimeError):
 def open_database(path: Path) -> sqlite3.Connection:
     """Open (creating if absent) the database at `path`.
 
-    Creates `path`'s parent directory at 0700, creates the database file
-    itself at 0600 before `sqlite3.connect` runs,
-    applies `schema.sql` inside one transaction on first creation only, and
-    -- on POSIX -- warns without rewriting the mode of an existing database
-    an operator deliberately widened.
+    Creates a missing parent directory at 0700 and a missing database file at
+    0600 before `sqlite3.connect` runs, applies `schema.sql` inside one
+    transaction on first creation only, and -- on POSIX -- warns without
+    rewriting the mode of an existing database an operator deliberately
+    widened. Any failure after connecting closes the connection before the
+    error propagates.
     """
     path = Path(path)
     parent = path.parent
     is_posix = os.name == "posix"
 
-    os.makedirs(parent, mode=0o700, exist_ok=True)
+    # An existing directory -- a home directory, a shared checkout, `/tmp` --
+    # is never re-moded: its owner chose the mode, and `chmod` on one owned
+    # by another user fails outright. A created one is 0700 under any umask,
+    # which can only take bits away.
+    try:
+        os.makedirs(parent, mode=0o700)
+    except FileExistsError:
+        pass
 
     if is_posix:
-        # `makedirs`' `mode` is masked by umask -- 022 would leave 0755.
-        os.chmod(parent, 0o700)
         _create_database_file_or_warn(path)
 
     # `check_same_thread=False`: the server runs handlers in a threadpool, so
@@ -74,20 +81,27 @@ def open_database(path: Path) -> sqlite3.Connection:
     # process contending for the write lock waits rather than failing
     # instantly with `SQLITE_BUSY`.
     conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False, timeout=5.0)
-    conn.execute("PRAGMA foreign_keys = ON")
-    # A committed session survives a power loss; one fsync per session is
-    # not noticeable.
-    conn.execute("PRAGMA synchronous = FULL")
-    _enable_wal(conn)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        # A committed session survives a power loss; one fsync per session is
+        # not noticeable.
+        conn.execute("PRAGMA synchronous = FULL")
+        _enable_wal(conn)
 
-    if _schema_already_applied(conn):
-        _check_schema_version(conn, path)
-    else:
-        _apply_schema(conn)
-        _stamp_creation_metadata(conn)
+        if _schema_already_applied(conn):
+            _check_schema_version(conn, path)
+        else:
+            _apply_schema(conn)
+            _stamp_creation_metadata(conn)
 
-    if is_posix:
-        _secure_wal_sidecars(path)
+        if is_posix:
+            _secure_wal_sidecars(path)
+    except BaseException:
+        # Closing rolls back a half-applied schema and releases its write
+        # lock now, not whenever the traceback that references `conn` is
+        # collected.
+        conn.close()
+        raise
 
     return conn
 
@@ -158,16 +172,15 @@ def _parse_schema_version(raw: str | None) -> int | None:
 
 def _check_schema_version(conn: sqlite3.Connection, path: Path) -> None:
     """Refuse a database whose `meta.schema_version` does not equal
-    `_SCHEMA_VERSION` -- issuing no DDL, and closing `conn` before raising.
-    Older *and* newer are both refused: a build that does not know a column
-    cannot honour whatever invariant the build that added it assumed.
+    `_SCHEMA_VERSION`, issuing no DDL. Older *and* newer are both refused: a
+    build that does not know a column cannot honour whatever invariant the
+    build that added it assumed.
     """
     row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
     found = _parse_schema_version(row[0] if row is not None else None)
     if found == _SCHEMA_VERSION:
         return
 
-    conn.close()
     found_description = "absent" if found is None else str(found)
     raise SchemaVersionError(
         f"{path}: schema_version is {found_description}, but this build requires "

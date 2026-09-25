@@ -176,6 +176,21 @@ def test_a_database_stamped_with_any_other_schema_version_is_refused(
     assert str(db_path) in message
 
 
+def _capture_connections(monkeypatch: pytest.MonkeyPatch) -> list[sqlite3.Connection]:
+    """Record every connection `sqlite3.connect` hands out, so a test can
+    check the one `open_database` made after it raised."""
+    created: list[sqlite3.Connection] = []
+    real_connect = sqlite3.connect
+
+    def _capturing_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        conn = cast(sqlite3.Connection, real_connect(*args, **kwargs))
+        created.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", _capturing_connect)
+    return created
+
+
 def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -188,15 +203,7 @@ def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
     ).fetchall()
     before.close()
 
-    created: list[sqlite3.Connection] = []
-    real_connect = sqlite3.connect
-
-    def _capturing_connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
-        conn = cast(sqlite3.Connection, real_connect(*args, **kwargs))
-        created.append(conn)
-        return conn
-
-    monkeypatch.setattr(sqlite3, "connect", _capturing_connect)
+    created = _capture_connections(monkeypatch)
 
     with pytest.raises(SchemaVersionError):
         open_database(db_path)
@@ -216,6 +223,56 @@ def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
     after.close()
 
     assert after_master == before_master
+
+
+def test_a_schema_that_fails_partway_is_rolled_back_and_its_lock_released_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A foreign SQLite file with its own `run` table: `CREATE TABLE IF NOT
+    EXISTS run` is skipped and the `run(started_at)` index then fails after
+    `BEGIN IMMEDIATE`. The connection must be closed as part of raising, so
+    the half-applied schema rolls back and the write lock is free while the
+    caller is still handling the error -- not whenever the traceback that
+    references the connection is collected."""
+    db_path = tmp_path / "store" / "vantage.db"
+    db_path.parent.mkdir(parents=True)
+    foreign = sqlite3.connect(str(db_path))
+    foreign.execute("CREATE TABLE run (id TEXT PRIMARY KEY)")
+    foreign.commit()
+    foreign.close()
+    created = _capture_connections(monkeypatch)
+
+    with pytest.raises(sqlite3.OperationalError, match="no such column"):
+        open_database(db_path)
+
+    assert len(created) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        created[0].execute("SELECT 1")
+    monkeypatch.undo()
+    other = sqlite3.connect(str(db_path), isolation_level=None, timeout=0)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("ROLLBACK")
+        tables = other.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    finally:
+        other.close()
+    assert tables == [("run",)]
+
+
+def test_a_file_that_is_not_a_database_leaves_no_open_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+    db_path.parent.mkdir(parents=True)
+    db_path.write_bytes(b"not a database, just some bytes " * 64)
+    created = _capture_connections(monkeypatch)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        open_database(db_path)
+
+    assert len(created) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        created[0].execute("SELECT 1")
 
 
 def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies_no_ddl(
