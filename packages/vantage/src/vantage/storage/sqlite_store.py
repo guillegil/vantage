@@ -137,19 +137,23 @@ _EXECUTION_COLUMNS = """
 # `_EXECUTION_COLUMNS` for a list: only a prefix of the commit subject is
 # loaded, so a 64 KiB subject is never read only to be sliced. The row still
 # decodes as an `Execution`, and `project_vcs` applies the list rule to it.
-# Binds `_LIST_SUBJECT_PREFIX`.
+# Binds `_LIST_SUBJECT_PREFIX_BYTES`.
 _LIST_EXECUTION_COLUMNS = """
     run.id, run.started_at, run.finished_at, run.exit_status, run.interrupted,
     run.interrupt_reason,
-    run.vcs_commit, run.vcs_branch, substr(run.vcs_commit_subject, 1, ?),
+    run.vcs_commit, run.vcs_branch, substr(CAST(run.vcs_commit_subject AS BLOB), 1, ?),
     run.vcs_commit_subject_truncated, run.vcs_dirty, run.vcs_root
 """
 
-# How much of a bounded list column to load: one character past the display
-# width, which is what `project_vcs` and `project_failure` need to tell a
-# longer value from one that fits.
-_LIST_SUBJECT_PREFIX = LIST_COMMIT_SUBJECT_CHARS + 1
-_LIST_MESSAGE_PREFIX = LIST_FAILURE_MESSAGE_CHARS + 1
+# How much of a bounded list column to load. The prefix is taken in bytes,
+# from the value cast to a BLOB, because SQLite's text `substr` stops at the
+# first NUL and would hand back a short prefix that looks complete. UTF-8
+# spends at most four bytes on a character, so this many bytes always hold
+# the first width + 1 characters whole -- one past the display width, which
+# is what `project_vcs` and `project_failure` need to tell a longer value
+# from one that fits.
+_LIST_SUBJECT_PREFIX_BYTES = 4 * (LIST_COMMIT_SUBJECT_CHARS + 1)
+_LIST_MESSAGE_PREFIX_BYTES = 4 * (LIST_FAILURE_MESSAGE_CHARS + 1)
 
 # `get_execution` and `get_run_detail` share one statement; `last_contact_at`
 # comes last so the first twelve values decode as an `Execution`.
@@ -293,14 +297,15 @@ _SELECT_RESULT = f"{_SELECT_FULL_RESULT} WHERE r.run_id = ? AND r.node_id = ?"
 
 # `list_results`' SELECT -- the paginated, lean sibling of
 # `_SELECT_RESULTS_FOR_RUN`, in `_FAILURE_COLUMNS`' shape so the row decodes
-# as a `Result` for `project_failure`. `failure_message` is a prefix, as in
-# `_LIST_EXECUTION_COLUMNS`. `failure_repr` and `traceback` are never loaded:
-# `substr(x, 1, 0)` is '' for a stored value and NULL for none, which is all
-# the emptiness rule needs of them. No captured-output column is selected.
-# Binds `_LIST_MESSAGE_PREFIX`.
+# as a `Result` for `project_failure`. `failure_message` is a byte prefix,
+# as in `_LIST_EXECUTION_COLUMNS`. `failure_repr` and `traceback` are never
+# loaded: `substr(x, 1, 0)` is '' for a stored value and NULL for none, which
+# is all the emptiness rule needs of them. No captured-output column is
+# selected. Binds `_LIST_MESSAGE_PREFIX_BYTES`.
 _LIST_RESULTS = f"""
     SELECT {_RESULT_COLUMNS},
-           r.failure_type, substr(r.failure_message, 1, ?), r.failure_message_truncated,
+           r.failure_type, substr(CAST(r.failure_message AS BLOB), 1, ?),
+           r.failure_message_truncated,
            r.failure_path, r.failure_lineno,
            substr(r.failure_repr, 1, 0), r.failure_repr_truncated,
            substr(r.traceback, 1, 0), r.traceback_truncated,
@@ -406,6 +411,15 @@ def _opt_datetime(value: object) -> datetime | None:
     return datetime.fromisoformat(value) if isinstance(value, str) else None
 
 
+def _text(value: object) -> str | None:
+    """A nullable text column, or the UTF-8 byte prefix a list query loads
+    in its place. Decoding the prefix drops only the one character it may
+    have cut in half; stored text is always valid UTF-8."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return cast("str | None", value)
+
+
 def _decode_identity(row: Sequence[object]) -> CaseIdentity:
     node_id, file_path, class_name, function_name, param_id = row
     return CaseIdentity(
@@ -424,7 +438,7 @@ def _decode_vcs(row: Sequence[object]) -> VcsContext | None:
     vcs = VcsContext(
         commit=cast("str | None", commit),
         branch=cast("str | None", branch),
-        commit_subject=cast("str | None", commit_subject),
+        commit_subject=_text(commit_subject),
         commit_subject_truncated=bool(commit_subject_truncated),
         dirty=None if dirty is None else bool(dirty),
         root=cast("str | None", root),
@@ -482,7 +496,7 @@ def _decode_failure(row: Sequence[object]) -> FailureEvidence | None:
     ) = row
     failure = FailureEvidence(
         failure_type=cast("str | None", failure_type),
-        failure_message=cast("str | None", failure_message),
+        failure_message=_text(failure_message),
         failure_message_truncated=bool(failure_message_truncated),
         failure_path=cast("str | None", failure_path),
         failure_lineno=cast("int | None", failure_lineno),
@@ -848,10 +862,10 @@ class SqliteExecutionStore:
         if metadata_key is not None and metadata_value is not None:
             rows = self._fetchall(
                 _LIST_RUNS_BY_METADATA,
-                (_LIST_SUBJECT_PREFIX, metadata_key, metadata_value, page_limit + 1, offset),
+                (_LIST_SUBJECT_PREFIX_BYTES, metadata_key, metadata_value, page_limit + 1, offset),
             )
         else:
-            rows = self._fetchall(_LIST_RUNS, (_LIST_SUBJECT_PREFIX, page_limit + 1, offset))
+            rows = self._fetchall(_LIST_RUNS, (_LIST_SUBJECT_PREFIX_BYTES, page_limit + 1, offset))
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def count_runs_predating_metadata_key(self, key: str) -> int:
@@ -863,7 +877,8 @@ class SqliteExecutionStore:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         with self._read_snapshot() as conn:
             rows = conn.execute(
-                _LIST_RUNS_BY_METADATA, (_LIST_SUBJECT_PREFIX, key, value, page_limit + 1, offset)
+                _LIST_RUNS_BY_METADATA,
+                (_LIST_SUBJECT_PREFIX_BYTES, key, value, page_limit + 1, offset),
             ).fetchall()
             (predating,) = conn.execute(_COUNT_RUNS_PREDATING_KEY, (key,)).fetchone()
         return _page(rows, page_limit, _row_to_run_list_entry), int(predating)
@@ -880,7 +895,7 @@ class SqliteExecutionStore:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         rows = self._fetchall(
             _LIST_RESULTS,
-            (_LIST_MESSAGE_PREFIX, execution_id, page_limit + 1, offset),
+            (_LIST_MESSAGE_PREFIX_BYTES, execution_id, page_limit + 1, offset),
         )
         return _page(rows, page_limit, _row_to_result_list_entry)
 
@@ -892,7 +907,7 @@ class SqliteExecutionStore:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         rows = self._fetchall(
             _LIST_HISTORY,
-            (_LIST_SUBJECT_PREFIX, node_id, page_limit + 1, offset),
+            (_LIST_SUBJECT_PREFIX_BYTES, node_id, page_limit + 1, offset),
         )
         return _page(rows, page_limit, _row_to_history_entry)
 

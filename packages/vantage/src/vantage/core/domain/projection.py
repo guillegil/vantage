@@ -21,9 +21,7 @@ from vantage.core.domain.execution import VcsContext
 from vantage.core.domain.result import FailureEvidence
 
 LIST_COMMIT_SUBJECT_CHARS = 120
-"""The list/history display width, in characters -- not bytes, so SQLite's
-`substr`/`length` and Python's slicing/`len` agree by construction across
-both storage adapters."""
+"""The list/history display width for `commit_subject`, in characters."""
 
 LIST_FAILURE_MESSAGE_CHARS = 200
 """The list/history display width for `failure_message`, in characters.

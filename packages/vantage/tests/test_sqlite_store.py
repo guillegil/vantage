@@ -16,7 +16,11 @@ from vantage.core.ports.storage import (
     MetadataFile,
     RunMetadata,
 )
-from vantage.storage.sqlite_store import _LIST_RUNS_BY_METADATA, SqliteExecutionStore
+from vantage.storage.sqlite_store import (
+    _LIST_RUNS_BY_METADATA,
+    _LIST_SUBJECT_PREFIX_BYTES,
+    SqliteExecutionStore,
+)
 from vantage_port_contract import ExecutionStoreContract, _execution, _start_only_execution
 
 
@@ -152,7 +156,7 @@ def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
     try:
         plan_rows = store._conn.execute(  # noqa: SLF001
             f"EXPLAIN QUERY PLAN {_LIST_RUNS_BY_METADATA}",
-            (121, "firmware_version", "2.1", 21, 0),
+            (_LIST_SUBJECT_PREFIX_BYTES, "firmware_version", "2.1", 21, 0),
         ).fetchall()
         plan_text = "\n".join(str(row[-1]) for row in plan_rows)
 

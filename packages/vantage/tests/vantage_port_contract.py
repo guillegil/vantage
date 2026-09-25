@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import (
+    LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
     project_failure,
     project_vcs,
@@ -834,6 +835,57 @@ class ExecutionStoreContract:
         assert entry.vcs is not None
         assert entry.vcs.commit_subject == "short"
         assert entry.vcs.commit_subject_truncated is True
+
+    def test_list_views_bound_text_holding_a_nul_like_any_other_text(
+        self, store: ExecutionStore
+    ) -> None:
+        """A failure message can hold U+0000 -- a test of a binary protocol
+        that puts raw bytes in its exception -- and a hand-written report
+        can put one in a commit subject. SQLite's text `substr` and `length`
+        stop at the first NUL; the list must still show the display width
+        and flag the rest, not a prefix that claims to be the whole value."""
+        message = "ValueError: bad frame header \x00\x01\x02" + "x" * 300
+        subject = "Fix\x00" + "y" * 200
+        vcs = _vcs(commit_subject=subject, commit_subject_truncated=False)
+        failure = _failure(failure_message=message)
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        store.record_session(
+            _execution("a" * 32, started=started, vcs=vcs),
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=started,
+        )
+
+        (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0).items
+        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+
+        assert result_entry.failure == project_failure(failure)
+        assert result_entry.failure is not None
+        assert result_entry.failure.failure_message == message[:LIST_FAILURE_MESSAGE_CHARS]
+        assert result_entry.failure.failure_message_truncated is True
+        assert run_entry.vcs == project_vcs(vcs)
+        assert run_entry.vcs is not None
+        assert run_entry.vcs.commit_subject == subject[:LIST_COMMIT_SUBJECT_CHARS]
+        assert run_entry.vcs.commit_subject_truncated is True
+        assert history_entry.vcs == run_entry.vcs
+
+    def test_list_views_bound_multibyte_text_by_characters(self, store: ExecutionStore) -> None:
+        """The display width counts characters, whatever their UTF-8 length."""
+        message = "é" * 250
+        subject = "🙂" * 150
+        vcs = _vcs(commit_subject=subject, commit_subject_truncated=False)
+        failure = _failure(failure_message=message)
+        store.record_session(
+            _execution("a" * 32, vcs=vcs),
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0).items
+
+        assert result_entry.failure == project_failure(failure)
+        assert run_entry.vcs == project_vcs(vcs)
 
     def test_list_runs_null_subject_flag_is_false_not_null(self, store: ExecutionStore) -> None:
         """A run with `vcs_commit_subject IS NULL` reports
