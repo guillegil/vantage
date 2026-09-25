@@ -1491,3 +1491,51 @@ def test_an_unrecordable_test_report_never_disables_the_finish_write(
     assert recorder._disabled is False
     assert len(sent) == 1
     assert [entry["node_id"] for entry in sent[0]["results"]] == ["test_sample.py::test_it"]  # type: ignore[attr-defined]
+
+
+def test_a_result_that_cannot_be_built_warns_once_and_costs_only_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reports that cannot be built into a result -- here a teardown with no
+    setup before it -- lose that one test its result. The finish-write
+    still carries every other result, and one warning says how many were
+    lost, so the gap in the recorded run is never silent.
+    """
+    from pytest_vantage.recorder import Recorder
+
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send", lambda address, report, *, timeout: sent.append(report)
+    )
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+
+    class _ConfigDouble:
+        rootpath = "unused"
+
+    def _report(node_id: str, when: str) -> pytest.TestReport:
+        return pytest.TestReport(
+            nodeid=node_id,
+            location=("test_sample.py", 0, node_id),
+            keywords={},
+            outcome="passed",
+            longrepr=None,
+            when=when,  # type: ignore[arg-type]
+        )
+
+    recorder = Recorder(
+        _ConfigDouble(),  # type: ignore[arg-type]
+        "http://127.0.0.1:1",
+        1.0,
+        lifecycle_available=True,
+    )
+    recorder.pytest_runtest_logreport(_report("test_sample.py::test_orphan", "teardown"))
+    for when in ("setup", "call", "teardown"):
+        recorder.pytest_runtest_logreport(_report("test_sample.py::test_it", when))
+
+    with pytest.warns(VantageWarning) as warned:
+        recorder.pytest_sessionfinish(exitstatus=0)
+
+    assert [str(w.message) for w in warned] == ["vantage: 1 test result(s) could not be recorded"]
+    assert recorder._disabled is False
+    (report,) = sent
+    assert [entry["node_id"] for entry in report["results"]] == ["test_sample.py::test_it"]  # type: ignore[attr-defined]

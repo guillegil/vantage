@@ -19,7 +19,8 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from pytest_vantage import vcs
+from pytest_vantage import transport, vcs
+from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.recorder import Recorder
 from vantage.core.domain.execution import Execution
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
@@ -273,6 +274,49 @@ def test_metadata_section_is_identical_on_both_reports(
     # The FIRST capture, never a later one -- proves it was not re-read.
     assert start_report["metadata"]["files"][0]["content"] == "call-1"  # type: ignore[index]
     assert call_count[0] == 1
+
+
+def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`capture_metadata` warns about every problem it expects and never
+    raises; anything that escapes it anyway warns once and the run is still
+    recorded, with every result and without a `metadata` section, rather
+    than left unrecorded by the failed `Recorder` construction.
+    """
+
+    def _raise(config: pytest.Config, rootpath: Path) -> None:
+        raise RuntimeError("synthetic metadata failure")
+
+    monkeypatch.setattr("pytest_vantage.recorder.metadata.capture_metadata", _raise)
+    sent: list[dict[str, object]] = []
+
+    def _record_then_send(address: str, report: dict[str, object], *, timeout: float) -> None:
+        sent.append(report)
+        transport.send(address, report, timeout=timeout)
+
+    monkeypatch.setattr("pytest_vantage.recorder.send", _record_then_send)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    # Raised from `pytest_configure`, the warning escapes an in-process
+    # run's capture into this session, so it is asserted here.
+    with pytest.warns(VantageWarning, match="synthetic metadata failure") as warned:
+        result = pytester.runpytest(
+            "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-metadata"
+        )
+
+    result.assert_outcomes(passed=1)
+    assert [str(w.message) for w in warned] == [
+        "vantage: error while capturing metadata: synthetic metadata failure, "
+        "metadata will not be captured"
+    ]
+    assert len(sent) == 2
+    assert not any("metadata" in report for report in sent)
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert len(vantage_server.results()) == 1
 
 
 def test_no_metadata_section_when_capture_was_not_requested(

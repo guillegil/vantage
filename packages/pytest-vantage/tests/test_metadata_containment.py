@@ -62,7 +62,7 @@ def test_a_symlink_loop_is_rejected_not_crashed(tmp_path: Path) -> None:
 def test_a_path_containing_a_nul_byte_is_rejected_not_crashed(tmp_path: Path) -> None:
     # `Path.resolve()` raises `ValueError` for a NUL byte on every supported
     # version -- neither `OSError` nor `RuntimeError`. Escaping, it would
-    # crash the session with `INTERNALERROR`.
+    # cost the run all of its metadata.
     root = tmp_path / "project"
     root.mkdir()
 

@@ -13,8 +13,8 @@ resolving only the root lets a committed symlink point outside the tree.
 known ones, because path operations fail differently across versions and
 inputs: a symlink loop raises `RuntimeError` on 3.10-3.12 but nothing on
 3.13 (where `is_file()` rejects it instead), and a NUL byte raises
-`ValueError` everywhere. An exception escaping here would crash the session
-in `pytest_configure`.
+`ValueError` everywhere. An exception escaping here would cost the run all
+of its metadata rather than one file its status.
 
 Not defended against: a path component swapped for a symlink between the
 resolve and the later `open()` (closing that race portably is not possible

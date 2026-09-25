@@ -64,14 +64,29 @@ def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
     Deliberately neither `fault_isolated` nor `liveness_isolated`: both latch,
     and a git failure must record the run with null VCS fields, not stop
     recording. `vcs.capture` never raises on its own; this net catches
-    anything that escapes it anyway, because `Recorder.__init__` runs inside
-    `pytest_configure`, which is not fault-isolated, and an exception there
-    would surface as a pytest INTERNALERROR.
+    anything that escapes it anyway, because an exception out of
+    `Recorder.__init__` leaves the whole session unrecorded.
     """
     try:
         return vcs.capture(rootpath)
     except Exception:  # the same outer net vcs.py's own docstring names, never BaseException
         return vcs.VcsSnapshot(warning=_VCS_CAPTURE_ESCAPED_WARNING)
+
+
+def _capture_metadata(config: pytest.Config, rootpath: Path) -> metadata.MetadataSection | None:
+    """Capture the declared metadata, or `None` after one warning on any error.
+
+    The same net as `_capture_vcs`: `metadata.capture_metadata` warns about
+    every problem it expects and never raises on its own, and anything that
+    escapes it costs the run its metadata, never its recording.
+    """
+    try:
+        return metadata.capture_metadata(config, rootpath)
+    except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+        warn(
+            config, f"vantage: error while capturing metadata: {exc}, metadata will not be captured"
+        )
+        return None
 
 
 # Beats are activity-driven, not a timer thread: one is only attempted from
@@ -116,12 +131,13 @@ class Recorder:
       warning that says so.
     - `_vcs` and `_metadata` are captured once here and never re-read, so
       both reports describe the same repository state and the same metadata.
-      Each capture warns at most once and never raises, which is what makes
-      calling them from `__init__` (inside the unwrapped `pytest_configure`)
-      safe. No `Recorder` is constructed on an xdist worker, so each happens
-      once per session. `_metadata` is `None` when `--vantage-metadata` was
-      not passed or the declaration is missing or invalid; the `metadata`
-      key is then omitted from both reports.
+      Each capture warns at most once and never raises: `pytest_configure`
+      leaves the session unrecorded when construction fails, and a failure
+      in either capture must cost the run that section alone. No `Recorder`
+      is constructed on an xdist worker, so each happens once per session.
+      `_metadata` is `None` when `--vantage-metadata` was not passed, the
+      declaration is missing or invalid, or capturing it failed; the
+      `metadata` key is then omitted from both reports.
     """
 
     def __init__(
@@ -157,7 +173,7 @@ class Recorder:
             warn(config, f"vantage: {self._vcs.warning}")
         self._metadata: metadata.MetadataSection | None = None
         if metadata_requested:
-            self._metadata = metadata.capture_metadata(config, Path(str(config.rootpath)))
+            self._metadata = _capture_metadata(config, Path(str(config.rootpath)))
 
     def _vcs_section(self) -> dict[str, object]:
         """Serialises the snapshot captured in `__init__`."""
@@ -309,6 +325,8 @@ class Recorder:
         finished_at, interrupted, interrupt_reason = self._how_it_ended(exit_status)
 
         results = assemble_results(self._results)
+        if results.dropped:
+            warn(self._config, f"vantage: {results.dropped} test result(s) could not be recorded")
         # The server rejects an oversized body whole, losing the entire
         # session: failure text is bounded first, then the results are split
         # over as many reports as they need.
