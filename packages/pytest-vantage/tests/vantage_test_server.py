@@ -13,49 +13,27 @@ Dev-only and never packaged, so it may import the server and `uvicorn`.
 
 from __future__ import annotations
 
-import asyncio
-import socket
-import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-import uvicorn
+from loopback_server import LoopbackServer
 from memory_store import InMemoryExecutionStore
 from starlette.types import Receive, Scope, Send
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.result import CatalogueEntry, Result
-from vantage.core.ports.storage import RunMetadata
+from vantage.core.ports.storage import MAX_PAGE_ITEMS, RunMetadata
 from vantage.service.app import create_app
 
-# Both bound the wait on the server thread: a thread that dies or hangs must
-# fail the test that needed it, never hang the whole suite.
-_STARTUP_TIMEOUT_SECONDS = 5.0
-_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
-
-class VantageTestServer:
-    """A real `vantage` server (uvicorn + `create_app`), bound to an
-    ephemeral loopback port, backed by an in-memory store the test can
-    inspect directly.
-
-    Binds its own listening socket first (`("127.0.0.1", 0)`, then
-    `getsockname()` for the OS-assigned port), the same ordering
-    `test_rejection.py::_RawSocketServer` uses and for the same reason: the
-    real port must be known ahead of time without guessing or hardcoding
-    one that might already be taken.
+class VantageTestServer(LoopbackServer):
+    """A real `vantage` server (uvicorn + `create_app`) on an ephemeral
+    loopback port, backed by an in-memory store the test can inspect.
     """
 
     def __init__(self) -> None:
         self.store = InMemoryExecutionStore()
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(128)
-        self.port = self._sock.getsockname()[1]
-        self.address = f"http://127.0.0.1:{self.port}"
-
         app = create_app(self.store)
         # Every HTTP request, in arrival order, so a test can assert what the
         # plugin sent even when it left nothing in the store.
@@ -66,92 +44,46 @@ class VantageTestServer:
                 self.requests.append((scope["method"], scope["path"]))
             await app(scope, receive, send)
 
-        config = uvicorn.Config(
-            _log_requests,
-            host="127.0.0.1",
-            log_level="warning",
-            lifespan="off",
-            interface="asgi3",
-        )
-        self._server = uvicorn.Server(config)
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run, name="vantage-test-server", daemon=True)
+        super().__init__(_log_requests)
 
-    def _run(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._server.serve(sockets=[self._sock]))
-
-    def start(self) -> None:
-        self._thread.start()
-        deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
-        while not self._server.started:
-            if not self._thread.is_alive() or time.monotonic() > deadline:
-                self.stop()
-                raise RuntimeError("the vantage test server did not start")
-            time.sleep(0.001)
-
-    def stop(self) -> None:
-        self._server.should_exit = True
-        # A failing assertion above must not leave a listener behind to
-        # poison a later test -- join with a bound, not forever.
-        self._thread.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
-        if self._thread.is_alive():
-            raise RuntimeError("the vantage test server did not stop")
-        # Only once the thread has exited: closing a loop that is still
-        # running raises. Left open, it warns as unclosed in whichever test
-        # happens to trigger garbage collection.
-        self._loop.close()
-        self._sock.close()
+    def _run_ids(self) -> list[str]:
+        """Every stored run id, newest first. The plugin generates the id,
+        so a test rarely knows it ahead of time; the run list does."""
+        run_ids: list[str] = []
+        while True:
+            page = self.store.list_runs(limit=MAX_PAGE_ITEMS, offset=len(run_ids))
+            run_ids.extend(entry.execution.identity.value for entry in page.items)
+            if not page.has_more:
+                return run_ids
 
     def executions(self) -> list[Execution]:
-        """Every execution the server has stored so far, in no particular
-        order. `InMemoryExecutionStore.get_execution` needs the id, which
-        the caller here rarely knows ahead of time (it is client-generated
-        by `Recorder`) -- reaching into the store's own dict once here,
-        rather than scattering the same private-attribute access across
-        every test that needs to inspect what was recorded.
-        """
-        return list(self.store._executions.values())  # noqa: SLF001
+        """Every execution the server has stored so far, newest first."""
+        return [
+            execution
+            for run_id in self._run_ids()
+            if (execution := self.store.get_execution(run_id)) is not None
+        ]
 
     def results(self) -> list[Result]:
         """Every result the server has stored so far, across every
-        execution, in no particular order. `get_results` on the port needs
-        an execution id the caller rarely knows ahead of time -- same
-        reasoning as `executions()` above, and the same private-attribute
-        reach-in rather than scattering it across every test that needs it.
-        """
-        return list(self.store._results.values())  # noqa: SLF001
+        execution."""
+        return [result for run_id in self._run_ids() for result in self.store.get_results(run_id)]
 
     def metadata(self, run_id: str) -> RunMetadata:
-        """The metadata files and entries stored for `run_id`. No port
-        method returns them -- the run list filters by them without showing
-        them -- so this reaches into the store the way `executions()` does.
-        """
-        files = tuple(
-            stored
-            for (stored_run, _path), stored in self.store._metadata_files.items()  # noqa: SLF001
-            if stored_run == run_id
-        )
-        entries = tuple(
-            stored
-            for (stored_run, _key), stored in self.store._metadata_entries.items()  # noqa: SLF001
-            if stored_run == run_id
-        )
-        return RunMetadata(files=files, entries=entries)
+        """The metadata files and entries stored for `run_id`, in no
+        particular order."""
+        return self.store.metadata(run_id)
 
     def catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         """The catalogue entry for one node id, or `None` if the server has
-        never observed it. A thin pass-through -- `get_catalogue_entry` is
-        already public on the port and takes exactly this argument, so no
-        private reach-in is needed here (unlike `executions()`/`results()`).
-        """
+        never observed it."""
         return self.store.get_catalogue_entry(node_id)
 
 
 def wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> Execution:
-    """Poll `server` until its first run entry has landed, or raise after
-    `timeout` seconds: a bounded wait on an observable condition rather
-    than a fixed sleep, which is flaky on a loaded CI runner.
+    """Poll `server` until a run entry has landed and return the newest, or
+    raise after `timeout` seconds: a bounded wait on an observable condition
+    rather than a fixed sleep, which is flaky on a loaded CI runner.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

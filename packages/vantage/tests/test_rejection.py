@@ -6,19 +6,17 @@ Runs the app factory (`vantage.service.app.create_app`) against an injected
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import socket
 import threading
-import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
-import uvicorn
 from fastapi.testclient import TestClient
+from loopback_server import LoopbackServer
 from memory_store import InMemoryExecutionStore
 from starlette.types import ASGIApp, Receive, Scope, Send
 from vantage.service.app import create_app
@@ -482,66 +480,8 @@ def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
 # Everything above drives `create_app` through `fastapi.testclient.TestClient`,
 # whose ASGI transport hands the whole submitted body to `request.stream()`
 # already assembled in memory, so it can never observe a socket stopping
-# mid-transfer. This section runs a real `uvicorn` server on a real,
-# already-bound TCP socket and drives it byte-for-byte instead.
-
-
-_SERVER_TIMEOUT_SECONDS = 5.0
-
-
-class _RawSocketServer:
-    """A real `uvicorn` server bound to an ephemeral loopback port.
-
-    The listening socket is bound here, *before* uvicorn sees it, to an
-    OS-assigned port (`bind(("127.0.0.1", 0))`, then `getsockname()`), so
-    the port is known ahead of time and the test survives a machine where
-    any fixed port is already taken.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(128)
-        self.port = self._sock.getsockname()[1]
-
-        config = uvicorn.Config(app, host="127.0.0.1", log_level="warning", lifespan="off")
-        self._server = uvicorn.Server(config)
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self._run, name="vantage-test-raw-socket-server", daemon=True
-        )
-
-    def _run(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._server.serve(sockets=[self._sock]))
-
-    def __enter__(self) -> _RawSocketServer:
-        self._thread.start()
-        # Bounded: a server thread that dies or hangs before it starts must
-        # fail this test, never hang the suite.
-        deadline = time.monotonic() + _SERVER_TIMEOUT_SECONDS
-        while not self._server.started:
-            if not self._thread.is_alive() or time.monotonic() > deadline:
-                self._stop()
-                raise RuntimeError("the raw-socket test server did not start")
-            time.sleep(0.001)
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self._stop()
-
-    def _stop(self) -> None:
-        self._server.should_exit = True
-        # A failing assertion above must not leave a listener behind to
-        # poison a later test -- join with a bound, not forever.
-        self._thread.join(timeout=_SERVER_TIMEOUT_SECONDS)
-        assert not self._thread.is_alive(), "the raw-socket test server did not stop"
-        # Only once the thread has exited: closing a running loop raises.
-        # Left open, each is reported unclosed in whichever later test
-        # happens to trigger garbage collection.
-        self._loop.close()
-        self._sock.close()
+# mid-transfer. This section serves the app from a `LoopbackServer`, a real
+# `uvicorn` server on a real TCP socket, and drives it byte-for-byte instead.
 
 
 class _AsgiCompletionSignal:
@@ -640,7 +580,7 @@ def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
     signal = _AsgiCompletionSignal(app)
     error_capture = _UvicornErrorCapture()
 
-    with _RawSocketServer(signal) as server, error_capture:
+    with LoopbackServer(signal) as server, error_capture:
         report_id = "c" * 32
         # Deliberately short: promises 500 bytes via Content-Length, sends a
         # small fraction of that, then stops.
@@ -714,7 +654,7 @@ def test_finish_report_truncated_after_an_accepted_start_write_leaves_the_start_
     signal = _AsgiCompletionSignal(app)
     error_capture = _UvicornErrorCapture()
 
-    with _RawSocketServer(signal) as server, error_capture:
+    with LoopbackServer(signal) as server, error_capture:
         # Deliberately short: promises 500 bytes via Content-Length, sends a
         # small fraction of that, then stops -- same shape as
         # `test_truncated_body_raw_socket`, but a finish report for a run id
