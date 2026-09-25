@@ -368,7 +368,7 @@ def _require_json_media_type(request: Request) -> None:
     content_type = request.headers.get("content-type", "")
     media_type = content_type.split(";", 1)[0].strip().lower()
     if media_type != _JSON_MEDIA_TYPE:
-        raise UnsupportedMediaTypeError(media_type or "<absent>")
+        raise UnsupportedMediaTypeError(media_type)
 
 
 async def _read_bounded_body(request: Request) -> bytes:

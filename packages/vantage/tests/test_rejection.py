@@ -309,6 +309,75 @@ def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecution
     assert store.count_executions() == 0
 
 
+def test_the_415_body_names_a_plain_media_type(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/runs", content=b"{}", headers={"content-type": "text/plain; charset=utf-8"}
+    )
+
+    assert response.status_code == 415
+    assert "text/plain" in response.json()["detail"]
+
+
+def test_the_415_body_never_reflects_the_content_type_header(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """The header is client text like any other: echoed verbatim it would
+    carry markup and kilobytes of padding back in the response."""
+    marker = "</script><img src=x onerror=alert(1)>"
+
+    response = client.post(
+        "/api/v1/runs",
+        content=json.dumps(_well_formed_report()).encode(),
+        headers={"content-type": marker + "a" * 5000},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["error"] == "unsupported_media_type"
+    assert marker not in response.text
+    assert len(response.content) < 512
+    assert store.count_executions() == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status", "error"),
+    [
+        ("PUT", "/api/v1/runs", 405, "method_not_allowed"),
+        ("DELETE", "/api/v1/runs", 405, "method_not_allowed"),
+        ("GET", f"/api/v1/runs/{'e' * 32}/heartbeat", 405, "method_not_allowed"),
+        ("POST", "/runs", 404, "not_found"),
+        ("GET", "/api/v1/nonexistent", 404, "not_found"),
+        ("POST", "/api/v2/runs", 404, "not_found"),
+    ],
+)
+def test_an_unrouted_request_answers_in_the_rejection_shape(
+    client: TestClient, method: str, path: str, status: int, error: str
+) -> None:
+    """The router's own 404 and 405 are rejections too, so a client parses
+    them the same way; a 405 still says which methods the path takes."""
+    response = client.request(method, path)
+
+    assert response.status_code == status
+    body = response.json()
+    assert set(body) == {"error", "detail", "fields"}
+    assert body["error"] == error
+    assert body["fields"] == []
+    if status == 405:
+        assert "POST" in response.headers["allow"]
+
+
+@pytest.mark.parametrize("body", [b"null", b"[]", b"42", b'"x"'])
+def test_a_body_that_is_not_an_object_names_no_empty_field(client: TestClient, body: bytes) -> None:
+    """The failure is the body as a whole, which has no dotted path; an
+    empty string in `fields` would name nothing."""
+    response = client.post(
+        "/api/v1/runs", content=body, headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_report"
+    assert response.json()["fields"] == []
+
+
 def test_forbidden_extra_field_name_is_not_echoed(client: TestClient) -> None:
     """A rejected *value* is never echoed -- but for an `extra_forbidden`
     error the offending path segment is a key the CLIENT chose, and echoing

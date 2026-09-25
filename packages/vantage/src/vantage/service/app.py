@@ -8,7 +8,8 @@ passes it in. This module never imports `vantage.storage.sqlite_store`.
 redirect from one, so an unversioned path answers 404.
 
 **Every rejection is shaped by `service/errors.py`**, registered here once,
-so no route can answer a rejection in a different shape.
+so no route can answer a rejection in a different shape -- nor can the
+router, for a path nothing serves or a method a path does not take.
 
 **FastAPI's generated interface documents are disabled.** A document
 generated from this route table could never drift from it, so it could

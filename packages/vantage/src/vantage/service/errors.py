@@ -25,7 +25,8 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # The request body cap, enforced while streaming, before the body is fully
 # buffered (`service/routes/runs.py`).
@@ -71,7 +72,12 @@ def _dotted_path(location: Iterable[object]) -> str:
 
 
 def _fields_from_errors(errors: Iterable[Mapping[str, Any]]) -> list[str]:
-    return [_dotted_path(error["loc"]) for error in errors]
+    """Every failing field's dotted path. A failure of the body as a whole
+    (not an object at all) has an empty path, which names nothing, so it
+    contributes no entry -- the same empty `fields` as any other whole-body
+    rejection."""
+    paths = (_dotted_path(error["loc"]) for error in errors)
+    return [path for path in paths if path]
 
 
 def _rejection_body(error: str, detail: str, fields: list[str] | None = None) -> dict[str, object]:
@@ -146,13 +152,24 @@ class PayloadTooLargeError(RejectionError):
 
 
 class UnsupportedMediaTypeError(RejectionError):
-    """Wrong or absent `Content-Type`, checked before the body is read."""
+    """Wrong or absent `Content-Type`, checked before the body is read.
+
+    The header is client text, so it is named back only through
+    `safe_segment`, one half of `type/subtype` at a time: `text/plain`
+    survives for diagnosis, markup or padding does not."""
 
     status_code = 415
     error = "unsupported_media_type"
 
     def __init__(self, media_type: str) -> None:
-        super().__init__(f"Content-Type must be application/json, got {media_type!r}.")
+        kind, slash, subtype = media_type.partition("/")
+        if not media_type:
+            shown = "none"
+        elif slash:
+            shown = f"{safe_segment(kind)}/{safe_segment(subtype)}"
+        else:
+            shown = safe_segment(kind)
+        super().__init__(f"Content-Type must be application/json, got {shown!r}.")
 
 
 class InvalidIdentityError(RejectionError):
@@ -315,15 +332,27 @@ def _rejection_response(exc: RejectionError) -> JSONResponse:
     )
 
 
+_ROUTING_REJECTIONS: dict[int, tuple[str, str]] = {
+    404: ("not_found", "No route matches that path."),
+    405: ("method_not_allowed", "That method is not allowed on this path."),
+}
+_OTHER_HTTP_REJECTION = ("http_error", "The request could not be served.")
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Wire every rejection this service can raise through the one shape.
 
-    Two sources, one output. `RejectionError` is raised by the manual body
+    Three sources, one output. `RejectionError` is raised by the manual body
     handling in `service/routes/runs.py` (media type, size cap, JSON parse,
-    schema validation). `RequestValidationError` is FastAPI's own exception
-    and is handled here too, as a safety net for anything still validated
-    through automatic parameter binding -- neither handler ever forwards a
-    pydantic error dict as-is.
+    schema validation) and by the other routes. `RequestValidationError` is
+    FastAPI's own exception and is handled here too, as a safety net for
+    anything still validated through automatic parameter binding -- neither
+    handler ever forwards a pydantic error dict as-is. Starlette's
+    `HTTPException` is what the router raises itself for a path nothing
+    serves (404) or a method the path does not take (405); its `detail` is
+    replaced from a fixed table, and its headers, which carry a 405's
+    `Allow`, are kept. `RejectionError` is not a subclass of it, so a
+    route's own 404, such as `unknown_run`, keeps its code.
 
     A `RequestValidationError` confined to the `node_id` query parameter
     (`GET /api/v1/tests/history`) is shaped as `InvalidIdentityError`; every
@@ -347,6 +376,16 @@ def register_error_handlers(app: FastAPI) -> None:
         ):
             return _rejection_response(InvalidIdentityError.from_errors(errors))
         return _rejection_response(InvalidReportError.from_errors(errors))
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _handle_http_exception(request: Request, exc: StarletteHTTPException) -> Response:
+        del request
+        error, detail = _ROUTING_REJECTIONS.get(exc.status_code, _OTHER_HTTP_REJECTION)
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=_rejection_body(error, detail),
+            headers=exc.headers,
+        )
 
 
 __all__ = [
