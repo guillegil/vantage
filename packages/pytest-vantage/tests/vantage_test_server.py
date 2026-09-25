@@ -25,12 +25,12 @@ from pathlib import Path
 
 import pytest
 import uvicorn
+from memory_store import InMemoryExecutionStore
 from starlette.types import Receive, Scope, Send
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.result import CatalogueEntry, Result
 from vantage.core.ports.storage import RunMetadata
 from vantage.service.app import create_app
-from vantage.storage.memory import InMemoryExecutionStore
 
 # Both bound the wait on the server thread: a thread that dies or hangs must
 # fail the test that needed it, never hang the whole suite.

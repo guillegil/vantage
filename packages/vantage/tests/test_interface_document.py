@@ -29,6 +29,7 @@ import httpx2 as httpx
 import yaml
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
+from memory_store import InMemoryExecutionStore
 from pydantic import BaseModel
 from vantage.core.domain.liveness import PRESENTATIONS
 from vantage.core.domain.result import OUTCOMES
@@ -61,7 +62,6 @@ from vantage.service.schemas import (
     SessionReport,
     VcsReport,
 )
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
 _DOCUMENT_BYTES = (

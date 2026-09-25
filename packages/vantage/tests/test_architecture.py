@@ -99,7 +99,6 @@ def test_the_storage_walk_is_not_vacuous() -> None:
 
     assert "vantage/storage/connection.py" in examined
     assert "vantage/storage/sqlite_store.py" in examined
-    assert "vantage/storage/memory.py" in examined
 
 
 def test_every_io_module_kept_out_of_the_core_is_a_real_stdlib_module() -> None:

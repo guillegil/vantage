@@ -19,10 +19,10 @@ from typing import Any
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
+from memory_store import InMemoryExecutionStore
 from starlette.types import ASGIApp, Receive, Scope, Send
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
 

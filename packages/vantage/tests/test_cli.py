@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from memory_store import InMemoryExecutionStore
 from vantage.service import cli
 from vantage.service.app import create_app
 from vantage.service.cli import (
@@ -28,7 +29,6 @@ from vantage.service.cli import (
     ensure_database_directory_writable,
     warn_if_bound_wide,
 )
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
 # Root ignores directory mode bits; Windows ACLs need a different check.

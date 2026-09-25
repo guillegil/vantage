@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from memory_store import InMemoryExecutionStore
 from vantage.core.domain.execution import Execution, Identity
 from vantage.core.domain.result import Result
 from vantage.core.domain.sections import MAX_SECTIONS
@@ -27,7 +28,6 @@ from vantage.core.ports.storage import EMPTY_RUN_METADATA, ExecutionStore, RunMe
 from vantage.service.app import create_app
 from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
 from vantage.storage import sqlite_store
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _result, _start_only_execution
 

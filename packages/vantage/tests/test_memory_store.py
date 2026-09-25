@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from memory_store import InMemoryExecutionStore
 from vantage.core.ports.storage import ExecutionStore
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage_port_contract import ExecutionStoreContract
 
 

@@ -14,6 +14,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from memory_store import InMemoryExecutionStore
 from vantage.core.domain.metadata import (
     MAX_METADATA_ENTRIES,
     MAX_METADATA_KEY_CHARS,
@@ -21,7 +22,6 @@ from vantage.core.domain.metadata import (
 )
 from vantage.core.ports.storage import MetadataEntry, MetadataFile
 from vantage.service.app import create_app
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _stored_metadata_entries, _stored_metadata_files
 

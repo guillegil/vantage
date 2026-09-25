@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from memory_store import InMemoryExecutionStore
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
@@ -29,7 +30,6 @@ from vantage.core.ports.storage import (
     RunMetadata,
     UserSetting,
 )
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
 

@@ -1,4 +1,6 @@
-"""An in-memory `ExecutionStore` for tests.
+"""An in-memory `ExecutionStore`, a test double kept beside the tests: the
+`vantage` command always serves a `SqliteExecutionStore`, so nothing shipped
+needs it.
 
 The shared contract suite (``vantage_port_contract.py``) runs against both
 this and the SQLite adapter, so the port is proven by two independent

@@ -26,6 +26,7 @@ from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
+from memory_store import InMemoryExecutionStore
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, LIST_FAILURE_MESSAGE_CHARS
 from vantage.core.domain.result import CaseIdentity, Result
@@ -39,7 +40,6 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.service.app import create_app
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _captured, _failure, _result
 

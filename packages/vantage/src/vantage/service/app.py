@@ -1,8 +1,8 @@
 """The app factory.
 
-**Takes an injected `ExecutionStore`.** Tests pass `InMemoryExecutionStore`;
-the `vantage` command (`cli.py`) resolves a `SqliteExecutionStore` and
-passes it in. This module never imports `vantage.storage.sqlite_store`.
+**Takes an injected `ExecutionStore`.** The `vantage` command (`cli.py`)
+resolves a `SqliteExecutionStore` and passes it in; tests pass whichever
+store they inspect. This module never imports `vantage.storage.sqlite_store`.
 
 **Mounts `/api/v1` and nothing else.** There is no unversioned route and no
 redirect from one, so an unversioned path answers 404.

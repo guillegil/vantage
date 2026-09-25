@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import httpx2 as httpx
 import pytest
 from fastapi.testclient import TestClient
+from memory_store import InMemoryExecutionStore
 from vantage.core.domain.sections import (
     MAX_SECTIONS,
     SECTION_NAME_MAX_CHARS,
@@ -22,7 +23,6 @@ from vantage.core.domain.sections import (
 )
 from vantage.service.app import create_app
 from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage_port_contract import _execution, _result
 
 _SECTIONS = "/api/v1/config/sections"
