@@ -1068,6 +1068,57 @@ def test_an_unsupported_format_is_treated_as_malformed(
     )
 
 
+_UNUSABLE_DOCUMENTS = {
+    "json_lone_surrogate_escape": ("json", '{"firmware_version": "x\\ud800"}'),
+    "yaml_lone_surrogate_escape": ("yaml", 'firmware_version: "x\\udc80"\n'),
+}
+
+
+@pytest.mark.parametrize(
+    ("content_type", "content"), _UNUSABLE_DOCUMENTS.values(), ids=_UNUSABLE_DOCUMENTS.keys()
+)
+def test_a_declared_document_the_server_cannot_store_still_records_the_run(
+    any_store: Any, content_type: str, content: str
+) -> None:
+    """The metadata section travels with the start report and the finish
+    report alike, so a document that crashed the parser would lose every
+    write of the session. It is recorded `malformed` instead."""
+    run_id = "6" + "1" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(format=content_type, content=content, keys=["firmware_version"])
+    )
+
+    response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _stored_metadata_files(any_store, run_id) == frozenset(
+        {
+            MetadataFile(
+                source_file="config/firmware.json", content_type=content_type, status="malformed"
+            )
+        }
+    )
+
+
+def test_a_json_declared_number_is_stored_as_the_text_the_file_holds(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A metadata filter compares strings, so `2.10` must not be stored as
+    `2.1`."""
+    run_id = "6" + "2" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content='{"firmware_version": 2.10}', keys=["firmware_version"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    [entry] = _stored_metadata_entries(store, run_id)
+    assert entry.value == "2.10"
+
+
 # --- hostile client-chosen text -----------------------------------------------
 
 

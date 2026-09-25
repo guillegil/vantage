@@ -14,8 +14,9 @@ import json
 import time
 
 import pytest
+import yaml
 from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES
-from vantage.service.metadata_parse import parse
+from vantage.service.metadata_parse import KeyResult, parse
 
 
 def test_json_malformed_document_yields_none() -> None:
@@ -175,3 +176,154 @@ def test_json_top_level_that_is_not_an_object_yields_none() -> None:
     result = parse("[1, 2, 3]", "json", ["anything"])
 
     assert result is None
+
+
+# --- documents that must degrade, never raise --------------------------------
+
+
+def test_yaml_escaped_surrogate_pair_is_combined_into_one_character() -> None:
+    """PyYAML turns each `\\uXXXX` escape into its own code point, so a
+    non-BMP character written by a JSON serialiser -- valid YAML -- arrives
+    as two surrogates. They are combined, as a JSON reader would."""
+    content = json.dumps({"release_name": "Rocket \U0001f680"})
+
+    result = parse(content, "yaml", ["release_name"])
+
+    assert result == {"release_name": KeyResult(status="captured", value="Rocket \U0001f680")}
+
+
+@pytest.mark.parametrize(
+    ("content", "content_type"),
+    [
+        ('release_name: "x\\udc80"\n', "yaml"),
+        ('{"release_name": "x\\ud800"}', "json"),
+        ('{"x\\ud800": "2.1"}', "json"),
+    ],
+    ids=["yaml_value", "json_value", "json_key"],
+)
+def test_a_lone_surrogate_escape_makes_the_document_malformed(
+    content: str, content_type: str
+) -> None:
+    """A lone surrogate has no UTF-8 form, so the text cannot be stored; the
+    document is unusable and degrades to `None` rather than raising."""
+    assert parse(content, content_type, ["release_name"]) is None
+
+
+def test_json_integer_beyond_the_digit_limit_is_classified_not_raised() -> None:
+    """Converting a number literal over 4,300 digits to `int` raises a plain
+    `ValueError`; the literal text is kept instead, so it is only a value
+    too large to store, and the file's other keys are unaffected."""
+    long_literal = "1" + "0" * 4999
+    with pytest.raises(ValueError, match="4300"):
+        json.loads(long_literal)
+
+    result = parse(
+        f'{{"build": {long_literal}, "firmware_version": "2.1"}}',
+        "json",
+        ["build", "firmware_version"],
+    )
+
+    assert result == {
+        "build": KeyResult(status="value_too_large", value=None),
+        "firmware_version": KeyResult(status="captured", value="2.1"),
+    }
+
+
+# --- JSON numbers keep their literal text ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "literal",
+    ["2.10", "3.140", "1e3", "1E3", "0.10000000000000000001", "1e400", "-0", "NaN", "-Infinity"],
+)
+def test_json_declared_number_is_captured_as_literal_text(literal: str) -> None:
+    """Values are compared as strings, so a JSON number must keep the text
+    the file holds -- `2.10` is not `2.1` -- exactly as YAML does."""
+    json_result = parse(f'{{"firmware_version": {literal}}}', "json", ["firmware_version"])
+    yaml_result = parse(f"firmware_version: {literal}\n", "yaml", ["firmware_version"])
+
+    assert json_result == {"firmware_version": KeyResult(status="captured", value=literal)}
+    assert json_result == yaml_result
+
+
+# --- YAML merge keys ---------------------------------------------------------
+
+
+def _captured(result: dict[str, KeyResult] | None, key: str) -> str | None:
+    assert result is not None
+    assert result[key].status == "captured"
+    return result[key].value
+
+
+def test_yaml_key_pulled_in_through_a_merge_is_captured() -> None:
+    """`<<: *anchor` is how a defaults/overrides config shares keys; every
+    YAML loader a user would check with resolves it."""
+    content = 'defaults: &d {firmware_version: "2.1"}\n<<: *d\nboard_revision: C\n'
+
+    result = parse(content, "yaml", ["firmware_version", "board_revision"])
+
+    assert _captured(result, "firmware_version") == "2.1"
+    assert _captured(result, "board_revision") == "C"
+
+
+def test_yaml_merge_precedence_matches_safe_load() -> None:
+    """An explicit key beats a merged one, and in a sequence merge the
+    earlier source wins."""
+    content = (
+        "a: &a {board_revision: A, toolchain: gcc}\n"
+        "b: &b {board_revision: B, toolchain: clang, os: linux}\n"
+        "<<: [*a, *b]\n"
+        "toolchain: icc\n"
+    )
+    keys = ["board_revision", "toolchain", "os"]
+    expected = yaml.safe_load(content)
+
+    result = parse(content, "yaml", keys)
+
+    assert {key: _captured(result, key) for key in keys} == {key: expected[key] for key in keys}
+
+
+def test_yaml_nested_merge_bomb_completes_quickly() -> None:
+    """Each mapping's merged view is built once, so a chain of mappings that
+    each merge the previous one twice stays linear instead of doubling per
+    level the way copying the merged pairs would."""
+    bomb = "a0: &a0 {firmware_version: '2.1'}\n"
+    for i in range(1, 61):
+        bomb += f"a{i}: &a{i} {{<<: [*a{i - 1}, *a{i - 1}]}}\n"
+    bomb += "<<: *a60\n"
+
+    started = time.monotonic()
+    result = parse(bomb, "yaml", ["firmware_version"])
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert _captured(result, "firmware_version") == "2.1"
+
+
+def test_yaml_self_referencing_merge_terminates() -> None:
+    result = parse("x: &a {k: v, <<: *a}\n<<: *a\n", "yaml", ["k"])
+
+    assert _captured(result, "k") == "v"
+
+
+def test_yaml_quoted_merge_key_is_an_ordinary_key() -> None:
+    """Only a plain `<<` is a merge; a quoted one is a key like any other."""
+    result = parse("'<<': literal\n", "yaml", ["<<"])
+
+    assert _captured(result, "<<") == "literal"
+
+
+# --- byte order mark ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("content_type", ["json", "yaml"])
+def test_a_leading_byte_order_mark_is_ignored(content_type: str) -> None:
+    """Editors on Windows save UTF-8 with a BOM, and the plugin ships the
+    decoded text as it is. YAML skips it; JSON must too."""
+    result = parse('﻿{"firmware_version": "2.1"}', content_type, ["firmware_version"])
+
+    assert result == {"firmware_version": KeyResult(status="captured", value="2.1")}
+
+
+def test_a_byte_order_mark_after_the_start_is_still_malformed() -> None:
+    assert parse(' ﻿{"firmware_version": "2.1"}', "json", ["firmware_version"]) is None
