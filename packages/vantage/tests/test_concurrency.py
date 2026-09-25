@@ -238,3 +238,32 @@ def test_every_read_returns_rather_than_waiting_on_the_stores_own_lock(tmp_path:
         assert _run_concurrently(reads) == []
     finally:
         store.close()
+
+
+def test_two_stores_on_one_file_both_land_every_session(tmp_path: Path) -> None:
+    """Two server processes on one database each hold their own connection,
+    which no in-process lock can serialise. WAL, `BEGIN IMMEDIATE` and the
+    busy timeout must make them take turns rather than fail with "database
+    is locked"."""
+    db_path = tmp_path / "store" / "vantage.db"
+    stores = [SqliteExecutionStore(db_path), SqliteExecutionStore(db_path)]
+    try:
+
+        def _report(store: SqliteExecutionStore, prefix: str) -> None:
+            for i in range(20):
+                store.record_session(
+                    _execution(f"{prefix}{i:031x}"),
+                    results=[_result(f"t.py::test_{prefix}_{i}_{j}") for j in range(20)],
+                    received_at=datetime.now(timezone.utc),
+                )
+
+        errors = _run_concurrently(
+            [partial(_report, store, prefix) for store, prefix in zip(stores, "ab")]
+        )
+
+        assert errors == []
+        assert stores[0].count_executions() == 40
+        assert stores[1].count_results() == 800
+    finally:
+        for store in stores:
+            store.close()
