@@ -10,7 +10,6 @@ side effect. Creating anything belongs to whoever acts on the resolved path
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +23,10 @@ _DEFAULT_PORT = 8765
 _BEAT_INTERVAL_HINT_SECONDS = 30.0
 _DEFAULT_GRACE_BEATS = 30
 _DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_BEATS * _BEAT_INTERVAL_HINT_SECONDS  # 900.0
+
+# Longer than any live session goes quiet, and far inside what `timedelta`
+# can hold -- the read routes build one from the grace period on every request.
+_MAX_GRACE_PERIOD_SECONDS = 365 * 24 * 60 * 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,12 +60,13 @@ def resolve_server_config(
     started deliberately by whoever runs it.
 
     Host, port and the grace period each take only a CLI value or a fixed
-    default; none has an environment variable.
+    default; none has an environment variable. A value the server cannot run
+    with raises `ServerConfigError` here, before anything is created.
     """
     return ServerConfig(
         database_path=_resolve_database_path(cli_database, env_database, home, xdg_data_home),
-        host=cli_host if cli_host is not None else _DEFAULT_HOST,
-        port=cli_port if cli_port is not None else _DEFAULT_PORT,
+        host=_resolve_host(cli_host),
+        port=_resolve_port(cli_port),
         grace_period_seconds=_resolve_grace_period(cli_grace_period),
     )
 
@@ -76,18 +80,42 @@ class ServerConfigError(ValueError):
     """
 
 
+def _resolve_host(cli_host: str | None) -> str:
+    if cli_host is None:
+        return _DEFAULT_HOST
+    # `--host "$VAR"` with the variable unset arrives as "", which asyncio
+    # binds as every interface: the opposite of the loopback default meant.
+    if not cli_host.strip():
+        raise ServerConfigError(
+            f"--host must name a bind address, got {cli_host!r}; omit it to bind {_DEFAULT_HOST}"
+        )
+    return cli_host
+
+
+def _resolve_port(cli_port: int | None) -> int:
+    if cli_port is None:
+        return _DEFAULT_PORT
+    # `argparse type=int` accepts any integer, and uvicorn rejects a bad one
+    # only after the database exists. 0 binds a random port no plugin can find.
+    if not 1 <= cli_port <= 65535:
+        raise ServerConfigError(f"--port must be between 1 and 65535, got {cli_port}")
+    return cli_port
+
+
 def _resolve_grace_period(cli_grace_period: float | None) -> float:
-    if cli_grace_period is not None:
-        # `argparse type=float` accepts 0, -1, nan and inf. Any of them breaks
-        # abandonment derivation for every unfinished run, including sessions
-        # heartbeating normally -- a silently useless server rather than one
-        # that refuses to start.
-        if not math.isfinite(cli_grace_period) or cli_grace_period <= 0:
-            raise ServerConfigError(
-                f"--grace-period must be a positive number of seconds, got {cli_grace_period!r}"
-            )
-        return cli_grace_period
-    return _DEFAULT_GRACE_PERIOD_SECONDS
+    if cli_grace_period is None:
+        return _DEFAULT_GRACE_PERIOD_SECONDS
+    # `argparse type=float` accepts 0, -1, nan, inf and 1e14. The first two
+    # make every unfinished run abandoned on sight, including sessions
+    # heartbeating normally; the others cannot become the `timedelta` every
+    # run list and run detail builds. Either way the server would run and be
+    # useless, so it refuses to start. The chained comparison is false for nan.
+    if not 0 < cli_grace_period <= _MAX_GRACE_PERIOD_SECONDS:
+        raise ServerConfigError(
+            f"--grace-period must be more than 0 and at most {_MAX_GRACE_PERIOD_SECONDS:.0f} "
+            f"seconds (365 days), got {cli_grace_period!r}"
+        )
+    return cli_grace_period
 
 
 def _resolve_database_path(

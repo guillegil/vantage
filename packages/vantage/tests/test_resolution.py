@@ -111,6 +111,31 @@ def test_cli_host_and_port_override_the_default() -> None:
     assert config.port == 9000
 
 
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_empty_host_is_refused(value: str) -> None:
+    """`--host "$VAR"` with the variable unset arrives as an empty host,
+    which asyncio binds as every interface -- the opposite of the loopback
+    default the operator meant. Refusing it surfaces the unset variable.
+    """
+    with pytest.raises(ServerConfigError, match="--host"):
+        _resolve(cli_host=value)
+
+
+@pytest.mark.parametrize("port", [-1, 0, 65536, 70000])
+def test_a_port_outside_the_bindable_range_is_refused(port: int) -> None:
+    """`argparse type=int` accepts any integer; uvicorn only fails on it
+    after the database has been created. 0 would bind a random port that no
+    plugin could find.
+    """
+    with pytest.raises(ServerConfigError, match="--port"):
+        _resolve(cli_port=port)
+
+
+@pytest.mark.parametrize("port", [1, 65535])
+def test_both_ends_of_the_port_range_are_accepted(port: int) -> None:
+    assert _resolve(cli_port=port).port == port
+
+
 def test_default_grace_period_is_900_seconds() -> None:
     """900.0 seconds, expressed in source as `30 * 30.0` -- a multiple of the
     default heartbeat interval, not an invented round number. CLI-only, like
@@ -155,14 +180,24 @@ def test_cli_main_carries_the_resolved_grace_period_into_the_app(
     assert app.state.grace_period == 60.0  # type: ignore[attr-defined]
 
 
-@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+_ONE_YEAR_SECONDS = 365 * 24 * 60 * 60.0
+
+
+@pytest.mark.parametrize(
+    "value", [0.0, -1.0, float("nan"), float("inf"), _ONE_YEAR_SECONDS + 1, 1e14, 1e100]
+)
 def test_a_nonsensical_grace_period_is_refused_at_resolution(value: float) -> None:
-    """`argparse type=float` accepts 0, -1, nan and inf.
+    """`argparse type=float` accepts 0, -1, nan, inf and 1e14.
 
     0 and -1 make every unfinished run derive as abandoned the instant it is
-    read -- including sessions heartbeating normally -- and nan or inf cannot
-    even become a `timedelta`. The server must refuse to start rather than
-    run and answer wrong.
+    read -- including sessions heartbeating normally. nan, inf and 1e14
+    cannot become the `timedelta` the read routes build on every request, so
+    every run list and run detail would fail. The server must refuse to
+    start rather than run and answer wrong.
     """
-    with pytest.raises(ServerConfigError):
+    with pytest.raises(ServerConfigError, match="--grace-period"):
         _resolve(cli_grace_period=value)
+
+
+def test_a_grace_period_of_one_year_is_accepted() -> None:
+    assert _resolve(cli_grace_period=_ONE_YEAR_SECONDS).grace_period_seconds == _ONE_YEAR_SECONDS
