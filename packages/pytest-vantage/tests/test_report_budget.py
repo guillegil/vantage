@@ -211,6 +211,24 @@ def test_a_field_is_cut_to_the_servers_field_bound_before_it_is_charged(
     assert "captured_stderr_truncated" not in entries[0]
 
 
+def test_text_carrying_a_lone_surrogate_is_measured_without_raising() -> None:
+    """A message built from a file name that is not valid UTF-8 carries the
+    lone surrogates `surrogateescape` decodes it to, which strict UTF-8
+    cannot encode. The budget still measures it, and `json.dumps` escapes it
+    on the wire, so it must never raise and cost the whole finish-write.
+    """
+    message = "missing /data/caf\udce9.csv"
+    entries: list[dict[str, object]] = [
+        {"outcome": "failed", "failure_message": message},
+        {"outcome": "failed", "failure_message": "\udce9" * (_FIELD_BYTES_CAP // 2)},
+    ]
+
+    spend_failure_text_budget(entries)
+
+    assert entries[0] == {"outcome": "failed", "failure_message": message}
+    assert entries[1]["failure_message_truncated"] is True
+
+
 def test_short_fields_are_never_charged_or_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     """`failure_type`, `failure_path`, `failure_lineno`, `skip_reason` and
     `xfail_reason` are never charged: a budget of zero leaves every one of

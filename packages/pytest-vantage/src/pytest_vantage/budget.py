@@ -75,8 +75,12 @@ def _cut_to_field_cap(value: str) -> tuple[str, bool]:
     """`value` cut to at most `_FIELD_BYTES_CAP` bytes of UTF-8, the way
     the server's own bound cuts it: a character straddling the cut is
     dropped whole, never sent mangled. Returns whether a cut happened.
+
+    `surrogatepass`, because text decoded with `surrogateescape` -- a file
+    name that is not valid UTF-8, quoted in a message -- carries lone
+    surrogates that strict UTF-8 refuses to encode. A cut drops them.
     """
-    encoded = value.encode("utf-8")
+    encoded = value.encode("utf-8", errors="surrogatepass")
     if len(encoded) <= _FIELD_BYTES_CAP:
         return value, False
     return encoded[:_FIELD_BYTES_CAP].decode("utf-8", errors="ignore"), True
