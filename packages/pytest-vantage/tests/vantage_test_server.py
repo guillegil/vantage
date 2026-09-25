@@ -19,21 +19,28 @@ from pathlib import Path
 
 import pytest
 from loopback_server import LoopbackServer
-from memory_store import InMemoryExecutionStore
+from sqlite_rows import read_metadata
 from starlette.types import Receive, Scope, Send
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.result import CatalogueEntry, Result
 from vantage.core.ports.storage import MAX_PAGE_ITEMS, RunMetadata
 from vantage.service.app import create_app
+from vantage.storage.sqlite_store import SqliteExecutionStore
 
 
 class VantageTestServer(LoopbackServer):
     """A real `vantage` server (uvicorn + `create_app`) on an ephemeral
-    loopback port, backed by an in-memory store the test can inspect.
+    loopback port, backed by a `SqliteExecutionStore` in `directory` -- the
+    adapter `vantage` serves -- so the plugin's end-to-end tests exercise
+    the store that ships.
+
+    The inspection helpers read through the store's port, and through plain
+    SQL for the metadata rows the port never returns.
     """
 
-    def __init__(self) -> None:
-        self.store = InMemoryExecutionStore()
+    def __init__(self, directory: Path) -> None:
+        self._database = directory / "vantage.db"
+        self.store = SqliteExecutionStore(self._database)
         app = create_app(self.store)
         # Every HTTP request, in arrival order, so a test can assert what the
         # plugin sent even when it left nothing in the store.
@@ -45,6 +52,14 @@ class VantageTestServer(LoopbackServer):
             await app(scope, receive, send)
 
         super().__init__(_log_requests)
+
+    def close(self) -> None:
+        """Stop serving, then close the store. A test may stop the server
+        itself and still inspect the store until then."""
+        try:
+            self.stop()
+        finally:
+            self.store.close()
 
     def _run_ids(self) -> list[str]:
         """Every stored run id, newest first. The plugin generates the id,
@@ -72,7 +87,7 @@ class VantageTestServer(LoopbackServer):
     def metadata(self, run_id: str) -> RunMetadata:
         """The metadata files and entries stored for `run_id`, in no
         particular order."""
-        return self.store.metadata(run_id)
+        return read_metadata(self._database, run_id)
 
     def catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         """The catalogue entry for one node id, or `None` if the server has
@@ -107,10 +122,12 @@ def wait_for_file(path: Path, *, timeout: float = 15.0) -> None:
 
 
 @pytest.fixture
-def vantage_server() -> Iterator[VantageTestServer]:
-    server = VantageTestServer()
+def vantage_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[VantageTestServer]:
+    # A directory of its own, never one the test itself writes to or
+    # inspects, such as `tmp_path` or `pytester.path`.
+    server = VantageTestServer(tmp_path_factory.mktemp("vantage-server"))
     server.start()
     try:
         yield server
     finally:
-        server.stop()
+        server.close()
