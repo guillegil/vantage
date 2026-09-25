@@ -6,9 +6,10 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 from vantage.core.ports.storage import (
@@ -28,6 +29,8 @@ from vantage_port_contract import (
     _result,
     _start_only_execution,
 )
+
+_Row = TypeVar("_Row", MetadataFile, MetadataEntry)
 
 
 class TestSqliteExecutionStore(ExecutionStoreContract):
@@ -357,3 +360,54 @@ def test_a_timestamp_from_an_early_year_is_stored_zero_padded(tmp_path: Path) ->
     assert raw == ("0100-01-01T09:00:00.000000+00:00",)
     assert found is not None
     assert found.started_at == started
+
+
+def _forced(row: _Row, **fields: str) -> _Row:
+    """`row` with values the core refuses, forced past its validation -- the
+    shape a caller bypassing the domain types could hand the adapter."""
+    for name, value in fields.items():
+        object.__setattr__(row, name, value)
+    return row
+
+
+_VALID_FILE = MetadataFile(source_file="m.json", content_type="json", status="captured")
+_VALID_ENTRY = MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured")
+
+
+@pytest.mark.parametrize(
+    ("files", "entries"),
+    [
+        ((_forced(replace(_VALID_FILE), content_type="xml"),), (_VALID_ENTRY,)),
+        ((_forced(replace(_VALID_FILE), status="bogus"),), (_VALID_ENTRY,)),
+        ((_VALID_FILE,), (_forced(replace(_VALID_ENTRY), status="bogus"),)),
+    ],
+    ids=["content-type", "file-status", "entry-status"],
+)
+def test_a_metadata_row_the_schema_refuses_rolls_back_the_whole_session(
+    tmp_path: Path, files: tuple[MetadataFile, ...], entries: tuple[MetadataEntry, ...]
+) -> None:
+    """Metadata is write-once, but only a repeated key may be skipped: a row
+    outside the CHECK vocabulary is an error, and the session it arrived
+    with is not stored at all rather than stored without it."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            store.record_session(
+                _execution("a" * 32),
+                results=(_result("t.py::test_x"),),
+                received_at=datetime.now(timezone.utc),
+                metadata=RunMetadata(files=files, entries=entries),
+            )
+
+        conn = store._conn  # noqa: SLF001
+        counts = {
+            table: conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]  # noqa: S608
+            for table in _TABLES
+        }
+        assert counts == dict.fromkeys(_TABLES, 0)
+        assert _write_run(store, "b" * 32) is True
+    finally:
+        store.close()
+
+
+_TABLES = ("run", "test_case", "result", "run_metadata_file", "run_metadata")

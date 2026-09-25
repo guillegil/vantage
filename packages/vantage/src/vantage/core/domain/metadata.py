@@ -1,18 +1,20 @@
-"""User-declared run metadata: the file- and key-level status vocabularies
-and the size bounds on declared keys and values.
+"""User-declared run metadata: the file formats, the file- and key-level
+status vocabularies, and the size bounds on declared keys and values.
 
 No logic lives here: parsing, bounding and path containment belong to
 `pytest-vantage` and `vantage.service`; this module only names the values
 those layers agree on.
 
-``FILE_STATUSES`` and ``KEY_STATUSES`` are module-level ``frozenset``s of
-plain ``str``, never an ``Enum``, for the ``__format__`` reason recorded in
-``liveness.py``. Both mirror ``schema.sql``'s ``CHECK`` constraints on
-``run_metadata_file.status`` and ``run_metadata.status`` exactly, and must be
-kept in step with them by hand.
+The vocabularies are module-level ``frozenset``s of plain ``str``, never an
+``Enum``, for the ``__format__`` reason recorded in ``liveness.py``. Each
+mirrors one of ``schema.sql``'s ``CHECK`` constraints exactly;
+``test_metadata.py`` parses the constraints to hold them in step.
 """
 
 from __future__ import annotations
+
+METADATA_CONTENT_TYPES = frozenset({"json", "yaml", "toml"})
+"""The formats `run_metadata_file.content_type`'s `CHECK` constraint accepts."""
 
 FILE_STATUSES = frozenset(
     {
@@ -66,4 +68,5 @@ __all__ = [
     "MAX_METADATA_ENTRIES",
     "MAX_METADATA_KEY_CHARS",
     "MAX_METADATA_VALUE_BYTES",
+    "METADATA_CONTENT_TYPES",
 ]

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.execution import Execution
+from vantage.core.domain.metadata import FILE_STATUSES, KEY_STATUSES, METADATA_CONTENT_TYPES
 from vantage.core.domain.projection import (
     FailureProjection,
     VcsProjection,
@@ -174,27 +175,43 @@ class UserSetting:
     updated_at: datetime
 
 
+def _check_vocabulary(field: str, value: str, vocabulary: frozenset[str]) -> None:
+    if value not in vocabulary:
+        raise ValueError(f"{field} must be one of {sorted(vocabulary)}, got {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class MetadataFile:
     """One row of `run_metadata_file`. `source_file` is the DECLARED,
     rootpath-relative path exactly as written -- never the resolved one,
-    which is absolute and can carry a username."""
+    which is absolute and can carry a username.
+
+    `content_type` and `status` are checked against the vocabularies the
+    schema's CHECK constraints accept, so no adapter is ever handed a row
+    one of them would store and another refuse."""
 
     source_file: str
     content_type: str
     status: str
+
+    def __post_init__(self) -> None:
+        _check_vocabulary("content_type", self.content_type, METADATA_CONTENT_TYPES)
+        _check_vocabulary("status", self.status, FILE_STATUSES)
 
 
 @dataclass(frozen=True, slots=True)
 class MetadataEntry:
     """One row of `run_metadata`. `value` is `None` whenever `status` is not
     `'captured'` -- a declared-but-uncaptured key is a row, never a missing
-    row."""
+    row. `status` is checked as `MetadataFile`'s is."""
 
     key: str
     value: str | None
     source_file: str
     status: str
+
+    def __post_init__(self) -> None:
+        _check_vocabulary("status", self.status, KEY_STATUSES)
 
 
 @dataclass(frozen=True, slots=True)

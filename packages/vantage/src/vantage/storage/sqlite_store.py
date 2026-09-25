@@ -252,16 +252,20 @@ _INSERT_RESULT = """
     ON CONFLICT(run_id, node_id) DO NOTHING
 """
 
-# `INSERT OR IGNORE` on the primary key makes metadata write-once: a replay,
-# even one carrying different values, never changes a stored row.
+# `ON CONFLICT(<primary key>) DO NOTHING` makes metadata write-once: a
+# replay, even one carrying different values, never changes a stored row.
+# Not `INSERT OR IGNORE`, which would also skip a row that fails a CHECK
+# constraint and commit the session without it.
 _INSERT_METADATA_FILE = """
-    INSERT OR IGNORE INTO run_metadata_file (run_id, source_file, content_type, status)
+    INSERT INTO run_metadata_file (run_id, source_file, content_type, status)
     VALUES (?, ?, ?, ?)
+    ON CONFLICT(run_id, source_file) DO NOTHING
 """
 
 _INSERT_METADATA_ENTRY = """
-    INSERT OR IGNORE INTO run_metadata (run_id, key, value, source_file, status)
+    INSERT INTO run_metadata (run_id, key, value, source_file, status)
     VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(run_id, key) DO NOTHING
 """
 
 # `_decode_identity`'s five columns and the eleven outcome and timing

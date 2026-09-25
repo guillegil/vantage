@@ -104,8 +104,8 @@ class InMemoryExecutionStore:
             if key not in self._results:
                 self._results[key] = _normalized_result(result)
 
-        # `setdefault` mirrors the SQLite adapter's `INSERT OR IGNORE`: a
-        # metadata file/entry is written once and never updated.
+        # `setdefault` mirrors the SQLite adapter's `ON CONFLICT DO NOTHING`:
+        # a metadata file/entry is written once and never updated.
         for metadata_file in metadata.files:
             self._metadata_files.setdefault((identity, metadata_file.source_file), metadata_file)
         for metadata_entry in metadata.entries:
