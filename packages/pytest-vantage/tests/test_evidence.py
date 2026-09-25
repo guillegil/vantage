@@ -621,9 +621,19 @@ def test_each_phase_carries_only_its_own_output(pytester: pytest.Pytester, captu
     assert stderr == {"setup": "", "call": "CALL-ERR\n", "teardown": ""}
 
 
-def test_capture_disabled_leaves_output_absent(pytester: pytest.Pytester) -> None:
-    """A session run with `-s` / `--capture=no` never observes output at
-    all, so `captured_stdout`/`captured_stderr` are `None`, not `""` -- the
+@pytest.mark.parametrize(
+    "disable_capture",
+    [
+        pytest.param(("-s",), id="capture-no"),
+        pytest.param(("-p", "no:capture"), id="capture-plugin-blocked"),
+    ],
+)
+def test_capture_disabled_leaves_output_absent(
+    pytester: pytest.Pytester, disable_capture: tuple[str, ...]
+) -> None:
+    """A session run with `-s` / `--capture=no`, or with pytest's capture
+    plugin blocked, never observes output at all, so
+    `captured_stdout`/`captured_stderr` are `None`, not `""` -- the
     distinguisher is the session's capture mode, never `text or None`.
     """
     pytester.makepyfile(
@@ -633,9 +643,44 @@ def test_capture_disabled_leaves_output_absent(pytester: pytest.Pytester) -> Non
         """
     )
 
-    evidence = _capture_evidence(pytester, "-s")
+    evidence = _capture_evidence(pytester, *disable_capture)
 
     call_evidence = evidence["test_capture_off.py::test_it_prints_something::call"]
     assert call_evidence is not None
     assert call_evidence["captured_stdout"] is None
     assert call_evidence["captured_stderr"] is None
+
+
+@pytest.mark.parametrize("distributed", [False, True], ids=["serial", "xdist"])
+def test_blocking_the_capture_plugin_keeps_the_suite_outcome(
+    pytester: pytest.Pytester, distributed: bool
+) -> None:
+    """With `-p no:capture` pytest never registers the `--capture` option.
+    Reading it must not raise, or `pytest_configure` turns a run whose tests
+    merely failed into an INTERNALERROR in which no test runs."""
+    extra = ("-n", "2") if distributed else ()
+    if distributed:
+        pytest.importorskip("xdist")
+    pytester.makepyfile(
+        test_sample="""
+        def test_passes():
+            pass
+
+
+        def test_fails():
+            raise AssertionError("synthetic failure")
+        """
+    )
+
+    result = pytester.runpytest_subprocess(
+        "-p",
+        "no:capture",
+        "--vantage",
+        f"--vantage-server={_closed_port_address()}",
+        "--vantage-failure-text",
+        *extra,
+    )
+
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    result.assert_outcomes(passed=1, failed=1)
+    assert "INTERNALERROR" not in result.stdout.str() + result.stderr.str()

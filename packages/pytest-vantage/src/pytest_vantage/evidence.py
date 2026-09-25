@@ -34,7 +34,10 @@ class EvidenceCollector:
     def __init__(self, config: pytest.Config) -> None:
         self._config = config
         self._disabled = False
-        self._capture_disabled = config.getoption("capture") == "no"
+        # `--capture` exists only while pytest's capture plugin is loaded. With
+        # it blocked (`-p no:capture`) nothing is captured, which is the same
+        # fact as `-s`.
+        self._capture_disabled = config.getoption("capture", "no") == "no"
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtest_makereport(self, item: pytest.Item, call: pytest.CallInfo[None]) -> Any:
