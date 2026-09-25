@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 import warnings
 from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
 from pytest_vantage import vcs
@@ -35,6 +36,7 @@ from pytest_vantage.boundary import (
 )
 from pytest_vantage.plugin import _preflight_reachable
 from pytest_vantage.transport import Capabilities, fetch_capabilities, send
+from vantage.service.errors import RejectionError
 from vantage_test_server import (  # noqa: F401 -- fixture
     VantageTestServer,
     vantage_server,
@@ -660,72 +662,65 @@ def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-def _broken_liveness_handler(
-    requests_seen: list[tuple[str, bytes]],
-) -> Callable[[socket.socket], None]:
-    """A current server whose liveness path is broken: it advertises the
-    lifecycle, closes the connection without answering the start-write (a
-    report with no exit status) and every heartbeat, and acknowledges the
-    finish-write. Records every request it receives.
-    """
+class _UnavailableError(RejectionError):
+    """What the server answers while its storage cannot take a write."""
 
-    def _handler(conn: socket.socket) -> None:
-        request_line, body = _read_request(conn)
-        if not request_line:
-            return  # the bare TCP preflight
-        requests_seen.append((request_line, body))
-        if request_line.startswith("GET /api/v1/capabilities"):
-            conn.sendall(_LIFECYCLE_ADVERTISED)
-        elif (
-            request_line.startswith("POST /api/v1/runs ")
-            and json.loads(body)["run"]["exit_status"] is not None
-        ):
-            conn.sendall(_acknowledgement_of(body))
-
-    return _handler
+    status_code = 503
+    error = "unavailable"
 
 
 def test_a_failing_start_write_warns_once_silences_the_heartbeats_and_keeps_every_result(
     pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The start-write is `@liveness_isolated`, not `@fault_isolated`: its
-    failure warns once and latches `_liveness_disabled`, which the beats
-    share, so five beat opportunities (a zero `_BEAT_INTERVAL_SECONDS`) send
-    no heartbeat and add no warning. The finish-write still goes out with
-    every result, and the exit status is untouched.
+    """A server that advertises the lifecycle but refuses the start-write
+    -- and so knows no run any heartbeat could name -- costs one warning.
+    The start-write is `@liveness_isolated`, not `@fault_isolated`: its
+    failure latches `_liveness_disabled`, which the beats share, so five
+    beat opportunities (a zero `_BEAT_INTERVAL_SECONDS`) send no heartbeat
+    at all. The finish-write alone then records the whole run, every
+    result included, and the exit status is untouched.
 
     `runpytest_subprocess`, not in-process `runpytest`: a `VantageWarning`
-    raised this early (`pytest_sessionstart`, before the first test runs)
-    prints straight to the real stderr via Python's default
-    `warnings.showwarning` in an in-process run -- the same reason
-    `_combined_output`'s own docstring gives for `pytest_configure`'s
-    preflight warnings -- so only a subprocess run's piped stderr reliably
-    captures it here.
+    raised as early as `pytest_sessionstart` escapes an in-process run's
+    capture (see `_combined_output`). The server runs in this process, so
+    its store can still be made to refuse the first write.
     """
+    real_record_session = vantage_server.store.record_session
+    writes = itertools.count()
+
+    def _refuse_the_first_write(*args: Any, **kwargs: Any) -> bool:
+        if next(writes) == 0:
+            raise _UnavailableError("storage is unavailable")
+        return real_record_session(*args, **kwargs)
+
+    monkeypatch.setattr(vantage_server.store, "record_session", _refuse_the_first_write)
     pytester.makeconftest(
         "import pytest_vantage.recorder as recorder\nrecorder._BEAT_INTERVAL_SECONDS = 0.0\n"
     )
-    requests_seen: list[tuple[str, bytes]] = []
-    with _StubServer(_broken_liveness_handler(requests_seen)) as server:
-        pytester.makepyfile(
-            test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
-        )
-        result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
+    )
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}"
+    )
 
     result.assert_outcomes(passed=5)
     assert result.ret == 0
     output = _combined_output(result)
     assert output.count("VantageWarning:") == 1
-    assert "error while reporting session liveness" in output
-    request_lines = [request_line for request_line, _body in requests_seen]
-    assert request_lines == [
-        "GET /api/v1/capabilities HTTP/1.1",
-        "POST /api/v1/runs HTTP/1.1",
-        "POST /api/v1/runs HTTP/1.1",
+    assert "error while reporting session liveness: HTTP Error 503" in output
+    assert vantage_server.requests == [
+        ("GET", "/api/v1/capabilities"),
+        ("POST", "/api/v1/runs"),
+        ("POST", "/api/v1/runs"),
     ]
-    finish = json.loads(requests_seen[-1][1])
-    assert finish["run"]["exit_status"] == 0
-    assert len(finish["results"]) == 5
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert execution.exit_status == 0
+    assert len(vantage_server.results()) == 5
 
 
 def _assert_the_probe_and_the_report_each_warned(output: str, failure: str) -> None:

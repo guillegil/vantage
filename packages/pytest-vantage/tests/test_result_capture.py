@@ -8,6 +8,8 @@ in-memory store -- never a stub of either side of that boundary.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 from vantage.core.domain.result import Result
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
@@ -604,3 +606,56 @@ def test_empty_param_id_survives_the_real_server_hop_end_to_end(
     assert empty_param.identity.node_id == "test_empty_param.py::test_empty_id[]"
     assert empty_param.identity.param_id == ""
     assert unparametrised.identity.param_id is None
+
+
+# --- names that are not UTF-8, end to end ------------------------------------
+
+_FAILS_NAMING_A_NON_UTF8_FILE = """
+import os
+
+
+def test_reads_the_report():
+    raise AssertionError("cannot parse " + os.fsdecode(b"report-\\xff.csv"))
+"""
+
+
+def test_names_that_are_not_utf8_are_recorded_not_lost(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """A POSIX file name need not be UTF-8. Python decodes one with
+    `surrogateescape`, so a test under a directory named `caf\\xe9` carries a
+    lone surrogate in its node id, and so does a failure message quoting
+    such a name. JSON can carry a lone surrogate as an escape but UTF-8
+    cannot, so the server stores U+FFFD in its place: the test is recorded
+    with its failure text, rather than the one character losing the whole
+    session.
+    """
+    directory = os.fsencode(pytester.path) + b"/caf\xe9"
+    try:
+        os.mkdir(directory)
+    except OSError as exc:
+        pytest.skip(f"this filesystem refuses a name that is not UTF-8: {exc}")
+    with open(directory + b"/test_non_utf8.py", "w") as handle:
+        handle.write(_FAILS_NAMING_A_NON_UTF8_FILE)
+
+    # pytest's own cache cannot write such a node id to disk and fails the
+    # session in `pytest_sessionfinish`; that is pytest's to fix, not ours.
+    run = pytester.runpytest_subprocess(
+        "-p",
+        "no:cacheprovider",
+        "--vantage",
+        f"--vantage-server={vantage_server.address}",
+        "--vantage-failure-text",
+    )
+
+    run.assert_outcomes(failed=1)
+    assert "VantageWarning" not in run.stdout.str() + run.stderr.str()
+    (stored,) = vantage_server.results()
+    assert stored.identity.node_id == "caf\ufffd/test_non_utf8.py::test_reads_the_report"
+    assert stored.identity.file_path == "caf\ufffd/test_non_utf8.py"
+    assert stored.failure is not None
+    assert stored.failure.failure_message == "AssertionError: cannot parse report-\ufffd.csv"
+    assert stored.failure.failure_path == "caf\ufffd/test_non_utf8.py"
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None

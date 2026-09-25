@@ -25,8 +25,10 @@ from pathlib import Path
 
 import pytest
 import uvicorn
+from starlette.types import Receive, Scope, Send
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.result import CatalogueEntry, Result
+from vantage.core.ports.storage import RunMetadata
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 
@@ -57,8 +59,22 @@ class VantageTestServer:
         self.port = self._sock.getsockname()[1]
         self.address = f"http://127.0.0.1:{self.port}"
 
+        app = create_app(self.store)
+        # Every HTTP request, in arrival order, so a test can assert what the
+        # plugin sent even when it left nothing in the store.
+        self.requests: list[tuple[str, str]] = []
+
+        async def _log_requests(scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "http":
+                self.requests.append((scope["method"], scope["path"]))
+            await app(scope, receive, send)
+
         config = uvicorn.Config(
-            create_app(self.store), host="127.0.0.1", log_level="warning", lifespan="off"
+            _log_requests,
+            host="127.0.0.1",
+            log_level="warning",
+            lifespan="off",
+            interface="asgi3",
         )
         self._server = uvicorn.Server(config)
         self._loop = asyncio.new_event_loop()
@@ -108,6 +124,23 @@ class VantageTestServer:
         reach-in rather than scattering it across every test that needs it.
         """
         return list(self.store._results.values())  # noqa: SLF001
+
+    def metadata(self, run_id: str) -> RunMetadata:
+        """The metadata files and entries stored for `run_id`. No port
+        method returns them -- the run list filters by them without showing
+        them -- so this reaches into the store the way `executions()` does.
+        """
+        files = tuple(
+            stored
+            for (stored_run, _path), stored in self.store._metadata_files.items()  # noqa: SLF001
+            if stored_run == run_id
+        )
+        entries = tuple(
+            stored
+            for (stored_run, _key), stored in self.store._metadata_entries.items()  # noqa: SLF001
+            if stored_run == run_id
+        )
+        return RunMetadata(files=files, entries=entries)
 
     def catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         """The catalogue entry for one node id, or `None` if the server has
