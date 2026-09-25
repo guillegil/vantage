@@ -17,7 +17,7 @@ from pytest_vantage import budget, capture, metadata, recorder, vcs
 from vantage.core.config import resolution
 from vantage.core.domain import metadata as core_metadata
 from vantage.core.domain.result import OUTCOMES
-from vantage.service import errors, metadata_parse, truncation
+from vantage.service import errors, truncation
 from vantage.service.routes import runs as runs_route
 from vantage.storage.connection import isoformat_utc as server_isoformat_utc
 
@@ -69,9 +69,8 @@ def test_a_mirrored_metadata_bound_matches_the_server(
 
 
 def test_every_admissible_format_is_one_the_server_parses_and_stores() -> None:
-    """A format the server cannot parse records every declared key as
-    unavailable; one its schema cannot store drops the file entirely."""
-    assert metadata._ADMISSIBLE_FORMATS <= metadata_parse._ADMISSIBLE_CONTENT_TYPES
+    """The server parses and stores exactly the core's formats, and drops a
+    file in any other format together with its declared keys."""
     assert metadata._ADMISSIBLE_FORMATS <= core_metadata.METADATA_CONTENT_TYPES
 
 
