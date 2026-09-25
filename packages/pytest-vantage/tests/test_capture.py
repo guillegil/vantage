@@ -334,6 +334,95 @@ def test_accumulate_overwrites_a_duplicate_report_for_the_same_phase() -> None:
     assert pending["test_nid.py::test_it"].call is second_call
 
 
+def test_a_crashed_worker_report_is_ignored_and_the_rest_still_recorded() -> None:
+    """When an xdist worker dies mid-test, xdist logs that test on the
+    controller with a synthetic report whose phase is `"???"`. It is not a
+    phase of a result: it must neither raise (which would disable recording
+    for the whole session) nor count as one, and every other test is still
+    recorded."""
+    pending: dict[str, _Pending] = {}
+    for when, outcome in _ALL_PHASES_PASSING:
+        accumulate(pending, _report(when, outcome, nodeid="t.py::test_ok"))
+    accumulate(pending, _report("setup", "passed", nodeid="t.py::test_crashed"))
+    crash = pytest.TestReport(
+        nodeid="t.py::test_crashed",
+        location=("t.py", None, "t.py"),
+        keywords={},
+        outcome="failed",
+        longrepr="worker 'gw0' crashed while running 't.py::test_crashed'",
+        when="???",  # type: ignore[arg-type]  # exactly what xdist sends
+    )
+
+    accumulate(pending, crash)
+
+    assert [result["node_id"] for result in assemble_results(pending)] == ["t.py::test_ok"]
+
+
+def _rerun(when: _Phase, *, duration: float) -> pytest.TestReport:
+    """A failed phase report a rerun plugin (pytest-rerunfailures) logs as
+    an intermediate attempt: it rewrites the outcome to `"rerun"` before
+    logging it and skips the rest of that attempt."""
+    report = _report(when, "failed", duration=duration)
+    report.outcome = "rerun"  # type: ignore[assignment]  # what the rerun plugin does
+    return report
+
+
+@pytest.mark.parametrize(
+    ("attempts", "expected_outcome"),
+    [
+        pytest.param(
+            [
+                _report("setup", "passed", duration=1.0),
+                _rerun("call", duration=5.0),
+                _report("setup", "failed", duration=0.25),
+                _report("teardown", "passed", duration=0.5),
+            ],
+            "error",
+            id="retry-fails-in-setup-after-a-rerun-call",
+        ),
+        pytest.param(
+            [
+                _report("setup", "passed", duration=1.0),
+                _rerun("call", duration=5.0),
+                _report("setup", "skipped", duration=0.25),
+                _report("teardown", "passed", duration=0.5),
+            ],
+            "skipped",
+            id="retry-skips-in-setup-after-a-rerun-call",
+        ),
+        pytest.param(
+            [
+                _report("setup", "passed", duration=1.0),
+                _report("call", "passed", duration=5.0),
+                _rerun("teardown", duration=2.0),
+                _report("setup", "failed", duration=0.25),
+                _report("teardown", "passed", duration=0.5),
+            ],
+            "error",
+            id="retry-fails-in-setup-after-a-passed-call",
+        ),
+    ],
+)
+def test_a_new_setup_report_starts_a_fresh_attempt(
+    attempts: list[pytest.TestReport], expected_outcome: str
+) -> None:
+    """A rerun plugin runs the same node id again, starting with a new setup
+    report. Nothing from the earlier attempt may survive into the recorded
+    one: a stale call report would carry the old attempt's outcome, duration
+    and output, and a `"rerun"` phase outcome is outside the vocabulary the
+    server accepts, so it would reject the whole session."""
+    pending: dict[str, _Pending] = {}
+    for report in attempts:
+        accumulate(pending, report)
+
+    (result,) = assemble_results(pending)
+
+    assert result["outcome"] == expected_outcome
+    assert result["call_outcome"] is None
+    assert result["call_duration"] is None
+    assert result["duration"] == 0.75  # the final attempt's setup and teardown only
+
+
 _ALL_PHASES_PASSING: tuple[tuple[_Phase, _ReportOutcome], ...] = (
     ("setup", "passed"),
     ("call", "passed"),

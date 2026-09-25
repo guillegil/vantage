@@ -103,6 +103,12 @@ def _isoformat_utc(moment: datetime) -> str:
     return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
+# The only outcomes pytest itself gives a phase report. A rerun plugin logs an
+# intermediate attempt as "rerun"; that is not a result, and the server
+# rejects any phase outcome outside its vocabulary.
+_REPORT_OUTCOMES = frozenset({"passed", "failed", "skipped"})
+
+
 class _Pending:
     """Accumulates the up-to-three reports pytest emits for one test's
     lifecycle, keyed by node id in `Recorder._results`.
@@ -119,7 +125,23 @@ class _Pending:
         self.teardown: pytest.TestReport | None = None
 
     def record(self, report: pytest.TestReport) -> None:
-        setattr(self, report.when, report)
+        """Explicit dispatch on the three phases. Any other `when` is ignored:
+        xdist logs a test whose worker crashed with `when="???"`, and that
+        report is no phase of a result.
+        """
+        when = report.when
+        if when == "setup":
+            # A setup report starts a new attempt at the test (a rerun plugin
+            # retrying it), so nothing from an earlier attempt may survive.
+            self.setup = self.call = self.teardown = None
+        if report.outcome not in _REPORT_OUTCOMES:
+            return
+        if when == "setup":
+            self.setup = report
+        elif when == "call":
+            self.call = report
+        elif when == "teardown":
+            self.teardown = report
 
 
 def accumulate(pending: dict[str, _Pending], report: pytest.TestReport) -> None:

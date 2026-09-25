@@ -67,6 +67,39 @@ def test_six_tests_under_xdist_produce_six_results_and_one_run_entry(
     assert worker_ids == {"gw0", "gw1"}
 
 
+_CRASHES_ITS_WORKER = """
+import os
+
+
+def test_crashes_its_worker():
+    os._exit(1)
+"""
+
+
+def test_a_crashed_worker_leaves_every_other_result_recorded(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """A worker that dies mid-test (a segfault, an OOM kill) makes xdist log
+    that test with a report of no known phase and replace the worker. The
+    session still finishes and every test that completed is recorded; only
+    the test that never finished is missing."""
+    pytest.importorskip("xdist")
+    pytester.makepyfile(test_six=_SIX_TESTS, test_crash=_CRASHES_ITS_WORKER)
+
+    run = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "-n", "2"
+    )
+
+    assert run.ret == pytest.ExitCode.TESTS_FAILED
+    assert "error while reporting" not in run.stdout.str() + run.stderr.str()
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert execution.exit_status == 1
+    recorded = {result.identity.function_name for result in vantage_server.results()}
+    assert recorded == {f"test_{n}" for n in range(1, 7)}
+
+
 _PRINTS_IN_EVERY_PHASE = """
 import pytest
 
