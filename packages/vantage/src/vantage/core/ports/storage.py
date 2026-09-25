@@ -292,31 +292,26 @@ class ExecutionStore(Protocol):
         the entry's own `execution.vcs` is always `None`.
 
         When both `metadata_key` and `metadata_value` are given, the page is
-        narrowed to runs holding that exact declared `(key, value)` pair;
-        otherwise both are ignored. The route enforces the both-or-neither
-        rule."""
-        ...
-
-    def count_runs_predating_metadata_key(self, key: str) -> int:
-        """How many runs were recorded before `key` was first declared.
-
-        `first_seen` is `MIN(run.started_at)` over runs holding **any**
-        `run_metadata` row for `key`, regardless of status -- a
-        declared-but-dropped row still counts, since without it a run whose
-        value was too large to capture would be miscounted as predating the
-        declaration. When no run has ever carried `key`, `first_seen` is
-        undefined and this returns the total run count: every run predates a
-        key that was never declared."""
+        narrowed to runs holding that exact declared `(key, value)` pair --
+        a key declared but not captured has no value, so it never matches;
+        otherwise both are ignored."""
         ...
 
     def list_runs_with_metadata_horizon(
         self, *, key: str, value: str, limit: int, offset: int
     ) -> tuple[Page[RunListEntry], int]:
         """`list_runs` narrowed to runs holding `(key, value)`, together with
-        `count_runs_predating_metadata_key(key)`, both read from one
-        snapshot of the store. Two separate calls can straddle a session
-        another process records, and then describe two different sets of
-        runs."""
+        how many runs were recorded before `key` was first declared, both
+        read from one snapshot of the store. Two separate reads can straddle
+        a session another process records, and then describe two different
+        sets of runs.
+
+        `first_seen` is `MIN(run.started_at)` over runs holding **any**
+        `run_metadata` row for `key`, regardless of status -- a
+        declared-but-dropped row still counts, since without it a run whose
+        value was too large to capture would be miscounted as predating the
+        declaration. When no run has ever carried `key`, every run predates
+        it and the count is the total run count."""
         ...
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:

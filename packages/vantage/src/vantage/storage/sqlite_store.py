@@ -865,9 +865,6 @@ class SqliteExecutionStore:
             rows = self._fetchall(_LIST_RUNS, (_LIST_SUBJECT_PREFIX_BYTES, page_limit + 1, offset))
         return _page(rows, page_limit, _row_to_run_list_entry)
 
-    def count_runs_predating_metadata_key(self, key: str) -> int:
-        return self._count(_COUNT_RUNS_PREDATING_KEY, (key,))
-
     def list_runs_with_metadata_horizon(
         self, *, key: str, value: str, limit: int, offset: int
     ) -> tuple[Page[RunListEntry], int]:

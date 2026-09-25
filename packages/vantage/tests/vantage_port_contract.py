@@ -1589,4 +1589,3 @@ class ExecutionStoreContract:
         assert page.has_more is True
         assert predating == 2
         assert page == store.list_runs(limit=1, offset=0, metadata_key="fw", metadata_value="2.1")
-        assert predating == store.count_runs_predating_metadata_key("fw")

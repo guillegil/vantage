@@ -29,7 +29,8 @@ rather than one `key=value` string because a value may itself contain `=`,
 and both or neither. A run recorded before the key was ever declared has no
 value for it and is excluded, so `metadata_horizon` reports how many runs
 predate the key -- otherwise "not asked yet" would read as "did not match".
-It is `None` when no filter was given.
+The page and the count come from one store call, so they describe the same
+set of runs. `metadata_horizon` is `None` when no filter was given.
 """
 
 from __future__ import annotations
@@ -238,8 +239,8 @@ async def list_runs(
     metadata_value: str | None = Query(default=None),
 ) -> RunListResponse:
     """`GET /api/v1/runs`. `limit <= 0` is a `422` -- not a page size. The
-    200-item cap is enforced by `store.list_runs`, not re-clamped here; the
-    default `limit` keeps it holding when a caller sends none.
+    200-item cap is enforced by the store, not re-clamped here; the default
+    `limit` keeps it holding when a caller sends none.
 
     `metadata_key`/`metadata_value` are both-or-neither, checked here
     because FastAPI's parameter binding cannot express a cross-field rule.
@@ -249,20 +250,17 @@ async def list_runs(
             "metadata_value" if metadata_key is not None else "metadata_key"
         )
     store = request.app.state.store
-    page = store.list_runs(
-        limit=limit, offset=offset, metadata_key=metadata_key, metadata_value=metadata_value
-    )
+    horizon: MetadataHorizonResponse | None = None
+    if metadata_key is not None and metadata_value is not None:
+        page, predating = store.list_runs_with_metadata_horizon(
+            key=metadata_key, value=metadata_value, limit=limit, offset=offset
+        )
+        horizon = MetadataHorizonResponse(key=metadata_key, predating=predating)
+    else:
+        page = store.list_runs(limit=limit, offset=offset)
     now = datetime.now(timezone.utc)
     grace = timedelta(seconds=request.app.state.grace_period)
     items = [_run_list_item(entry, now=now, grace=grace) for entry in page.items]
-    horizon = (
-        MetadataHorizonResponse(
-            key=metadata_key,
-            predating=store.count_runs_predating_metadata_key(metadata_key),
-        )
-        if metadata_key is not None
-        else None
-    )
     return RunListResponse(items=items, has_more=page.has_more, metadata_horizon=horizon)
 
 
