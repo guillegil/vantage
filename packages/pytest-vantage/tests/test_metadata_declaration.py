@@ -10,6 +10,8 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import subprocess
+import sys
 import threading
 import warnings
 from pathlib import Path
@@ -18,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 from pytest_vantage import metadata
 from pytest_vantage.boundary import VantageWarning
+from vantage.core.domain.metadata import FILE_STATUSES as _SERVER_FILE_STATUSES
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES as _SERVER_MAX_METADATA_ENTRIES
 from vantage.core.domain.metadata import MAX_METADATA_KEY_CHARS as _SERVER_MAX_METADATA_KEY_CHARS
 
@@ -53,6 +56,15 @@ def test_the_mirrored_key_char_bound_matches_the_server() -> None:
     assert metadata.MAX_DECLARED_KEY_CHARS == _SERVER_MAX_METADATA_KEY_CHARS
 
 
+def test_the_mirrored_file_statuses_match_the_server_but_malformed() -> None:
+    """Each declared entry is charged to the section budget with the longest
+    status in `metadata._FILE_STATUSES`, so a status the plugin gains must
+    land there. The server accepts no status it does not know, and assigns
+    `malformed` itself, after parsing.
+    """
+    assert set(metadata._FILE_STATUSES) == _SERVER_FILE_STATUSES - {"malformed"}
+
+
 # --- read_declaration: rejection conditions ---------------------------------
 
 
@@ -81,8 +93,23 @@ def test_a_directory_named_like_the_declaration_is_not_reported_as_absent(
     assert result is None
     warned = _metadata_warnings(recwarn)
     assert len(warned) == 1
-    assert metadata.DECLARATION_FILENAME in str(warned[0].message)
-    assert "found" not in str(warned[0].message)
+    assert "not a regular file" in str(warned[0].message)
+
+
+def test_a_declaration_in_a_symlink_loop_is_not_reported_as_absent(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # Unreadable even as root, unlike the permission case below.
+    root = tmp_path / "project"
+    root.mkdir()
+    os.symlink(metadata.DECLARATION_FILENAME, root / metadata.DECLARATION_FILENAME)
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "cannot read" in str(warned[0].message)
 
 
 @pytest.mark.skipif(
@@ -171,6 +198,37 @@ def test_the_declaration_is_read_only_up_to_its_byte_bound(
 
     assert (result == ()) is accepted
     assert len(_metadata_warnings(recwarn)) == (0 if accepted else 1)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is enforced on Linux")
+def test_a_huge_declaration_is_refused_without_being_read_whole(tmp_path: Path) -> None:
+    # A sparse file far larger than the child's capped address space: reading
+    # it whole raises MemoryError there instead of exhausting the host.
+    root = tmp_path / "project"
+    root.mkdir()
+    with (root / metadata.DECLARATION_FILENAME).open("wb") as handle:
+        handle.truncate(4 * 1024**3)
+    script = (
+        "import resource, sys, warnings\n"
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        "from pytest_vantage import metadata\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))\n"
+        "with warnings.catch_warnings(record=True) as caught:\n"
+        "    warnings.simplefilter('always')\n"
+        "    result = metadata.read_declaration(SimpleNamespace(), Path(sys.argv[1]))\n"
+        "print(result, len(caught))\n"
+    )
+
+    completed = subprocess.run(  # noqa: S603 -- this interpreter, a literal script
+        [sys.executable, "-c", script, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["None", "1"]
 
 
 @pytest.mark.parametrize(
