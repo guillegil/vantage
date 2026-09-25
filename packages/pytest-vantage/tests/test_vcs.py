@@ -35,9 +35,7 @@ def _fixture_env() -> dict[str, str]:
     # the suite inherits GIT_DIR, and every fixture would be built inside
     # the real repository.
     env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in vcs._REPOSITORY_SELECTING_ENV  # noqa: SLF001
+        key: value for key, value in os.environ.items() if key not in vcs._REPOSITORY_SELECTING_ENV
     }
     env.update(_GIT_IDENTITY_ENV)
     return env
@@ -196,26 +194,50 @@ def test_not_a_repository_records_nulls_and_no_warning(tmp_path: Path) -> None:
     assert snapshot.warning is None
 
 
-def test_corrupt_git_entry_records_nulls_and_warns_once(tmp_path: Path) -> None:
-    # Fixture 1: a `.git` *file* with garbage, not a `gitdir: ...` pointer.
-    garbage_file_repo = tmp_path / "corrupt-git-file"
-    garbage_file_repo.mkdir()
-    (garbage_file_repo / ".git").write_text("not a valid gitfile pointer\n")
+def _break_repository(root: Path, kind: str) -> None:
+    root.mkdir(parents=True)
+    if kind == "garbage-git-file":  # a `.git` file that is not a `gitdir:` pointer
+        (root / ".git").write_text("not a valid gitfile pointer\n")
+    elif kind == "dangling-gitdir-pointer":  # a removed worktree's or submodule's
+        (root / ".git").write_text(f"gitdir: {root.parent / 'removed'}\n")
+    else:  # a `.git` directory with a truncated HEAD and no objects
+        (root / ".git").mkdir()
+        (root / ".git" / "HEAD").write_text("ref: ")
 
-    file_snapshot = vcs.capture(garbage_file_repo)
 
-    _assert_all_null(file_snapshot)
-    assert file_snapshot.warning is not None
+@pytest.mark.parametrize("kind", ["garbage-git-file", "dangling-gitdir-pointer", "truncated-head"])
+@pytest.mark.parametrize("below_top", [False, True], ids=["at-top", "in-subdirectory"])
+def test_corrupt_repository_records_nulls_and_warns_once(
+    tmp_path: Path, kind: str, below_top: bool
+) -> None:
+    # git searches upward, so a broken repository whose top is above rootpath
+    # (a sub-package with its own pytest config) warns too.
+    repo = tmp_path / "corrupt"
+    _break_repository(repo, kind)
+    rootpath = repo / "packages" / "pkg" if below_top else repo
+    rootpath.mkdir(parents=True, exist_ok=True)
 
-    # Fixture 2: a `.git` *directory* with a truncated `HEAD`, no objects.
-    truncated_head_repo = tmp_path / "corrupt-git-dir"
-    (truncated_head_repo / ".git").mkdir(parents=True)
-    (truncated_head_repo / ".git" / "HEAD").write_text("ref: ")
+    snapshot = vcs.capture(rootpath)
 
-    dir_snapshot = vcs.capture(truncated_head_repo)
+    _assert_all_null(snapshot)
+    assert snapshot.warning == vcs._CORRUPT_WARNING
 
-    _assert_all_null(dir_snapshot)
-    assert dir_snapshot.warning is not None
+
+def test_a_git_that_cannot_be_executed_is_not_reported_as_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo_with_one_commit(tmp_path / "repo")
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    # No shebang and no executable format: exec fails at once.
+    (shim_dir / "git").write_bytes(b"\x00not an executable\n")
+    (shim_dir / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", str(shim_dir))
+
+    snapshot = vcs.capture(repo)
+
+    _assert_all_null(snapshot)
+    assert snapshot.warning == vcs._CORRUPT_WARNING
 
 
 def test_missing_git_executable_records_nulls_silently(
@@ -331,7 +353,7 @@ def test_the_git_environment_drops_repository_selection_but_keeps_config(
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
 
-    env = vcs._build_env()  # noqa: SLF001
+    env = vcs._build_env()
 
     assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} & env.keys()
     assert env["GIT_CONFIG_COUNT"] == "1"
@@ -377,23 +399,28 @@ def _write_sleeping_git_shim(directory: Path, *, sleep_seconds: float, forward: 
 
 
 @pytest.mark.slow
-def test_hung_git_bounded_at_capture_level(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("below_top", [False, True], ids=["at-top", "in-subdirectory"])
+def test_hung_git_bounded_at_capture_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, below_top: bool
+) -> None:
     # `capture` reads the budget at call time; a short one keeps the test
     # quick while still measuring that the hang is cut off.
     monkeypatch.setattr(vcs, "_CAPTURE_BUDGET_SECONDS", 0.5)
+    repo = _repo_with_one_commit(tmp_path / "some-project")
+    rootpath = repo / "packages" / "pkg" if below_top else repo
+    rootpath.mkdir(parents=True, exist_ok=True)
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     _write_sleeping_git_shim(shim_dir, sleep_seconds=30, forward=False)
     monkeypatch.setenv("PATH", str(shim_dir))
-    repo_marker = tmp_path / "some-project"
-    repo_marker.mkdir()
 
     started = time.monotonic()
-    snapshot = vcs.capture(repo_marker)
+    snapshot = vcs.capture(rootpath)
     elapsed = time.monotonic() - started
 
     assert elapsed < vcs._CAPTURE_BUDGET_SECONDS + 1.0
     _assert_all_null(snapshot)
+    assert snapshot.warning == vcs._TIMEOUT_WARNING
 
 
 @pytest.mark.slow

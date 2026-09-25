@@ -9,7 +9,8 @@ Every `Exception` is swallowed inside `capture`. The ones expected are:
 
 - `FileNotFoundError` -- no `git` binary, even past `shutil.which`: `which`
   and `exec` can disagree, and `PATH` can change between them.
-- `subprocess.TimeoutExpired` -- the whole-capture deadline elapsed.
+- `subprocess.TimeoutExpired` -- the whole-capture deadline elapsed; the
+  only failure the warning calls a timeout.
 - `OSError` (`PermissionError`, `NotADirectoryError`, `BlockingIOError`) --
   a non-executable `git`, a deleted `cwd`, a permission refusal, a fork
   failure.
@@ -164,6 +165,21 @@ def _run(
     )
 
 
+def _inside_a_repository(rootpath: Path) -> bool:
+    """Whether a `.git` entry exists at `rootpath` or any directory above it.
+
+    git searches upward, so a broken or hung repository whose top is above
+    `rootpath` (a sub-package with its own pytest config) must still warn.
+    Resolved first because git walks the physical path. A failed check stays
+    silent, as if there were no repository.
+    """
+    try:
+        start = rootpath.resolve()
+        return any((directory / ".git").exists() for directory in (start, *start.parents))
+    except Exception:  # `capture` never raises, and this only chooses a warning
+        return False
+
+
 def capture(rootpath: Path) -> VcsSnapshot:
     """One bounded git read. Never raises.
 
@@ -178,6 +194,7 @@ def capture(rootpath: Path) -> VcsSnapshot:
 
     env = _build_env()
     deadline = time.monotonic() + _CAPTURE_BUDGET_SECONDS
+    timed_out = False
 
     def remaining() -> float:
         return max(_MIN_TIMEOUT_SECONDS, deadline - time.monotonic())
@@ -186,8 +203,12 @@ def capture(rootpath: Path) -> VcsSnapshot:
         # None on any swallowed failure, timeout included. A timeout here
         # ends the capture: the budget is shared, so every later invocation
         # finds `remaining()` already at the floor and times out too.
+        nonlocal timed_out
         try:
             return _run(argv, cwd=rootpath, env=env, timeout=remaining())
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            return None
         except Exception:  # the module docstring lists what is expected here
             return None
 
@@ -195,8 +216,8 @@ def capture(rootpath: Path) -> VcsSnapshot:
     if gate is None or gate.returncode != 0:
         # Not-a-repo and corrupt-repo are both exit 128. The discriminator
         # is a filesystem check, never stderr text.
-        if (rootpath / ".git").exists():
-            warning = _TIMEOUT_WARNING if gate is None else _CORRUPT_WARNING
+        if _inside_a_repository(rootpath):
+            warning = _TIMEOUT_WARNING if timed_out else _CORRUPT_WARNING
             return VcsSnapshot(warning=warning)
         return _EMPTY
 
