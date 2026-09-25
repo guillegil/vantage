@@ -269,6 +269,9 @@ def pytest_configure(config: pytest.Config) -> None:
        ``404`` of a server without that route, makes the `Recorder` send
        only the finish report -- no start-write or heartbeats -- rather
        than half-record against a server that cannot finish the job.
+    8. This hook has no fault-isolation boundary of its own, so a failure
+       constructing the `Recorder` warns once and leaves the session
+       unrecorded rather than ending it as an INTERNALERROR.
 
     A server that passes the preflight and later disappears or fails is
     handled by ``pytest_vantage.boundary``'s fault-isolation decorator on
@@ -297,12 +300,17 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     liveness_timeout = resolve_liveness_timeout(settings.timeout)
     lifecycle_available = fetch_capabilities(settings.address, timeout=liveness_timeout)
-    config.pluginmanager.register(
-        Recorder(
+    try:
+        recorder = Recorder(
             config,
             settings.address,
             settings.timeout,
             lifecycle_available=lifecycle_available,
             metadata_requested=_metadata_capture_requested(config),
         )
-    )
+    except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+        _warn(
+            config, f"vantage: could not start recording: {exc}, this session will not be recorded"
+        )
+        return
+    config.pluginmanager.register(recorder)

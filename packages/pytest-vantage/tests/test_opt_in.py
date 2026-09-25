@@ -500,6 +500,32 @@ def test_an_invocation_that_runs_tests_does_reach_for_the_server(
     assert "cannot reach" in warned
 
 
+# --- Starting the recorder ---------------------------------------------------------
+
+
+def test_a_recorder_that_fails_to_start_leaves_the_suite_unrecorded_and_unharmed(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """`pytest_configure` has no fault-isolation boundary of its own, so an
+    exception while constructing the recorder would otherwise end the
+    session as an INTERNALERROR with no test run."""
+
+    def _explode(self: Recorder, *args: object, **kwargs: object) -> None:
+        raise RuntimeError("synthetic start-up failure")
+
+    monkeypatch.setattr(Recorder, "__init__", _explode)
+    pytester.makepyfile(test_sample=_SAMPLE_TEST)
+
+    with pytest.warns(VantageWarning, match="synthetic start-up failure"):
+        result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    assert result.ret == pytest.ExitCode.OK
+    result.assert_outcomes(passed=1)
+    assert vantage_server.executions() == []
+
+
 def _patch_path_open_recorder(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     """Wraps the real `Path.open` to record every path it is called on
     while still letting it execute for real -- the same non-fabricating
