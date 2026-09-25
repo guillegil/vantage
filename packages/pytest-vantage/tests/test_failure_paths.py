@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import re
 import socket
 import subprocess
 import sys
@@ -22,6 +23,7 @@ import urllib.error
 import urllib.request
 import warnings
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 from pytest_vantage import vcs
@@ -539,35 +541,44 @@ def test_preflight_falls_back_to_the_scheme_default_port(
     assert attempted == [("example.com", 80), ("example.com", 443), ("example.com", 8765)]
 
 
-def test_two_hundred_tests_produce_exactly_one_warning_naming_the_address(
-    pytester: pytest.Pytester,
-) -> None:
-    """The preflight runs once, in `pytest_configure`, independent of how
-    many tests the session collects: 200 tests still produce exactly one
-    warning.
+def _wait_for_file(path: Path, *, timeout: float = 15.0) -> None:
+    """Poll until `path` exists, or raise after `timeout` seconds: a bounded
+    wait on what the child has actually done, never a guess at how long it
+    takes on a loaded runner.
     """
-    address = _closed_port_address()
-    pytester.makepyfile(
-        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(200))
-    )
-
-    result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={address}")
-
-    result.assert_outcomes(passed=200)
-    assert result.ret == 0
-    assert _combined_output(result).count("VantageWarning:") == 1
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"{path} did not appear within {timeout}s")
+        time.sleep(0.01)
 
 
 def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """The preflight passes because the server was up when `pytest_configure`
-    ran. It is stopped before `pytest_sessionfinish` sends the report, so
-    the failure surfaces at report time through `fault_isolated`, not
-    through a second preflight.
+    """The preflight and the start-write reach the server; it is stopped
+    while the test runs, so the finish-write fails and the failure surfaces
+    at report time through `fault_isolated`, not through a second
+    preflight.
+
+    The child's test signals that it has started and then waits for the
+    parent's go-ahead, so the server is gone exactly between the two
+    writes, however slowly the child starts.
     """
-    pytester.makepyfile(test_slow="import time\n\n\ndef test_slow():\n    time.sleep(2)\n")
+    entered = pytester.path / "entered"
+    proceed = pytester.path / "proceed"
+    pytester.makepyfile(
+        test_waits=(
+            "import pathlib\nimport time\n\n\n"
+            "def test_waits():\n"
+            f"    pathlib.Path({str(entered)!r}).touch()\n"
+            "    deadline = time.monotonic() + 15\n"
+            f"    while not pathlib.Path({str(proceed)!r}).exists():\n"
+            "        assert time.monotonic() < deadline\n"
+            "        time.sleep(0.01)\n"
+        )
+    )
 
     process = pytester.popen(
         [
@@ -584,14 +595,20 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
         # raising `ValueError`. `DEVNULL` leaves nothing to flush.
         stdin=subprocess.DEVNULL,
     )
-    # Give the child time to pass configure (preflight included) and enter
-    # the test before pulling the server out from under it.
-    time.sleep(1.0)
-    vantage_server.stop()
-    stdout, stderr = process.communicate(timeout=15)
+    try:
+        _wait_for_file(entered)
+        vantage_server.stop()
+        proceed.touch()
+        stdout, stderr = process.communicate(timeout=15)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate()
 
+    output = stdout.decode() + stderr.decode()
     assert process.returncode == 0
-    assert (stdout.decode() + stderr.decode()).count("VantageWarning:") == 1
+    assert output.count("VantageWarning:") == 1
+    assert "error while reporting" in output
 
 
 # --- Something goes wrong while reporting ---------------------------------
@@ -652,15 +669,39 @@ def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-def test_failing_start_write_warns_once_and_the_session_still_completes(
+def _broken_liveness_handler(
+    requests_seen: list[tuple[str, bytes]],
+) -> Callable[[socket.socket], None]:
+    """A current server whose liveness path is broken: it advertises the
+    lifecycle, closes the connection without answering the start-write (a
+    report with no exit status) and every heartbeat, and acknowledges the
+    finish-write. Records every request it receives.
+    """
+
+    def _handler(conn: socket.socket) -> None:
+        request_line, body = _read_request(conn)
+        if not request_line:
+            return  # the bare TCP preflight
+        requests_seen.append((request_line, body))
+        if request_line.startswith("GET /api/v1/capabilities"):
+            conn.sendall(_LIFECYCLE_ADVERTISED)
+        elif (
+            request_line.startswith("POST /api/v1/runs ")
+            and json.loads(body)["run"]["exit_status"] is not None
+        ):
+            conn.sendall(_acknowledgement_of(body))
+
+    return _handler
+
+
+def test_a_failing_start_write_warns_once_silences_the_heartbeats_and_keeps_every_result(
     pytester: pytest.Pytester,
 ) -> None:
     """The start-write is `@liveness_isolated`, not `@fault_isolated`: its
-    own failure must never cost the session its ordinary exit status.
-    `_StubServer` fails only its second accepted connection (the
-    start-write) and answers correctly from the third onward (the
-    finish-write); the first is the bare TCP preflight, which needs no
-    response.
+    failure warns once and latches `_liveness_disabled`, which the beats
+    share, so five beat opportunities (a zero `_BEAT_INTERVAL_SECONDS`) send
+    no heartbeat and add no warning. The finish-write still goes out with
+    every result, and the exit status is untouched.
 
     `runpytest_subprocess`, not in-process `runpytest`: a `VantageWarning`
     raised this early (`pytest_sessionstart`, before the first test runs)
@@ -670,22 +711,42 @@ def test_failing_start_write_warns_once_and_the_session_still_completes(
     preflight warnings -- so only a subprocess run's piped stderr reliably
     captures it here.
     """
-    connections_seen = itertools.count(1)
-
-    def _fail_second_connection_only(conn: socket.socket) -> None:
-        connection_number = next(connections_seen)
-        if connection_number < 3:
-            return  # 1: the preflight (no response needed); 2: the start-write (fails)
-        _request_line, body = _read_request(conn)
-        conn.sendall(_acknowledgement_of(body))
-
-    with _StubServer(_fail_second_connection_only) as server:
-        pytester.makepyfile(test_sample=_PASSING_TEST)
+    pytester.makeconftest(
+        "import pytest_vantage.recorder as recorder\nrecorder._BEAT_INTERVAL_SECONDS = 0.0\n"
+    )
+    requests_seen: list[tuple[str, bytes]] = []
+    with _StubServer(_broken_liveness_handler(requests_seen)) as server:
+        pytester.makepyfile(
+            test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
+        )
         result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
 
-    result.assert_outcomes(passed=1)
+    result.assert_outcomes(passed=5)
     assert result.ret == 0
-    assert _combined_output(result).count("VantageWarning:") == 1
+    output = _combined_output(result)
+    assert output.count("VantageWarning:") == 1
+    assert "error while reporting session liveness" in output
+    request_lines = [request_line for request_line, _body in requests_seen]
+    assert request_lines == [
+        "GET /api/v1/capabilities HTTP/1.1",
+        "POST /api/v1/runs HTTP/1.1",
+        "POST /api/v1/runs HTTP/1.1",
+    ]
+    finish = json.loads(requests_seen[-1][1])
+    assert finish["run"]["exit_status"] == 0
+    assert len(finish["results"]) == 5
+
+
+def _assert_the_probe_and_the_report_each_warned(output: str, failure: str) -> None:
+    """A server that fails every request fails the capability probe first,
+    which turns the start-write and heartbeats off with one warning, and
+    then the finish-write, with a second. Both are matched by their text,
+    naming `failure` (a regular expression), so one warning cannot stand in
+    for the other.
+    """
+    assert output.count("VantageWarning:") == 2
+    assert re.search(rf"the capability probe to \S+ failed \((?:{failure})", output), output
+    assert re.search(rf"error while reporting: (?:{failure})", output), output
 
 
 def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester) -> None:
@@ -695,10 +756,12 @@ def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    # Two warnings, not one: `_accept_then_close` misbehaves for every
-    # connection, so both the start-write and the finish-write fail -- one
-    # liveness warning, one reporting warning. They must not collapse into one.
-    assert _combined_output(result).count("VantageWarning:") == 2
+    # Closing at once races the client's request, so the client sees the
+    # answer missing, the connection reset, or its own write fail.
+    _assert_the_probe_and_the_report_each_warned(
+        _combined_output(result),
+        "Remote end closed connection without response|.*Connection reset by peer|<urlopen error",
+    )
 
 
 def test_server_accepts_and_never_answers_finishes_within_timeout_plus_five_seconds(
@@ -710,17 +773,19 @@ def test_server_accepts_and_never_answers_finishes_within_timeout_plus_five_seco
         result = pytester.runpytest_subprocess(
             "--vantage",
             f"--vantage-server={server.address}",
-            "--vantage-timeout=1.0",
+            "--vantage-timeout=0.3",
             timeout=15,
         )
         elapsed = time.monotonic() - started
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    assert elapsed < 1.0 + 5.0
-    # Two warnings, not one -- see
-    # `test_server_accepts_then_closes_without_responding` above.
-    assert _combined_output(result).count("VantageWarning:") == 2
+    assert elapsed < 0.3 + 5.0
+    # The request's deadline and its socket timeout expire together; either
+    # may be the one that reports it.
+    _assert_the_probe_and_the_report_each_warned(
+        _combined_output(result), "no complete answer within 0.3s|timed out"
+    )
 
 
 # --- Untrusted responses ---------------------------------------------------
@@ -737,9 +802,8 @@ def test_oversized_response_is_bounded_and_does_not_hang(pytester: pytest.Pytest
     assert result.ret == 0
     # The truncated 64 KiB chunk of the unbounded body is not valid JSON
     # either, so this doubles as the "malformed acknowledgement is a
-    # warning, never an exception" proof. Two warnings, not one -- see
-    # `test_server_accepts_then_closes_without_responding` above.
-    assert _combined_output(result).count("VantageWarning:") == 2
+    # warning, never an exception" proof.
+    _assert_the_probe_and_the_report_each_warned(_combined_output(result), "Expecting value")
 
 
 def test_non_json_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -> None:
@@ -749,9 +813,7 @@ def test_non_json_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    # Two warnings, not one -- see
-    # `test_server_accepts_then_closes_without_responding` above.
-    assert _combined_output(result).count("VantageWarning:") == 2
+    _assert_the_probe_and_the_report_each_warned(_combined_output(result), "Expecting value")
 
 
 def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -> None:
@@ -761,9 +823,9 @@ def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    # Two warnings, not one -- see
-    # `test_server_accepts_then_closes_without_responding` above.
-    assert _combined_output(result).count("VantageWarning:") == 2
+    _assert_the_probe_and_the_report_each_warned(
+        _combined_output(result), "HTTP Error 500: Internal Server Error"
+    )
 
 
 _A_REPORT: dict[str, object] = {"run": {"id": "a" * 32}}
@@ -1000,29 +1062,6 @@ def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still
     assert result.ret == 0
     assert _combined_output(result).count("VantageWarning:") == 1
     assert len(vantage_server.results()) == 5
-
-
-def test_start_write_and_heartbeat_failure_share_one_flag_leaving_two_warnings_total(
-    pytester: pytest.Pytester,
-) -> None:
-    """The start-write and the heartbeat share `_liveness_disabled`. When the
-    start-write fails, the liveness path latches before the first heartbeat,
-    so forcing a beat opportunity on every test (a zero
-    `_BEAT_INTERVAL_SECONDS`) adds no third warning to the liveness and
-    reporting warnings `test_server_accepts_then_closes_without_responding`
-    already expects."""
-    pytester.makeconftest(
-        "import pytest_vantage.recorder as recorder\nrecorder._BEAT_INTERVAL_SECONDS = 0.0\n"
-    )
-    with _StubServer(_accept_then_close) as server:
-        pytester.makepyfile(
-            test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
-        )
-        result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
-
-    result.assert_outcomes(passed=5)
-    assert result.ret == 0
-    assert _combined_output(result).count("VantageWarning:") == 2
 
 
 # --- Capability advertisement: fail closed, degrade for older servers -----

@@ -43,6 +43,16 @@ def _wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> 
     raise TimeoutError(f"no run entry appeared within {timeout}s")
 
 
+def _wait_for_file(path: Path, *, timeout: float = 15.0) -> None:
+    """Poll until `path` exists, or raise after `timeout` seconds: the same
+    bounded wait as `_wait_for_execution`, on a marker the child writes."""
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"{path} did not appear within {timeout}s")
+        time.sleep(0.01)
+
+
 class _ConfigDouble:
     rootpath = "unused"
 
@@ -580,8 +590,21 @@ def test_sigint_leaves_start_time_and_null_end_time(
     `finished_at` null and `interrupted` true. Needs a raw `Popen`
     (`pytester.popen`, not `runpytest_subprocess`) because the signal has to
     be delivered to a still-running child process.
+
+    The signal goes only once the child's test has started. Earlier, it
+    would land in configure or inside the start-write, where pytest never
+    calls `pytest_sessionfinish` at all -- and the start row is stored before
+    the start-write returns, so its appearance is no signal that it has.
     """
-    pytester.makepyfile(test_slow=("import time\n\n\ndef test_slow():\n    time.sleep(5)\n"))
+    entered = pytester.path / "entered"
+    pytester.makepyfile(
+        test_slow=(
+            "import pathlib\nimport time\n\n\n"
+            "def test_slow():\n"
+            f"    pathlib.Path({str(entered)!r}).touch()\n"
+            "    time.sleep(30)\n"
+        )
+    )
 
     process = pytester.popen(
         [
@@ -591,15 +614,18 @@ def test_sigint_leaves_start_time_and_null_end_time(
             "--vantage",
             f"--vantage-server={vantage_server.address}",
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
     )
-    # Give the child time to pass configure/collection and enter the sleep
-    # before interrupting it -- interrupting too early (still in configure)
-    # would not exercise `wrap_session`'s interrupted-session path at all.
-    time.sleep(1.0)
-    process.send_signal(signal.SIGINT)
-    process.wait(timeout=15)
+    try:
+        _wait_for_file(entered)
+        process.send_signal(signal.SIGINT)
+        process.wait(timeout=15)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
 
     executions = vantage_server.executions()
     assert len(executions) == 1
@@ -611,58 +637,17 @@ def test_sigint_leaves_start_time_and_null_end_time(
 # --- Sessions that have not finished ---------------------------------------
 
 
-def test_a_still_running_session_already_has_a_run_entry(
-    pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
-) -> None:
-    """A still-running session already has a run entry: the server is
-    queried while the child is still executing, proving the row exists
-    because of the start-write alone, not merely once the session is over.
-
-    Needs a raw `Popen` (`pytester.popen`), not `runpytest_subprocess`,
-    because the child must still be alive when the server is queried.
-    `stdin=subprocess.DEVNULL` because `pytester.popen` otherwise leaves a
-    closed stdin pipe, which `communicate()` fails to flush before Python 3.13.
-    """
-    pytester.makepyfile(test_slow=_SLOW_TEST)
-
-    process = pytester.popen(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--vantage",
-            f"--vantage-server={vantage_server.address}",
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        stdin=subprocess.DEVNULL,
-    )
-    try:
-        execution = _wait_for_execution(vantage_server)
-
-        # The assertion of record: the child is still executing its 5-second
-        # test when the row is observed.
-        assert process.poll() is None
-        assert execution.started_at is not None
-        assert execution.finished_at is None
-    finally:
-        os.kill(process.pid, signal.SIGKILL)
-        process.wait(timeout=15)
-
-
 def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_reason(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """SIGKILL cannot be caught, so no plugin code runs after it: the run
-    entry the start-write left behind stays exactly as it was -- a start
+    """A still-running session already has a run entry, from the start-write
+    alone: the row is observed while the child is still executing its
+    5-second test. SIGKILL cannot be caught, so no plugin code runs after
+    it, and the row stays exactly as the start-write left it -- a start
     time, a null end time, `interrupted=False` and no `interrupt_reason`.
     Contrast SIGINT (`test_sigint_leaves_start_time_and_null_end_time`),
     which Python observes and which yields `interrupted=True`.
-
-    The kill is sent only after `_wait_for_execution` confirms the
-    start-write has landed.
     """
     pytester.makepyfile(test_slow=_SLOW_TEST)
 
@@ -674,14 +659,16 @@ def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_re
             "--vantage",
             f"--vantage-server={vantage_server.address}",
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
     )
-    _wait_for_execution(vantage_server)
-
-    os.kill(process.pid, signal.SIGKILL)
-    process.wait(timeout=15)
+    try:
+        _wait_for_execution(vantage_server)
+        assert process.poll() is None
+    finally:
+        os.kill(process.pid, signal.SIGKILL)
+        process.wait(timeout=15)
 
     executions = vantage_server.executions()
     assert len(executions) == 1
@@ -693,32 +680,6 @@ def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_re
 
 
 # --- Activity-driven heartbeats --------------------------------------------
-
-
-def test_a_suite_exceeding_one_heartbeat_interval_sends_at_least_one_heartbeat(
-    pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A long suite sends heartbeats during execution.
-    `_BEAT_INTERVAL_SECONDS` is shrunk to zero so every
-    `pytest_runtest_logreport` call is a beat opportunity, proving the wiring
-    fires rather than merely never being due."""
-    beats: list[str] = []
-
-    def _capture(address: str, run_id: str, *, timeout: float) -> None:
-        beats.append(run_id)
-
-    monkeypatch.setattr("pytest_vantage.recorder.send_heartbeat", _capture)
-    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
-    pytester.makepyfile(
-        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
-    )
-
-    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
-
-    result.assert_outcomes(passed=3)
-    assert len(beats) >= 1
 
 
 def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_contact(
