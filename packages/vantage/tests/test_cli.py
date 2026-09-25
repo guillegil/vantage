@@ -1,6 +1,8 @@
 """`vantage` startup: every refusal is one `vantage: ...` line and exit
 status 1, a bad setting is refused before anything is created, and the
-store is closed once the server stops.
+store is closed once the server stops. Also the pieces `main` composes: the
+writable-directory check, the wide-bind warning, and the grace period
+`create_app` builds.
 
 `uvicorn.run` is replaced throughout -- these tests are about what `main`
 does around serving, and none of them binds a socket. It is patched by
@@ -20,6 +22,13 @@ from typing import Any
 
 import pytest
 from vantage.service import cli
+from vantage.service.app import create_app
+from vantage.service.cli import (
+    DatabaseDirectoryNotWritableError,
+    ensure_database_directory_writable,
+    warn_if_bound_wide,
+)
+from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
 # Root ignores directory mode bits; Windows ACLs need a different check.
@@ -191,3 +200,57 @@ def test_main_closes_the_store_when_the_server_stops(
 
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         served["store"].count_executions()
+
+
+@_needs_enforced_mode_bits
+def test_ensure_database_directory_writable_raises_on_read_only_parent(tmp_path: Path) -> None:
+    parent = tmp_path / "readonly"
+    parent.mkdir(mode=0o500)
+    try:
+        with pytest.raises(DatabaseDirectoryNotWritableError, match=str(parent)):
+            ensure_database_directory_writable(parent / "vantage.db")
+    finally:
+        parent.chmod(0o700)  # so tmp_path's own fixture cleanup can remove it
+
+
+def test_ensure_database_directory_writable_passes_for_a_writable_parent(tmp_path: Path) -> None:
+    ensure_database_directory_writable(tmp_path / "vantage.db")
+
+
+def test_default_host_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING):
+        warn_if_bound_wide("127.0.0.1")
+
+    assert caplog.records == []
+
+
+def test_non_loopback_host_warns_naming_missing_authentication(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING):
+        warn_if_bound_wide("0.0.0.0")  # noqa: S104
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("authentication" in message for message in messages)
+    assert any("0.0.0.0" in message for message in messages)  # noqa: S104
+
+
+def test_create_app_defaults_grace_period_to_900_seconds() -> None:
+    app = create_app(InMemoryExecutionStore())
+
+    assert app.state.grace_period == timedelta(seconds=900)
+
+
+def test_create_app_exposes_the_configured_grace_period() -> None:
+    app = create_app(InMemoryExecutionStore(), grace_period_seconds=123.0)
+
+    assert app.state.grace_period == timedelta(seconds=123)
+
+
+@pytest.mark.parametrize("seconds", [0.0, -1.0, float("nan"), float("inf"), 1e14])
+def test_create_app_refuses_a_grace_period_it_cannot_apply(seconds: float) -> None:
+    """Refused when the app is built, not on every read of a run: nan, inf
+    and 1e14 cannot become a `timedelta`, and a grace period that is not
+    positive would present every unfinished run as abandoned."""
+    with pytest.raises((ValueError, OverflowError)):
+        create_app(InMemoryExecutionStore(), grace_period_seconds=seconds)

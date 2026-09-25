@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,7 +25,9 @@ from vantage.storage.sqlite_store import (
 )
 from vantage_port_contract import (
     ExecutionStoreContract,
+    _captured,
     _execution,
+    _failure,
     _result,
     _start_only_execution,
 )
@@ -412,3 +414,175 @@ def test_a_metadata_row_the_schema_refuses_rolls_back_the_whole_session(
         assert _write_run(store, "b" * 32) is True
     finally:
         store.close()
+
+
+class _CommitCountingConnection:
+    """Wraps a real `sqlite3.Connection`, counting only `COMMIT` statements.
+
+    `record_session` must reach storage in exactly one commit for the whole
+    batch, not one per result or one per statement, so a report is stored
+    completely or not at all. Wrapping the connection observes that from
+    outside `SqliteExecutionStore` without weakening the adapter's own
+    commit discipline for the sake of a test.
+    """
+
+    def __init__(self, real: sqlite3.Connection) -> None:
+        self._real = real
+        self.commit_count = 0
+
+    def execute(self, sql: str, parameters: Sequence[object] = ()) -> sqlite3.Cursor:
+        if sql.strip() == "COMMIT":
+            self.commit_count += 1
+        return self._real.execute(sql, parameters)
+
+    def executemany(self, sql: str, seq_of_parameters: Any) -> sqlite3.Cursor:
+        return self._real.executemany(sql, seq_of_parameters)
+
+    def close(self) -> None:
+        self._real.close()
+
+
+def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
+    """A 500-result finish report reaches storage in exactly one commit, and
+    the finish fields and every result row are actually written.
+
+    A handful of the 500 carry failure evidence and captured output, so the
+    single commit is checked at the full width of `_INSERT_RESULT`, and a
+    failing result's evidence must round-trip.
+    """
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    counting = _CommitCountingConnection(adapter._conn)
+    adapter._conn = counting  # type: ignore[assignment]
+
+    try:
+        execution = _execution("f" + "0" * 31)
+        failure = _failure()
+        captured = _captured(stdout="some output", stderr="")
+        results = [
+            _result(
+                f"packages/vantage/tests/test_bulk.py::test_{i}",
+                outcome="failed" if i < 5 else "passed",
+                failure=failure if i < 5 else None,
+                captured=captured if i < 5 else None,
+            )
+            for i in range(500)
+        ]
+
+        created = adapter.record_session(
+            execution, results=results, received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is True
+        assert counting.commit_count == 1
+        # Counting commits proves the transaction's shape, not its content:
+        # an adapter that committed once and wrote no rows would satisfy the
+        # count alone.
+        assert adapter.count_results() == 500
+        assert adapter.count_executions() == 1
+        stored = adapter.get_execution(execution.identity.value)
+        assert stored is not None
+        assert stored.finished_at == execution.finished_at
+        assert stored.exit_status == execution.exit_status
+
+        found = adapter.get_result(
+            execution.identity.value,
+            node_id="packages/vantage/tests/test_bulk.py::test_0",
+        )
+        assert found is not None
+        assert found.failure == failure
+        assert found.captured == captured
+    finally:
+        adapter.close()
+
+
+def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_commit(
+    tmp_path: Path,
+) -> None:
+    """The same finish-write, run after a prior accepted start-write for the
+    same run id -- one commit, the same 500 result rows, and the finish
+    fields actually applied through the conflict (`DO UPDATE`) branch rather
+    than the insert branch."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+
+    try:
+        identity = "f" + "1" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start = _start_only_execution(identity, started=started)
+        adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+
+        counting = _CommitCountingConnection(adapter._conn)
+        adapter._conn = counting  # type: ignore[assignment]
+
+        finish = _execution(identity, finished=True, started=started)
+        results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
+
+        created = adapter.record_session(
+            finish, results=results, received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is False
+        assert counting.commit_count == 1
+        assert adapter.count_results() == 500
+        assert adapter.count_executions() == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at == finish.finished_at
+        assert stored.exit_status == finish.exit_status
+    finally:
+        adapter.close()
+
+
+def test_start_write_reaches_storage_in_one_commit(tmp_path: Path) -> None:
+    """A start-write reaches storage in one commit: one run row, a null
+    `finished_at`, and zero result rows, since a start report carries
+    none."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    counting = _CommitCountingConnection(adapter._conn)
+    adapter._conn = counting  # type: ignore[assignment]
+
+    try:
+        identity = "f" + "2" * 31
+        start = _start_only_execution(identity)
+
+        created = adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+
+        assert created is True
+        assert counting.commit_count == 1
+        assert adapter.count_results() == 0
+        assert adapter.count_executions() == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at is None
+    finally:
+        adapter.close()
+
+
+def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> None:
+    """A start-write arriving after the finish-write for the same run is one
+    commit and leaves the recorded finish intact."""
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+
+    try:
+        identity = "f" + "3" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        finish = _execution(identity, finished=True, started=started)
+        results = [_result("packages/vantage/tests/test_bulk.py::test_reordered")]
+        adapter.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
+
+        counting = _CommitCountingConnection(adapter._conn)
+        adapter._conn = counting  # type: ignore[assignment]
+
+        late_start = _start_only_execution(identity, started=started)
+        created = adapter.record_session(
+            late_start, results=(), received_at=datetime.now(timezone.utc)
+        )
+
+        assert created is False
+        assert counting.commit_count == 1
+        stored = adapter.get_execution(identity)
+        assert stored is not None
+        assert stored.finished_at == finish.finished_at
+        assert stored.exit_status == finish.exit_status
+        assert adapter.count_results() == 1
+    finally:
+        adapter.close()

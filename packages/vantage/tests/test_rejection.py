@@ -9,29 +9,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import socket
-import sqlite3
 import threading
 import time
-from collections.abc import Iterator, Sequence
-from datetime import datetime, timezone
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, get_args
+from typing import Any
 
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
 from starlette.types import ASGIApp, Receive, Scope, Send
-from vantage.core.domain.result import OUTCOMES
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
-from vantage.service.schemas import _Outcome
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _captured, _execution, _failure, _result, _start_only_execution
-
-_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -483,194 +475,6 @@ def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
     assert "results" in body["fields"]
     for field in body["fields"]:
         assert safe_segment(field) == field
-
-
-class _CommitCountingConnection:
-    """Wraps a real `sqlite3.Connection`, counting only `COMMIT` statements.
-
-    `record_session` must reach storage in exactly one commit for the whole
-    batch, not one per result or one per statement, so a report is stored
-    completely or not at all. Wrapping the connection observes that from
-    outside `SqliteExecutionStore` without weakening the adapter's own
-    commit discipline for the sake of a test.
-    """
-
-    def __init__(self, real: sqlite3.Connection) -> None:
-        self._real = real
-        self.commit_count = 0
-
-    def execute(self, sql: str, parameters: Sequence[object] = ()) -> sqlite3.Cursor:
-        if sql.strip() == "COMMIT":
-            self.commit_count += 1
-        return self._real.execute(sql, parameters)
-
-    def executemany(self, sql: str, seq_of_parameters: Any) -> sqlite3.Cursor:
-        return self._real.executemany(sql, seq_of_parameters)
-
-    def close(self) -> None:
-        self._real.close()
-
-
-def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
-    """A 500-result finish report reaches storage in exactly one commit, and
-    the finish fields and every result row are actually written.
-
-    A handful of the 500 carry failure evidence and captured output, so the
-    single commit is checked at the full width of `_INSERT_RESULT`, and a
-    failing result's evidence must round-trip.
-    """
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    counting = _CommitCountingConnection(adapter._conn)
-    adapter._conn = counting  # type: ignore[assignment]
-
-    try:
-        execution = _execution("f" + "0" * 31)
-        failure = _failure()
-        captured = _captured(stdout="some output", stderr="")
-        results = [
-            _result(
-                f"packages/vantage/tests/test_bulk.py::test_{i}",
-                outcome="failed" if i < 5 else "passed",
-                failure=failure if i < 5 else None,
-                captured=captured if i < 5 else None,
-            )
-            for i in range(500)
-        ]
-
-        created = adapter.record_session(
-            execution, results=results, received_at=datetime.now(timezone.utc)
-        )
-
-        assert created is True
-        assert counting.commit_count == 1
-        # Counting commits proves the transaction's shape, not its content:
-        # an adapter that committed once and wrote no rows would satisfy the
-        # count alone.
-        assert adapter.count_results() == 500
-        assert adapter.count_executions() == 1
-        stored = adapter.get_execution(execution.identity.value)
-        assert stored is not None
-        assert stored.finished_at == execution.finished_at
-        assert stored.exit_status == execution.exit_status
-
-        found = adapter.get_result(
-            execution.identity.value,
-            node_id="packages/vantage/tests/test_bulk.py::test_0",
-        )
-        assert found is not None
-        assert found.failure == failure
-        assert found.captured == captured
-    finally:
-        adapter.close()
-
-
-def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_commit(
-    tmp_path: Path,
-) -> None:
-    """The same finish-write, run after a prior accepted start-write for the
-    same run id -- one commit, the same 500 result rows, and the finish
-    fields actually applied through the conflict (`DO UPDATE`) branch rather
-    than the insert branch."""
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-
-    try:
-        identity = "f" + "1" * 31
-        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
-        start = _start_only_execution(identity, started=started)
-        adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
-
-        counting = _CommitCountingConnection(adapter._conn)
-        adapter._conn = counting  # type: ignore[assignment]
-
-        finish = _execution(identity, finished=True, started=started)
-        results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
-
-        created = adapter.record_session(
-            finish, results=results, received_at=datetime.now(timezone.utc)
-        )
-
-        assert created is False
-        assert counting.commit_count == 1
-        assert adapter.count_results() == 500
-        assert adapter.count_executions() == 1
-        stored = adapter.get_execution(identity)
-        assert stored is not None
-        assert stored.finished_at == finish.finished_at
-        assert stored.exit_status == finish.exit_status
-    finally:
-        adapter.close()
-
-
-def test_start_write_reaches_storage_in_one_commit(tmp_path: Path) -> None:
-    """A start-write reaches storage in one commit: one run row, a null
-    `finished_at`, and zero result rows, since a start report carries
-    none."""
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    counting = _CommitCountingConnection(adapter._conn)
-    adapter._conn = counting  # type: ignore[assignment]
-
-    try:
-        identity = "f" + "2" * 31
-        start = _start_only_execution(identity)
-
-        created = adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
-
-        assert created is True
-        assert counting.commit_count == 1
-        assert adapter.count_results() == 0
-        assert adapter.count_executions() == 1
-        stored = adapter.get_execution(identity)
-        assert stored is not None
-        assert stored.finished_at is None
-    finally:
-        adapter.close()
-
-
-def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> None:
-    """A start-write arriving after the finish-write for the same run is one
-    commit and leaves the recorded finish intact."""
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-
-    try:
-        identity = "f" + "3" * 31
-        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
-        finish = _execution(identity, finished=True, started=started)
-        results = [_result("packages/vantage/tests/test_bulk.py::test_reordered")]
-        adapter.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
-
-        counting = _CommitCountingConnection(adapter._conn)
-        adapter._conn = counting  # type: ignore[assignment]
-
-        late_start = _start_only_execution(identity, started=started)
-        created = adapter.record_session(
-            late_start, results=(), received_at=datetime.now(timezone.utc)
-        )
-
-        assert created is False
-        assert counting.commit_count == 1
-        stored = adapter.get_execution(identity)
-        assert stored is not None
-        assert stored.finished_at == finish.finished_at
-        assert stored.exit_status == finish.exit_status
-        assert adapter.count_results() == 1
-    finally:
-        adapter.close()
-
-
-def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None:
-    """The six outcome strings live in three places: `schema.sql`'s CHECK,
-    `OUTCOMES`, and the service `_Outcome` Literal. Parses the CHECK clause
-    itself instead of trusting a fourth, hand-typed copy here -- the CHECK
-    is the ground truth this test protects."""
-    schema_sql = (
-        _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"
-    ).read_text(encoding="utf-8")
-    match = re.search(r"CHECK \(outcome IN \(([^)]+)\)\)", schema_sql)
-    assert match is not None
-    schema_outcomes = frozenset(value.strip(" '") for value in match.group(1).split(","))
-
-    assert schema_outcomes == OUTCOMES
-    assert schema_outcomes == frozenset(get_args(_Outcome))
 
 
 # --- Raw-socket truncation --------------------------------------------------

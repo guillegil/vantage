@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -340,28 +340,6 @@ def test_an_older_server_tolerates_unrecognized_failure_evidence_keys(
     assert store.count_results() == 1
 
 
-def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
-    """`param_id: ""` and `param_id: null` on the wire arrive as distinct
-    Python values, and a duration of `0.0` survives as `0.0` -- no
-    falsy-to-`None` coercion."""
-    from vantage.service.schemas import ResultReport
-
-    empty_param = ResultReport.model_validate(
-        _result_entry("packages/vantage/tests/test_result.py::test_x[]", param_id="")
-    )
-    absent_param = ResultReport.model_validate(
-        _result_entry("packages/vantage/tests/test_result.py::test_y", param_id=None)
-    )
-    zero_duration = ResultReport.model_validate(
-        _result_entry("packages/vantage/tests/test_result.py::test_z", duration=0.0)
-    )
-
-    assert empty_param.param_id == ""
-    assert absent_param.param_id is None
-    assert empty_param.param_id != absent_param.param_id
-    assert zero_duration.duration == 0.0
-
-
 def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
     sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
 ) -> None:
@@ -646,30 +624,6 @@ def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
     # unchanged, yet the response is still 200 -- a rowcount-based 404 would
     # have answered 404 here.
     assert store._last_contact[run_id] == far_future  # noqa: SLF001
-
-
-# --- `app.state.grace_period` -------------------------------------------------
-
-
-def test_create_app_defaults_grace_period_to_900_seconds() -> None:
-    app = create_app(InMemoryExecutionStore())
-
-    assert app.state.grace_period == timedelta(seconds=900)
-
-
-def test_create_app_exposes_the_configured_grace_period() -> None:
-    app = create_app(InMemoryExecutionStore(), grace_period_seconds=123.0)
-
-    assert app.state.grace_period == timedelta(seconds=123)
-
-
-@pytest.mark.parametrize("seconds", [0.0, -1.0, float("nan"), float("inf"), 1e14])
-def test_create_app_refuses_a_grace_period_it_cannot_apply(seconds: float) -> None:
-    """Refused when the app is built, not on every read of a run: nan, inf
-    and 1e14 cannot become a `timedelta`, and a grace period that is not
-    positive would present every unfinished run as abandoned."""
-    with pytest.raises((ValueError, OverflowError)):
-        create_app(InMemoryExecutionStore(), grace_period_seconds=seconds)
 
 
 # --- capability advertisement -------------------------------------------------

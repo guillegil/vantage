@@ -1,4 +1,6 @@
-"""Validation of a session report's `vcs` and `metadata` sections.
+"""Validation of a session report's `results`, `vcs` and `metadata`
+sections, and the outcome vocabulary the models share with the core and the
+schema.
 
 `VcsReport.commit` accepts a SHA-256 (64 hex chars), never only a 40-hex
 pattern -- git is migrating away from SHA-1.
@@ -6,13 +8,73 @@ pattern -- git is migrating away from SHA-1.
 
 from __future__ import annotations
 
+import importlib.resources
+import re
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
+from vantage.core.domain.result import OUTCOMES
 from vantage.service.schemas import (
     MetadataFileReport,
     MetadataReport,
+    ResultReport,
     VcsReport,
+    _Outcome,
 )
+
+
+def _well_formed_result(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "node_id": "tests/test_result.py::test_x",
+        "file_path": "tests/test_result.py",
+        "class_name": None,
+        "function_name": "test_x",
+        "param_id": None,
+        "outcome": "passed",
+        "duration": 0.0031,
+        "started_at": None,
+        "finished_at": None,
+        "setup_outcome": "passed",
+        "call_outcome": "passed",
+        "teardown_outcome": "passed",
+        "setup_duration": 0.0008,
+        "call_duration": 0.0019,
+        "teardown_duration": 0.0004,
+        "worker_id": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
+    """`param_id: ""` and `param_id: null` on the wire arrive as distinct
+    Python values, and a duration of `0.0` survives as `0.0` -- no
+    falsy-to-`None` coercion."""
+    empty_param = ResultReport.model_validate(_well_formed_result(param_id=""))
+    absent_param = ResultReport.model_validate(_well_formed_result(param_id=None))
+    zero_duration = ResultReport.model_validate(_well_formed_result(duration=0.0))
+
+    assert empty_param.param_id == ""
+    assert absent_param.param_id is None
+    assert empty_param.param_id != absent_param.param_id
+    assert zero_duration.duration == 0.0
+
+
+def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None:
+    """The six outcome strings live in three places: `schema.sql`'s CHECK,
+    `OUTCOMES`, and the service `_Outcome` Literal. Parses the CHECK clause
+    itself instead of trusting a fourth, hand-typed copy here -- the CHECK
+    is the ground truth this test protects."""
+    schema_sql = (
+        importlib.resources.files("vantage.storage").joinpath("schema.sql").read_text("utf-8")
+    )
+    match = re.search(r"CHECK \(outcome IN \(([^)]+)\)\)", schema_sql)
+    assert match is not None
+    schema_outcomes = frozenset(value.strip(" '") for value in match.group(1).split(","))
+
+    assert schema_outcomes == OUTCOMES
+    assert schema_outcomes == frozenset(get_args(_Outcome))
 
 
 def _well_formed_vcs(**overrides: object) -> dict[str, object]:

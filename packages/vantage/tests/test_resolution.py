@@ -1,8 +1,8 @@
 """`resolve_server_config`: precedence, and the values it refuses.
 
-Plain function calls throughout -- no server, no filesystem I/O, no pytest
-session. Purity itself (no directory ever created) is proved separately in
-`test_path_authority.py`.
+Plain function calls throughout -- no server, no pytest session, and no
+filesystem I/O: resolving a path answers a question and must never act on
+the answer.
 """
 
 from __future__ import annotations
@@ -172,3 +172,24 @@ def test_a_nonsensical_grace_period_is_refused_at_resolution(value: float) -> No
 
 def test_a_grace_period_of_one_year_is_accepted() -> None:
     assert _resolve(cli_grace_period=_ONE_YEAR_SECONDS).grace_period_seconds == _ONE_YEAR_SECONDS
+
+
+def test_resolution_creates_no_directory(tmp_path: Path) -> None:
+    """`resolve_server_config` is pure: asking where the database would go
+    must not materialise it. `xdg_data_home` names a directory that does
+    not exist on disk; resolving against it must leave it that way.
+    """
+    xdg_data_home = tmp_path / "xdg-data"
+
+    config = resolve_server_config(
+        cli_database=None,
+        env_database=None,
+        cli_host=None,
+        cli_port=None,
+        cli_grace_period=None,
+        home=tmp_path,
+        xdg_data_home=str(xdg_data_home),
+    )
+
+    assert config.database_path == xdg_data_home / "vantage" / "vantage.db"
+    assert not xdg_data_home.exists()
