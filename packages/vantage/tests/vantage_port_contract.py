@@ -493,6 +493,30 @@ class ExecutionStoreContract:
         assert entry.last_seen_at == later_execution.started_at
         assert entry.last_seen_run_id == later_execution.identity.value
 
+    def test_a_late_report_of_an_earlier_session_moves_first_seen_back(
+        self, store: ExecutionStore
+    ) -> None:
+        """Results arrive with the finish report, so of two overlapping
+        sessions the one that started later can report first. The session
+        that started earlier still saw the test first."""
+        node_id = "t.py::test_overlapping"
+        started = datetime(2026, 9, 1, 10, 30, 0, tzinfo=timezone.utc)
+        short_job = _execution("a" * 32, started=started)
+        long_job = _execution("b" * 32, started=started - timedelta(minutes=30))
+        store.record_session(
+            short_job, results=(_result(node_id),), received_at=datetime.now(timezone.utc)
+        )
+        store.record_session(
+            long_job, results=(_result(node_id),), received_at=datetime.now(timezone.utc)
+        )
+
+        entry = store.get_catalogue_entry(node_id)
+
+        assert entry is not None
+        assert entry.first_seen_at == long_job.started_at
+        assert entry.last_seen_at == short_job.started_at
+        assert entry.last_seen_run_id == short_job.identity.value
+
     def test_a_report_without_a_node_id_leaves_its_catalogue_entry_untouched(
         self, store: ExecutionStore
     ) -> None:

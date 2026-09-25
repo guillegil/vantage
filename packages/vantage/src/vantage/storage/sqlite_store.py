@@ -24,8 +24,9 @@ mid-statement is the classic two-writer deadlock.
 A session's run, catalogue, result and metadata rows are written in one
 transaction, without `RETURNING`: it needs SQLite >= 3.35, newer than some
 Python 3.10 builds link against. The catalogue
-advances `last_seen_at` with `MAX`, so a late report with an older
-`started_at` cannot move it backwards, and the result insert is `ON
+takes `first_seen_at` with `MIN` and `last_seen_at` with `MAX`, so a report
+arriving out of start order moves neither the wrong way, and the result
+insert is `ON
 CONFLICT(run_id, node_id) DO NOTHING`, so a replayed report is a silent
 no-op.
 
@@ -210,7 +211,9 @@ _COUNT_RUNS_PREDATING_KEY = """
     ) AS first_seen
 """
 
-# Conflict target is `node_id`, the catalogue's identity key.
+# Conflict target is `node_id`, the catalogue's identity key. Every
+# right-hand side reads the row as it was before the update, so the order of
+# the assignments does not matter.
 _UPSERT_TEST_CASE = """
     INSERT INTO test_case (
         node_id, file_path, class_name, function_name,
@@ -223,6 +226,7 @@ _UPSERT_TEST_CASE = """
         param_id         = excluded.param_id,
         last_seen_run_id = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
                                 THEN excluded.last_seen_run_id ELSE test_case.last_seen_run_id END,
+        first_seen_at    = MIN(test_case.first_seen_at, excluded.first_seen_at),
         last_seen_at     = MAX(test_case.last_seen_at, excluded.last_seen_at)
 """
 
@@ -589,7 +593,7 @@ def _catalogue_rows(
             identity.class_name,
             identity.function_name,
             identity.param_id,
-            started_at,  # first_seen_at -- only used on INSERT, ignored on conflict
+            started_at,  # first_seen_at -- the MIN clause decides on conflict
             started_at,  # last_seen_at -- the MAX/CASE clause decides on conflict
             run_id,  # last_seen_run_id
         )

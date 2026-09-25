@@ -148,9 +148,10 @@ class Result:
 class CatalogueEntry:
     """A test's catalogue row.
 
-    ``last_seen_at`` advances monotonically at the storage layer; this
-    dataclass carries whatever the store read back and does not enforce
-    that invariant itself.
+    The store keeps ``first_seen_at`` at the earliest run that held the
+    test and ``last_seen_at`` at the latest, whatever order their reports
+    arrive in; this dataclass carries whatever the store read back and does
+    not enforce that itself.
     """
 
     identity: CaseIdentity

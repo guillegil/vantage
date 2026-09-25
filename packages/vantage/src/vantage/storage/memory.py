@@ -124,13 +124,14 @@ class InMemoryExecutionStore:
             )
             return
 
-        # Mirrors the SQLite `DO UPDATE`: identity fields always refresh, but
+        # Mirrors the SQLite `DO UPDATE`: identity fields always refresh,
+        # `first_seen_at` moves back to an earlier run, and
         # `last_seen_at`/`last_seen_run_id` advance only when the new run is
         # strictly newer.
         advances = execution.started_at > existing.last_seen_at
         self._catalogue[identity.node_id] = CatalogueEntry(
             identity=identity,
-            first_seen_at=existing.first_seen_at,
+            first_seen_at=min(existing.first_seen_at, execution.started_at),
             last_seen_at=execution.started_at if advances else existing.last_seen_at,
             last_seen_run_id=execution.identity.value if advances else existing.last_seen_run_id,
         )
