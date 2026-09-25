@@ -1,11 +1,12 @@
 """Guard: the workspace root ``pyproject.toml`` is the only pytest config file.
 
-pytest uses a single config file: walking up from each path it is given, or
-from the invocation directory, it takes the first file that counts. A config
-file anywhere under ``packages/`` therefore replaces the root's for any run on
-that directory or below it -- ``pytest packages/<pkg>`` from the workspace
-root included -- and the root's settings, ``--strict-markers`` and the
-``slow`` marker declaration among them, silently stop applying.
+pytest uses a single config file: walking up from the directory its path
+arguments share, or from the invocation directory when there are none, it
+takes the first file that counts. A config file anywhere under ``packages/``
+therefore replaces the root's for any run on that directory or below it --
+``pytest packages/<pkg>`` from the workspace root included -- and the root's
+settings, ``--strict-markers`` and the ``slow`` marker declaration among them,
+silently stop applying.
 
 This is a text scan, not a TOML parse: ``tomllib`` does not exist on
 Python 3.10 and the project declares no dependency on the ``tomli`` backport.

@@ -40,11 +40,11 @@ pytest-vantage = { workspace = true }
 vantage = { workspace = true }
 
 # The workspace's only pytest configuration. pytest uses the first config
-# file it finds walking up from the paths it is given, so a pytest.ini,
-# tox.ini, setup.cfg, pytest.toml or [tool.pytest] table anywhere under
-# packages/ would silently replace this one for runs on that directory,
-# `pytest packages/<pkg>` from here included. A guard test fails if one
-# appears.
+# file it finds walking up from the paths it is given, so a pytest.ini or
+# pytest.toml, a pytest section in tox.ini or setup.cfg, or a [tool.pytest]
+# table anywhere under packages/ would silently replace this one for runs on
+# that directory, `pytest packages/<pkg>` from here included. A guard test
+# fails if one appears.
 [tool.pytest.ini_options]
 markers = [
     # Opt OUT with `-m 'not slow'`, never opt in. The default run is the
