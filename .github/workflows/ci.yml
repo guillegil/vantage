@@ -36,8 +36,8 @@ jobs:
       - name: Install project (locked, dev extra)
         run: uv sync --locked --extra dev --python ${{ matrix.python-version }}
 
-      # `uv run --extra dev` re-syncs and would reinstall pytest-xdist, so
-      # the "without" leg drops it after sync and runs with --no-sync.
+      # Every step after the locked sync runs with --no-sync: a re-sync
+      # would reinstall pytest-xdist, which the "without" leg drops here.
       - name: Uninstall pytest-xdist for the "without" leg
         if: matrix.xdist == 'without'
         run: uv pip uninstall pytest-xdist
@@ -223,18 +223,18 @@ jobs:
         run: uv sync --locked --extra dev --python 3.12
 
       - name: Run ruff format --check
-        run: uv run --extra dev ruff format --check .
+        run: uv run --no-sync ruff format --check .
 
       - name: Run ruff check
-        run: uv run --extra dev ruff check .
+        run: uv run --no-sync ruff check .
 
       - name: Run mypy --strict
-        run: uv run --extra dev mypy .
+        run: uv run --no-sync mypy .
 
       # deptry's known false positives are ignored by name in
       # pyproject.toml's [tool.deptry.per_rule_ignores], not silenced wholesale.
       - name: Run deptry
-        run: uv run --extra dev deptry .
+        run: uv run --no-sync deptry .
 
       - name: Build both distributions (packaging guard)
         run: uv build --wheel --all-packages -o dist
