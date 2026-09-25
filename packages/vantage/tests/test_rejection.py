@@ -15,7 +15,7 @@ import sqlite3
 import threading
 import time
 import tracemalloc
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, get_args
@@ -99,6 +99,18 @@ def client(store: InMemoryExecutionStore) -> TestClient:
     return TestClient(create_app(store))
 
 
+@pytest.fixture(params=["memory", "sqlite"])
+def any_store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Any]:
+    """Both adapters, for rejections that must not depend on which store
+    would have received the write."""
+    if request.param == "memory":
+        yield InMemoryExecutionStore()
+        return
+    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    yield adapter
+    adapter.close()
+
+
 def test_422_response_never_echoes_input_or_pydantic_types(client: TestClient) -> None:
     """FastAPI's default handler mirrors the client's own value back in an
     ``"input"`` key, and can carry pydantic's internal error ``"type"``
@@ -154,11 +166,10 @@ def test_non_json_body_is_400(client: TestClient, store: InMemoryExecutionStore)
     assert store.count_executions() == 0
 
 
+_REPORT_BYTES = json.dumps(_well_formed_report()).encode()
 _UNPARSEABLE_BODIES = {
-    "invalid_utf8": json.dumps(_well_formed_report()).encode().replace(b"null", b'"\xff"', 1),
-    "encoded_surrogate": json.dumps(_well_formed_report())
-    .encode()
-    .replace(b"null", b'"\xed\xa0\x80"', 1),
+    "invalid_utf8": _REPORT_BYTES.replace(b"null", b'"\xff"', 1),
+    "encoded_surrogate": _REPORT_BYTES.replace(b"null", b'"\xed\xa0\x80"', 1),
     "nesting_deeper_than_the_recursion_limit": b"[" * 200_000,
     "integer_over_the_digit_limit": b'{"run": {"exit_status": ' + b"1" * 5000 + b"}}",
 }
@@ -179,6 +190,58 @@ def test_every_unparseable_body_is_400_invalid_json(
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_json"
     assert store.count_executions() == 0
+
+
+def _report_with(field: str, value: object) -> dict[str, Any]:
+    """`_well_formed_report` carrying one result, with `value` at the dotted
+    `field` (`run.<name>` or `results.0.<name>`)."""
+    report = _well_formed_report()
+    report["results"] = [_result_entry("tests/test_a.py::test_one")]
+    section, *rest = field.split(".")
+    target = report["run"] if section == "run" else report["results"][int(rest.pop(0))]
+    target[rest[0]] = value
+    return report
+
+
+_OUT_OF_RANGE_VALUES = {
+    "exit_status_above_int64": ("run.exit_status", 2**63),
+    "exit_status_below_int64": ("run.exit_status", -(2**63) - 1),
+    "failure_lineno_above_int64": ("results.0.failure_lineno", 2**63),
+    "started_at_past_year_9999_in_utc": ("run.started_at", "9999-12-31T23:59:59-05:00"),
+    "started_at_before_year_1_in_utc": ("run.started_at", "0001-01-01T00:00:00+01:00"),
+    "finished_at_past_year_9999_in_utc": ("run.finished_at", "9999-12-31T23:59:59-05:00"),
+    "result_started_at_past_year_9999_in_utc": (
+        "results.0.started_at",
+        "9999-12-31T23:59:59-05:00",
+    ),
+    "result_finished_at_before_year_1_in_utc": (
+        "results.0.finished_at",
+        "0001-01-01T00:00:00+01:00",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), _OUT_OF_RANGE_VALUES.values(), ids=_OUT_OF_RANGE_VALUES.keys()
+)
+def test_a_value_the_store_cannot_hold_is_422_naming_the_field(
+    any_store: Any, field: str, value: object
+) -> None:
+    """Integers outside SQLite's signed 64-bit range, and timestamps whose
+    UTC form leaves years 1-9999, are refused at validation in the shared
+    shape -- not a 500 from the store or from the UTC conversion, and the
+    same answer from either adapter."""
+    client = TestClient(create_app(any_store))
+
+    response = client.post("/api/v1/runs", json=_report_with(field, value))
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": "invalid_report",
+        "detail": "The submitted report does not match the expected shape.",
+        "fields": [field],
+    }
+    assert any_store.count_executions() == 0
 
 
 def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore) -> None:

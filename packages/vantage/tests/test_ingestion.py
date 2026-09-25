@@ -467,6 +467,46 @@ def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     assert result.finished_at == datetime(2026, 8, 18, 13, 0, 2, tzinfo=timezone.utc)
 
 
+def test_timestamps_at_the_edge_of_the_utc_range_are_accepted(
+    sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
+) -> None:
+    """Only a timestamp whose UTC form leaves years 1-9999 is refused; one
+    that lands exactly on either end converts and is stored."""
+    report = _well_formed_report("9" * 31 + "a")
+    report["run"]["started_at"] = "0001-01-01T01:00:00+01:00"
+    report["run"]["finished_at"] = "9999-12-31T18:59:59-05:00"
+
+    response = sqlite_client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    execution = sqlite_store.get_execution("9" * 31 + "a")
+    assert execution is not None
+    assert execution.started_at == datetime(1, 1, 1, tzinfo=timezone.utc)
+    assert execution.finished_at == datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("bound", [2**63 - 1, -(2**63)], ids=["int64_max", "int64_min"])
+def test_integers_at_the_signed_64_bit_bounds_are_stored(
+    sqlite_client: TestClient, sqlite_store: SqliteExecutionStore, bound: int
+) -> None:
+    """The integer bound is SQLite's own range: its two ends are stored and
+    read back unchanged."""
+    run_id = "9" * 31 + ("b" if bound > 0 else "c")
+    report = _well_formed_report(run_id)
+    report["run"]["exit_status"] = bound
+    report["results"] = [_failing_result_entry("tests/test_a.py::test_one", failure_lineno=bound)]
+
+    response = sqlite_client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    execution = sqlite_store.get_execution(run_id)
+    assert execution is not None
+    assert execution.exit_status == bound
+    [result] = sqlite_store.get_results(run_id)
+    assert result.failure is not None
+    assert result.failure.failure_lineno == bound
+
+
 # --- lone surrogates ----------------------------------------------------------
 
 # pytest builds node ids and exception text from `surrogateescape`-decoded

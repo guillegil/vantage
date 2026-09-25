@@ -38,7 +38,7 @@ import re
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import PurePath
-from typing import Any, overload
+from typing import Any
 
 from fastapi import APIRouter, Path, Request
 from fastapi.responses import JSONResponse
@@ -87,29 +87,6 @@ sends one."""
 _MAX_DECLARED_PATH_CHARS = 1024
 """Mirrors `pytest_vantage.metadata.MAX_DECLARED_PATH_CHARS`. The two
 distributions cannot import each other, so each carries its own copy."""
-
-
-@overload
-def _normalize_to_utc(value: datetime) -> datetime: ...
-@overload
-def _normalize_to_utc(value: None) -> None: ...
-def _normalize_to_utc(value: datetime | None) -> datetime | None:
-    """Normalize every timestamp that reaches the store to UTC.
-
-    Stored timestamps are TEXT, and `test_case.last_seen_at` only moves
-    forward via `MAX(...)` -- a lexicographic comparison, correct only when
-    every string has the same offset. The plugin already sends UTC, but any
-    HTTP client can report here, so the server does not trust the wire.
-
-    An aware value converts with `astimezone(timezone.utc)`. A naive value is
-    stamped as UTC with `replace()` -- `astimezone()` on a naive value would
-    assume the server's local zone.
-    """
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _to_vcs_context(vcs: VcsReport | None) -> VcsContext | None:
@@ -240,8 +217,8 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
 def _to_execution(run: RunReport, vcs: VcsReport | None) -> Execution:
     return Execution(
         identity=Identity(run.id),
-        started_at=_normalize_to_utc(run.started_at),
-        finished_at=_normalize_to_utc(run.finished_at),
+        started_at=run.started_at,
+        finished_at=run.finished_at,
         exit_status=run.exit_status,
         interrupted=run.interrupted,
         interrupt_reason=run.interrupt_reason,
@@ -330,8 +307,8 @@ def _to_result(item: ResultReport) -> Result:
         ),
         outcome=item.outcome,
         duration=item.duration,
-        started_at=_normalize_to_utc(item.started_at),
-        finished_at=_normalize_to_utc(item.finished_at),
+        started_at=item.started_at,
+        finished_at=item.finished_at,
         setup_outcome=item.setup_outcome,
         call_outcome=item.call_outcome,
         teardown_outcome=item.teardown_outcome,

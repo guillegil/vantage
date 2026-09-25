@@ -32,12 +32,42 @@ instead of rejecting the report.
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Literal
+from datetime import datetime, timezone
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
+
+# SQLite stores an integer as signed 64 bits and refuses a larger one at
+# parameter binding, after validation, as a 500 that loses the whole report.
+# Bounding here makes it a 422 naming the field, whichever store is behind.
+INT64_MIN = -(2**63)
+INT64_MAX = 2**63 - 1
+
+
+def _to_utc(value: datetime) -> datetime:
+    """Normalise a reported timestamp to UTC.
+
+    Stored timestamps are TEXT, and `test_case.last_seen_at` only moves
+    forward via `MAX(...)` -- a lexicographic comparison, correct only when
+    every string has the same offset. The plugin already sends UTC, but any
+    HTTP client can report here, so the server does not trust the wire.
+
+    A naive value is stamped as UTC with `replace()`: `astimezone()` on a
+    naive value would assume the server's local zone. An aware value whose
+    UTC form leaves years 1-9999 cannot be stored, and converting it here
+    makes that a validation error on its own field.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    try:
+        return value.astimezone(timezone.utc)
+    except OverflowError:
+        raise ValueError("timestamp is out of range once converted to UTC") from None
+
+
+_UtcDatetime = Annotated[datetime, AfterValidator(_to_utc)]
 
 # Mirrors `vantage.core.domain.result.OUTCOMES`. A `Literal` must spell out
 # its values, so the vocabulary is declared again here;
@@ -58,9 +88,9 @@ class RunReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str = Field(pattern=_IDENTITY_PATTERN)
-    started_at: datetime
-    finished_at: datetime | None
-    exit_status: int | None
+    started_at: _UtcDatetime
+    finished_at: _UtcDatetime | None
+    exit_status: int | None = Field(ge=INT64_MIN, le=INT64_MAX)
     interrupted: bool
     interrupt_reason: str | None
 
@@ -102,8 +132,8 @@ class ResultReport(BaseModel):
     param_id: str | None
     outcome: _Outcome
     duration: float | None
-    started_at: datetime | None
-    finished_at: datetime | None
+    started_at: _UtcDatetime | None
+    finished_at: _UtcDatetime | None
     setup_outcome: _Outcome | None
     call_outcome: _Outcome | None
     teardown_outcome: _Outcome | None
@@ -115,7 +145,7 @@ class ResultReport(BaseModel):
     failure_message: str | None = None
     failure_message_truncated: bool = False
     failure_path: str | None = None
-    failure_lineno: int | None = None
+    failure_lineno: int | None = Field(default=None, ge=INT64_MIN, le=INT64_MAX)
     failure_repr: str | None = None
     failure_repr_truncated: bool = False
     traceback: str | None = None
