@@ -5,7 +5,7 @@ than using `boundary.py`'s decorators, which latch after one failure and
 would stop the session's later reports and heartbeats. A failed git read
 records nulls; it must not stop recording.
 
-Every exception is swallowed inside `capture`:
+Every `Exception` is swallowed inside `capture`. The ones expected are:
 
 - `FileNotFoundError` -- no `git` binary, even past `shutil.which`: `which`
   and `exec` can disagree, and `PATH` can change between them.
@@ -17,9 +17,9 @@ Every exception is swallowed inside `capture`:
   `check=True`), caught anyway so a later `check=True` cannot fail open.
 - `UnicodeDecodeError`, `LookupError` -- decoding stdout; `errors="replace"`
   already prevents the first, `LookupError` covers a broken codec registry.
-- Anything else -- `Exception`, the outer net. Never `BaseException`:
-  `KeyboardInterrupt`/`SystemExit` must still reach pytest's `wrap_session`,
-  the same rule `boundary._isolated` follows.
+
+Never `BaseException`: `KeyboardInterrupt`/`SystemExit` must still reach
+pytest's `wrap_session`, the same rule `boundary._isolated` follows.
 """
 
 from __future__ import annotations
@@ -70,17 +70,6 @@ class VcsSnapshot:
 
 
 _EMPTY = VcsSnapshot()
-
-# See the module docstring for what raises each one.
-_SWALLOWED_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    FileNotFoundError,
-    subprocess.TimeoutExpired,
-    OSError,
-    subprocess.CalledProcessError,
-    UnicodeDecodeError,
-    LookupError,
-    Exception,
-)
 
 
 def _field(result: subprocess.CompletedProcess[str] | None) -> str | None:
@@ -173,7 +162,7 @@ def capture(rootpath: Path) -> VcsSnapshot:
         # finds `remaining()` already at the floor and times out too.
         try:
             return _run(argv, cwd=rootpath, env=env, timeout=remaining())
-        except _SWALLOWED_EXCEPTIONS:
+        except Exception:  # the module docstring lists what is expected here
             return None
 
     gate = invoke(["git", "rev-parse", "--show-toplevel"])
