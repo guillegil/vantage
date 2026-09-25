@@ -14,7 +14,6 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -22,36 +21,15 @@ import pytest
 from pytest_vantage import transport, vcs
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.recorder import Recorder
-from vantage.core.domain.execution import Execution
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import (  # noqa: F401 -- fixture
+    VantageTestServer,
+    vantage_server,
+    wait_for_execution,
+    wait_for_file,
+)
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
 _SLOW_TEST = "import time\n\n\ndef test_slow():\n    time.sleep(5)\n"
-
-
-def _wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> Execution:
-    """Poll `server` until its first run entry has landed, or raise after
-    `timeout` seconds. A bounded wait on an observable condition rather than
-    a fixed sleep, which is flaky on a loaded CI runner. Used to act only
-    after `pytest_sessionstart`'s start-write has been accepted.
-    """
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        executions = server.executions()
-        if executions:
-            return executions[0]
-        time.sleep(0.02)
-    raise TimeoutError(f"no run entry appeared within {timeout}s")
-
-
-def _wait_for_file(path: Path, *, timeout: float = 15.0) -> None:
-    """Poll until `path` exists, or raise after `timeout` seconds: the same
-    bounded wait as `_wait_for_execution`, on a marker the child writes."""
-    deadline = time.monotonic() + timeout
-    while not path.exists():
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"{path} did not appear within {timeout}s")
-        time.sleep(0.01)
 
 
 class _ConfigDouble:
@@ -672,7 +650,7 @@ def test_sigint_leaves_start_time_and_null_end_time(
         stdin=subprocess.DEVNULL,
     )
     try:
-        _wait_for_file(entered)
+        wait_for_file(entered)
         process.send_signal(signal.SIGINT)
         process.wait(timeout=15)
     finally:
@@ -717,7 +695,7 @@ def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_re
         stdin=subprocess.DEVNULL,
     )
     try:
-        _wait_for_execution(vantage_server)
+        wait_for_execution(vantage_server)
         assert process.poll() is None
     finally:
         os.kill(process.pid, signal.SIGKILL)
@@ -774,7 +752,7 @@ def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_cont
     result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
     result.assert_outcomes(passed=3)
-    execution = _wait_for_execution(vantage_server)
+    execution = wait_for_execution(vantage_server)
     run_id = execution.identity.value
     assert run_id in baseline_by_run, (
         "no heartbeat ever reached the server's touch_last_contact -- "

@@ -21,6 +21,7 @@ import socket
 import threading
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 import uvicorn
@@ -115,6 +116,32 @@ class VantageTestServer:
         private reach-in is needed here (unlike `executions()`/`results()`).
         """
         return self.store.get_catalogue_entry(node_id)
+
+
+def wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> Execution:
+    """Poll `server` until its first run entry has landed, or raise after
+    `timeout` seconds: a bounded wait on an observable condition rather
+    than a fixed sleep, which is flaky on a loaded CI runner.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        executions = server.executions()
+        if executions:
+            return executions[0]
+        time.sleep(0.02)
+    raise TimeoutError(f"no run entry appeared within {timeout}s")
+
+
+def wait_for_file(path: Path, *, timeout: float = 15.0) -> None:
+    """Poll until `path` exists, or raise after `timeout` seconds: the same
+    bounded wait, on a marker a child process writes once it has reached a
+    point the test must not act before.
+    """
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"{path} did not appear within {timeout}s")
+        time.sleep(0.01)
 
 
 @pytest.fixture

@@ -23,7 +23,6 @@ import urllib.error
 import urllib.request
 import warnings
 from collections.abc import Callable, Iterator
-from pathlib import Path
 
 import pytest
 from pytest_vantage import vcs
@@ -36,7 +35,11 @@ from pytest_vantage.boundary import (
 )
 from pytest_vantage.plugin import _preflight_reachable
 from pytest_vantage.transport import Capabilities, fetch_capabilities, send
-from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
+from vantage_test_server import (  # noqa: F401 -- fixture
+    VantageTestServer,
+    vantage_server,
+    wait_for_file,
+)
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
 
@@ -541,18 +544,6 @@ def test_preflight_falls_back_to_the_scheme_default_port(
     assert attempted == [("example.com", 80), ("example.com", 443), ("example.com", 8765)]
 
 
-def _wait_for_file(path: Path, *, timeout: float = 15.0) -> None:
-    """Poll until `path` exists, or raise after `timeout` seconds: a bounded
-    wait on what the child has actually done, never a guess at how long it
-    takes on a loaded runner.
-    """
-    deadline = time.monotonic() + timeout
-    while not path.exists():
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"{path} did not appear within {timeout}s")
-        time.sleep(0.01)
-
-
 def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -596,7 +587,7 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
         stdin=subprocess.DEVNULL,
     )
     try:
-        _wait_for_file(entered)
+        wait_for_file(entered)
         vantage_server.stop()
         proceed.touch()
         stdout, stderr = process.communicate(timeout=15)
@@ -1384,12 +1375,17 @@ def test_hung_git_does_not_delay_session(
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A hung git is bounded by the five-second whole-capture budget. A fake
-    `git` on `PATH` sleeps well past it, wired through a real `Recorder` --
-    unlike `test_vcs.py`'s capture-level test, this proves the budget bounds
+    """A hung git is bounded by the whole-capture budget. A fake `git` on
+    `PATH` sleeps well past it, wired through a real `Recorder` -- unlike
+    `test_vcs.py`'s capture-level test, this proves the budget bounds
     `Recorder.__init__` itself, and that the run is still reported with all
     five snapshot fields null.
+
+    `vcs.capture` reads the budget at call time and `runpytest` runs the
+    session in this process, so a half-second budget stands in for the
+    five-second one without waiting it out.
     """
+    monkeypatch.setattr(vcs, "_CAPTURE_BUDGET_SECONDS", 0.5)
     shim_dir = pytester.path / "shim"
     shim_dir.mkdir()
     shim_path = shim_dir / "git"
@@ -1409,9 +1405,9 @@ def test_hung_git_does_not_delay_session(
     elapsed = time.monotonic() - started
 
     result.assert_outcomes(passed=1)
-    # The whole-capture budget (5s), not several 5s timeouts stacked, plus
-    # slack for the rest of a one-test session.
-    assert elapsed < 5.0 + 5.0
+    # The whole-capture budget, not the shim's 30 seconds, plus slack for
+    # the rest of a one-test session.
+    assert elapsed < vcs._CAPTURE_BUDGET_SECONDS + 5.0
     assert sent, "no report captured -- the session never reached the finish-write"
     finish_report = sent[-1]
     assert finish_report["vcs"] == {
