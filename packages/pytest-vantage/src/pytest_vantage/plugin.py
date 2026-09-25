@@ -6,7 +6,9 @@ implements no hook capable of a side effect: only ``pytest_addoption`` and
 ``pytest_vantage.recorder`` and is registered through
 ``config.pluginmanager.register(...)`` only once ``--vantage`` is given --
 pytest fires every ``pytest_*`` hook it finds on a registered plugin, so a
-reporting hook here would run in every session.
+reporting hook here would run in every session. For the same reason the
+recording modules are imported inside ``pytest_configure``, after the
+activation check: a session without ``--vantage`` never pays for them.
 
 The plugin never opens a database. It reports sessions over HTTP with
 ``urllib`` and ``json`` -- standard library only, so installing it can
@@ -23,9 +25,6 @@ import pytest
 
 from pytest_vantage.boundary import _warn
 from pytest_vantage.config import VantageConfigError, resolve_liveness_timeout, resolve_settings
-from pytest_vantage.evidence import EvidenceCollector
-from pytest_vantage.recorder import Recorder
-from pytest_vantage.transport import fetch_capabilities
 
 # The preflight probe waits at most min(2.0, report timeout): it must not
 # itself wait as long as a full report is allowed to.
@@ -279,6 +278,8 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     if hasattr(config, "workerinput"):
         if _failure_text_capture_requested(config):
+            from pytest_vantage.evidence import EvidenceCollector
+
             config.pluginmanager.register(EvidenceCollector(config))
         return
     if _session_runs_no_tests(config):
@@ -291,6 +292,8 @@ def pytest_configure(config: pytest.Config) -> None:
     except VantageConfigError as exc:
         raise pytest.UsageError(str(exc)) from None
     if _failure_text_capture_requested(config):
+        from pytest_vantage.evidence import EvidenceCollector
+
         config.pluginmanager.register(EvidenceCollector(config))
     connect_timeout = min(_MAX_CONNECT_TIMEOUT, settings.timeout)
     if not _preflight_reachable(settings.address, connect_timeout):
@@ -298,6 +301,9 @@ def pytest_configure(config: pytest.Config) -> None:
             config, f"vantage: cannot reach {settings.address}, this session will not be recorded"
         )
         return
+    from pytest_vantage.recorder import Recorder
+    from pytest_vantage.transport import fetch_capabilities
+
     liveness_timeout = resolve_liveness_timeout(settings.timeout)
     lifecycle_available = fetch_capabilities(settings.address, timeout=liveness_timeout)
     try:
