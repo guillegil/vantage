@@ -305,6 +305,7 @@ def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecution
     )
 
     assert response.status_code == 415
+    assert "'<absent>'" in response.json()["detail"]
     assert store.count_executions() == 0
 
 

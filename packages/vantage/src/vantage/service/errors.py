@@ -166,7 +166,8 @@ class UnsupportedMediaTypeError(RejectionError):
     def __init__(self, media_type: str) -> None:
         kind, slash, subtype = media_type.partition("/")
         if not media_type:
-            shown = "none"
+            # Not a name `safe_segment` passes, so no header value reads as it.
+            shown = "<absent>"
         elif slash:
             shown = f"{safe_segment(kind)}/{safe_segment(subtype)}"
         else:
