@@ -106,6 +106,32 @@ def test_an_over_length_name_or_prefix_is_rejected(
     assert response.json()["error"] == expected_error
 
 
+def test_a_prefix_that_normalizes_past_the_bound_is_rejected(client: TestClient) -> None:
+    """The coerced trailing `/` counts: a prefix of exactly the bound with
+    no slash would be stored one character over it."""
+    response = _upsert(client, "Billing", "x" * SECTION_PREFIX_MAX_CHARS)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_section_prefix"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["x" * (SECTION_PREFIX_MAX_CHARS - 1), "x" * (SECTION_PREFIX_MAX_CHARS - 1) + "/"],
+    ids=["without-slash", "with-slash"],
+)
+def test_a_prefix_at_the_bound_once_normalized_is_stored_and_posts_back(
+    client: TestClient, prefix: str
+) -> None:
+    """Whatever the list returns can be posted back unchanged."""
+    created = _upsert(client, "Billing", prefix)
+    listed = client.get(_SECTIONS).json()["items"][0]["prefix"]
+
+    assert created.status_code == 201
+    assert len(listed) == SECTION_PREFIX_MAX_CHARS
+    assert _upsert(client, "Billing", listed).status_code == 200
+
+
 def test_too_many_sections_is_rejected_at_the_bound(client: TestClient) -> None:
     for index in range(MAX_SECTIONS):
         response = _upsert(client, f"Section{index}", f"tests/section{index}")
@@ -130,6 +156,21 @@ def test_delete_then_delete_again_is_204_then_404(client: TestClient) -> None:
     assert first.status_code == 204
     assert second.status_code == 404
     assert second.json()["error"] == "unknown_section"
+
+
+@pytest.mark.parametrize("delete_name", [" Checkout ", "Checkout"])
+def test_delete_resolves_a_name_the_way_post_stores_it(
+    client: TestClient, delete_name: str
+) -> None:
+    """POST strips surrounding whitespace before storing a name, so the
+    padded spelling that created a section and the stored one both delete
+    it."""
+    _upsert(client, " Checkout ", "tests/checkout")
+
+    response = client.delete(_SECTIONS, params={"name": delete_name})
+
+    assert response.status_code == 204
+    assert client.get(_SECTIONS).json() == {"items": []}
 
 
 # --- GET ------------------------------------------------------------------
@@ -175,6 +216,34 @@ def test_a_quoting_shaped_name_round_trips_byte_identically(client: TestClient) 
 
     listing = client.get(_SECTIONS)
     assert listing.json()["items"][0]["name"] == name
+
+
+@pytest.mark.parametrize(
+    ("body", "expected_error"),
+    [
+        (b'{"name": "Check\\ud800out", "prefix": "tests/checkout"}', "invalid_section_name"),
+        (b'{"name": "Checkout", "prefix": "tests/check\\ud800out"}', "invalid_section_prefix"),
+    ],
+    ids=["name", "prefix"],
+)
+def test_a_lone_surrogate_is_rejected_and_nothing_is_stored(
+    client: TestClient, store: InMemoryExecutionStore, body: bytes, expected_error: str
+) -> None:
+    """JSON can escape a lone surrogate, but no UTF-8 encoder accepts one:
+    unchecked, it fails in the store or the response serializer as a bare
+    `500`, and the in-memory store keeps the row and fails every later
+    read."""
+    _upsert(client, "Billing", "tests/billing")
+    before = store.list_settings(TEST_SECTIONS_NAMESPACE)
+
+    response = client.post(_SECTIONS, content=body, headers={"content-type": "application/json"})
+
+    assert response.status_code == 422
+    assert response.json()["error"] == expected_error
+    assert "ud800" not in response.text
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == before
+    listing = client.get(_SECTIONS)
+    assert listing.json() == {"items": [{"name": "Billing", "prefix": "tests/billing/"}]}
 
 
 # --- GET /runs/{run_id}/sections: the run aggregate -------------------------

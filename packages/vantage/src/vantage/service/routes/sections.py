@@ -78,6 +78,23 @@ def _load_definitions(store: ExecutionStore) -> list[SectionDefinition]:
     return definitions
 
 
+def _stored_name(raw: str) -> str:
+    """The key a section name is stored under. Upsert and delete share it,
+    so the spelling that created a section also removes it."""
+    return raw.strip()
+
+
+def _encodable(text: str) -> bool:
+    """False for text holding a lone surrogate: JSON can escape one
+    (`\\ud800`), but no store or response serializer can encode it, so it
+    would otherwise surface as a bare `500`."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 @router.get("/config/sections")
 async def list_sections(request: Request) -> SectionListResponse:
     store: ExecutionStore = request.app.state.store
@@ -90,16 +107,20 @@ async def list_sections(request: Request) -> SectionListResponse:
 async def upsert_section(request: Request, payload: SectionUpsertRequest) -> Response:
     store: ExecutionStore = request.app.state.store
 
-    name = payload.name.strip()
-    if not name or len(name) > SECTION_NAME_MAX_CHARS:
+    name = _stored_name(payload.name)
+    if not name or len(name) > SECTION_NAME_MAX_CHARS or not _encodable(name):
         raise InvalidSectionNameError()
     if is_reserved_section_name(name):
         raise ReservedSectionNameError()
 
     prefix = payload.prefix.strip()
-    if not prefix or len(prefix) > SECTION_PREFIX_MAX_CHARS:
+    if not prefix or not _encodable(prefix):
         raise InvalidSectionPrefixError()
+    # Bounded after normalization: the coerced trailing `/` is part of what
+    # is stored and listed, and a listed prefix must post back unchanged.
     normalized_prefix = normalize_prefix(prefix)
+    if len(normalized_prefix) > SECTION_PREFIX_MAX_CHARS:
+        raise InvalidSectionPrefixError()
 
     existing_names = {definition.name for definition in _load_definitions(store)}
     if name not in existing_names and len(existing_names) >= MAX_SECTIONS:
@@ -116,7 +137,7 @@ async def upsert_section(request: Request, payload: SectionUpsertRequest) -> Res
 @router.delete("/config/sections", status_code=204)
 async def delete_section(request: Request, name: str = Query(...)) -> Response:
     store: ExecutionStore = request.app.state.store
-    if not store.delete_setting(TEST_SECTIONS_NAMESPACE, name):
+    if not store.delete_setting(TEST_SECTIONS_NAMESPACE, _stored_name(name)):
         raise UnknownSectionError()
     return Response(status_code=204)
 
