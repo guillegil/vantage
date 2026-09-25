@@ -9,20 +9,27 @@ attribute.
 A worker is the only process with `item`/`excinfo`, so `EvidenceCollector`
 runs there, and the worker branch reads exactly three options:
 ``vantage`` and ``vantage_failure_text`` to decide whether to register it,
-and ``capture``, read once by `EvidenceCollector.__init__`. Beyond that a
-worker never resolves a server address, reads a timeout, preflights a
+and ``capture``, read once by `EvidenceCollector.__init__`. xdist hands each
+worker the controller's typed arguments, so the worker applies the same
+"typed on the command line" rule and agrees with its controller. Beyond that
+a worker never resolves a server address, reads a timeout, preflights a
 socket, probes the server's capabilities or constructs a `Recorder`.
 `_WorkerConfigDouble` answers exactly those reads and raises for anything
 else.
 
-Pure unit test: a config double stands in for a real ``pytest.Config``, no
+Pure unit tests: config doubles stand in for a real ``pytest.Config``, no
 subprocess or real xdist session needed.
 """
 
 from __future__ import annotations
 
+import socket
+from types import SimpleNamespace
 from typing import Any
 
+import pytest
+from pytest_vantage.boundary import VantageWarning
+from pytest_vantage.evidence import EvidenceCollector
 from pytest_vantage.plugin import pytest_configure
 
 
@@ -49,15 +56,16 @@ class _WorkerConfigDouble:
     where that would be caught. ``getini`` raises unconditionally -- no ini
     value is read on a worker. ``pluginmanager`` is a
     ``_RegisterCallDouble``, so a worker that ever constructed a `Recorder`
-    is caught there too. Opted in (`True`) so the registration path is
-    exercised; an opted-out worker would register nothing at all.
+    is caught there too. Both flags parse as set; ``typed`` is what the
+    controller's command line actually carried.
     """
 
     workerinput: dict[str, Any] = {}
     _ALLOWED_OPTIONS = frozenset({"vantage", "capture", "vantage_failure_text"})
 
-    def __init__(self) -> None:
+    def __init__(self, typed: tuple[str, ...]) -> None:
         self.pluginmanager = _RegisterCallDouble()
+        self.invocation_params = SimpleNamespace(args=typed)
 
     def getoption(self, name: str, default: object = None) -> object:
         if name == "vantage":
@@ -78,11 +86,35 @@ class _WorkerConfigDouble:
         )
 
 
-class _ControllerConfigDouble:
+def test_worker_registers_exactly_one_evidencecollector_when_activated() -> None:
+    """A worker's `pytest_configure` must register exactly one
+    `EvidenceCollector`, and nothing else -- in particular no `Recorder` --
+    when activated."""
+    config = _WorkerConfigDouble(typed=("--vantage", "--vantage-failure-text", "-n", "2"))
+    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+
+    assert len(config.pluginmanager.registered) == 1
+    (registered,) = config.pluginmanager.registered
+    assert isinstance(registered, EvidenceCollector)
+
+
+def test_worker_registers_nothing_when_the_flags_came_from_addopts() -> None:
+    """The flags parse as set -- a committed ``addopts`` reaches every
+    worker too -- but the controller's command line only carried ``-n``."""
+    config = _WorkerConfigDouble(typed=("-n", "2"))
+    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+
+    assert config.pluginmanager.registered == []
+
+
+class _UnactivatedControllerDouble:
     """The non-worker counterpart: no ``workerinput``, so the activation
     check must run -- triangulates that the guard is scoped to xdist workers
-    only, not swallowing every invocation.
+    only, not swallowing every invocation. No ``getini`` and no
+    ``pluginmanager``: an unactivated session touches neither.
     """
+
+    invocation_params = SimpleNamespace(args=())
 
     def __init__(self) -> None:
         self.options_read: list[str] = []
@@ -92,22 +124,44 @@ class _ControllerConfigDouble:
         return False
 
 
-def test_worker_registers_exactly_one_evidencecollector_when_activated() -> None:
-    """A worker's `pytest_configure` must register exactly one
-    `EvidenceCollector`, and nothing else -- in particular no `Recorder` --
-    when activated."""
-    from pytest_vantage.evidence import EvidenceCollector
-
-    config = _WorkerConfigDouble()
-    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
-
-    assert len(config.pluginmanager.registered) == 1
-    (registered,) = config.pluginmanager.registered
-    assert isinstance(registered, EvidenceCollector)
-
-
 def test_no_worker_input_still_runs_the_activation_check() -> None:
-    config = _ControllerConfigDouble()
+    config = _UnactivatedControllerDouble()
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
-    assert config.options_read == ["vantage"]
+    assert "vantage" in config.options_read
+
+
+class _ActivatedControllerDouble:
+    """A controller whose typed arguments ask for recording and failure
+    text, pointed at a port where nothing listens: `EvidenceCollector`
+    registers before the preflight, so its outcome does not matter here."""
+
+    def __init__(self, address: str) -> None:
+        self.pluginmanager = _RegisterCallDouble()
+        self.invocation_params = SimpleNamespace(args=("--vantage", "--vantage-failure-text"))
+        self._options: dict[str, Any] = {
+            "vantage": True,
+            "vantage_server": address,
+            "vantage_timeout": 0.5,
+            "vantage_failure_text": True,
+            "capture": "fd",
+        }
+
+    def getoption(self, name: str, default: object = None) -> object:
+        return self._options.get(name, default)
+
+
+def test_controller_registers_an_evidencecollector_when_activated() -> None:
+    """A session with no xdist workers at all still needs failure evidence
+    collected somewhere, so the controller registers `EvidenceCollector`
+    too."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    closed_port = probe.getsockname()[1]
+    probe.close()
+    config = _ActivatedControllerDouble(f"http://127.0.0.1:{closed_port}")
+
+    with pytest.warns(VantageWarning, match="cannot reach"):
+        pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+
+    assert [type(plugin) for plugin in config.pluginmanager.registered] == [EvidenceCollector]

@@ -22,13 +22,7 @@ from urllib.parse import urlparse
 import pytest
 
 from pytest_vantage.boundary import _warn
-from pytest_vantage.config import (
-    VantageConfigError,
-    resolve_failure_text_capture,
-    resolve_liveness_timeout,
-    resolve_metadata_capture,
-    resolve_settings,
-)
+from pytest_vantage.config import VantageConfigError, resolve_liveness_timeout, resolve_settings
 from pytest_vantage.evidence import EvidenceCollector
 from pytest_vantage.recorder import Recorder
 from pytest_vantage.transport import fetch_capabilities
@@ -38,6 +32,13 @@ from pytest_vantage.transport import fetch_capabilities
 _MAX_CONNECT_TIMEOUT = 2.0
 _DEFAULT_HTTP_PORT = 80
 _DEFAULT_HTTPS_PORT = 443
+
+# The flags that turn something on, keyed by their option names.
+_OPT_IN_FLAGS = {
+    "vantage": "--vantage",
+    "vantage_failure_text": "--vantage-failure-text",
+    "vantage_metadata": "--vantage-metadata",
+}
 
 # pytest's native TOML table hands `getini` a number for `vantage_timeout =
 # 5` and refuses one registered as a string. The float type exists from
@@ -57,7 +58,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help=(
             "Record this session's run to a vantage server. "
-            "This is the ONLY thing that activates recording."
+            "This is the ONLY thing that activates recording, and only when typed "
+            "on the command line: addopts and PYTEST_ADDOPTS cannot give it."
         ),
     )
     group.addoption(
@@ -80,8 +82,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help=(
             "Enable failure-text capture (traceback, failure fields, captured output) "
             "for this session. Absent by default -- capture never happens "
-            "unless this flag is given, there is no ini equivalent, and the flag "
-            "cannot activate recording on its own. Stored failure "
+            "unless this flag is typed on the command line, there is no ini equivalent, "
+            "and the flag cannot activate recording on its own. Stored failure "
             "text is unredacted and may contain any value a test printed or "
             "asserted, including credentials."
         ),
@@ -93,8 +95,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help=(
             "Read the files named by vantage-metadata.json in the project root and "
             "record the declared keys with this session. Absent by default -- capture "
-            "never happens unless this flag is given, there is no ini equivalent, and "
-            "the flag cannot activate recording on its own. Declared "
+            "never happens unless this flag is typed on the command line, there is no "
+            "ini equivalent, and the flag cannot activate recording on its own. Declared "
             "files are read from disk and their declared values are stored; a "
             "configuration file is where credentials live by convention."
         ),
@@ -134,6 +136,31 @@ def _preflight_reachable(address: str, timeout: float) -> bool:
     return True
 
 
+def _typed_on_command_line(config: pytest.Config, flag: str) -> bool:
+    """Whether ``flag`` itself was typed on the command line.
+
+    pytest folds the ini ``addopts`` value and the ``PYTEST_ADDOPTS``
+    environment variable into the parsed options, so ``getoption`` cannot
+    tell a committed or inherited flag from a typed one;
+    ``invocation_params.args`` holds only what was typed. xdist starts each
+    worker from its controller's typed arguments, so a worker reaches the
+    same answer. Everything after a bare ``--`` is a positional argument.
+    A store-true flag has exactly one spelling; anything else that sets it,
+    such as an ``@file`` of arguments, does not match and so enables
+    nothing.
+    """
+    args = list(config.invocation_params.args)
+    if "--" in args:
+        args = args[: args.index("--")]
+    return flag in args
+
+
+def _opt_in(config: pytest.Config, name: str) -> bool:
+    """Whether the opt-in flag registered as option ``name`` was given, and
+    given by typing it."""
+    return bool(config.getoption(name)) and _typed_on_command_line(config, _OPT_IN_FLAGS[name])
+
+
 def _activation_requested(config: pytest.Config) -> bool:
     """Whether recording was activated for this session.
 
@@ -142,27 +169,23 @@ def _activation_requested(config: pytest.Config) -> bool:
     ``vantage_timeout`` ini values and the ``VANTAGE_SERVER`` environment
     variable configure WHERE a report would go -- none of them may turn
     recording on by themselves. A config file committed by one person must
-    never silently enable recording for everyone who checks the project out.
+    never silently enable recording for everyone who checks the project out,
+    which is why ``--vantage`` in ``addopts`` does not count either.
     """
-    return bool(config.getoption("vantage"))
+    return _opt_in(config, "vantage")
 
 
 def _failure_text_capture_requested(config: pytest.Config) -> bool:
     """Whether `EvidenceCollector` should be registered for this session:
-    only when both `--vantage` and `--vantage-failure-text` are given, with
+    only when both `--vantage` and `--vantage-failure-text` are typed, with
     no ini or environment equivalent, so a committed configuration file can
-    never enable capture.
+    never enable capture of unredacted failure text.
 
     Called on both the worker and controller branches of `pytest_configure`,
     since the opt-in is session-wide. An unactivated session short-circuits
     and reads `"vantage"` alone.
     """
-    if not _activation_requested(config):
-        return False
-    return resolve_failure_text_capture(
-        activated=True,
-        cli_opt_in=bool(config.getoption("vantage_failure_text")),
-    )
+    return _activation_requested(config) and _opt_in(config, "vantage_failure_text")
 
 
 def _metadata_capture_requested(config: pytest.Config) -> bool:
@@ -175,12 +198,24 @@ def _metadata_capture_requested(config: pytest.Config) -> bool:
     worker, so the declaration is read once per session regardless of
     worker count.
     """
-    if not _activation_requested(config):
-        return False
-    return resolve_metadata_capture(
-        activated=True,
-        cli_opt_in=bool(config.getoption("vantage_metadata")),
-    )
+    return _activation_requested(config) and _opt_in(config, "vantage_metadata")
+
+
+def _warn_about_untyped_flags(config: pytest.Config) -> None:
+    """One warning naming any opt-in flag that parsed as set but was not
+    typed, so a committed ``addopts`` is visibly ignored rather than
+    silently doing nothing."""
+    ignored = [
+        flag
+        for name, flag in _OPT_IN_FLAGS.items()
+        if config.getoption(name) and not _typed_on_command_line(config, flag)
+    ]
+    if ignored:
+        _warn(
+            config,
+            f"vantage: ignoring {', '.join(ignored)} from addopts or PYTEST_ADDOPTS; "
+            "recording and capture are enabled only by flags typed on the command line",
+        )
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -194,8 +229,9 @@ def pytest_configure(config: pytest.Config) -> None:
        address, reads a timeout, probes the server or constructs a
        `Recorder`: a `Recorder` per worker would record one session as
        several runs.
-    3. **Controller branch.** Absent ``--vantage``, nothing further happens:
-       no plugin is registered, no socket is opened.
+    3. **Controller branch.** An opt-in flag that was not typed is reported
+       once, and absent a typed ``--vantage`` nothing further happens: no
+       plugin is registered, no socket is opened.
     4. The address and timeout are resolved and validated. An invalid value
        stops the session with a usage error naming the option -- reporting
        somewhere other than intended is worse than not starting.
@@ -222,6 +258,7 @@ def pytest_configure(config: pytest.Config) -> None:
         if _failure_text_capture_requested(config):
             config.pluginmanager.register(EvidenceCollector(config))
         return
+    _warn_about_untyped_flags(config)
     if not _activation_requested(config):
         return
     try:

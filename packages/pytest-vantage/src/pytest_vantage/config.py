@@ -171,29 +171,6 @@ def resolve_settings(config: pytest.Config) -> ReportSettings:
     )
 
 
-def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool) -> bool:
-    """Whether `EvidenceCollector` should be registered for this session.
-
-    Capture is opt-in: `cli_opt_in` can only widen an activated session's
-    capture, never enable recording on its own. The signature deliberately
-    has no ini or environment-variable parameter: stored failure text is
-    unredacted, so a committed config file enabling it would ship everyone's
-    tracebacks, credentials included, without them asking.
-    """
-    return activated and cli_opt_in
-
-
-def resolve_metadata_capture(*, activated: bool, cli_opt_in: bool) -> bool:
-    """Whether the plugin should attempt to read the metadata declaration
-    for this session.
-
-    The same rule as `resolve_failure_text_capture`, likewise with no ini or
-    environment-variable parameter: a committed configuration file must
-    never enable a filesystem read for everyone who checks the project out.
-    """
-    return activated and cli_opt_in
-
-
 def resolve_liveness_timeout(report_timeout: float) -> float:
     """The bound on a liveness request (start-write, heartbeat): `min(2.0,
     report_timeout)`.
@@ -210,9 +187,7 @@ __all__ = [
     "ReportSettings",
     "VantageConfigError",
     "resolve_and_validate_address",
-    "resolve_failure_text_capture",
     "resolve_liveness_timeout",
-    "resolve_metadata_capture",
     "resolve_report_timeout",
     "resolve_server_address",
     "resolve_settings",

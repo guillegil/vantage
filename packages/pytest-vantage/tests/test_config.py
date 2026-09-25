@@ -17,8 +17,6 @@ import pytest
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.config import (
     VantageConfigError,
-    resolve_failure_text_capture,
-    resolve_metadata_capture,
     resolve_report_timeout,
     resolve_server_address,
     resolve_settings,
@@ -230,24 +228,3 @@ def test_a_numeric_native_toml_timeout_lets_the_session_run(pytester: pytest.Pyt
 
     assert result.ret == pytest.ExitCode.OK
     result.assert_outcomes(passed=1)
-
-
-# --- Capture opt-ins -------------------------------------------------------------
-
-
-def test_resolve_failure_text_capture_true_only_when_activated_and_cli_opt_in() -> None:
-    """The exhaustive truth table: only `activated=True, cli_opt_in=True`
-    resolves `True` -- capture is absent by default."""
-    assert resolve_failure_text_capture(activated=False, cli_opt_in=False) is False
-    assert resolve_failure_text_capture(activated=False, cli_opt_in=True) is False
-    assert resolve_failure_text_capture(activated=True, cli_opt_in=False) is False
-    assert resolve_failure_text_capture(activated=True, cli_opt_in=True) is True
-
-
-def test_resolve_metadata_capture_true_only_when_activated_and_cli_opt_in() -> None:
-    """The exhaustive truth table: only `activated=True, cli_opt_in=True`
-    resolves `True` -- capture is absent by default."""
-    assert resolve_metadata_capture(activated=False, cli_opt_in=False) is False
-    assert resolve_metadata_capture(activated=False, cli_opt_in=True) is False
-    assert resolve_metadata_capture(activated=True, cli_opt_in=False) is False
-    assert resolve_metadata_capture(activated=True, cli_opt_in=True) is True

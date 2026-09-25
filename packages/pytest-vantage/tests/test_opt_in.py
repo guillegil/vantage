@@ -1,5 +1,14 @@
-"""Absence of ``--vantage`` is the plugin's fully inert default state.
+"""What turns recording on, and what never does.
 
+Only flags typed on the command line count. ``--vantage`` activates
+recording; ``--vantage-failure-text`` and ``--vantage-metadata`` widen an
+activated session's capture. pytest folds a committed ``addopts`` and the
+``PYTEST_ADDOPTS`` environment variable into the parsed options, so the
+plugin checks the typed arguments themselves: a flag that arrives any other
+way is ignored with one warning. An ini value or an environment variable
+may say where to report, never whether.
+
+Absence of ``--vantage`` is the plugin's fully inert default state.
 **Differential, never absolute**: pytest itself writes ``.pytest_cache`` and
 ``__pycache__``, so "no file was created" can only be made to pass by lying
 about what it checks. Instead the same project runs twice -- once bare, once
@@ -7,9 +16,9 @@ with ``-p no:vantage`` (the control: pytest with this plugin definitively
 absent) -- and the two resulting project trees must be byte-identical: the
 same relative paths, and the same file content.
 
-The stronger half is the socket-level assertion below: with no recording
-option present, no connection is even *attempted* -- not "no data sent", no
-socket opened at all. That is what proves inertness rather than politeness.
+The stronger half is the socket-level assertion: with no recording option
+present, no connection is even *attempted* -- not "no data sent", no socket
+opened at all. That is what proves inertness rather than politeness.
 """
 
 from __future__ import annotations
@@ -24,12 +33,17 @@ from types import SimpleNamespace
 import pytest
 from pytest_vantage import vcs
 from pytest_vantage.boundary import VantageWarning
-from pytest_vantage.plugin import _failure_text_capture_requested, _metadata_capture_requested
+from pytest_vantage.plugin import (
+    _activation_requested,
+    _failure_text_capture_requested,
+    _metadata_capture_requested,
+)
 from pytest_vantage.recorder import Recorder
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _SAMPLE_TEST = "def test_it():\n    assert True\n"
 _METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
+_ALL_FLAGS = "--vantage --vantage-failure-text --vantage-metadata"
 
 
 def _tree_snapshot(root: Path) -> dict[str, bytes]:
@@ -53,6 +67,10 @@ def _run_pytest(cwd: Path, *extra_args: str) -> subprocess.CompletedProcess[str]
 
 def _forbidden_create_connection(*args: object, **kwargs: object) -> tuple[object, ...]:
     raise AssertionError("socket.create_connection must not be called when --vantage is absent")
+
+
+def _vantage_warnings(recwarn: pytest.WarningsRecorder) -> list[str]:
+    return [str(w.message) for w in recwarn.list if issubclass(w.category, VantageWarning)]
 
 
 def test_project_tree_is_byte_identical_with_plugin_absent(
@@ -108,6 +126,96 @@ def test_no_connection_is_attempted_with_no_recording_option(
     result.assert_outcomes(passed=1, warnings=0)
 
 
+def test_no_connection_is_attempted_with_a_metadata_declaration_present_but_no_flags(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The socket-level half: a `vantage-metadata.json` present in the
+    project root, with no `--vantage` or `--vantage-metadata` given, must
+    not cause even a single connection attempt.
+    """
+    pytester.makepyfile(test_sample=_SAMPLE_TEST)
+    (pytester.path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
+    monkeypatch.setattr(socket, "create_connection", _forbidden_create_connection)
+
+    result = pytester.runpytest()
+
+    result.assert_outcomes(passed=1, warnings=0)
+
+
+# --- Only typed flags count ----------------------------------------------------
+
+_ADDOPTS_SOURCES = ["pyproject.toml addopts", "pytest.ini addopts", "PYTEST_ADDOPTS"]
+
+
+def _put_in_addopts(
+    source: str, flags: str, pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if source == "pyproject.toml addopts":
+        pytester.makepyprojecttoml(f'[tool.pytest.ini_options]\naddopts = "{flags}"\n')
+    elif source == "pytest.ini addopts":
+        pytester.makeini(f"[pytest]\naddopts = {flags}\n")
+    else:
+        monkeypatch.setenv("PYTEST_ADDOPTS", flags)
+
+
+@pytest.mark.parametrize("source", _ADDOPTS_SOURCES)
+@pytest.mark.parametrize(
+    ("typed", "activated"),
+    [((), False), (("--vantage",), True), (("--", "--vantage"), False)],
+    ids=["nothing typed", "--vantage typed", "--vantage after a bare --"],
+)
+def test_flags_from_addopts_enable_nothing(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+    typed: tuple[str, ...],
+    activated: bool,
+) -> None:
+    """A committed ``addopts`` is exactly how one person's choice would
+    silently become everyone's: recording, unredacted failure text and
+    configuration-file reads for every clone. pytest does fold the flags
+    into the parsed options -- asserted first, so the gates below are
+    tested against the real hazard -- and none of them may count. Only a
+    ``--vantage`` typed before any bare ``--`` activates, and it does not
+    carry the capture flags from ``addopts`` with it.
+    """
+    _put_in_addopts(source, _ALL_FLAGS, pytester, monkeypatch)
+
+    config = pytester.parseconfig(*typed)
+
+    assert config.getoption("vantage_failure_text") is True
+    assert _activation_requested(config) is activated
+    assert _failure_text_capture_requested(config) is False
+    assert _metadata_capture_requested(config) is False
+
+
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        ((), (False, False, False)),
+        (("--vantage-failure-text", "--vantage-metadata"), (False, False, False)),
+        (("--vantage",), (True, False, False)),
+        (("--vantage", "--vantage-failure-text"), (True, True, False)),
+        (("--vantage", "--vantage-metadata"), (True, False, True)),
+    ],
+)
+def test_typed_flags_decide_every_gate(
+    pytester: pytest.Pytester, typed: tuple[str, ...], expected: tuple[bool, bool, bool]
+) -> None:
+    """Capture is absent unless asked for, and a capture flag never
+    activates recording on its own."""
+    config = pytester.parseconfig(*typed)
+
+    gates = (
+        _activation_requested(config),
+        _failure_text_capture_requested(config),
+        _metadata_capture_requested(config),
+    )
+    assert gates == expected
+
+
+# --- Nothing but a typed --vantage records, even with a server listening -------
+
 _LEAKY_FAILING_TEST = """
 def test_login():
     password = "hunter2"
@@ -130,6 +238,88 @@ def _make_capturable_project(pytester: pytest.Pytester) -> None:
             }
         )
     )
+
+
+def _spy_on_connections(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Record every ``socket.create_connection`` while still connecting for
+    real -- the preflight is the plugin's first network action, so an empty
+    list means no socket was ever opened."""
+    attempts: list[object] = []
+    real_create_connection = socket.create_connection
+
+    def _spy(address: tuple[str, int], *args: object, **kwargs: object) -> socket.socket:
+        attempts.append(address)
+        return real_create_connection(address, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(socket, "create_connection", _spy)
+    return attempts
+
+
+_UNTYPED_SOURCES = [
+    "vantage_server ini value",
+    "VANTAGE_SERVER",
+    "--vantage-server alone",
+    *_ADDOPTS_SOURCES,
+]
+
+
+@pytest.mark.parametrize("source", _UNTYPED_SOURCES)
+def test_nothing_but_a_typed_vantage_records(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    recwarn: pytest.WarningsRecorder,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    source: str,
+) -> None:
+    """Every way of configuring the plugin short of typing ``--vantage``,
+    pointed at a server that is up and would accept the run: no socket is
+    opened and nothing is stored. The ``addopts`` sources carry every flag,
+    and the plugin says once that it ignored them."""
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    _make_capturable_project(pytester)
+    address = vantage_server.address
+    args: list[str] = []
+    if source == "vantage_server ini value":
+        pytester.makeini(f"[pytest]\nvantage_server = {address}\n")
+    elif source == "VANTAGE_SERVER":
+        monkeypatch.setenv("VANTAGE_SERVER", address)
+    elif source == "--vantage-server alone":
+        args = [f"--vantage-server={address}"]
+    else:
+        _put_in_addopts(source, f"{_ALL_FLAGS} --vantage-server={address}", pytester, monkeypatch)
+    attempts = _spy_on_connections(monkeypatch)
+
+    result = pytester.runpytest(*args)
+
+    result.assert_outcomes(failed=1)
+    assert attempts == []
+    assert vantage_server.executions() == []
+    warned = _vantage_warnings(recwarn)
+    if source in _ADDOPTS_SOURCES:
+        assert len(warned) == 1, warned
+        assert "ignoring --vantage, --vantage-failure-text, --vantage-metadata" in warned[0]
+    else:
+        assert warned == []
+
+
+def test_a_typed_vantage_records_to_the_ini_address(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """The positive control for the test above: the same project and the
+    same committed address record once ``--vantage`` is typed, so the empty
+    server there means "not activated", not "not reachable"."""
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    _make_capturable_project(pytester)
+    pytester.makeini(f"[pytest]\nvantage_server = {vantage_server.address}\n")
+    attempts = _spy_on_connections(monkeypatch)
+
+    result = pytester.runpytest("--vantage")
+
+    result.assert_outcomes(failed=1)
+    assert attempts != []
+    assert len(vantage_server.executions()) == 1
 
 
 # --- The capture opt-ins have no ini or environment equivalent -----------------
@@ -195,6 +385,8 @@ class _IniOnlyConfig:
     the ini value at all is what this double is built to expose.
     """
 
+    invocation_params = SimpleNamespace(args=("--vantage",))
+
     def __init__(self) -> None:
         self.ini_reads: list[str] = []
 
@@ -223,22 +415,6 @@ def test_a_committed_ini_cannot_be_the_means_by_which_capture_is_enabled() -> No
     assert config.ini_reads == [], (
         f"the failure-text opt-in must not consult any ini value; read {config.ini_reads}"
     )
-
-
-def test_no_connection_is_attempted_with_a_metadata_declaration_present_but_no_flags(
-    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The socket-level half: a `vantage-metadata.json` present in the
-    project root, with no `--vantage` or `--vantage-metadata` given, must
-    not cause even a single connection attempt.
-    """
-    pytester.makepyfile(test_sample=_SAMPLE_TEST)
-    (pytester.path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
-    monkeypatch.setattr(socket, "create_connection", _forbidden_create_connection)
-
-    result = pytester.runpytest()
-
-    result.assert_outcomes(passed=1, warnings=0)
 
 
 class _UnactivatedConfig:
