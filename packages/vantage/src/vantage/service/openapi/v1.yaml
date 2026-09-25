@@ -82,11 +82,11 @@ paths:
       description: node_id is a named query parameter, not a path segment, because a node id may contain `/` -- the same as on /tests/history.
       parameters:
         - $ref: '#/components/parameters/run_id'
-        - {name: node_id, in: query, required: true, schema: {type: string, maxLength: 1024}}
+        - {name: node_id, in: query, required: true, schema: {type: string}}
       responses:
         "200": {description: The result., content: {application/json: {schema: {$ref: '#/components/schemas/ResultDetailResponse'}}}}
         "404": {description: "No run with that id has been recorded (unknown_run), or the run has no result with that node_id (unknown_result).", content: *rejection}
-        "422": {description: "node_id missing or over 1024 characters (invalid_identity); or run_id is not 32 lowercase hex characters.", content: *rejection}
+        "422": {description: "node_id missing (invalid_identity); or run_id is not 32 lowercase hex characters.", content: *rejection}
   /tests/history:
     get:
       operationId: list_history
@@ -94,12 +94,12 @@ paths:
       summary: A test's execution history, newest first, by its node id.
       description: node_id is a named query parameter on an identity-free path, not a path segment, because a node id may contain `/`. The parameter name is the identity scheme, so another scheme can later be added as a sibling parameter.
       parameters:
-        - {name: node_id, in: query, required: true, schema: {type: string, maxLength: 1024}}
+        - {name: node_id, in: query, required: true, schema: {type: string}}
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
       responses:
         "200": {description: "A page of history entries; empty, not an error, for an unknown node_id.", content: {application/json: {schema: {$ref: '#/components/schemas/HistoryResponse'}}}}
-        "422": {description: "node_id missing or over 1024 characters (invalid_identity); or limit below 1 or offset out of range.", content: *rejection}
+        "422": {description: "node_id missing (invalid_identity); or limit below 1 or offset out of range.", content: *rejection}
   /capabilities:
     get:
       operationId: capabilities
@@ -167,7 +167,7 @@ components:
     # enforce, and a strict generated client would refuse a request the
     # server answers happily. The cap is stated as behaviour instead.
     limit: {name: limit, in: query, required: false, description: "Page size. Values above 200 are clamped to 200; the response reports whether more items exist. A value below 1 is rejected with 422 -- it is not a page size.", schema: {type: integer, minimum: 1}}
-    offset: {name: offset, in: query, required: false, schema: {type: integer, format: int64, minimum: 0}}
+    offset: {name: offset, in: query, required: false, schema: {type: integer, format: int64, minimum: 0, maximum: 9223372036854775807}}
   schemas:
     # Request and response bodies are both stated in full: this document is
     # the contract for what the server accepts and what it returns, and a
@@ -190,9 +190,10 @@ components:
     #   * every declared `enum`, against `OUTCOMES` / `PRESENTATIONS` -- the
     #     domain frozensets that decide what the server can emit.
     #
-    # Not checked: the JSON `type` and `format` keywords, `default`, and the
-    # `pattern` / `maxLength` constraints. A `string` declared where the
-    # model holds an `int` would drift silently.
+    # Not checked here: the JSON `type` and `format` keywords, `default`, and
+    # the `pattern` / `maxLength` constraints. A `string` declared where the
+    # model holds an `int` would drift silently. The integer `minimum` /
+    # `maximum` bounds are checked against the running server instead.
     SessionReport:
       type: object
       required: [run]
@@ -201,7 +202,7 @@ components:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason]
       additionalProperties: false
-      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"], format: int64}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}}
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"], format: int64, minimum: -9223372036854775808, maximum: 9223372036854775807}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}}
     # An unknown key on one result is tolerated and named back in
     # `Acknowledgement.ignored`; the failure and captured-output fields are
     # optional, because an older plugin sends none of them.
@@ -209,7 +210,7 @@ components:
       type: object
       required: [node_id, file_path, class_name, function_name, param_id, outcome, duration, started_at, finished_at, setup_outcome, call_outcome, teardown_outcome, setup_duration, call_duration, teardown_duration, worker_id]
       additionalProperties: true
-      properties: {node_id: {type: string}, file_path: {type: string}, class_name: {type: [string, "null"]}, function_name: {type: string}, param_id: {type: [string, "null"]}, outcome: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}, duration: {type: [number, "null"]}, started_at: {type: [string, "null"], format: date-time}, finished_at: {type: [string, "null"], format: date-time}, setup_outcome: {type: [string, "null"], enum: [passed, failed, error, skipped, xfailed, xpassed, null]}, call_outcome: {type: [string, "null"], enum: [passed, failed, error, skipped, xfailed, xpassed, null]}, teardown_outcome: {type: [string, "null"], enum: [passed, failed, error, skipped, xfailed, xpassed, null]}, setup_duration: {type: [number, "null"]}, call_duration: {type: [number, "null"]}, teardown_duration: {type: [number, "null"]}, worker_id: {type: [string, "null"]}, failure_type: {type: [string, "null"], default: null}, failure_message: {type: [string, "null"], default: null}, failure_message_truncated: {type: boolean, default: false}, failure_path: {type: [string, "null"], default: null}, failure_lineno: {type: [integer, "null"], format: int64, default: null}, failure_repr: {type: [string, "null"], default: null}, failure_repr_truncated: {type: boolean, default: false}, traceback: {type: [string, "null"], default: null}, traceback_truncated: {type: boolean, default: false}, skip_reason: {type: [string, "null"], default: null}, skip_reason_truncated: {type: boolean, default: false}, xfail_reason: {type: [string, "null"], default: null}, xfail_reason_truncated: {type: boolean, default: false}, captured_stdout: {type: [string, "null"], default: null}, captured_stdout_truncated: {type: boolean, default: false}, captured_stderr: {type: [string, "null"], default: null}, captured_stderr_truncated: {type: boolean, default: false}}
+      properties: {node_id: {type: string}, file_path: {type: string}, class_name: {type: [string, "null"]}, function_name: {type: string}, param_id: {type: [string, "null"]}, outcome: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}, duration: {type: [number, "null"]}, started_at: {type: [string, "null"], format: date-time}, finished_at: {type: [string, "null"], format: date-time}, setup_outcome: {type: [string, "null"], enum: [passed, failed, error, skipped, xfailed, xpassed, null]}, call_outcome: {type: [string, "null"], enum: [passed, failed, error, skipped, xfailed, xpassed, null]}, teardown_outcome: {type: [string, "null"], enum: [passed, failed, error, skipped, xfailed, xpassed, null]}, setup_duration: {type: [number, "null"]}, call_duration: {type: [number, "null"]}, teardown_duration: {type: [number, "null"]}, worker_id: {type: [string, "null"]}, failure_type: {type: [string, "null"], default: null}, failure_message: {type: [string, "null"], default: null}, failure_message_truncated: {type: boolean, default: false}, failure_path: {type: [string, "null"], default: null}, failure_lineno: {type: [integer, "null"], format: int64, minimum: -9223372036854775808, maximum: 9223372036854775807, default: null}, failure_repr: {type: [string, "null"], default: null}, failure_repr_truncated: {type: boolean, default: false}, traceback: {type: [string, "null"], default: null}, traceback_truncated: {type: boolean, default: false}, skip_reason: {type: [string, "null"], default: null}, skip_reason_truncated: {type: boolean, default: false}, xfail_reason: {type: [string, "null"], default: null}, xfail_reason_truncated: {type: boolean, default: false}, captured_stdout: {type: [string, "null"], default: null}, captured_stdout_truncated: {type: boolean, default: false}, captured_stderr: {type: [string, "null"], default: null}, captured_stderr_truncated: {type: boolean, default: false}}
     VcsReport:
       type: object
       required: [commit, branch, commit_subject, dirty, root]

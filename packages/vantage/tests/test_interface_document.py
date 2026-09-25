@@ -398,6 +398,67 @@ def test_the_capabilities_schema_matches_what_the_server_answers() -> None:
     assert all(isinstance(value, bool) for value in body.values())
 
 
+def _report_with(run_id: str, field: str, value: int) -> dict[str, Any]:
+    """`_report` with `value` at `run.exit_status`, or at `field` on one
+    result."""
+    report = _report(run_id)
+    if field == "exit_status":
+        report["run"]["exit_status"] = value
+        return report
+    result = {
+        "node_id": "tests/test_bounds.py::test_x",
+        "file_path": "tests/test_bounds.py",
+        "class_name": None,
+        "function_name": "test_x",
+        "param_id": None,
+        "outcome": "failed",
+        "duration": None,
+        "started_at": None,
+        "finished_at": None,
+        "setup_outcome": None,
+        "call_outcome": None,
+        "teardown_outcome": None,
+        "setup_duration": None,
+        "call_duration": None,
+        "teardown_duration": None,
+        "worker_id": None,
+        field: value,
+    }
+    report["results"] = [result]
+    return report
+
+
+def test_every_documented_integer_bound_is_the_one_the_server_enforces(tmp_path: Path) -> None:
+    """The document states the signed 64-bit range SQLite can bind. Each
+    bound is read from the document, then sent to a real store: the bound
+    itself is accepted and one past it is refused, never a `500`."""
+    document = _parsed_document()
+    schemas = document["components"]["schemas"]
+    offset = document["components"]["parameters"]["offset"]["schema"]
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    client = TestClient(create_app(store))
+    try:
+        assert client.get("/api/v1/runs", params={"offset": offset["maximum"]}).status_code == 200
+        past = client.get("/api/v1/runs", params={"offset": offset["maximum"] + 1})
+        assert past.status_code == 422
+
+        cases = [
+            (field, value, expected)
+            for schema, field in (("RunReport", "exit_status"), ("ResultReport", "failure_lineno"))
+            for value, expected in (
+                (schemas[schema]["properties"][field]["minimum"], 201),
+                (schemas[schema]["properties"][field]["maximum"], 201),
+                (schemas[schema]["properties"][field]["minimum"] - 1, 422),
+                (schemas[schema]["properties"][field]["maximum"] + 1, 422),
+            )
+        ]
+        for case, (field, value, expected) in enumerate(cases, start=1):
+            response = client.post("/api/v1/runs", json=_report_with(f"{case:032x}", field, value))
+            assert response.status_code == expected, (field, value)
+    finally:
+        store.close()
+
+
 # --- Schema checks ----------------------------------------------------------
 
 # `v1.yaml`'s schema name -> the model that produces or accepts that shape.
