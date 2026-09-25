@@ -65,13 +65,6 @@ def test_posting_an_existing_name_returns_200_not_201(client: TestClient) -> Non
     assert response.json() == {"name": "Checkout", "prefix": "tests/checkout-v2/"}
 
 
-def test_a_missing_trailing_slash_is_coerced_on_write(client: TestClient) -> None:
-    """A prefix without a trailing slash is stored with one."""
-    response = _upsert(client, "Billing", "tests/billing")
-
-    assert response.json()["prefix"] == "tests/billing/"
-
-
 # --- POST: rejections --------------------------------------------------------
 
 

@@ -1,20 +1,19 @@
-"""Every `read` path leaves stored data unchanged: a digest pair over every
-path the interface document tags `read`, plus a falsifier.
+"""Every `read` path leaves stored data unchanged: a content digest over
+every table, before and after calling every path the interface document tags
+`read`, plus a falsifier.
 
 **The read surface is whatever `openapi/v1.yaml` tags `read`** --
 `_read_operations` derives the call set from the document itself, so a path
-added with the tag but no binding here fails
-`test_every_read_path_has_a_binding` rather than being silently skipped. A
-read route the document does not tag `read` is not checked at all.
+added with the tag but no binding here fails the binding-completeness
+assertion rather than being silently skipped. A read route the document does
+not tag `read` is not checked at all.
 
-**Why a naive before/after file hash flakes.** The store opens WAL; a read
-connection can checkpoint the main file on close, and `-wal`/`-shm` change
-for reasons unrelated to any row changing. The proof is a pair instead: a
-logical content digest over every table (the strong half), a main-file digest
-with the read store's one connection pinned open across both digests (never
-`-wal`/`-shm`), plus `count_executions()`/`count_results()` held unchanged.
-The fixture writer's store is closed before the read store opens, so WAL is
-already checkpointed and removed when the first digest is taken.
+**Why rows, not file bytes.** The store opens WAL: a write lands in `-wal`
+and leaves the main file's bytes as they were, while a checkpoint rewrites
+them with no row changing. A file hash therefore neither catches a write nor
+stays stable across reads. The digest is taken over every table's rows,
+through the store's own connection, with `count_executions()` and
+`count_results()` held unchanged beside it.
 
 `test_a_writing_endpoint_tagged_read_fails_the_harness` proves
 `_run_read_only_proof` can report a mismatch, so the read-only check is not
@@ -35,7 +34,6 @@ from typing import Any
 import yaml
 from fastapi.testclient import TestClient
 from vantage.service.app import create_app
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _execution, _result, _vcs
 
@@ -85,30 +83,20 @@ def _logical_content_digest(conn: sqlite3.Connection) -> bytes:
     return hasher.digest()
 
 
-def _main_file_digest(db_path: Path) -> bytes:
-    """The weak half -- `.db` bytes only, never `-wal`/`-shm`."""
-    return hashlib.sha256(db_path.read_bytes()).digest()
+# A snapshot's three positions -- named once, indexed everywhere else, so the
+# pairing (before, after) does not have to be spelled out six times.
+_LOGICAL, _EXECUTIONS, _RESULTS = range(3)
+_Snapshot = tuple[bytes, int, int]
 
 
-# A snapshot's four positions -- named once, indexed everywhere else, so the
-# pairing (before, after) does not have to be spelled out eight times.
-_LOGICAL, _MAIN_FILE, _EXECUTIONS, _RESULTS = range(4)
-_Snapshot = tuple[bytes, bytes, int, int]
-
-
-def _snapshot(conn: sqlite3.Connection, db_path: Path, store: SqliteExecutionStore) -> _Snapshot:
-    return (
-        _logical_content_digest(conn),
-        _main_file_digest(db_path),
-        store.count_executions(),
-        store.count_results(),
-    )
+def _snapshot(conn: sqlite3.Connection, store: SqliteExecutionStore) -> _Snapshot:
+    return (_logical_content_digest(conn), store.count_executions(), store.count_results())
 
 
 @dataclass(frozen=True)
 class _ReadOnlyProof:
-    """`(logical, main_file, executions, results)`, before and after every op
-    in `ops` ran. Asserts nothing itself -- the caller decides."""
+    """`(logical, executions, results)`, before and after every op in `ops`
+    ran. Asserts nothing itself -- the caller decides."""
 
     before: _Snapshot
     after: _Snapshot
@@ -117,21 +105,20 @@ class _ReadOnlyProof:
 def _run_read_only_proof(
     *,
     store: SqliteExecutionStore,
-    db_path: Path,
     ops: set[tuple[str, str]],
     bindings: Mapping[tuple[str, str], tuple[_Call, ...]],
 ) -> _ReadOnlyProof:
-    conn = store._conn  # noqa: SLF001 -- the one connection, pinned open across both snapshots
-    before = _snapshot(conn, db_path, store)
+    conn = store._conn  # noqa: SLF001 -- reads what the routes' own connection sees
+    before = _snapshot(conn, store)
     for op in sorted(ops):
         for call in bindings[op]:
             call()
-    return _ReadOnlyProof(before=before, after=_snapshot(conn, db_path, store))
+    return _ReadOnlyProof(before=before, after=_snapshot(conn, store))
 
 
 def _seed_database(db_path: Path) -> None:
-    """One run, one result, via `record_session` -- writer closed before any
-    read store opens (module docstring)."""
+    """One run, one result, via `record_session`, from a writer closed
+    before the store under test opens."""
     writer = SqliteExecutionStore(db_path)
     writer.record_session(
         _execution(_RUN_ID, started=_SEEDED_AT, vcs=_vcs()),
@@ -227,9 +214,7 @@ def test_a_writing_endpoint_tagged_read_fails_the_harness(tmp_path: Path) -> Non
             ),
         }
 
-        proof = _run_read_only_proof(
-            store=store, db_path=db_path, ops=tampered_ops, bindings=tampered_bindings
-        )
+        proof = _run_read_only_proof(store=store, ops=tampered_ops, bindings=tampered_bindings)
 
         assert proof.before[_LOGICAL] != proof.after[_LOGICAL]
         assert proof.before[_EXECUTIONS] != proof.after[_EXECUTIONS]
@@ -249,38 +234,10 @@ def test_logical_content_digest_unchanged_after_every_read_path(tmp_path: Path) 
         bindings = _read_bindings(client)
         assert set(bindings) == read_ops, "binding table incomplete for this run"
 
-        proof = _run_read_only_proof(store=store, db_path=db_path, ops=read_ops, bindings=bindings)
+        proof = _run_read_only_proof(store=store, ops=read_ops, bindings=bindings)
 
         assert proof.before[_LOGICAL] == proof.after[_LOGICAL]
         assert proof.before[_EXECUTIONS] == proof.after[_EXECUTIONS] == 1
         assert proof.before[_RESULTS] == proof.after[_RESULTS] == 1
     finally:
         store.close()
-
-
-def test_main_file_digest_stable_despite_wal_checkpointing(tmp_path: Path) -> None:
-    """The main-file digest is stable across every read path, with the
-    connection pinned open as the module docstring describes."""
-    db_path = tmp_path / "store" / "vantage.db"
-    _seed_database(db_path)
-
-    store = SqliteExecutionStore(db_path)
-    try:
-        client = TestClient(create_app(store))
-        read_ops = _read_operations(_document())
-        bindings = _read_bindings(client)
-
-        proof = _run_read_only_proof(store=store, db_path=db_path, ops=read_ops, bindings=bindings)
-
-        assert proof.before[_MAIN_FILE] == proof.after[_MAIN_FILE]
-    finally:
-        store.close()
-
-
-def test_every_read_path_has_a_binding() -> None:
-    """A path tagged `read` in the document without a binding here fails
-    this test rather than being silently skipped."""
-    read_ops = _read_operations(_document())
-    client = TestClient(create_app(InMemoryExecutionStore()))
-
-    assert set(_read_bindings(client)) == read_ops

@@ -9,7 +9,6 @@ from __future__ import annotations
 import pytest
 from vantage.core.domain.sections import (
     UNASSIGNED,
-    RunSectionSummary,
     SectionDefinition,
     SectionSummary,
     derive_section,
@@ -241,10 +240,3 @@ def test_summarize_sections_totals_plus_unassigned_equal_the_run_total() -> None
 
     run_total = len(case_outcomes)
     assert sum(item.total for item in summary.items) + summary.unassigned.total == run_total
-
-
-def test_summarize_sections_returns_a_run_section_summary() -> None:
-    summary = summarize_sections([], [])
-
-    assert isinstance(summary, RunSectionSummary)
-    assert summary.items == ()

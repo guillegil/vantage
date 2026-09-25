@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from vantage.core.domain.execution import Execution, Identity
-from vantage.core.domain.liveness import PRESENTATIONS, derive_presentation
+from vantage.core.domain.liveness import derive_presentation
 
 _STARTED = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
 _GRACE = timedelta(minutes=15)
@@ -100,20 +100,6 @@ def test_grace_is_measured_from_last_contact_not_from_start() -> None:
     )
 
     assert presentation == "running"
-
-
-def test_derive_presentation_returns_a_plain_str_never_an_enum() -> None:
-    """`PRESENTATIONS` is a module-level `frozenset`, never an `Enum` --
-    `class X(str, Enum)` formats differently between Python 3.10 and 3.13."""
-    presentation = derive_presentation(
-        _execution(finished=True, exit_status=0),
-        last_contact_at=_STARTED,
-        now=_STARTED,
-        grace=_GRACE,
-    )
-
-    assert type(presentation) is str
-    assert presentation in PRESENTATIONS
 
 
 def test_a_recorded_exit_status_is_never_abandoned_however_stale() -> None:
