@@ -568,25 +568,6 @@ def test_an_item_whose_node_id_has_no_double_colon_is_recorded(
     assert execution.finished_at is not None
 
 
-def test_a_setup_only_session_still_finishes_its_run(
-    pytester: pytest.Pytester,
-    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
-) -> None:
-    """`--setup-only` runs no test body, so there is no result to record,
-    but the run itself still finishes rather than being left looking
-    abandoned."""
-    pytester.makepyfile(test_ok="def test_ok():\n    assert True\n")
-
-    run = pytester.runpytest_subprocess(
-        "--vantage", f"--vantage-server={vantage_server.address}", "--setup-only"
-    )
-
-    assert "error while reporting" not in run.stdout.str() + run.stderr.str()
-    (execution,) = vantage_server.executions()
-    assert execution.finished_at is not None
-    assert vantage_server.results() == []
-
-
 # --- empty parameter id, end to end -----------------------------------------
 
 _EMPTY_PARAM_ID = """

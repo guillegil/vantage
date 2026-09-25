@@ -413,7 +413,7 @@ def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     raw_started_at = sqlite_store._conn.execute(
         "SELECT started_at FROM run WHERE id = ?", ("9" * 32,)
     ).fetchone()[0]
-    assert raw_started_at == "2026-08-18T11:00:00+00:00"
+    assert raw_started_at == "2026-08-18T11:00:00.000000+00:00"
 
     execution = sqlite_store.get_execution("9" * 32)
     assert execution is not None

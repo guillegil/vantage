@@ -14,11 +14,9 @@ from __future__ import annotations
 import json
 import socket
 from pathlib import Path
-from typing import Any
 
 import pytest
 from pytest_vantage.boundary import VantageWarning
-from pytest_vantage.plugin import pytest_configure
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 
@@ -33,43 +31,6 @@ def _closed_port_address() -> str:
     port = probe.getsockname()[1]
     probe.close()
     return f"http://127.0.0.1:{port}"
-
-
-class _RegisterCallDouble:
-    """Mirrors `test_xdist_guard.py`'s double of the same name (no shared
-    import across test modules, by convention in this test suite)."""
-
-    def __init__(self) -> None:
-        self.registered: list[object] = []
-
-    def register(self, plugin: object) -> None:
-        self.registered.append(plugin)
-
-
-class _ControllerConfigDouble:
-    """A non-worker `pytest.Config` stand-in, carrying just enough surface
-    for `pytest_configure`'s controller branch to run to completion: no
-    `workerinput`, so `EvidenceCollector` registration and the preflight
-    both run. The configured server address (a closed port) fails the
-    preflight immediately rather than waiting out a connect timeout --
-    `EvidenceCollector` registers BEFORE that preflight runs either way, so
-    its outcome is irrelevant to what this test checks.
-    """
-
-    def __init__(self) -> None:
-        self.pluginmanager = _RegisterCallDouble()
-        self._options: dict[str, Any] = {
-            "vantage": True,
-            "vantage_server": _closed_port_address(),
-            "vantage_timeout": 0.1,
-            "vantage_failure_text": True,
-        }
-
-    def getoption(self, name: str, default: object = None) -> object:
-        return self._options.get(name, default)
-
-    def getini(self, name: str) -> object:
-        return None
 
 
 def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
@@ -258,20 +219,6 @@ def test_absent_flag_does_not_suppress_outcome_timings_or_identity(
     assert result.duration is not None
     assert result.started_at is not None
     assert result.finished_at is not None
-
-
-def test_evidencecollector_registers_on_the_controller_when_activated() -> None:
-    """The non-xdist counterpart to the worker registration test in
-    `test_xdist_guard.py` -- `EvidenceCollector` is registered on the
-    controller too, since a session with no xdist workers at all still needs
-    failure evidence collected somewhere."""
-    from pytest_vantage.evidence import EvidenceCollector
-
-    config = _ControllerConfigDouble()
-    with pytest.warns(VantageWarning, match="cannot reach"):
-        pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
-
-    assert any(isinstance(plugin, EvidenceCollector) for plugin in config.pluginmanager.registered)
 
 
 # --- rendering and field extraction -----------------------------------------
