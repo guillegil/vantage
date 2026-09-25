@@ -256,6 +256,16 @@ class SessionReport(BaseModel):
         return value
 
 
+class RejectionResponse(BaseModel):
+    """The one body every rejection has, built only by `service/errors.py`:
+    an error code, a fixed sentence and dotted field paths, never a value
+    the client submitted."""
+
+    error: str
+    detail: str
+    fields: list[str]
+
+
 class Acknowledgement(BaseModel):
     """The response body of `POST /api/v1/runs`, for both `201` and `200`."""
 

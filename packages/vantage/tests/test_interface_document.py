@@ -9,7 +9,8 @@ can fail, not only that it currently passes.
 
 `GET /api/v1/openapi.yaml` is itself declared `read` in the document, so it
 is exercised by `test_every_documented_path_answers_2xx` like every other
-read path.
+read path. The rejections are exercised the same way: every status a probe
+gets back must be one its operation lists.
 
 The schema tests at the end of this module check `components.schemas`: they
 read the declared schemas out of the parsed document and the field set out
@@ -32,15 +33,20 @@ from pydantic import BaseModel
 from vantage.core.domain.liveness import PRESENTATIONS
 from vantage.core.domain.result import OUTCOMES
 from vantage.service.app import create_app
+from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.service.schemas import (
     Acknowledgement,
     FailureProjectionResponse,
     HeartbeatAcknowledgement,
     HistoryEntryResponse,
     HistoryResponse,
+    MetadataFileReport,
     MetadataHorizonResponse,
+    MetadataReport,
+    RejectionResponse,
     ResultDetailResponse,
     ResultListItemResponse,
+    ResultReport,
     ResultsResponse,
     RunDetailResponse,
     RunListItemResponse,
@@ -53,6 +59,7 @@ from vantage.service.schemas import (
     SectionSummaryResponse,
     SectionUpsertRequest,
     SessionReport,
+    VcsReport,
 )
 from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -166,14 +173,15 @@ def test_a_served_but_undocumented_route_is_reported() -> None:
 def test_a_documented_but_unserved_path_is_reported() -> None:
     """The reverse direction, `declared - mounted`. Half 1: against the real
     app, empty. Half 2: a document copy carrying one path the app never
-    mounts, proving this direction can fail too."""
-    declared = _declared_operations(_parsed_document())
+    mounts, read through the same `_declared_operations`, proving this
+    direction can fail too."""
     mounted = _mounted_operations(create_app(InMemoryExecutionStore()))
 
-    assert declared - mounted == set()
+    assert _declared_operations(_parsed_document()) - mounted == set()
 
-    tainted_declared = declared | {("GET", "/_never-mounted-probe")}
-    assert tainted_declared - mounted == {("GET", "/_never-mounted-probe")}
+    tainted = _parsed_document()
+    tainted["paths"]["/_never-mounted-probe"] = {"get": {"responses": {}}}
+    assert _declared_operations(tainted) - mounted == {("GET", "/_never-mounted-probe")}
 
 
 def test_every_read_operation_is_get_and_every_write_operation_is_not() -> None:
@@ -270,11 +278,124 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
     bound_keys = {key for key, _ in ordered_bindings}
     assert bound_keys == declared, "binding table does not cover every documented path"
 
-    for key, call in ordered_bindings:
-        response = call()
-        assert 200 <= response.status_code < 300, (key, response.text)
+    try:
+        for key, call in ordered_bindings:
+            response = call()
+            assert 200 <= response.status_code < 300, (key, response.text)
+    finally:
+        store.close()
 
-    store.close()
+
+# --- Status codes -----------------------------------------------------------
+
+
+def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
+    """One request per rejection the server can give on each documented
+    operation, against an empty store. The unreadable-setting 500 needs a
+    corrupted row and is left out."""
+    json_header = {"content-type": "application/json"}
+    known_shape = f"/api/v1/runs/{'7' * 32}"
+    malformed = "/api/v1/runs/NOT-AN-ID"
+    node = {"node_id": "tests/test_a.py::test_one"}
+    return [
+        (
+            ("POST", "/runs"),
+            lambda: client.post("/api/v1/runs", content=b"{}", headers={"content-type": "x/y"}),
+        ),
+        (("POST", "/runs"), lambda: client.post("/api/v1/runs", content=b"{", headers=json_header)),
+        (
+            ("POST", "/runs"),
+            lambda: client.post(
+                "/api/v1/runs", content=b" " * (MAX_REPORT_BYTES + 1), headers=json_header
+            ),
+        ),
+        (
+            ("POST", "/runs"),
+            lambda: client.post("/api/v1/runs", content=b"{}", headers=json_header),
+        ),
+        (("GET", "/runs"), lambda: client.get("/api/v1/runs", params={"limit": 0})),
+        (("GET", "/runs"), lambda: client.get("/api/v1/runs", params={"metadata_key": "k"})),
+        (("GET", "/runs/{run_id}"), lambda: client.get(known_shape)),
+        (("GET", "/runs/{run_id}"), lambda: client.get(malformed)),
+        (("POST", "/runs/{run_id}/heartbeat"), lambda: client.post(f"{known_shape}/heartbeat")),
+        (("POST", "/runs/{run_id}/heartbeat"), lambda: client.post(f"{malformed}/heartbeat")),
+        (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{known_shape}/results")),
+        (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{malformed}/results")),
+        (
+            ("GET", "/runs/{run_id}/results"),
+            lambda: client.get(f"{known_shape}/results", params={"limit": 0}),
+        ),
+        (
+            ("GET", "/runs/{run_id}/result"),
+            lambda: client.get(f"{known_shape}/result", params=node),
+        ),
+        (("GET", "/runs/{run_id}/result"), lambda: client.get(f"{malformed}/result", params=node)),
+        (("GET", "/runs/{run_id}/result"), lambda: client.get(f"{known_shape}/result")),
+        (("GET", "/tests/history"), lambda: client.get("/api/v1/tests/history")),
+        (("GET", "/runs/{run_id}/sections"), lambda: client.get(f"{known_shape}/sections")),
+        (("GET", "/runs/{run_id}/sections"), lambda: client.get(f"{malformed}/sections")),
+        (
+            ("POST", "/config/sections"),
+            lambda: client.post("/api/v1/config/sections", json={"name": "", "prefix": "tests"}),
+        ),
+        (("POST", "/config/sections"), lambda: client.post("/api/v1/config/sections", json={})),
+        (
+            ("DELETE", "/config/sections"),
+            lambda: client.delete("/api/v1/config/sections", params={"name": "never-stored"}),
+        ),
+        (("DELETE", "/config/sections"), lambda: client.delete("/api/v1/config/sections")),
+    ]
+
+
+def _undocumented_statuses(
+    document: Mapping[str, Any], observed: set[tuple[str, str, int]]
+) -> set[tuple[str, str, int]]:
+    return {
+        (method, path, status)
+        for method, path, status in observed
+        if str(status) not in document["paths"][path][method.lower()]["responses"]
+    }
+
+
+def test_every_status_the_server_answers_is_documented() -> None:
+    """A generated client decides what to handle from the listed statuses,
+    so each rejection the server gives must be listed. Half 2 removes one
+    code from a copy of the document and proves the check reports it."""
+    client = TestClient(create_app(InMemoryExecutionStore()))
+    observed = {(*key, call().status_code) for key, call in _probes(client)}
+    assert all(status >= 400 for _, _, status in observed)
+
+    assert _undocumented_statuses(_parsed_document(), observed) == set()
+
+    tainted = _parsed_document()
+    del tainted["paths"]["/runs"]["post"]["responses"]["415"]
+    assert _undocumented_statuses(tainted, observed) == {("POST", "/runs", 415)}
+
+
+def test_every_response_declares_its_body() -> None:
+    """Every rejection carries the `Rejection` body, and every other
+    response but a `204` states what it returns."""
+    rejection = {"application/json": {"schema": {"$ref": "#/components/schemas/Rejection"}}}
+    for path, operations in _parsed_document()["paths"].items():
+        for method, operation in operations.items():
+            for status, response in operation["responses"].items():
+                where = f"{method.upper()} {path} {status}"
+                if int(status) >= 400:
+                    assert response.get("content") == rejection, where
+                elif status != "204":
+                    assert response.get("content"), where
+
+
+def test_the_capabilities_schema_matches_what_the_server_answers() -> None:
+    """Declared inline, since no model produces this body."""
+    responses = _parsed_document()["paths"]["/capabilities"]["get"]["responses"]
+    schema = responses["200"]["content"]["application/json"]["schema"]
+
+    body = TestClient(create_app(InMemoryExecutionStore())).get("/api/v1/capabilities").json()
+
+    assert set(schema["required"]) == set(schema["properties"]) == set(body)
+    assert all(schema["properties"][name] == {"type": "boolean"} for name in body)
+    assert all(isinstance(value, bool) for value in body.values())
 
 
 # --- Schema checks ----------------------------------------------------------
@@ -290,9 +411,14 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
 _REQUEST_SCHEMAS: dict[str, type[BaseModel]] = {
     "SessionReport": SessionReport,
     "RunReport": RunReport,
+    "ResultReport": ResultReport,
+    "VcsReport": VcsReport,
+    "MetadataReport": MetadataReport,
+    "MetadataFileReport": MetadataFileReport,
     "SectionUpsertRequest": SectionUpsertRequest,
 }
 _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
+    "Rejection": RejectionResponse,
     "Acknowledgement": Acknowledgement,
     "HeartbeatAcknowledgement": HeartbeatAcknowledgement,
     "RunVcs": RunVcsResponse,
@@ -318,14 +444,24 @@ _BOUND_MODELS: dict[str, type[BaseModel]] = {**_REQUEST_SCHEMAS, **_RESPONSE_SCH
 # the response models type these fields as plain `str` -- the document is
 # stricter than the model on purpose, and the domain is what the server can
 # actually emit. Every `enum` in the document must appear here, and every
-# entry here must appear in the document (both directions, below).
+# entry here must appear in the document (both directions, below). A
+# nullable property's enum also lists `null`, which is not part of the
+# vocabulary.
 _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
+    ("ResultReport", "outcome"): OUTCOMES,
+    ("ResultReport", "setup_outcome"): OUTCOMES,
+    ("ResultReport", "call_outcome"): OUTCOMES,
+    ("ResultReport", "teardown_outcome"): OUTCOMES,
     ("RunListItem", "presentation"): PRESENTATIONS,
     ("RunDetailResponse", "presentation"): PRESENTATIONS,
     ("ResultListItem", "outcome"): OUTCOMES,
     ("ResultDetailResponse", "outcome"): OUTCOMES,
     ("HistoryEntry", "outcome"): OUTCOMES,
 }
+
+# `extra=` on a model, to the `additionalProperties` its schema must declare.
+# `ignore` (and a response model's unset default) declares nothing.
+_ADDITIONAL_PROPERTIES = {"forbid": False, "allow": True}
 
 
 def _declared_schemas() -> dict[str, Any]:
@@ -448,8 +584,8 @@ def test_declared_enums_match_the_vocabulary_the_server_can_emit() -> None:
     second; adding an enum to a property nobody vetted fails the first,
     rather than passing unchecked because no expectation was written for
     it."""
-    found: dict[tuple[str, str], frozenset[str]] = {
-        (name, field): frozenset(declaration["enum"])
+    found: dict[tuple[str, str], Mapping[str, Any]] = {
+        (name, field): declaration
         for name, schema in _declared_schemas().items()
         for field, declaration in schema.get("properties", {}).items()
         if "enum" in declaration
@@ -459,9 +595,75 @@ def test_declared_enums_match_the_vocabulary_the_server_can_emit() -> None:
         "the document's enum-declaring properties are "
         f"{sorted(found)}, expected {sorted(_DECLARED_ENUMS)}"
     )
-    for key, declared in found.items():
+    for key, declaration in found.items():
+        declared = frozenset(value for value in declaration["enum"] if value is not None)
         expected = _DECLARED_ENUMS[key]
         assert declared == expected, (
             f"{key[0]}.{key[1]}: the document declares {sorted(declared)}, "
             f"the domain permits {sorted(expected)}"
+        )
+        # A JSON Schema enum rejects every value it does not list, `null`
+        # included, whatever `type` says.
+        assert (None in declaration["enum"]) == _document_allows_null(declaration), (
+            f"{key[0]}.{key[1]}: the enum and the type disagree about null"
+        )
+
+
+def _models_in(annotation: Any) -> set[type[BaseModel]]:
+    """Every model an annotation holds, through unions, lists and
+    `Annotated`."""
+    found: set[type[BaseModel]] = set()
+    pending = [annotation]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, type) and issubclass(current, BaseModel):
+            found.add(current)
+        else:
+            pending.extend(get_args(current))
+    return found
+
+
+def _refs_in(declaration: object) -> set[str]:
+    """Every schema name a property declaration references, at any depth."""
+    if isinstance(declaration, Mapping):
+        return {
+            name
+            for key, value in declaration.items()
+            for name in ({value.rsplit("/", 1)[-1]} if key == "$ref" else _refs_in(value))
+        }
+    if isinstance(declaration, list):
+        return {name for item in declaration for name in _refs_in(item)}
+    return set()
+
+
+def test_every_nested_model_is_bound_and_referenced_by_its_schema() -> None:
+    """A model reachable from a bound one -- a section of the report, an
+    item of a response list -- is part of the contract too, so it must be
+    bound, and the property holding it must `$ref` the schema bound to that
+    same model. Without this, a nested model could be left out of the
+    document entirely while every check above still passed."""
+    schemas = _declared_schemas()
+    name_of = {model: name for name, model in _BOUND_MODELS.items()}
+
+    for name, model in _BOUND_MODELS.items():
+        properties = schemas[name].get("properties", {})
+        for field in sorted(set(properties) & set(model.model_fields)):
+            held = _models_in(model.model_fields[field].annotation)
+            unbound = sorted(nested.__name__ for nested in held if nested not in name_of)
+            assert not unbound, f"{name}.{field} holds {unbound}, bound to no schema"
+            assert _refs_in(properties[field]) == {name_of[nested] for nested in held}, (
+                f"{name}.{field}: the document references {sorted(_refs_in(properties[field]))}"
+            )
+
+
+def test_declared_additional_properties_match_the_model_extra_setting() -> None:
+    """Whether an unknown key is refused, tolerated or ignored differs per
+    model on purpose; a generated client learns which from
+    `additionalProperties`."""
+    schemas = _declared_schemas()
+
+    for name, model in _BOUND_MODELS.items():
+        expected = _ADDITIONAL_PROPERTIES.get(str(model.model_config.get("extra")))
+        assert schemas[name].get("additionalProperties") == expected, (
+            f"{name}: {model.__name__} has extra={model.model_config.get('extra')!r}"
         )

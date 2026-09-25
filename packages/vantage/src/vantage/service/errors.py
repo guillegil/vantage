@@ -28,6 +28,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from vantage.service.schemas import RejectionResponse
+
 # The request body cap, enforced while streaming, before the body is fully
 # buffered (`service/routes/runs.py`).
 MAX_REPORT_BYTES = 1024 * 1024  # 1 MiB
@@ -81,7 +83,7 @@ def _fields_from_errors(errors: Iterable[Mapping[str, Any]]) -> list[str]:
 
 
 def _rejection_body(error: str, detail: str, fields: list[str] | None = None) -> dict[str, object]:
-    return {"error": error, "detail": detail, "fields": fields or []}
+    return RejectionResponse(error=error, detail=detail, fields=fields or []).model_dump()
 
 
 class RejectionError(Exception):
