@@ -213,7 +213,18 @@ def test_a_non_object_declaration_captures_nothing_and_warns_once(
     assert len(_metadata_warnings(recwarn)) == 1
 
 
-@pytest.mark.parametrize("document", [{"files": []}, {"version": 2, "files": []}])
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"files": []},
+        {"version": 2, "files": []},
+        # Equal to 1 in Python, but not the integer 1.
+        {"version": True, "files": []},
+        {"version": 1.0, "files": []},
+        {"version": "1", "files": []},
+    ],
+    ids=["missing", "two", "true", "float", "string"],
+)
 def test_an_unsupported_version_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder, document: dict[str, object]
 ) -> None:
@@ -297,6 +308,34 @@ def test_a_duplicate_stored_key_captures_nothing_and_warns_once(
         {"path": "a.json", "format": "json", "keys": ["firmware_version"]},
         {"path": "b.json", "format": "json", "keys": ["firmware_version"]},
     ]
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": files}))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    assert len(_metadata_warnings(recwarn)) == 1
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ({"path": "g.json", "format": "json"}, {"path": "g.json", "format": "json"}),
+        ({"path": "./g.json", "format": "json"}, {"path": "g.json", "format": "json"}),
+        ({"path": "g.json", "format": "json"}, {"path": "g.json", "format": "yaml"}),
+    ],
+    ids=["same_path", "same_file_spelled_differently", "different_format"],
+)
+def test_a_path_declared_twice_captures_nothing_and_warns_once(
+    tmp_path: Path,
+    recwarn: pytest.WarningsRecorder,
+    first: dict[str, object],
+    second: dict[str, object],
+) -> None:
+    # The server keeps one file entry per path and would silently drop the
+    # second one's status; the plugin would read and charge the file twice.
+    root = tmp_path / "project"
+    root.mkdir()
+    files = [{**first, "keys": ["a"]}, {**second, "keys": ["b"]}]
     (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": files}))
 
     result = metadata.read_declaration(_config(), root)

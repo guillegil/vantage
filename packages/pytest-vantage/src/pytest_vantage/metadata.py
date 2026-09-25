@@ -188,7 +188,9 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
             config, f"{DECLARATION_FILENAME} must be a JSON object, metadata will not be captured"
         )
         return None
-    if document.get("version") != 1:
+    version = document.get("version")
+    # By type as well as value: `true` and `1.0` both compare equal to 1.
+    if type(version) is not int or version != 1:
         _reject(
             config,
             f"{DECLARATION_FILENAME} declares no supported version, metadata will not be captured",
@@ -204,6 +206,7 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
         return None
     declared: list[DeclaredFile] = []
     seen_keys: set[str] = set()
+    seen_paths: set[PurePath] = set()
     for entry in files:
         if not isinstance(entry, dict):
             _reject(
@@ -251,6 +254,16 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
                 "metadata will not be captured",
             )
             return None
+        # The server keeps one file entry per path, so a repeat would lose
+        # its status there. Compared as paths, so `./a.json` repeats `a.json`.
+        if PurePath(path) in seen_paths:
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares the path {path!r} more than once, "
+                "metadata will not be captured",
+            )
+            return None
+        seen_paths.add(PurePath(path))
         for key in keys:
             if key in seen_keys:
                 _reject(
