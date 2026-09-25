@@ -1,8 +1,9 @@
 """The uniform 64 KiB bound on stored text fields.
 
 Applied by `service/routes/runs.py` to the commit subject, the interrupt
-reason, the failure evidence text and captured output. It only bounds size: the values are
-stored, not echoed back, so output encoding is the reader's concern.
+reason, the failure evidence text and captured output. It only bounds size:
+the values are stored, not echoed back, so output encoding is the reader's
+concern.
 
 **The bound is on UTF-8 bytes, cut at a character boundary.**
 `value[:65536]` slices characters, not bytes, and can store up to four times

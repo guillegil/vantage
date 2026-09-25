@@ -299,8 +299,10 @@ def _report(run_id: str) -> dict[str, Any]:
 
 
 class _ParkedWriteStore(InMemoryExecutionStore):
-    """Holds every `record_session` before it writes, until `release` is
-    set: a write stuck on a slow disk or on another process's lock."""
+    """Holds every `record_session` until `release` is set, before it takes
+    the store's lock: the report stays in flight for as long as the test
+    needs, and only the way a route calls the store can hold up another
+    request."""
 
     def __init__(self) -> None:
         super().__init__()

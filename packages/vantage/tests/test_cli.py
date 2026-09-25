@@ -204,6 +204,8 @@ def test_main_closes_the_store_when_the_server_stops(
 
 @_needs_enforced_mode_bits
 def test_ensure_database_directory_writable_raises_on_read_only_parent(tmp_path: Path) -> None:
+    """A directory this process cannot write to fails loudly at startup
+    rather than silently at the first write."""
     parent = tmp_path / "readonly"
     parent.mkdir(mode=0o500)
     try:
@@ -218,6 +220,8 @@ def test_ensure_database_directory_writable_passes_for_a_writable_parent(tmp_pat
 
 
 def test_default_host_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """A warning on every normal start trains people to ignore the one that
+    matters."""
     with caplog.at_level(logging.WARNING):
         warn_if_bound_wide("127.0.0.1")
 
@@ -227,6 +231,8 @@ def test_default_host_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None
 def test_non_loopback_host_warns_naming_missing_authentication(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Binding wider than loopback, with no authentication in front of the
+    server, warns and names what is missing."""
     with caplog.at_level(logging.WARNING):
         warn_if_bound_wide("0.0.0.0")  # noqa: S104
 
