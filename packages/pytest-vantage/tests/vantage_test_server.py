@@ -126,8 +126,10 @@ def vantage_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Vantage
     # A directory of its own, never one the test itself writes to or
     # inspects, such as `tmp_path` or `pytester.path`.
     server = VantageTestServer(tmp_path_factory.mktemp("vantage-server"))
-    server.start()
     try:
+        # Inside the `try`: a server that fails to start still closes its
+        # store's connection.
+        server.start()
         yield server
     finally:
         server.close()
