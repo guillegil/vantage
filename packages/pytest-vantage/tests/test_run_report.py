@@ -439,6 +439,43 @@ def test_second_invocation_gets_a_distinct_identifier(
     assert executions[0].identity.value != executions[1].identity.value
 
 
+def test_failure_text_reaches_the_server_field_for_field(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """The failure text the plugin captures is what the server stores,
+    read back from it: the server tolerates result keys it does not know,
+    so a field named differently on either side would be dropped with the
+    session still recorded, and only reading it back shows the loss.
+    """
+    pytester.makepyfile(
+        test_sample=(
+            "def test_it():\n    print('OUTPUT-MARKER')\n    assert 3 == 4, 'MESSAGE-MARKER'\n"
+        )
+    )
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    result.assert_outcomes(failed=1)
+    (stored,) = vantage_server.results()
+    failure = stored.failure
+    assert failure is not None
+    assert failure.failure_type == "AssertionError"
+    assert failure.failure_message is not None
+    assert "MESSAGE-MARKER" in failure.failure_message
+    assert failure.failure_path is not None
+    assert failure.failure_path.endswith("test_sample.py")
+    assert failure.failure_lineno == 3
+    assert failure.failure_repr is not None
+    assert failure.traceback is not None
+    assert "MESSAGE-MARKER" in failure.traceback
+    assert stored.captured.stdout is not None
+    assert "OUTPUT-MARKER" in stored.captured.stdout
+    assert stored.captured.stderr is not None
+
+
 def test_zero_test_collection_still_writes_one_row(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
