@@ -176,22 +176,19 @@ class UnsupportedMediaTypeError(RejectionError):
 
 
 class InvalidIdentityError(RejectionError):
-    """A `node_id` query value is missing or exceeds `MAX_IDENTITY_CHARS`.
+    """A required `node_id` query value is missing. There is no length
+    bound: any node id already stored must stay readable by its exact value.
 
     Chosen by `_handle_request_validation_error` only when every failing
     field is `node_id`, so an unrelated failure (e.g. a malformed `limit`)
-    still gets the generic shape. The identity value itself is never
-    echoed."""
+    still gets the generic shape."""
 
     status_code = 422
     error = "invalid_identity"
 
     @classmethod
     def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidIdentityError:
-        return cls(
-            "The node_id query parameter is missing or exceeds the maximum identity length.",
-            _fields_from_errors(errors),
-        )
+        return cls("The node_id query parameter is missing.", _fields_from_errors(errors))
 
 
 class InvalidMetadataFilterError(RejectionError):
@@ -213,7 +210,7 @@ class InvalidMetadataFilterError(RejectionError):
 
 
 class UnknownRunError(RejectionError):
-    """No run matches the id used in a heartbeat.
+    """No run matches the `run_id` in a heartbeat or read path.
 
     Accepting a heartbeat for an id the server never saw would either
     manufacture liveness for a run that does not exist or require inventing
@@ -245,8 +242,9 @@ class UnknownResultError(RejectionError):
 
 
 class InvalidSectionNameError(RejectionError):
-    """A section name is empty after `strip()`, or exceeds
-    `SECTION_NAME_MAX_CHARS`.
+    """A section name is empty after `strip()`, exceeds
+    `SECTION_NAME_MAX_CHARS`, or holds text that is not valid Unicode -- a
+    lone surrogate, which JSON can escape but UTF-8 cannot encode.
 
     The message and `fields` are fixed strings; the submitted name is never
     interpolated, so a hostile name (a CR/LF, a `</script>`) cannot ride
@@ -257,7 +255,8 @@ class InvalidSectionNameError(RejectionError):
 
     def __init__(self) -> None:
         super().__init__(
-            "The section name is empty after stripping whitespace, or exceeds the maximum length.",
+            "The section name is empty after stripping whitespace, exceeds the maximum length, "
+            "or is not valid Unicode.",
             ["name"],
         )
 
@@ -275,17 +274,17 @@ class ReservedSectionNameError(RejectionError):
 
 
 class InvalidSectionPrefixError(RejectionError):
-    """A section prefix is empty after `strip()`, or exceeds
-    `SECTION_PREFIX_MAX_CHARS`. Same no-echo discipline as
-    `InvalidSectionNameError`."""
+    """A section prefix is empty after `strip()`, exceeds
+    `SECTION_PREFIX_MAX_CHARS` once normalized, or holds text that is not
+    valid Unicode. Same no-echo discipline as `InvalidSectionNameError`."""
 
     status_code = 422
     error = "invalid_section_prefix"
 
     def __init__(self) -> None:
         super().__init__(
-            "The section prefix is empty after stripping whitespace, "
-            "or exceeds the maximum length.",
+            "The section prefix is empty after stripping whitespace, exceeds the maximum length, "
+            "or is not valid Unicode.",
             ["prefix"],
         )
 
@@ -358,8 +357,9 @@ def register_error_handlers(app: FastAPI) -> None:
     route's own 404, such as `unknown_run`, keeps its code.
 
     A `RequestValidationError` confined to the `node_id` query parameter
-    (`GET /api/v1/tests/history`) is shaped as `InvalidIdentityError`; every
-    other automatic-binding failure gets the `InvalidReportError` shape.
+    (`/tests/history`, `/runs/{run_id}/result`) is shaped as
+    `InvalidIdentityError`; every other automatic-binding failure gets the
+    `InvalidReportError` shape.
     """
 
     @app.exception_handler(RejectionError)

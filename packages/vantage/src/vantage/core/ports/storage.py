@@ -23,9 +23,12 @@ MAX_PAGE_ITEMS = 200
 rejected; a request for more is satisfied up to this many."""
 
 MAX_IDENTITY_CHARS = 1024
-"""The bound on a client-chosen test identity value -- a 1,024-character
-identity percent-encodes to at most ~3 KiB, comfortably inside the common
-8 KiB request-line buffer."""
+"""The length of a short, client-chosen, path-shaped string. Nothing is
+refused against this constant itself: a stored node id may be longer --
+pytest never shortens a parametrize id -- and must stay readable by its
+exact value. It is the value `SECTION_PREFIX_MAX_CHARS`,
+`MAX_METADATA_KEY_CHARS` and `MAX_METADATA_VALUE_BYTES` take, and the
+plugin's bound on a declared path."""
 
 T = TypeVar("T")
 

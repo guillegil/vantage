@@ -32,7 +32,7 @@ def derive_presentation(
     2. `interrupted`, or any recorded exit status -> "interrupted". A finish
        report *did* arrive, so the run is never abandoned however stale its
        last contact -- checked before the clock, and not shadowed by rule 1
-       because a Ctrl-C run carries `finished_at is None`.
+       because an interrupted run carries `finished_at is None`.
     3. `now - (last_contact_at or execution.started_at) > grace` ->
        "abandoned". The `started_at` fallback is defensive: every row this
        code writes has a last contact, but a row written by another adapter
@@ -42,10 +42,12 @@ def derive_presentation(
     if execution.finished_at is not None:
         return "finished"
     if execution.interrupted or execution.exit_status is not None:
-        # The plugin sends a null `finished_at` for pytest's INTERNAL_ERROR
-        # (status 3) but sets `interrupted` only for status 2, so keying on
-        # `interrupted` alone would present a session that did report as one
-        # that never did.
+        # The plugin sends a null `finished_at` both for an interruption --
+        # Ctrl-C or `pytest.exit`, whatever the exit status -- and for
+        # pytest's internal error (status 3), but sets `interrupted` only for
+        # the first, so keying on `interrupted` alone would present a session
+        # that did report as one that never did. pytest's own stops with
+        # status 2 carry a `finished_at` and read as finished.
         return "interrupted"
     reference = last_contact_at if last_contact_at is not None else execution.started_at
     if now - reference > grace:

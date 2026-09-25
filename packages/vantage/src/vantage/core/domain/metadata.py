@@ -59,9 +59,10 @@ MAX_METADATA_KEY_CHARS = 1024
 declared key is the same class of short, client-supplied, indexed string."""
 
 MAX_METADATA_ENTRIES = 200
-"""Bound on stored keys per run, total: `MAX_PAGE_ITEMS`. A run's metadata is
-presented unpaginated on the run detail, so this cap on stored entries *is*
-the bound on that response."""
+"""Bound on declared keys per run, across all its files. The plugin refuses
+a declaration past it, and the server drops every key past it that another
+client sends. No response presents a run's metadata, so this bounds only
+what one report can make the server store."""
 
 
 __all__ = [
