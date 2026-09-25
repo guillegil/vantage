@@ -21,15 +21,14 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Path, Query, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import ValidationError
 
 from vantage.core.domain.sections import (
     MAX_SECTIONS,
     SECTION_NAME_MAX_CHARS,
     SECTION_PREFIX_MAX_CHARS,
-    UNASSIGNED,
     SectionDefinition,
     SectionSummary,
+    is_reserved_section_name,
     normalize_prefix,
     summarize_sections,
 )
@@ -64,14 +63,18 @@ ordinary namespace parameter and attaches no meaning to it."""
 def _load_definitions(store: ExecutionStore) -> list[SectionDefinition]:
     """Every stored section, read fresh on every call -- never cached.
     Raises `UnreadableSettingError` the moment one row's `value` fails
-    `SectionValue`, naming the row's key and never the value."""
+    `SectionValue` or its key is a reserved name, naming the row's key and
+    never the value."""
     definitions: list[SectionDefinition] = []
     for setting in store.list_settings(TEST_SECTIONS_NAMESPACE):
         try:
             value = SectionValue.model_validate_json(setting.value)
-        except ValidationError as exc:
+            definition = SectionDefinition(name=setting.key, prefix=value.prefix)
+        except ValueError as exc:
+            # Pydantic's `ValidationError` is a `ValueError`, and so is the
+            # domain's refusal of a reserved name a hand-edited row can hold.
             raise UnreadableSettingError(setting.namespace, setting.key) from exc
-        definitions.append(SectionDefinition(name=setting.key, prefix=value.prefix))
+        definitions.append(definition)
     return definitions
 
 
@@ -90,7 +93,7 @@ async def upsert_section(request: Request, payload: SectionUpsertRequest) -> Res
     name = payload.name.strip()
     if not name or len(name) > SECTION_NAME_MAX_CHARS:
         raise InvalidSectionNameError()
-    if name.casefold() == UNASSIGNED:
+    if is_reserved_section_name(name):
         raise ReservedSectionNameError()
 
     prefix = payload.prefix.strip()

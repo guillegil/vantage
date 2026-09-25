@@ -18,6 +18,29 @@ from vantage.core.domain.sections import (
 )
 
 # ---------------------------------------------------------------------------
+# SectionDefinition: the reserved name
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [UNASSIGNED, "Unassigned", "UNASSIGNED"])
+def test_a_section_cannot_be_named_unassigned(name: str) -> None:
+    """`derive_section` answers `UNASSIGNED` for a result matching no
+    section, so a section by that name would share the unassigned bucket and
+    `summarize_sections` would report its results twice."""
+    with pytest.raises(ValueError, match="reserved"):
+        SectionDefinition(name=name, prefix="tests/a/")
+
+
+def test_a_name_merely_containing_unassigned_is_an_ordinary_section() -> None:
+    sections = [SectionDefinition(name="unassigned-legacy", prefix="tests/a/")]
+
+    summary = summarize_sections([("tests/a/test_x.py", "passed")], sections)
+
+    assert [item.name for item in summary.items] == ["unassigned-legacy"]
+    assert summary.unassigned.total == 0
+
+
+# ---------------------------------------------------------------------------
 # normalize_prefix: coercion, sibling non-bleed
 # ---------------------------------------------------------------------------
 

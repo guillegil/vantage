@@ -300,3 +300,35 @@ def test_run_sections_summary_malformed_stored_value_is_500(
 
     assert response.status_code == 500
     assert response.json()["error"] == "unreadable_setting"
+
+
+def test_a_stored_section_named_unassigned_is_unreadable_not_double_counted(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A row written around the POST route's reservation -- by hand, or by
+    another caller of the port -- would merge with the unassigned bucket and
+    be reported twice. It reads as a named `500` instead, like any other
+    stored row the API would not have accepted, and deleting it by name
+    recovers."""
+    run_id = "5" * 32
+    store.record_session(
+        _execution(run_id, started=_SECTIONED_START),
+        results=[_result("tests/a/test_x.py::test_0"), _result("tests/b/test_y.py::test_0")],
+        received_at=_SECTIONED_START,
+    )
+    store.upsert_setting(
+        TEST_SECTIONS_NAMESPACE,
+        "unassigned",
+        value='{"prefix": "tests/a/"}',
+        updated_at=_SECTIONED_START,
+    )
+
+    summary = _run_sections(client, run_id)
+    listing = client.get(_SECTIONS)
+
+    assert summary.status_code == 500
+    assert summary.json()["error"] == "unreadable_setting"
+    assert summary.json()["fields"] == ["unassigned"]
+    assert listing.status_code == 500
+    assert client.delete(_SECTIONS, params={"name": "unassigned"}).status_code == 204
+    assert _run_sections(client, run_id).json()["unassigned"]["total"] == 2

@@ -28,12 +28,29 @@ unpaginated, so this cap on stored sections is also the bound on that
 response."""
 
 
+def is_reserved_section_name(name: str) -> bool:
+    """Whether `name` is `UNASSIGNED` in any casing -- one that differs only
+    in case would still read as the unassigned bucket to a person."""
+    return name.casefold() == UNASSIGNED
+
+
 @dataclass(frozen=True, slots=True)
 class SectionDefinition:
-    """One section's name and its normalized prefix."""
+    """One section's name and its normalized prefix.
+
+    A reserved name raises `ValueError`. `derive_section` answers
+    `UNASSIGNED` for a result matching no section, so a section by that
+    name would share the unassigned bucket and be reported twice; refusing
+    it here, rather than summarizing around it, keeps a stored section from
+    silently vanishing out of the run summary.
+    """
 
     name: str
     prefix: str
+
+    def __post_init__(self) -> None:
+        if is_reserved_section_name(self.name):
+            raise ValueError(f"the section name {UNASSIGNED!r} is reserved")
 
 
 def normalize_prefix(prefix: str) -> str:
@@ -168,6 +185,7 @@ __all__ = [
     "SectionDefinition",
     "SectionSummary",
     "derive_section",
+    "is_reserved_section_name",
     "normalize_prefix",
     "summarize_sections",
 ]
