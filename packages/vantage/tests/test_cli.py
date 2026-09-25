@@ -11,6 +11,7 @@ does not re-export its imports and mypy flags reaching through the module.
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import sqlite3
 from pathlib import Path
@@ -82,18 +83,22 @@ def test_an_unusable_setting_is_refused_before_anything_is_created(
 
 @_needs_enforced_mode_bits
 @pytest.mark.usefixtures("never_served")
-@pytest.mark.parametrize("below", ["v.db", "sub/v.db"], ids=["parent", "ancestor"])
-def test_a_database_under_a_read_only_directory_is_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], below: str
+@pytest.mark.parametrize(
+    ("mode", "below"),
+    [(0o500, "v.db"), (0o500, "sub/v.db"), (0o000, "sub/v.db")],
+    ids=["read-only-parent", "read-only-ancestor", "unsearchable-ancestor"],
+)
+def test_a_database_under_an_unusable_directory_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], mode: int, below: str
 ) -> None:
-    read_only = tmp_path / "readonly"
-    read_only.mkdir(mode=0o500)
+    locked = tmp_path / "locked"
+    locked.mkdir(mode=mode)
     try:
-        err = _refusal(capsys, ["--database", str(read_only / below)])
+        err = _refusal(capsys, ["--database", str(locked / below)])
     finally:
-        read_only.chmod(0o700)  # so tmp_path's own fixture cleanup can remove it
+        locked.chmod(0o700)  # so tmp_path's own fixture cleanup can remove it
 
-    assert str(read_only) in err
+    assert str(locked) in err
 
 
 @pytest.mark.usefixtures("never_served")
@@ -124,16 +129,32 @@ def test_a_path_sqlite_cannot_open_is_refused(
     assert str(database) in err
 
 
+@pytest.mark.usefixtures("never_served")
+def test_a_refused_start_does_not_warn_about_a_bind_it_never_makes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    database = tmp_path / "v.db"
+    database.mkdir()
+
+    with caplog.at_level(logging.WARNING, logger=cli.__name__):
+        _refusal(capsys, ["--host", "0.0.0.0", "--database", str(database)])  # noqa: S104
+
+    assert [r.getMessage() for r in caplog.records if r.name == cli.__name__] == []
+
+
 @pytest.mark.usefixtures("served")
 def test_main_reads_the_database_path_from_vantage_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     database = tmp_path / "from-env" / "v.db"
     monkeypatch.setenv("VANTAGE_DATABASE", str(database))
+    # Were the variable ignored, the default would land here, not in $HOME.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
 
     cli.main([])
 
     assert database.exists()
+    assert not (tmp_path / "xdg").exists()
 
 
 def test_main_carries_the_resolved_grace_period_into_the_app(

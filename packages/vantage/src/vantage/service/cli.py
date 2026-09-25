@@ -100,21 +100,22 @@ def main(argv: list[str] | None = None) -> None:
             home=Path.home(),
             xdg_data_home=os.environ.get("XDG_DATA_HOME"),
         )
-        ensure_database_directory_writable(config.database_path)
-    except (ServerConfigError, DatabaseDirectoryNotWritableError) as exc:
+    except ServerConfigError as exc:
         _refuse(str(exc))
-
-    warn_if_bound_wide(config.host)
 
     try:
+        ensure_database_directory_writable(config.database_path)
         store = SqliteExecutionStore(config.database_path)
-    except SchemaVersionError as exc:
+    except (DatabaseDirectoryNotWritableError, SchemaVersionError) as exc:
         _refuse(str(exc))
     except (OSError, sqlite3.Error) as exc:
-        # An unwritable ancestor, a directory at the path, a file that is not
-        # a database: the OS or sqlite3 message already says what is wrong.
+        # An ancestor this process cannot search or write, a directory at the
+        # path, a file that is not a database: the OS or sqlite3 message
+        # already says what is wrong.
         _refuse(f"cannot open the database at {config.database_path}: {exc}")
 
+    # Warn only once the database is open: a refused start makes no bind to warn about.
+    warn_if_bound_wide(config.host)
     try:
         app = create_app(store, grace_period_seconds=config.grace_period_seconds)
         uvicorn.run(app, host=config.host, port=config.port)
