@@ -1,5 +1,6 @@
 """Concurrent writers on one database file never corrupt or drop each
-other's writes, and a thread never reads another's write half-done.
+other's writes, a thread never reads another's write half-done, and a slow
+store call never holds up an unrelated request.
 
 Every thread is joined with a timeout: a deadlock is exactly what these tests
 look for, and an unbounded `join` would hang the suite instead of failing it.
@@ -9,17 +10,26 @@ from __future__ import annotations
 
 import contextlib
 import sqlite3
+import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
+from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.result import Result
+from vantage.core.domain.sections import MAX_SECTIONS
+from vantage.core.ports.storage import EMPTY_RUN_METADATA, ExecutionStore, RunMetadata
+from vantage.service.app import create_app
+from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
 from vantage.storage import sqlite_store
+from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _result
+from vantage_port_contract import _result, _start_only_execution
 
 _JOIN_TIMEOUT_SECONDS = 10
 
@@ -266,3 +276,139 @@ def test_two_stores_on_one_file_both_land_every_session(tmp_path: Path) -> None:
     finally:
         for store in stores:
             store.close()
+
+
+# --- The HTTP layer ------------------------------------------------------------
+#
+# `TestClient` used as a context manager runs every request on one event
+# loop, as uvicorn does, so a request sent from a second thread shares that
+# loop with one still in flight.
+
+
+def _report(run_id: str) -> dict[str, Any]:
+    return {
+        "run": {
+            "id": run_id,
+            "started_at": "2026-08-15T09:14:02.481930+00:00",
+            "finished_at": "2026-08-15T09:14:47.002118+00:00",
+            "exit_status": 0,
+            "interrupted": False,
+            "interrupt_reason": None,
+        }
+    }
+
+
+class _ParkedWriteStore(InMemoryExecutionStore):
+    """Holds every `record_session` before it writes, until `release` is
+    set: a write stuck on a slow disk or on another process's lock."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writing = threading.Event()
+        self.release = threading.Event()
+
+    def record_session(
+        self,
+        execution: Execution,
+        *,
+        results: Sequence[Result],
+        received_at: datetime,
+        metadata: RunMetadata = EMPTY_RUN_METADATA,
+    ) -> bool:
+        self.writing.set()
+        self.release.wait(2 * _JOIN_TIMEOUT_SECONDS)
+        return super().record_session(
+            execution, results=results, received_at=received_at, metadata=metadata
+        )
+
+
+def test_a_slow_store_write_holds_up_no_other_request() -> None:
+    """A store call made on the event loop stalls every request until it
+    returns -- heartbeats included, and a session that cannot heartbeat
+    reads as abandoned. With one report's write parked inside the store, a
+    heartbeat for another run and the capability check must both answer."""
+    store = _ParkedWriteStore()
+    live_run = "b" * 32
+    # The base class's method, which does not park: a run already in progress.
+    InMemoryExecutionStore.record_session(
+        store,
+        _start_only_execution(live_run),
+        results=(),
+        received_at=datetime.now(timezone.utc),
+    )
+    answered: dict[str, int] = {}
+
+    with TestClient(create_app(store)) as client:
+
+        def _write() -> None:
+            answered["write"] = client.post("/api/v1/runs", json=_report("a" * 32)).status_code
+
+        def _others() -> None:
+            answered["capabilities"] = client.get("/api/v1/capabilities").status_code
+            answered["heartbeat"] = client.post(f"/api/v1/runs/{live_run}/heartbeat").status_code
+
+        writer = threading.Thread(target=_write)
+        others = threading.Thread(target=_others)
+        writer.start()
+        try:
+            assert store.writing.wait(_JOIN_TIMEOUT_SECONDS)
+            others.start()
+            others.join(timeout=_JOIN_TIMEOUT_SECONDS)
+            assert not others.is_alive(), "a request waited for another request's store write"
+            assert "write" not in answered
+        finally:
+            store.release.set()
+            writer.join(timeout=_JOIN_TIMEOUT_SECONDS)
+            others.join(timeout=_JOIN_TIMEOUT_SECONDS)
+
+    assert not writer.is_alive()
+    assert answered == {"capabilities": 200, "heartbeat": 200, "write": 201}
+
+
+@pytest.fixture(params=["memory", "sqlite"])
+def any_store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[ExecutionStore]:
+    store: ExecutionStore = (
+        InMemoryExecutionStore()
+        if request.param == "memory"
+        else SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    )
+    yield store
+    store.close()
+
+
+def test_section_posts_racing_for_the_last_slot_never_pass_the_bound(
+    any_store: ExecutionStore,
+) -> None:
+    """Counting the stored sections and then writing would let every post
+    racing for the last free slot see it free. The store makes the count
+    and the write one step, so exactly one racer is created."""
+    now = datetime.now(timezone.utc)
+    for index in range(MAX_SECTIONS - 1):
+        any_store.upsert_setting(
+            TEST_SECTIONS_NAMESPACE,
+            f"Seeded{index:03d}",
+            value='{"prefix": "tests/seeded/"}',
+            updated_at=now,
+        )
+    racers = 16
+    statuses: list[int] = []
+
+    with TestClient(create_app(any_store)) as client:
+
+        def _post(index: int) -> None:
+            section = {"name": f"Racer{index}", "prefix": f"tests/racer{index}"}
+            statuses.append(client.post("/api/v1/config/sections", json=section).status_code)
+
+        # Pure-Python work rarely yields the GIL mid-request at the default
+        # interval; switching threads far more often is what makes a race
+        # in the in-memory adapter likely enough to be caught.
+        interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            errors = _run_concurrently([partial(_post, index) for index in range(racers)])
+        finally:
+            sys.setswitchinterval(interval)
+
+    assert errors == []
+    assert sorted(statuses) == [201] + [422] * (racers - 1)
+    assert len(any_store.list_settings(TEST_SECTIONS_NAMESPACE)) == MAX_SECTIONS

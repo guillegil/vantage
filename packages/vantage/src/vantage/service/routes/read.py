@@ -8,8 +8,11 @@ history paths the source is a `VcsProjection`, which has no `root` at all; on
 the detail path `VcsContext` does carry it, and `_vcs_response` naming its
 five fields is the only thing keeping it out of the body.
 
-A run's presentation comes from `derive_presentation` and
-`app.state.grace_period`; nothing here reimplements its precedence.
+A run's presentation comes from `derive_presentation` and the app's grace
+period; nothing here reimplements its precedence.
+
+Every route here but the interface document reads the store, so each is a
+plain `def` that FastAPI runs in its threadpool (see `app.py`).
 
 A test's identity travels as a named query parameter (`?node_id=`), never a
 path segment: a node id contains `/`, an encoded slash in a path is decoded
@@ -38,7 +41,7 @@ from __future__ import annotations
 import importlib.resources
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Path, Query, Request, Response
+from fastapi import APIRouter, Depends, Path, Query, Response
 
 from vantage.core.domain.execution import IDENTITY_PATTERN, VcsContext
 from vantage.core.domain.liveness import derive_presentation
@@ -46,11 +49,13 @@ from vantage.core.domain.projection import FailureProjection, VcsProjection
 from vantage.core.domain.result import Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
+    ExecutionStore,
     HistoryEntry,
     ResultListEntry,
     RunDetail,
     RunListEntry,
 )
+from vantage.service.dependencies import get_grace_period, get_store
 from vantage.service.errors import InvalidMetadataFilterError, UnknownResultError, UnknownRunError
 from vantage.service.schemas import (
     FailureProjectionResponse,
@@ -231,12 +236,13 @@ def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
 
 
 @router.get("/runs")
-async def list_runs(
-    request: Request,
+def list_runs(
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
     metadata_key: str | None = Query(default=None),
     metadata_value: str | None = Query(default=None),
+    store: ExecutionStore = Depends(get_store),
+    grace: timedelta = Depends(get_grace_period),
 ) -> RunListResponse:
     """`GET /api/v1/runs`. `limit <= 0` is a `422` -- not a page size. The
     200-item cap is enforced by the store, not re-clamped here; the default
@@ -249,7 +255,6 @@ async def list_runs(
         raise InvalidMetadataFilterError(
             "metadata_value" if metadata_key is not None else "metadata_key"
         )
-    store = request.app.state.store
     horizon: MetadataHorizonResponse | None = None
     if metadata_key is not None and metadata_value is not None:
         page, predating = store.list_runs_with_metadata_horizon(
@@ -259,39 +264,36 @@ async def list_runs(
     else:
         page = store.list_runs(limit=limit, offset=offset)
     now = datetime.now(timezone.utc)
-    grace: timedelta = request.app.state.grace_period
     items = [_run_list_item(entry, now=now, grace=grace) for entry in page.items]
     return RunListResponse(items=items, has_more=page.has_more, metadata_horizon=horizon)
 
 
 @router.get("/runs/{run_id}")
-async def get_run_detail(
-    request: Request, run_id: str = Path(pattern=IDENTITY_PATTERN)
+def get_run_detail(
+    run_id: str = Path(pattern=IDENTITY_PATTERN),
+    store: ExecutionStore = Depends(get_store),
+    grace: timedelta = Depends(get_grace_period),
 ) -> RunDetailResponse:
     """`GET /api/v1/runs/{run_id}`. An unknown run is the same
     `UnknownRunError` the heartbeat route raises: one rejection shape per
     kind, not one per route."""
-    store = request.app.state.store
     detail = store.get_run_detail(run_id)
     if detail is None:
         raise UnknownRunError()
 
-    now = datetime.now(timezone.utc)
-    grace: timedelta = request.app.state.grace_period
-    return _run_detail_response(detail, now=now, grace=grace)
+    return _run_detail_response(detail, now=datetime.now(timezone.utc), grace=grace)
 
 
 @router.get("/runs/{run_id}/results")
-async def list_results(
-    request: Request,
+def list_results(
     run_id: str = Path(pattern=IDENTITY_PATTERN),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
+    store: ExecutionStore = Depends(get_store),
 ) -> ResultsResponse:
     """`GET /api/v1/runs/{run_id}/results`. An unknown
     `run_id` is `404`, consistent with `get_run_detail` -- checked via the
     cheaper `store.get_execution` rather than building a full detail."""
-    store = request.app.state.store
     if store.get_execution(run_id) is None:
         raise UnknownRunError()
     page = store.list_results(run_id, limit=limit, offset=offset)
@@ -300,16 +302,15 @@ async def list_results(
 
 
 @router.get("/runs/{run_id}/result")
-async def get_result(
-    request: Request,
+def get_result(
     run_id: str = Path(pattern=IDENTITY_PATTERN),
     node_id: str = Query(...),
+    store: ExecutionStore = Depends(get_store),
 ) -> ResultDetailResponse:
     """`GET /api/v1/runs/{run_id}/result?node_id=` -- `node_id` is a query
     value for the same reason as on `/tests/history`. An unknown `run_id` is
     `UnknownRunError`; a known run with no result at that identity is a
     distinct `404`, `UnknownResultError`."""
-    store = request.app.state.store
     if store.get_execution(run_id) is None:
         raise UnknownRunError()
     result = store.get_result(run_id, node_id=node_id)
@@ -319,16 +320,15 @@ async def get_result(
 
 
 @router.get("/tests/history")
-async def list_history(
-    request: Request,
+def list_history(
     node_id: str = Query(...),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
+    store: ExecutionStore = Depends(get_store),
 ) -> HistoryResponse:
     """`GET /api/v1/tests/history?node_id=...` -- see the module docstring
     for why `node_id` is a query value, not a path segment. An unknown
     `node_id` yields an empty page, not an error."""
-    store = request.app.state.store
     page = store.list_history(node_id=node_id, limit=limit, offset=offset)
     items = [_history_entry(entry) for entry in page.items]
     return HistoryResponse(items=items, has_more=page.has_more)

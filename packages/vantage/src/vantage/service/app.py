@@ -7,6 +7,15 @@ passes it in. This module never imports `vantage.storage.sqlite_store`.
 **Mounts `/api/v1` and nothing else.** There is no unversioned route and no
 redirect from one, so an unversioned path answers 404.
 
+**No store call runs on the event loop.** A store call blocks -- on the
+disk, on the store's own lock, on another process's write -- and one made on
+the loop would stall every other request until it returned, heartbeats
+included. So every route that reaches the store is a plain `def`, which
+FastAPI runs in its threadpool. `POST /runs` is `async` only to stream its
+body under the size cap, and hands the rest to the threadpool itself. The
+capabilities and interface-document routes never block and stay `async`, so
+they answer even while every worker thread waits on the store.
+
 **Every rejection is shaped by `service/errors.py`**, registered here once,
 so no route can answer a rejection in a different shape -- nor can the
 router, for a path nothing serves or a method a path does not take.

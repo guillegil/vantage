@@ -457,9 +457,9 @@ def test_to_run_metadata_marks_a_document_over_the_file_bound_too_large_without_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The plugin never ships a declared file over its per-file bound, and
-    parsing YAML costs CPU per byte on the request's event loop, so any
-    other client's oversized document is refused before the parser sees
-    it."""
+    parsing YAML costs CPU per byte that every other request waits on, so
+    any other client's oversized document is refused before the parser
+    sees it."""
 
     def _never_called(*_args: object) -> None:
         raise AssertionError("an oversized document reached the parser")

@@ -134,7 +134,6 @@ paths:
         "201": {description: Stored, a new section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
         "200": {description: Updated; the name was already stored., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
         "422": {description: "An invalid or reserved name, an invalid prefix, the stored-section count bound, or a body that does not match SectionUpsertRequest.", content: *rejection}
-        "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
     delete:
       operationId: delete_section
       tags: [write]

@@ -134,6 +134,28 @@ def test_too_many_sections_is_rejected_at_the_bound(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"] == "too_many_sections"
+    assert _upsert(client, "Section0", "tests/moved").status_code == 200
+
+
+def test_an_unreadable_stored_section_can_be_overwritten_in_place(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A write reads no stored definition, so a row the API cannot parse
+    neither blocks posting another section nor its own repair."""
+    store.upsert_setting(
+        TEST_SECTIONS_NAMESPACE,
+        "Broken",
+        value="not valid json",
+        updated_at=datetime.now(timezone.utc),
+    )
+    assert client.get(_SECTIONS).status_code == 500
+
+    assert _upsert(client, "Checkout", "tests/checkout").status_code == 201
+    assert _upsert(client, "Broken", "tests/broken").status_code == 200
+    assert client.get(_SECTIONS).json()["items"] == [
+        {"name": "Broken", "prefix": "tests/broken/"},
+        {"name": "Checkout", "prefix": "tests/checkout/"},
+    ]
 
 
 # --- DELETE -------------------------------------------------------------

@@ -7,19 +7,24 @@ travels as a body field on write and as a query value on delete. `run_id` in the
 route is the same 32-hex identity segment `routes/read.py` uses, so it does
 not have that problem.
 
-Each handler binds `store: ExecutionStore = request.app.state.store`, because
-`app.state` is untyped and every store call would otherwise go unchecked.
+Every handler reads the store, so each is a plain `def` that FastAPI runs
+in its threadpool (see `app.py`).
 
 **Section definitions are read fresh on every request, never cached.** No
 `app.state` field remembers them between requests, so an edit takes effect
 on the very next read, with no restart and no invalidation logic.
+
+**The section bound is checked by the store, in the write itself.** Counting
+here and then writing would let two requests racing for the last free slot
+both see it free; `upsert_setting`'s `max_keys` makes the count and the
+insert one step.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Path, Query, Request
+from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import JSONResponse, Response
 
 from vantage.core.domain.execution import IDENTITY_PATTERN
@@ -33,7 +38,8 @@ from vantage.core.domain.sections import (
     normalize_prefix,
     summarize_sections,
 )
-from vantage.core.ports.storage import ExecutionStore
+from vantage.core.ports.storage import ExecutionStore, NamespaceFullError
+from vantage.service.dependencies import get_store
 from vantage.service.errors import (
     InvalidSectionNameError,
     InvalidSectionPrefixError,
@@ -95,17 +101,16 @@ def _encodable(text: str) -> bool:
 
 
 @router.get("/config/sections")
-async def list_sections(request: Request) -> SectionListResponse:
-    store: ExecutionStore = request.app.state.store
+def list_sections(store: ExecutionStore = Depends(get_store)) -> SectionListResponse:
     definitions = _load_definitions(store)
     items = [SectionResponse(name=d.name, prefix=d.prefix) for d in definitions]
     return SectionListResponse(items=items)
 
 
 @router.post("/config/sections")
-async def upsert_section(request: Request, payload: SectionUpsertRequest) -> Response:
-    store: ExecutionStore = request.app.state.store
-
+def upsert_section(
+    payload: SectionUpsertRequest, store: ExecutionStore = Depends(get_store)
+) -> Response:
     name = _stored_name(payload.name)
     if not name or len(name) > SECTION_NAME_MAX_CHARS or not _encodable(name):
         raise InvalidSectionNameError()
@@ -121,21 +126,23 @@ async def upsert_section(request: Request, payload: SectionUpsertRequest) -> Res
     if len(normalized_prefix) > SECTION_PREFIX_MAX_CHARS:
         raise InvalidSectionPrefixError()
 
-    existing_names = {definition.name for definition in _load_definitions(store)}
-    if name not in existing_names and len(existing_names) >= MAX_SECTIONS:
-        raise TooManySectionsError()
-
     value = SectionValue(prefix=normalized_prefix).model_dump_json()
-    created = store.upsert_setting(
-        TEST_SECTIONS_NAMESPACE, name, value=value, updated_at=datetime.now(timezone.utc)
-    )
+    try:
+        created = store.upsert_setting(
+            TEST_SECTIONS_NAMESPACE,
+            name,
+            value=value,
+            updated_at=datetime.now(timezone.utc),
+            max_keys=MAX_SECTIONS,
+        )
+    except NamespaceFullError as exc:
+        raise TooManySectionsError() from exc
     body = SectionResponse(name=name, prefix=normalized_prefix)
     return JSONResponse(status_code=201 if created else 200, content=body.model_dump())
 
 
 @router.delete("/config/sections", status_code=204)
-async def delete_section(request: Request, name: str = Query(...)) -> Response:
-    store: ExecutionStore = request.app.state.store
+def delete_section(name: str = Query(...), store: ExecutionStore = Depends(get_store)) -> Response:
     if not store.delete_setting(TEST_SECTIONS_NAMESPACE, _stored_name(name)):
         raise UnknownSectionError()
     return Response(status_code=204)
@@ -156,14 +163,13 @@ def _section_summary_response(summary: SectionSummary) -> SectionSummaryResponse
 
 
 @router.get("/runs/{run_id}/sections")
-async def get_run_sections(
-    request: Request, run_id: str = Path(pattern=IDENTITY_PATTERN)
+def get_run_sections(
+    run_id: str = Path(pattern=IDENTITY_PATTERN), store: ExecutionStore = Depends(get_store)
 ) -> RunSectionSummaryResponse:
     """`GET /api/v1/runs/{run_id}/sections`. An unknown `run_id` is
     `404 unknown_run`, checked the same cheap way `list_results` does
     (`get_execution`, not a full detail read). `summarize_sections` does
     every count and every rounding, once."""
-    store: ExecutionStore = request.app.state.store
     if store.get_execution(run_id) is None:
         raise UnknownRunError()
 

@@ -17,7 +17,9 @@ runs. Instead:
 3. Only a complete, capped body is decoded as UTF-8, parsed as JSON and
    validated.
 
-Nothing is written unless all three succeed.
+Nothing is written unless all three succeed. Only the streaming is `async`:
+step 3, the conversion -- declared YAML metadata included -- and the store
+write run in the threadpool, off the event loop every request shares.
 
 **A lone surrogate is replaced, not rejected.** A `\\udXXX` escape with no
 partner is valid JSON, and pytest produces such text itself from file names
@@ -40,7 +42,8 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 
-from fastapi import APIRouter, Path, Request
+from fastapi import APIRouter, Depends, Path, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
@@ -53,8 +56,15 @@ from vantage.core.domain.metadata import (
     METADATA_CONTENT_TYPES,
 )
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
-from vantage.core.ports.storage import EMPTY_RUN_METADATA, MetadataEntry, MetadataFile, RunMetadata
+from vantage.core.ports.storage import (
+    EMPTY_RUN_METADATA,
+    ExecutionStore,
+    MetadataEntry,
+    MetadataFile,
+    RunMetadata,
+)
 from vantage.service import metadata_parse
+from vantage.service.dependencies import get_store
 from vantage.service.errors import (
     MAX_REPORT_BYTES,
     IncompleteBodyError,
@@ -90,9 +100,9 @@ _MAX_DECLARED_PATH_CHARS = 1024
 """Mirrors `MAX_DECLARED_PATH_CHARS`."""
 
 _MAX_DECLARED_FILE_BYTES = 8 * 1024
-"""Mirrors `MAX_DECLARED_FILE_BYTES`. Composing YAML costs CPU per byte on
-the event loop every route shares, so a larger document is recorded
-`too_large` without being parsed."""
+"""Mirrors `MAX_DECLARED_FILE_BYTES`. Composing YAML costs CPU per byte,
+which a worker thread still takes from every other request, so a larger
+document is recorded `too_large` without being parsed."""
 
 _MAX_METADATA_SECTION_BYTES = 32 * 1024
 """Mirrors `MAX_METADATA_SECTION_BYTES`, bounding what one report makes the
@@ -420,10 +430,10 @@ def _decode_body(body: bytes) -> Any:
     return payload
 
 
-@router.post("/runs")
-async def create_run(request: Request) -> JSONResponse:
-    _require_json_media_type(request)
-    body = await _read_bounded_body(request)
+def _record(store: ExecutionStore, body: bytes) -> tuple[bool, Acknowledgement]:
+    """Parse, validate, convert and store one complete report body, and
+    return whether the run was new with the acknowledgement to send. Every
+    step blocks, so `create_run` calls this in the threadpool."""
     payload_dict = _decode_body(body)
 
     try:
@@ -431,7 +441,6 @@ async def create_run(request: Request) -> JSONResponse:
     except ValidationError as exc:
         raise InvalidReportError.from_errors(exc.errors()) from exc
 
-    store = request.app.state.store
     execution = _to_execution(payload.run, payload.vcs)
     reported_results = payload.results or []
     results = [_to_result(item) for item in reported_results]
@@ -446,6 +455,14 @@ async def create_run(request: Request) -> JSONResponse:
         status="created" if created else "duplicate",
         ignored=_ignored_result_keys(reported_results),
     )
+    return created, acknowledgement
+
+
+@router.post("/runs")
+async def create_run(request: Request, store: ExecutionStore = Depends(get_store)) -> JSONResponse:
+    _require_json_media_type(request)
+    body = await _read_bounded_body(request)
+    created, acknowledgement = await run_in_threadpool(_record, store, body)
     return JSONResponse(
         status_code=201 if created else 200,
         content=acknowledgement.model_dump(),
@@ -453,8 +470,8 @@ async def create_run(request: Request) -> JSONResponse:
 
 
 @router.post("/runs/{run_id}/heartbeat")
-async def heartbeat(
-    request: Request, run_id: str = Path(pattern=IDENTITY_PATTERN)
+def heartbeat(
+    run_id: str = Path(pattern=IDENTITY_PATTERN), store: ExecutionStore = Depends(get_store)
 ) -> HeartbeatAcknowledgement:
     """Advance `run_id`'s last contact.
 
@@ -463,7 +480,6 @@ async def heartbeat(
     decides the 404: a no-op update means either "unknown run" or "a newer
     contact is already recorded", and only the former is a rejection.
     """
-    store = request.app.state.store
     if store.get_execution(run_id) is None:
         raise UnknownRunError()
 

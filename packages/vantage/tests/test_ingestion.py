@@ -1069,8 +1069,8 @@ def test_a_declared_document_the_server_cannot_store_still_records_the_run(
 def test_a_near_cap_yaml_document_is_stored_too_large_rather_than_parsed(
     any_store: Any,
 ) -> None:
-    """Composing YAML costs seconds per megabyte on the event loop every
-    route shares; a document only a non-plugin client could send is
+    """Composing YAML costs seconds of CPU per megabyte, taken from every
+    other request; a document only a non-plugin client could send is
     refused by size, and the run is still recorded."""
     run_id = "6" + "3" * 31
     report = _well_formed_report(run_id)
