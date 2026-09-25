@@ -488,7 +488,7 @@ def test_with_subtests(subtests):
     for i in range(3):
         with subtests.test(i=i):
             print(f"inside-subtest-{i}")
-            assert i != FAILING, "i must not be two"
+            assert i != 2, "i must not be two"
 
 
 def test_with_a_skipped_subtest(subtests):
@@ -509,7 +509,7 @@ def test_a_failing_subtest_is_recorded_with_its_evidence_and_output(
     exception is the evidence, and the output printed inside the subtest
     blocks, captured on the subtest reports, is kept. A skipped subtest
     leaves a passing test passed."""
-    pytester.makepyfile(test_fixture=_SUBTESTS_FIXTURE.replace("FAILING", "2"))
+    pytester.makepyfile(test_fixture=_SUBTESTS_FIXTURE)
 
     pytester.runpytest_subprocess(
         "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
