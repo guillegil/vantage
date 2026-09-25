@@ -67,6 +67,45 @@ def test_six_tests_under_xdist_produce_six_results_and_one_run_entry(
     assert worker_ids == {"gw0", "gw1"}
 
 
+_PRINTS_IN_EVERY_PHASE = """
+import pytest
+
+
+@pytest.fixture
+def noisy():
+    print("SETUP-OUT")
+    yield
+    print("TEARDOWN-OUT")
+
+
+def test_it_prints(noisy):
+    print("CALL-OUT")
+"""
+
+
+def test_captured_output_forwarded_by_workers_is_stored_once(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """Captured sections cross the worker-to-controller hop with the
+    report, so each phase's output is still stored exactly once when a
+    worker ran the test."""
+    pytest.importorskip("xdist")
+    pytester.makepyfile(test_output=_PRINTS_IN_EVERY_PHASE)
+
+    pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={vantage_server.address}",
+        "--vantage-failure-text",
+        "-n",
+        "2",
+    )
+
+    (result,) = vantage_server.results()
+    assert result.worker_id is not None
+    assert result.captured.stdout == "SETUP-OUT\nCALL-OUT\nTEARDOWN-OUT\n"
+
+
 def test_six_tests_without_xdist_also_produce_six_results(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose

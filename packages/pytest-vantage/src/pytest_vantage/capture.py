@@ -244,34 +244,26 @@ def _captured_output(
     `--vantage-failure-text` -- the same convention `build_result`'s
     evidence merge follows.
 
-    `capture_disabled` is one session-constant flag every phase's `_extract`
-    call receives identically (`evidence.py::_captured_fields`), so a phase
-    reporting `None` for a field means the WHOLE session had capture
-    disabled -- never a genuine per-phase mix of `None` and text. The first
-    `None` encountered therefore settles the field for the whole result.
+    A phase reporting `None` for a field is one of two things: capture was
+    disabled for the session (`evidence.py::_captured_fields` then reports
+    `None` for every phase), or reading that one phase's output failed. So a
+    `None` phase contributes nothing, and the field is `None` for the whole
+    result only when no phase could be read at all.
     """
     evidences = [
         evidence
         for report in (setup, call, teardown)
         if report is not None
         for evidence in (getattr(report, "vantage_evidence", None),)
+        if isinstance(evidence, dict)
     ]
-    if not any(isinstance(evidence, dict) for evidence in evidences):
+    if not evidences:
         return {}
 
     fields: dict[str, object] = {}
     for field in ("captured_stdout", "captured_stderr"):
-        parts: list[str] = []
-        disabled = False
-        for evidence in evidences:
-            if not isinstance(evidence, dict):
-                continue
-            value = evidence.get(field)
-            if value is None:
-                disabled = True
-                break
-            parts.append(str(value))
-        fields[field] = None if disabled else "".join(parts)
+        parts = [str(value) for value in (e.get(field) for e in evidences) if value is not None]
+        fields[field] = "".join(parts) if parts else None
     return fields
 
 

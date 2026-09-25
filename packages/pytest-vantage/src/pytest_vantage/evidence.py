@@ -119,38 +119,47 @@ def _failure_fields(
     return fields
 
 
+def _phase_output(report: pytest.TestReport, stream: str) -> str:
+    """What this phase alone printed on `stream` ("stdout"/"stderr").
+
+    Not `report.capstdout`/`.capstderr`: pytest copies every section
+    captured so far for the item onto each phase report, so the call report
+    also carries the setup output and the teardown report all three. Only the
+    section named for this report's own phase is this phase's output.
+    """
+    name = f"Captured {stream} {report.when}"
+    return "".join(content for section, content in report.sections if section == name)
+
+
 def _captured_fields(report: pytest.TestReport, capture_disabled: bool) -> dict[str, object]:
     """`captured_stdout`/`captured_stderr` for THIS phase report alone.
     `capture_disabled` is one session-constant flag, read once at
     `EvidenceCollector.__init__` and passed down unchanged -- when set, BOTH
     fields are `None` throughout the session: capture mode is the only thing
-    that can distinguish "empty" from "never observed"
-    (`report.capstdout`/`.capstderr` return `""` in both cases, and
-    `report.sections` does not separate them either, since pytest only adds
-    a section `if out:`). When capture is enabled, `report.capstdout` /
-    `.capstderr` are used directly -- `""` when this phase printed nothing,
+    that can distinguish "empty" from "never observed" (`report.sections`
+    reads back empty in both cases, since pytest only adds a section `if
+    out:`). When capture is enabled, `""` means this phase printed nothing,
     never coerced through `text or None`, which would erase that genuine
     empty string.
 
     Each field keeps its own `try/except`, the same per-field isolation
-    `_failure_fields` uses -- a hostile capture buffer costs one field, not
-    the whole phase.
+    `_failure_fields` uses -- a section a plugin filled with something other
+    than text costs this phase's field, not the whole phase.
 
     Known limit: a test that consumes its own buffer via the `capsys`/`capfd`
     fixture's `readouterr()` leaves nothing in `report.sections` for this
-    phase, so `capstdout`/`capstderr` read back as `""` here too --
-    indistinguishable from a genuinely silent phase through pytest's public
-    surface.
+    phase, so it reads back as `""` here too -- indistinguishable from a
+    genuinely silent phase through pytest's public surface.
     """
     if capture_disabled:
         return {"captured_stdout": None, "captured_stderr": None}
     fields: dict[str, object] = {}
     try:
-        fields["captured_stdout"] = report.capstdout
+        fields["captured_stdout"] = _phase_output(report, "stdout")
     except Exception:  # deliberately broad -- one field lost, not the rest
         fields["captured_stdout"] = None
     try:
-        fields["captured_stderr"] = report.capstderr
+        fields["captured_stderr"] = _phase_output(report, "stderr")
     except Exception:  # deliberately broad, same reason
         fields["captured_stderr"] = None
     return fields

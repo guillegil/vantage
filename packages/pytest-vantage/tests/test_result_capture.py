@@ -161,6 +161,83 @@ def test_setup_failure_leaves_call_duration_null_not_zero(
     assert result.call_outcome is None
 
 
+# --- captured output, end to end --------------------------------------------
+
+_PRINTS_IN_EVERY_PHASE = """
+import sys
+
+import pytest
+
+
+@pytest.fixture
+def noisy():
+    print("SETUP-OUT")
+    yield
+    print("TEARDOWN-OUT")
+
+
+def test_it_prints(noisy):
+    print("CALL-OUT")
+    sys.stderr.write("CALL-ERR\\n")
+
+
+def test_plain_pass():
+    print("hello stdout")
+"""
+
+
+def test_captured_output_is_stored_once(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """Every line a test printed is stored exactly once, in setup -> call ->
+    teardown order, the way `pytest -rA` shows it -- passing tests
+    included."""
+    pytester.makepyfile(test_output=_PRINTS_IN_EVERY_PHASE)
+
+    pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    results = vantage_server.results()
+    phases = _by_function_name(results, "test_it_prints")
+    assert phases.captured.stdout == "SETUP-OUT\nCALL-OUT\nTEARDOWN-OUT\n"
+    assert phases.captured.stderr == "CALL-ERR\n"
+    assert _by_function_name(results, "test_plain_pass").captured.stdout == "hello stdout\n"
+
+
+_UNREADABLE_TEARDOWN_SECTION = """
+import pytest
+
+
+@pytest.fixture
+def unreadable(request):
+    yield
+    request.node.add_report_section("teardown", "stdout", b"not text")
+
+
+def test_it_prints(unreadable):
+    print("CALL-OUT")
+"""
+
+
+def test_one_unreadable_phase_costs_only_its_own_output(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """A plugin that adds a non-text section breaks the read of one phase's
+    output. That phase contributes nothing; the phases read fine are still
+    stored, rather than the whole field reading as never captured."""
+    pytester.makepyfile(test_unreadable=_UNREADABLE_TEARDOWN_SECTION)
+
+    pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-failure-text"
+    )
+
+    result = _by_function_name(vantage_server.results(), "test_it_prints")
+    assert result.captured.stdout == "CALL-OUT\n"
+
+
 # --- identity storage, end to end -------------------------------------------
 
 _TWO_TESTS_IN_ONE_FILE = "def test_one():\n    assert True\n\n\ndef test_two():\n    assert True\n"

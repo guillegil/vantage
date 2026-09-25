@@ -489,6 +489,37 @@ def test_captured_output_concatenates_phases_in_order_no_marker() -> None:
     assert result["captured_stderr"] == "SETUP_ERRCALL_ERRTEARDOWN_ERR"
 
 
+@pytest.mark.parametrize(
+    ("per_phase", "expected"),
+    [
+        pytest.param(("S", "C", None), "SC", id="one-unreadable-phase-drops-only-itself"),
+        pytest.param((None, None, None), None, id="capture-disabled-stays-null"),
+    ],
+)
+def test_captured_output_is_null_only_when_no_phase_was_read(
+    per_phase: tuple[str | None, str | None, str | None], expected: str | None
+) -> None:
+    """A `None` in one phase means that phase's buffer could not be read; the
+    field is null for the whole result only when every phase is `None`, which
+    is what a session with capture disabled produces."""
+    reports = []
+    for when, value in zip(("setup", "call", "teardown"), per_phase, strict=True):
+        report = _report(when, "passed")  # type: ignore[arg-type]
+        report.vantage_evidence = {  # type: ignore[attr-defined]
+            "captured_stdout": value,
+            "captured_stderr": value,
+        }
+        reports.append(report)
+    pending = _Pending()
+    pending.setup, pending.call, pending.teardown = reports
+
+    result = build_result("test_nid.py::test_it", pending)
+
+    assert result is not None
+    assert result["captured_stdout"] == expected
+    assert result["captured_stderr"] == expected
+
+
 # --- exactly one HTTP request per session ----------------------------------
 
 

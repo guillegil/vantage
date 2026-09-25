@@ -579,6 +579,48 @@ def test_silent_test_has_empty_captured_output_not_absent(pytester: pytest.Pytes
     assert call_evidence["captured_stderr"] == ""
 
 
+_PRINTS_IN_EVERY_PHASE = """
+import sys
+
+import pytest
+
+
+@pytest.fixture
+def noisy():
+    print("SETUP-OUT")
+    yield
+    print("TEARDOWN-OUT")
+
+
+def test_it_prints(noisy):
+    print("CALL-OUT")
+    sys.stderr.write("CALL-ERR\\n")
+"""
+
+
+@pytest.mark.parametrize("capture", ["fd", "sys", "tee-sys"])
+def test_each_phase_carries_only_its_own_output(pytester: pytest.Pytester, capture: str) -> None:
+    """pytest copies every section captured so far onto each phase report, so
+    `report.capstdout` on the call report also holds the setup output, and on
+    the teardown report all three. Each phase's evidence must hold only what
+    that phase printed, or the concatenation across phases repeats it.
+    """
+    pytester.makepyfile(test_phases=_PRINTS_IN_EVERY_PHASE)
+
+    evidence = _capture_evidence(pytester, f"--capture={capture}")
+
+    stdout = {
+        when: (evidence[f"test_phases.py::test_it_prints::{when}"] or {})["captured_stdout"]
+        for when in ("setup", "call", "teardown")
+    }
+    stderr = {
+        when: (evidence[f"test_phases.py::test_it_prints::{when}"] or {})["captured_stderr"]
+        for when in ("setup", "call", "teardown")
+    }
+    assert stdout == {"setup": "SETUP-OUT\n", "call": "CALL-OUT\n", "teardown": "TEARDOWN-OUT\n"}
+    assert stderr == {"setup": "", "call": "CALL-ERR\n", "teardown": ""}
+
+
 def test_capture_disabled_leaves_output_absent(pytester: pytest.Pytester) -> None:
     """A session run with `-s` / `--capture=no` never observes output at
     all, so `captured_stdout`/`captured_stderr` are `None`, not `""` -- the
