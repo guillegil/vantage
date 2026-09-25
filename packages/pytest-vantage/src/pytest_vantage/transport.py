@@ -106,7 +106,14 @@ def _exchange(http_request: urllib_request.Request, timeout: float) -> bytes:
     """
 
     def attempt() -> bytes:
-        with _OPENER.open(http_request, timeout=timeout) as response:
+        try:
+            response = _OPENER.open(http_request, timeout=timeout)
+        except urllib_error.HTTPError as exc:
+            # The error carries the still-open response; only its status is
+            # needed, so release the connection before handing it on.
+            exc.close()
+            raise
+        with response:
             body: bytes = response.read(MAX_RESPONSE_BYTES)
         return body
 

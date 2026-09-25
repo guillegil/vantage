@@ -978,6 +978,33 @@ def test_send_is_bounded_by_its_timeout_as_a_whole() -> None:
     assert elapsed < 2.5
 
 
+def test_a_refused_report_releases_its_connection() -> None:
+    """A non-2xx answer arrives as an `HTTPError` that still holds the open
+    response. The connection is released at once, not left open until the
+    exception is garbage-collected.
+    """
+    released: list[bool] = []
+    watched = threading.Event()
+
+    def _refuse_then_watch(conn: socket.socket) -> None:
+        _read_request(conn)
+        conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+        conn.settimeout(2.0)
+        try:
+            released.append(conn.recv(1) == b"")
+        except TimeoutError:
+            released.append(False)
+        watched.set()
+
+    with _StubServer(_refuse_then_watch) as server:
+        with pytest.raises(urllib.error.HTTPError) as refusal:
+            send(server.address, _A_REPORT, timeout=5.0)
+        assert watched.wait(timeout=5.0)
+
+    assert refusal.value.code == 500
+    assert released == [True]
+
+
 def test_a_server_that_trickles_its_answers_cannot_hold_the_session(
     pytester: pytest.Pytester,
 ) -> None:
