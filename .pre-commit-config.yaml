@@ -3,8 +3,9 @@
 #     hooks, on modified files only. Whole-project passes belong at
 #     pre-push or in CI.
 #   - `pre-push`: `mypy --strict` over the whole project (a type checker
-#     needs every file, not just the changed ones) plus the test suite on
-#     one Python version; the version matrix runs in CI.
+#     needs every file, not just the changed ones) plus the test suite
+#     minus its `slow`-marked tests, on one Python version. CI runs every
+#     test on the whole version matrix.
 #
 # The project's own tools run from its environment (`uv sync --extra dev`
 # first), so uv.lock pins their versions here exactly as it does in CI.
@@ -33,9 +34,9 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-push]
-      - id: pytest-fast
-        name: pytest (fast unit suite)
-        entry: uv run --no-sync pytest
+      - id: pytest-not-slow
+        name: pytest (all but slow-marked tests)
+        entry: uv run --no-sync pytest -m "not slow"
         language: system
         pass_filenames: false
         stages: [pre-push]
