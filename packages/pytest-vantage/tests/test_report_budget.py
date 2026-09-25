@@ -1,8 +1,7 @@
-"""The report's size: the caps mirrored from the server, pinned so a drift
-fails the build rather than causing 413s in production;
-`spend_failure_text_budget`'s failures-first, field-by-field spending, with
-the server's per-field cut applied before anything is charged; and
-`split_results`, which spreads a large session over several reports.
+"""The report's size: `spend_failure_text_budget`'s failures-first,
+field-by-field spending, with the server's per-field cut applied before
+anything is charged; and `split_results`, which spreads a large session over
+several reports. `test_server_contract.py` pins the caps to the server's.
 
 The end-to-end tests run a real session against a real server
 (`vantage_server`) and read back what it stored. The imports of `vantage`
@@ -18,28 +17,12 @@ import pytest_vantage.budget as budget_module
 from pytest_vantage import transport
 from pytest_vantage.budget import (
     _FIELD_BYTES_CAP,
-    _REPORT_BYTES_CAP,
-    MAX_FAILURE_TEXT_BYTES,
     encoded_cost,
     spend_failure_text_budget,
     split_results,
 )
 from vantage.service.errors import MAX_REPORT_BYTES
-from vantage.service.truncation import MAX_TEXT_FIELD_BYTES
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
-
-
-def test_the_mirrored_caps_match_the_server() -> None:
-    """`_REPORT_BYTES_CAP` and `_FIELD_BYTES_CAP` mirror the server's
-    `MAX_REPORT_BYTES` and `MAX_TEXT_FIELD_BYTES`, which the plugin cannot
-    import. A report cap that drifts high produces 413s that reject whole
-    sessions, and a field cap that drifts sends or drops text the server
-    would treat differently, so both are pinned against the server's values.
-    """
-    assert _REPORT_BYTES_CAP == MAX_REPORT_BYTES
-    assert MAX_FAILURE_TEXT_BYTES * 2 == MAX_REPORT_BYTES
-    assert _FIELD_BYTES_CAP == MAX_TEXT_FIELD_BYTES
-
 
 # --- spend_failure_text_budget ------------------------------------------------
 

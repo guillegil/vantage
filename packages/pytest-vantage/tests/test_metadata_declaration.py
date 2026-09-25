@@ -1,5 +1,4 @@
-"""`pytest_vantage.metadata.read_declaration`, and the bounds it mirrors
-from the server.
+"""`pytest_vantage.metadata.read_declaration`.
 
 Every fixture is a real filesystem structure under `tmp_path`, never a mock
 of filesystem behaviour.
@@ -20,9 +19,6 @@ from types import SimpleNamespace
 import pytest
 from pytest_vantage import metadata
 from pytest_vantage.boundary import VantageWarning
-from vantage.core.domain.metadata import FILE_STATUSES as _SERVER_FILE_STATUSES
-from vantage.core.domain.metadata import MAX_METADATA_ENTRIES as _SERVER_MAX_METADATA_ENTRIES
-from vantage.core.domain.metadata import MAX_METADATA_KEY_CHARS as _SERVER_MAX_METADATA_KEY_CHARS
 
 
 def _config() -> pytest.Config:
@@ -35,34 +31,6 @@ def _config() -> pytest.Config:
 
 def _metadata_warnings(recwarn: pytest.WarningsRecorder) -> list[warnings.WarningMessage]:
     return [w for w in recwarn.list if issubclass(w.category, VantageWarning)]
-
-
-# --- mirrored constants -----------------------------------------------------
-
-
-def test_the_mirrored_entry_bound_matches_the_server() -> None:
-    """`metadata.MAX_METADATA_ENTRIES` mirrors the server's
-    `vantage.core.domain.metadata.MAX_METADATA_ENTRIES`, which the plugin
-    cannot import; this test is what keeps the two in step.
-    """
-    assert metadata.MAX_METADATA_ENTRIES == _SERVER_MAX_METADATA_ENTRIES
-
-
-def test_the_mirrored_key_char_bound_matches_the_server() -> None:
-    """`metadata.MAX_DECLARED_KEY_CHARS` mirrors the server's
-    `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS`, kept in step the
-    same way.
-    """
-    assert metadata.MAX_DECLARED_KEY_CHARS == _SERVER_MAX_METADATA_KEY_CHARS
-
-
-def test_the_mirrored_file_statuses_match_the_server_but_malformed() -> None:
-    """Each declared entry is charged to the section budget with the longest
-    status in `metadata._FILE_STATUSES`, so a status the plugin gains must
-    land there. The server accepts no status it does not know, and assigns
-    `malformed` itself, after parsing.
-    """
-    assert set(metadata._FILE_STATUSES) == _SERVER_FILE_STATUSES - {"malformed"}
 
 
 # --- read_declaration: rejection conditions ---------------------------------

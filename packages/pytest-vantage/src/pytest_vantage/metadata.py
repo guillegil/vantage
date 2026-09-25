@@ -57,7 +57,7 @@ identity."""
 MAX_METADATA_ENTRIES = 200
 """Mirrors `vantage.core.domain.metadata.MAX_METADATA_ENTRIES`, which the
 plugin cannot import because it does not depend on the `vantage`
-distribution. `test_metadata_declaration.py` pins the two values equal."""
+distribution. `test_server_contract.py` pins the two values equal."""
 
 MAX_DECLARED_KEY_CHARS = 1024
 """Mirrors `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS`, pinned the

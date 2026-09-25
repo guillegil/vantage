@@ -4,7 +4,7 @@ session's results over several reports.
 The server rejects a report body larger than
 `vantage.service.errors.MAX_REPORT_BYTES` outright, losing the whole
 session. `_REPORT_BYTES_CAP` mirrors that value because the plugin must not
-import the server package; `test_report_budget.py` pins the two together,
+import the server package; `test_server_contract.py` pins the two together,
 since a mirror that drifts high produces rejections of whole sessions.
 
 Every result costs a few hundred bytes before any failure text, so a large
