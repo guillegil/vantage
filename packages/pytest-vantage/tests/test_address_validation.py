@@ -69,9 +69,9 @@ def test_an_address_without_a_host_is_refused(address: str) -> None:
     ],
 )
 def test_a_malformed_port_or_host_is_refused(address: str) -> None:
-    """Each of these used to pass validation and then raise a ``ValueError``
-    (a port out of range or not a number, an empty or over-long host label,
-    an unterminated IPv6 bracket) from inside the preflight."""
+    """Past validation, each of these would raise a ``ValueError`` (a port
+    out of range or not a number, an empty or over-long host label, an
+    unterminated IPv6 bracket) from inside the preflight."""
     with pytest.raises(VantageConfigError) as excinfo:
         resolve_and_validate_address(address)
     assert repr(address) in str(excinfo.value)

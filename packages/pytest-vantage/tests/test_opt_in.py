@@ -365,16 +365,18 @@ def test_capture_is_enabled_only_by_its_typed_flag(
 
     result.assert_outcomes(failed=1)
     (stored,) = vantage_server.results()
-    metadata_rows = vantage_server.store._metadata_entries
+    runs_storing_the_declared_secret = vantage_server.store.list_runs(
+        limit=1, offset=0, metadata_key="db_password", metadata_value="s3cr3t-db"
+    ).items
     if kind == "typed":
         assert stored.failure is not None
         assert "hunter2" in (stored.failure.traceback or "")
         assert "hunter2" in (stored.captured.stdout or "")
-        assert metadata_rows
+        assert runs_storing_the_declared_secret
         return
     assert stored.failure is None
     assert stored.captured.stdout is None
-    assert not metadata_rows
+    assert not runs_storing_the_declared_secret
     if kind == "ini":
         assert f"Unknown config option: {name}" in result.stdout.str() + result.stderr.str()
 

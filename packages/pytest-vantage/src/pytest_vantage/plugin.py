@@ -252,8 +252,9 @@ def pytest_configure(config: pytest.Config) -> None:
        once, and absent a typed ``--vantage`` nothing further happens: no
        plugin is registered, no socket is opened.
     4. The address and timeout are resolved and validated. An invalid value
-       stops the session with a usage error naming the option -- reporting
-       somewhere other than intended is worse than not starting.
+       stops the session with a usage error naming the option: recording
+       was asked for, and a value that can never work is a mistake to fix,
+       not one to run past with a warning.
     5. If failure text was requested, the controller registers
        `EvidenceCollector` too -- a session with no xdist workers still
        needs evidence collected -- before anything that could fail or block.
