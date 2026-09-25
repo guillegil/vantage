@@ -58,6 +58,7 @@ def _build_opener() -> urllib_request.OpenerDirector:
         urllib_request.HTTPHandler(),
         urllib_request.HTTPDefaultErrorHandler(),
         urllib_request.HTTPErrorProcessor(),
+        urllib_request.UnknownHandler(),
     ]
     # Absent when Python was built without `ssl`; an https address then
     # fails as an unknown URL type instead of breaking this import.
