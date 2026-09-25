@@ -5,17 +5,40 @@
 #   - `pre-push`: `mypy --strict` over the whole project (a type checker
 #     needs every file, not just the changed ones) plus the test suite on
 #     one Python version; the version matrix runs in CI.
+#
+# The project's own tools run from its environment (`uv sync --extra dev`
+# first), so uv.lock pins their versions here exactly as it does in CI.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+  - repo: local
     hooks:
-      - id: ruff
-        args: [--fix]
+      - id: ruff-check
+        name: ruff check --fix
+        entry: uv run --no-sync ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
         stages: [pre-commit]
       - id: ruff-format
+        name: ruff format
+        entry: uv run --no-sync ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
         stages: [pre-commit]
+      - id: mypy-strict
+        name: mypy --strict (whole project)
+        entry: uv run --no-sync mypy .
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: pytest-fast
+        name: pytest (fast unit suite)
+        entry: uv run --no-sync pytest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
@@ -34,18 +57,3 @@ repos:
         stages: [pre-commit]
       - id: mixed-line-ending
         stages: [pre-commit]
-
-  - repo: local
-    hooks:
-      - id: mypy-strict
-        name: mypy --strict (whole project)
-        entry: uv run --extra dev mypy .
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
-      - id: pytest-fast
-        name: pytest (fast unit suite)
-        entry: uv run --extra dev pytest
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
