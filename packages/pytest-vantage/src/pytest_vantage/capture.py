@@ -349,9 +349,9 @@ def _describes_a_failure(evidence: object) -> bool:
 
 def build_result(node_id: str, pending: PendingResult) -> dict[str, object] | None:
     """Build one wire-shape `results[]` entry from an accumulated
-    `PendingResult`. Returns `None` -- dropped, never invented -- when no execution of the
-    test was observed whole: a half-observed test (e.g. one interrupted
-    mid-call) is worse reported as whole than not at all.
+    `PendingResult`. Returns `None` -- dropped, never invented -- when no
+    execution of the test was observed whole: a half-observed test (e.g. one
+    interrupted mid-call) is worse reported as whole than not at all.
 
     Several complete executions of one node id come from xdist's `--dist
     each`. The server keeps one result per node id, so the most severe one

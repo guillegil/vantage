@@ -29,7 +29,7 @@ _ALLOWED_SCHEMES = frozenset({"http", "https"})
 # server started with no options.
 _DEFAULT_ADDRESS = "http://127.0.0.1:8765"
 # Bounds each reporting request as a whole; the preflight and the liveness
-# requests are held shorter still.
+# requests are never held longer.
 _DEFAULT_REPORT_TIMEOUT = 10.0
 # Ceiling on a liveness request (start-write, heartbeat): a small fixed
 # payload that must not stall as long as the finish report may.

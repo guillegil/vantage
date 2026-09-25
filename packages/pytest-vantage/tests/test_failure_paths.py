@@ -663,7 +663,7 @@ def test_reporting_error_preserves_failing_exit_status_and_warns_once(
 
 
 class _UnavailableError(RejectionError):
-    """What the server answers while its storage cannot take a write."""
+    """A refusal the store is made to raise; the server answers it with 503."""
 
     status_code = 503
     error = "unavailable"
