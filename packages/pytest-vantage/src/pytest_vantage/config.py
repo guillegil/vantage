@@ -28,8 +28,8 @@ _ALLOWED_SCHEMES = frozenset({"http", "https"})
 # The server's default bind address too, so `--vantage` alone reaches a
 # server started with no options.
 _DEFAULT_ADDRESS = "http://127.0.0.1:8765"
-# Bounds every socket operation of the report itself; the preflight probe
-# has its own, shorter bound.
+# Bounds each reporting request as a whole; the preflight and the liveness
+# requests are held shorter still.
 _DEFAULT_REPORT_TIMEOUT = 10.0
 # Ceiling on a liveness request (start-write, heartbeat): a small fixed
 # payload that must not stall as long as the finish report may.
@@ -132,7 +132,7 @@ def _positive_seconds(raw: str | float, option: str) -> float:
 
 
 def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | float | None) -> float:
-    """The bound on the reporting request: `--vantage-timeout` > the
+    """The bound on each reporting request: `--vantage-timeout` > the
     `vantage_timeout` ini value > the default (`10.0` seconds). No
     environment variable is defined for the timeout -- only the address has
     one.

@@ -87,7 +87,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         type=float,
         default=None,
         metavar="SECONDS",
-        help="Bound, in seconds, on the reporting request. Configures WHERE/HOW, never activates.",
+        help="Bound, in seconds, on each reporting request. Configures WHERE/HOW, never activates.",
     )
     group.addoption(
         "--vantage-failure-text",
@@ -268,7 +268,8 @@ def pytest_configure(config: pytest.Config) -> None:
        front of every session. Anything but an explicit yes, including the
        ``404`` of a server without that route, makes the `Recorder` send
        only the finish report -- no start-write or heartbeats -- rather
-       than half-record against a server that cannot finish the job.
+       than half-record against a server that cannot finish the job, and
+       warn once, naming the probe's reason.
     8. This hook has no fault-isolation boundary of its own, so a failure
        constructing the `Recorder` warns once and leaves the session
        unrecorded rather than ending it as an INTERNALERROR.
@@ -304,13 +305,13 @@ def pytest_configure(config: pytest.Config) -> None:
     from pytest_vantage.transport import fetch_capabilities
 
     liveness_timeout = resolve_liveness_timeout(settings.timeout)
-    lifecycle_available = fetch_capabilities(settings.address, timeout=liveness_timeout)
+    capabilities = fetch_capabilities(settings.address, timeout=liveness_timeout)
     try:
         recorder = Recorder(
             config,
             settings.address,
             settings.timeout,
-            lifecycle_available=lifecycle_available,
+            lifecycle_available=capabilities,
             metadata_requested=_metadata_capture_requested(config),
         )
     except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
