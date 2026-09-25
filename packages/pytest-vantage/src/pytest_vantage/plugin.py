@@ -1,20 +1,16 @@
 """The always-loaded half of the plugin, registered via the ``pytest11`` entry point.
 
-Declared inert by design: this module is imported by pytest on **every**
-invocation, activated or not, so it must implement no hook capable of any
-side effect. ``pytest_addoption`` and ``pytest_configure`` land here; the
-recorder that actually reports lives in ``pytest_vantage.recorder`` and is
-registered through ``config.pluginmanager.register(...)`` only when a server
-address is configured.
+pytest imports this module on every invocation, activated or not, so it
+implements no hook capable of a side effect: only ``pytest_addoption`` and
+``pytest_configure``. The recorder that reports lives in
+``pytest_vantage.recorder`` and is registered through
+``config.pluginmanager.register(...)`` only once ``--vantage`` is given --
+pytest fires every ``pytest_*`` hook it finds on a registered plugin, so a
+reporting hook here would run in every session.
 
-That split is what lets CON-05 and RQ-2 hold together: pytest fires any
-``pytest_*`` hook it finds on a registered plugin, so a reporting hook on
-this always-imported module would run in every session in the world.
-
-Under ADR-9 this plugin never opens a database. It reports finished sessions
-over HTTP using ``urllib`` and encodes them with ``json`` -- standard library
-only, so installing it can conflict with nothing in the environment it lands
-in (RQ-24).
+The plugin never opens a database. It reports sessions over HTTP with
+``urllib`` and ``json`` -- standard library only, so installing it can
+conflict with nothing in the environment it lands in.
 """
 
 from __future__ import annotations
@@ -37,9 +33,8 @@ from pytest_vantage.evidence import EvidenceCollector
 from pytest_vantage.recorder import Recorder
 from pytest_vantage.transport import fetch_capabilities
 
-# design.md D6: "connect_timeout: min(2.0, report_timeout), applies to the
-# preflight probe" -- the preflight must not itself wait as long as a full
-# report would be allowed to.
+# The preflight probe waits at most min(2.0, report timeout): it must not
+# itself wait as long as a full report is allowed to.
 _MAX_CONNECT_TIMEOUT = 2.0
 _DEFAULT_HTTP_PORT = 80
 _DEFAULT_HTTPS_PORT = 443
@@ -47,7 +42,7 @@ _DEFAULT_HTTPS_PORT = 443
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Register every CLI/ini surface. Registering an option is not activating
-    it -- see ``_activation_requested`` for the one thing that does (RQ-2).
+    it -- see ``_activation_requested`` for the one thing that does.
     """
     group = parser.getgroup("vantage")
     group.addoption(
@@ -56,7 +51,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help=(
             "Record this session's run to a vantage server. "
-            "This is the ONLY thing that activates recording (RQ-2)."
+            "This is the ONLY thing that activates recording."
         ),
     )
     group.addoption(
@@ -78,9 +73,9 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help=(
             "Enable failure-text capture (traceback, failure fields, captured output) "
-            "for this session. Absent by default (RQ-25) -- capture never happens "
+            "for this session. Absent by default -- capture never happens "
             "unless this flag is given, there is no ini equivalent, and the flag "
-            "cannot activate recording on its own (design.md D72). Stored failure "
+            "cannot activate recording on its own. Stored failure "
             "text is unredacted and may contain any value a test printed or "
             "asserted, including credentials."
         ),
@@ -93,40 +88,31 @@ def pytest_addoption(parser: pytest.Parser) -> None:
             "Read the files named by vantage-metadata.json in the project root and "
             "record the declared keys with this session. Absent by default -- capture "
             "never happens unless this flag is given, there is no ini equivalent, and "
-            "the flag cannot activate recording on its own (design.md D99). Declared "
+            "the flag cannot activate recording on its own. Declared "
             "files are read from disk and their declared values are stored; a "
             "configuration file is where credentials live by convention."
         ),
     )
     parser.addini(
         "vantage_server",
-        help="Same as --vantage-server. Configures WHERE; never activates recording (RQ-2).",
+        help="Same as --vantage-server. Configures WHERE; never activates recording.",
         default=None,
     )
     parser.addini(
         "vantage_timeout",
-        help="Same as --vantage-timeout. Configures WHERE/HOW; never activates recording (RQ-2).",
+        help="Same as --vantage-timeout. Configures WHERE/HOW; never activates recording.",
         default=None,
     )
 
 
 def _preflight_reachable(address: str, timeout: float) -> bool:
-    """A bare TCP connect, not an HTTP request (design.md D6) -- proves only
-    that something is listening at `address`, never anything about the
-    protocol or route. This function itself sends no bytes -- but, since
-    `plugin-server-compatibility`, that is no longer true of the preflight
-    step as a whole: `pytest_configure` follows a successful call to this
-    function with a real HTTP capability request
-    (`transport.fetch_capabilities`, design decisions D38-D42). RQ-2 stays
-    untouched either way, because none of this runs until activation has
-    already been confirmed -- it is "sends no bytes" that stops being an
-    accurate claim about the preflight taken together, not RQ-2.
+    """A bare TCP connect, not an HTTP request: it sends no bytes and proves
+    only that something is listening at `address`, never anything about the
+    protocol or route.
 
     `ConnectionRefusedError` (nothing listening) and `socket.gaierror` (the
-    host does not resolve) are both `OSError` subclasses, so catching
-    `OSError` alone covers RQ-37 criteria 1 and 2 without needing to
-    distinguish which one fired -- the caller's response is the same
-    either way.
+    host does not resolve) are both `OSError` subclasses, and the caller's
+    response is the same either way.
     """
     parsed = urlparse(address)
     default_port = _DEFAULT_HTTPS_PORT if parsed.scheme == "https" else _DEFAULT_HTTP_PORT
@@ -141,7 +127,7 @@ def _preflight_reachable(address: str, timeout: float) -> bool:
 def _activation_requested(config: pytest.Config) -> bool:
     """Whether recording was activated for this session.
 
-    RQ-2: ``--vantage`` is the ACTIVATION switch and the only one. The
+    ``--vantage`` is the ACTIVATION switch and the only one. The
     ``--vantage-server``/``--vantage-timeout`` options, the ``vantage_server``/
     ``vantage_timeout`` ini values and the ``VANTAGE_SERVER`` environment
     variable configure WHERE a report would go -- none of them may turn
@@ -152,21 +138,14 @@ def _activation_requested(config: pytest.Config) -> bool:
 
 
 def _failure_text_capture_requested(config: pytest.Config) -> bool:
-    """Whether `EvidenceCollector` should be registered for this session
-    (design.md D72, revised after Phase 9's RQ-25 measurement: capture is
-    opt-in, absent by default). Composes `_activation_requested` with the
-    sole opt-in surface -- the `--vantage-failure-text` invocation flag --
-    through `resolve_failure_text_capture`, whose conjunction is monotone
-    increasing in that flag: it can only widen an activated session's
-    capture from absent to present, never enable recording itself. There is
-    deliberately no ini equivalent and no environment variable, so a
-    committed configuration file can never be the means by which capture is
-    enabled. Called identically on both the worker and controller branches
-    of `pytest_configure`: the opt-in is session-wide, not controller-only.
+    """Whether `EvidenceCollector` should be registered for this session:
+    only when both `--vantage` and `--vantage-failure-text` are given, with
+    no ini or environment equivalent, so a committed configuration file can
+    never enable capture.
 
-    Short-circuits before reading the opt-in surface when the session was
-    never activated at all (RQ-2): an unactivated worker or controller reads
-    `"vantage"` alone, exactly as it did before this decision existed.
+    Called on both the worker and controller branches of `pytest_configure`,
+    since the opt-in is session-wide. An unactivated session short-circuits
+    and reads `"vantage"` alone.
     """
     if not _activation_requested(config):
         return False
@@ -178,30 +157,13 @@ def _failure_text_capture_requested(config: pytest.Config) -> bool:
 
 def _metadata_capture_requested(config: pytest.Config) -> bool:
     """Whether `Recorder` should attempt to read the metadata declaration
-    for this session (design.md D99, opt-in-activation's "Metadata capture
-    flag inertness" requirement, RQ-2 extended). Composes
-    `_activation_requested` with the sole opt-in surface -- the
-    `--vantage-metadata` invocation flag -- through `resolve_metadata_
-    capture`, the identical monotone conjunction `_failure_text_capture_
-    requested` uses above: it can only widen an activated session's
-    capture from absent to present, never enable recording itself. There
-    is deliberately no ini equivalent and no environment variable, so a
-    committed configuration file can never be the means by which a
-    filesystem read is enabled (ADR-0017's C3).
+    for this session: the same gate as `_failure_text_capture_requested`,
+    for the `--vantage-metadata` flag, so a committed configuration file can
+    never enable a filesystem read.
 
-    Short-circuits before reading the opt-in surface when the session was
-    never activated at all (RQ-2), exactly like `_failure_text_capture_
-    requested`: an unactivated session reads `"vantage"` alone.
-
-    Unlike `_failure_text_capture_requested`, this is called only from the
-    controller branch of `pytest_configure` -- there is no per-worker
-    consumer of it (no `EvidenceCollector` equivalent registers on a
-    worker for metadata), and `test_xdist_guard.py`'s `_WorkerConfigDouble`
-    raises on any option read outside its allow-list, so reading
-    `"vantage_metadata"` on a worker would be an unproven, untested read
-    with nothing to act on it. The declaration is still read exactly once
-    per session regardless of worker count, because no `Recorder` is ever
-    constructed on a worker at all (`plugin.py:214-217`).
+    Called only on the controller: no `Recorder` is ever constructed on a
+    worker, so the declaration is read once per session regardless of
+    worker count.
     """
     if not _activation_requested(config):
         return False
@@ -212,57 +174,36 @@ def _metadata_capture_requested(config: pytest.Config) -> bool:
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """The always-imported hook (design.md D2, D6, D68; design decisions
-    D38-D42 for the capability probe).
+    """The always-imported hook: decides what, if anything, to register.
 
-    1. Under xdist, every worker re-runs this hook as a full pytest session
-       of its own. The guard is the FIRST statement: before anything else
-       runs, branch on ``workerinput``.
-    2. **Worker branch** (design.md D68): a worker is where
-       ``pytest_runtest_makereport`` actually fires -- ``item`` and
-       ``excinfo`` exist only in the process that ran the test -- so, when
-       activated, a worker registers `EvidenceCollector` and returns
-       immediately. Nothing past that: no server address is resolved, no
-       timeout is read, no preflight runs, no capability probe runs, and no
-       `Recorder` is EVER constructed on a worker -- that would break RQ-1's
-       "exactly one run entry" (RQ-27's xdist half of the matrix), and
-       `EvidenceCollector` alone cannot cause it because it never opens a
-       socket.
-    3. **Controller branch.** Absent ``--vantage``, this function does
-       nothing further on the controller either: no plugin is registered, no
-       socket is opened (RQ-2).
-    4. Once activated, the controller registers `EvidenceCollector` too --
-       a session with no xdist workers at all still needs failure evidence
-       collected somewhere -- before anything that could fail or block.
-    5. A bare TCP preflight (``_preflight_reachable``) proves something is
-       listening at the resolved address before a `Recorder` is registered
-       (RQ-37 criteria 1 and 2: refused connection, unresolvable host). A
-       failed preflight warns once, naming the address, and returns without
-       registering a `Recorder` -- the session then runs to completion with
-       `EvidenceCollector` still active but nothing reported.
-    6. Once the preflight succeeds, a capability probe
-       (``transport.fetch_capabilities``) asks whether the server
-       advertises ``session_lifecycle`` -- bounded by
-       ``resolve_liveness_timeout``, never the report timeout (D42), so a
-       slow or hanging server cannot put the full report timeout in front of
-       every session. Anything other than an explicit positive answer,
-       including the ``404`` an older server answers (D39), degrades: the
-       `Recorder` still gets registered below, but records exactly as the
-       previous release did (D41) rather than half-recording against a
-       server that cannot finish the job. The `Recorder` is registered once
-       activation and the preflight succeed, carrying whatever the
-       capability probe found, plus `_metadata_capture_requested(config)`
-       (design.md D99) -- the second gate C2 names, computed here rather
-       than inside `Recorder.__init__` so the same short-circuit-on-
-       activation guarantee every other opt-in surface holds is visible at
-       the single call site that constructs a `Recorder` at all.
+    1. Under xdist every worker re-runs this hook as a full pytest session
+       of its own, so the FIRST statement branches on ``workerinput``.
+    2. **Worker branch.** ``pytest_runtest_makereport`` fires only in the
+       process that ran the test, so a worker registers `EvidenceCollector`
+       if failure text was requested, and returns. It never resolves an
+       address, reads a timeout, probes the server or constructs a
+       `Recorder`: a `Recorder` per worker would record one session as
+       several runs.
+    3. **Controller branch.** Absent ``--vantage``, nothing further happens:
+       no plugin is registered, no socket is opened.
+    4. If failure text was requested, the controller registers
+       `EvidenceCollector` too -- a session with no xdist workers still
+       needs evidence collected -- before anything that could fail or block.
+    5. A bare TCP preflight (``_preflight_reachable``) checks that something
+       is listening at the resolved address. If not (connection refused,
+       host unresolvable), it warns once, naming the address, and returns
+       without a `Recorder`; the suite still runs to completion.
+    6. A capability probe (``transport.fetch_capabilities``) asks whether
+       the server advertises ``session_lifecycle``, bounded by the liveness
+       timeout so a hanging server cannot put the full report timeout in
+       front of every session. Anything but an explicit yes, including the
+       ``404`` of a server without that route, makes the `Recorder` send
+       only the finish report -- no start-write or heartbeats -- rather
+       than half-record against a server that cannot finish the job.
 
-    A server that answers the preflight and later disappears, or starts
-    failing partway through reporting, is not this function's concern --
-    ``pytest_vantage.boundary``'s fault-isolation decorator on every
-    ``Recorder`` hook is what catches that (RQ-21), and RQ-37 criterion 3
-    ("drops out mid-session") is mechanically that same path, not a second
-    preflight.
+    A server that passes the preflight and later disappears or fails is
+    handled by ``pytest_vantage.boundary``'s fault-isolation decorator on
+    every ``Recorder`` hook, not by this function.
     """
     if hasattr(config, "workerinput"):
         if _failure_text_capture_requested(config):

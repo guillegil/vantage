@@ -1,17 +1,15 @@
-"""`vantage` -- resolve configuration, fail fast, then serve (design.md D11, D12).
+"""`vantage` -- resolve configuration, fail fast, then serve.
 
-**Path authority.** A resolved database directory that exists but cannot be
-written to fails here, at startup -- not on the first report the server
-accepts, by which point the plugin that sent it has already exited and the
-report is lost either way. Resolution itself creates nothing
-(`core/config/resolution.py` is pure); this is the one place that checks
-the resolved path is actually usable before the server binds a port.
+**Path check at startup.** A database directory that exists but cannot be
+written to fails here, before the server binds a port -- not on the first
+report, by which point the plugin that sent it has exited and the report is
+lost. Resolution itself (`core/config/resolution.py`) is pure and creates
+nothing.
 
-**Network exposure.** Binding wider than the loopback default is a
-deliberate `--host`, and it gets a warning naming exactly what is missing:
-there is no authentication in front of this server yet (Phase 4). The
-default warns about nothing -- a warning on every normal start trains
-people to ignore the one that matters.
+**Network exposure.** Binding wider than the loopback default warns that
+there is no authentication in front of this server. The default warns about
+nothing: a warning on every normal start trains people to ignore the one
+that matters.
 """
 
 from __future__ import annotations
@@ -40,9 +38,9 @@ class DatabaseDirectoryNotWritableError(RuntimeError):
 def ensure_database_directory_writable(database_path: Path) -> None:
     """Raise if `database_path`'s parent exists and this process cannot write to it.
 
-    A missing parent is not an error here -- `open_database` (D9) creates
-    it. Only an *existing* directory this process cannot write into is a
-    startup failure, because nothing later in the path will create it for us.
+    A missing parent is not an error here -- `open_database` creates it.
+    Only an *existing* directory this process cannot write into is a
+    startup failure.
     """
     parent = database_path.parent
     if parent.exists() and not os.access(parent, os.W_OK):
@@ -56,8 +54,8 @@ def warn_if_bound_wide(host: str) -> None:
     """Warn, naming the missing authentication, for any bind address but the loopback default."""
     if host != _LOOPBACK:
         _LOGGER.warning(
-            "Binding to %s: there is no authentication in front of this server yet "
-            "(Phase 1); anyone who can route to this host can write to the database.",
+            "Binding to %s: there is no authentication in front of this server yet; "
+            "anyone who can route to this host can write to the database.",
             host,
         )
 

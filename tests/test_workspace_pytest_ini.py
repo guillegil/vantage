@@ -1,14 +1,14 @@
 """Guard: the workspace root ``pyproject.toml`` is the only file that may
-declare ``[tool.pytest.ini_options]`` (D9).
+declare ``[tool.pytest.ini_options]``.
 
-pytest resolves exactly one ini file per rootdir. A package ``pyproject.toml``
-that declared its own ``[tool.pytest.ini_options]`` would silently become
-*that* file when pytest is invoked from inside the package directory, and
-every ``@pytest.mark.req`` in that package would then fail collection under
-``--strict-markers``.
+pytest reads exactly one ini file. A package ``pyproject.toml`` that declared
+its own ``[tool.pytest.ini_options]`` would silently become *that* file when
+pytest is invoked from inside the package directory, and the root's settings
+-- ``--strict-markers`` and the ``slow`` marker declaration among them --
+would stop applying there.
 
-This is a text scan, not a TOML parse: ``tomllib`` does not exist on the
-Python 3.10 floor and ``tomli`` is a third-party backport (RQ-24).
+This is a text scan, not a TOML parse: ``tomllib`` does not exist on
+Python 3.10 and the project declares no dependency on the ``tomli`` backport.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pathlib import Path
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
 FORBIDDEN_SECTION = "[tool.pytest.ini_options]"
-# Two published distributions (ADR-4): pytest-vantage and vantage.
+# The two workspace packages: pytest-vantage and vantage.
 EXPECTED_PACKAGE_COUNT = 2
 
 
@@ -28,9 +28,7 @@ def _package_pyproject_files() -> list[Path]:
 def test_only_the_workspace_root_declares_pytest_ini_options() -> None:
     package_files = _package_pyproject_files()
 
-    # The guard must not pass having scanned nothing -- the same vacuity
-    # failure `test_core_package_is_not_empty` (Phase B) exists to prevent
-    # for the architecture test.
+    # The guard must not pass having scanned nothing.
     assert len(package_files) == EXPECTED_PACKAGE_COUNT, (
         f"expected {EXPECTED_PACKAGE_COUNT} package pyproject.toml files, "
         f"found {len(package_files)}: {package_files}"
@@ -53,5 +51,5 @@ def test_only_the_workspace_root_declares_pytest_ini_options() -> None:
 
     assert not offenders, (
         f"{FORBIDDEN_SECTION} must appear only in the workspace root "
-        f"pyproject.toml (D9), but was found in: {offenders}"
+        f"pyproject.toml, but was found in: {offenders}"
     )

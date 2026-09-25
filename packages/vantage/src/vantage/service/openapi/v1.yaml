@@ -1,18 +1,16 @@
-# Hand-written by design (design.md Q5, D53) -- never generated from
-# `app.routes`. A generated document would be the code in another format
-# and could never fail the drift check `test_interface_document.py` runs
-# against it; this one is authored independently, so an undocumented route
-# is a check that can actually fail.
+# Hand-written, never generated from `app.routes`. A generated document
+# would be the code in another format and could never fail the drift check
+# `test_interface_document.py` runs against it.
 openapi: 3.1.0
 info:
   title: Vantage API
   version: "1"
-  description: read-tagged paths are the surface history-read-api's read-only guarantee covers; write-tagged paths ingest or advance a run and are excluded from that guarantee by name (session-ingestion).
+  description: read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data.
 servers:
   - url: /api/v1
 tags:
   - {name: read, description: Leaves stored data unchanged.}
-  - {name: write, description: Ingests or advances a run.}
+  - {name: write, description: Changes stored data.}
 paths:
   /runs:
     post:
@@ -27,7 +25,7 @@ paths:
       operationId: list_runs
       tags: [read]
       summary: Page through recorded runs, newest first.
-      description: metadata_key and metadata_value together filter to runs holding that declared key=value pair (design.md D100) -- both or neither, one without the other is 422. A run recorded before the key was ever declared has no value for it and is excluded; metadata_horizon in the response reports how many runs predate it (null when no metadata filter was given).
+      description: metadata_key and metadata_value together filter to runs holding that declared key=value pair -- both or neither, one without the other is 422. A run recorded before the key was ever declared has no value for it and is excluded; metadata_horizon in the response reports how many runs predate it (null when no metadata filter was given).
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
@@ -74,7 +72,7 @@ paths:
       operationId: get_result
       tags: [read]
       summary: The full record for one result, unbounded by any list display width.
-      description: node_id is a named query parameter, not a path segment (design.md D54) -- the same reasoning /tests/history already applies.
+      description: node_id is a named query parameter, not a path segment, because a node id may contain `/` -- the same as on /tests/history.
       parameters:
         - $ref: '#/components/parameters/run_id'
         - {name: node_id, in: query, required: true, schema: {type: string, maxLength: 1024}}
@@ -87,7 +85,7 @@ paths:
       operationId: list_history
       tags: [read]
       summary: A test's execution history, newest first, by its node id.
-      description: node_id is a named query parameter on an identity-free path, not a path segment (design.md D54) -- the parameter name is the identity scheme, so a later stable_id sibling arrives purely additive.
+      description: node_id is a named query parameter on an identity-free path, not a path segment, because a node id may contain `/`. The parameter name is the identity scheme, so another scheme can later be added as a sibling parameter.
       parameters:
         - {name: node_id, in: query, required: true, schema: {type: string, maxLength: 1024}}
         - $ref: '#/components/parameters/limit'
@@ -99,7 +97,7 @@ paths:
     get:
       operationId: capabilities
       tags: [read]
-      summary: The compatibility advertisement (plugin-server-compatibility).
+      summary: The compatibility advertisement.
       responses:
         "200": {description: The single advertised capability.}
   /openapi.yaml:
@@ -119,7 +117,7 @@ paths:
     post:
       operationId: upsert_section
       tags: [write]
-      summary: Create or update a section's prefix. A section name is never a path segment (design.md D54, D87) -- it travels here as a body field.
+      summary: Create or update a section's prefix. A section name may contain `/`, so it travels as a body field, never as a path segment.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SectionUpsertRequest'}}}}
       responses:
         "201": {description: Stored, a new section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
@@ -129,7 +127,7 @@ paths:
       operationId: delete_section
       tags: [write]
       summary: Delete a section by name.
-      description: name is a query value, not a path segment (design.md D54, D87), for the same reason it is a body field on write.
+      description: name is a query value, not a path segment, because a section name may contain `/`.
       parameters:
         - {name: name, in: query, required: true, schema: {type: string}}
       responses:
@@ -140,13 +138,13 @@ paths:
       operationId: get_run_sections
       tags: [read]
       summary: One run's section summary -- every defined section, plus the always-present unassigned bucket.
-      description: Section definitions are read fresh on every call, never cached (design.md D88); classification happens at read time (design.md D84, D85).
+      description: Section definitions are read fresh on every call, never cached; classification happens at read time.
       parameters:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: The run's section summary., content: {application/json: {schema: {$ref: '#/components/schemas/RunSectionSummaryResponse'}}}}
         "404": {description: No run with that id has been recorded.}
-        "500": {description: A stored section's value could not be parsed (design.md D89 -- unreadable_setting).}
+        "500": {description: A stored section's value could not be parsed (error unreadable_setting).}
 components:
   parameters:
     run_id: {name: run_id, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{32}$'}}
@@ -171,9 +169,9 @@ components:
     # a `type: object` stub would leave every read response opaque to a
     # generated client.
     #
-    # The duplication D56 warns about is bounded by the schema checks at the
-    # end of `test_interface_document.py`. They parse this file and read
-    # `service/schemas.py`'s `model_fields` independently -- neither side is
+    # That duplicates `service/schemas.py`, and the schema checks at the end
+    # of `test_interface_document.py` bound the duplication. They parse this
+    # file and read `model_fields` independently -- neither side is
     # generated from the other -- and compare, in both directions:
     #
     #   * which schemas are declared, against the models bound to them;
@@ -185,14 +183,9 @@ components:
     #   * every declared `enum`, against `OUTCOMES` / `PRESENTATIONS` -- the
     #     domain frozensets that decide what the server can emit.
     #
-    # Stated narrowly on purpose (verify round 2): the earlier version of
-    # this comment claimed `test_routes_read.py`'s key-set assertions bounded
-    # the drift, and they do not -- they compare a response against a literal
-    # written in that test file and never open this document. Three tampers
-    # here alone left the whole suite green. What is still unchecked, and is
-    # named rather than implied: the JSON `type` and `format` keywords, and
-    # the `pattern` / `maxLength` constraints. A `string` declared where the
-    # model holds an `int` would drift silently.
+    # Not checked: the JSON `type` and `format` keywords, and the `pattern` /
+    # `maxLength` constraints. A `string` declared where the model holds an
+    # `int` would drift silently.
     Acknowledgement:
       type: object
       required: [run_id, status, ignored]
@@ -203,7 +196,7 @@ components:
       properties: {run_id: {type: string}, status: {type: string}}
     # No `root`. `VcsContext` carries one; this model has no field to
     # populate, which is what keeps a reporter's absolute path off the wire
-    # on the detail path where no type stops it (design.md D59).
+    # on the detail path where no type stops it.
     RunVcs:
       type: object
       required: [commit, branch, commit_subject, commit_subject_truncated, dirty]
@@ -212,9 +205,8 @@ components:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs]
       properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
-    # `predating` equals the total run count when `key` was never declared
-    # (design.md D100, Q2) -- populated only when a metadata filter was
-    # given.
+    # `predating` equals the total run count when `key` was never declared.
+    # Populated only when a metadata filter was given.
     MetadataHorizon:
       type: object
       required: [key, predating]
@@ -225,14 +217,13 @@ components:
       properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}, metadata_horizon: {oneOf: [{$ref: '#/components/schemas/MetadataHorizon'}, {type: "null"}]}}
     # Carries `interrupt_reason` and an untruncated `commit_subject`, which
     # the lean list entry omits -- the detail path keeps the full record
-    # reachable (design.md D57).
+    # reachable.
     RunDetailResponse:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs]
       properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
-    # No traceback, failure_repr or captured output at any depth -- the
-    # exclusion is structural now that `failure-evidence` populates them
-    # (history-read-api -> Lean list projections, Test, design.md D76).
+    # No traceback, failure_repr or captured output at any depth -- a
+    # results list never carries them; the single-result endpoint does.
     FailureProjection:
       type: object
       required: [failure_type, failure_message, failure_message_truncated, failure_path, failure_lineno, skip_reason, xfail_reason]
@@ -247,7 +238,7 @@ components:
       properties: {items: {type: array, items: {$ref: '#/components/schemas/ResultListItem'}}, has_more: {type: boolean}}
     # The single-result endpoint's response -- every field a list response
     # bounds or excludes, unbounded, flat like `ResultReport`'s own wire
-    # shape rather than nesting `failure`/`captured` (design.md D78).
+    # shape rather than nesting `failure`/`captured`.
     ResultDetailResponse:
       type: object
       required: [node_id, file_path, class_name, function_name, param_id, outcome, duration, started_at, finished_at, setup_outcome, call_outcome, teardown_outcome, setup_duration, call_duration, teardown_duration, worker_id, failure_type, failure_message, failure_message_truncated, failure_path, failure_lineno, failure_repr, failure_repr_truncated, traceback, traceback_truncated, skip_reason, skip_reason_truncated, xfail_reason, xfail_reason_truncated, captured_stdout, captured_stdout_truncated, captured_stderr, captured_stderr_truncated]

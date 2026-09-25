@@ -1,10 +1,10 @@
-"""RQ-24 criterion 2: `pytest_vantage` imports only the standard library or
-`pytest`. Under ADR-9 this plugin never opens a database and never imports
-the server packages -- it reports over HTTP with `urllib`.
+"""`pytest_vantage` imports only the standard library or `pytest`, so
+installing it adds no third-party dependency. The plugin never opens a
+database and never imports the server packages -- it reports over HTTP with
+`urllib`.
 
-Reuses `packages/vantage/tests/importwalk.py` (design.md, D10) rather than
-duplicating the walker -- PR1 built it parameterised by `allowed_top_levels`
-for exactly this second use.
+Reuses `packages/vantage/tests/importwalk.py`, parameterised by
+`allowed_top_levels`, rather than duplicating the walker.
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
 from importwalk import walk_package
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -21,7 +20,6 @@ _PLUGIN_DIR = _SRC_ROOT / "pytest_vantage"
 _ALLOWED = frozenset(sys.stdlib_module_names) | {"pytest"}
 
 
-@pytest.mark.req(id="RQ-24")
 def test_every_plugin_import_resolves_to_stdlib_or_pytest() -> None:
     result = walk_package(
         _PLUGIN_DIR,
@@ -35,7 +33,6 @@ def test_every_plugin_import_resolves_to_stdlib_or_pytest() -> None:
     ]
 
 
-@pytest.mark.req(id="RQ-24")
 def test_the_walk_is_not_vacuous() -> None:
     result = walk_package(
         _PLUGIN_DIR,

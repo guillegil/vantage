@@ -1,20 +1,15 @@
-"""One ``urllib`` POST per session (design.md D7, RQ-25's shape).
+"""The plugin's HTTP client: the session reports, heartbeats and the
+capability probe, over ``urllib``.
 
-``urlopen(timeout=t)`` bounds every socket operation of the request, so a
+``urlopen(timeout=t)`` bounds every socket operation of a request, so a
 server that accepts the connection and never answers trips at ``t`` rather
-than hanging forever (design.md D6) -- ``boundary.py`` is what turns that,
-and any other exception from this module, into a bounded warning instead of
-letting it propagate.
+than hanging forever.
 
-The response side is bounded and defensive on purpose (design.md threat
-matrix "Untrusted response"): the server this plugin talks to is not
-trusted to behave. ``resp.read(MAX_RESPONSE_BYTES)`` never buffers more than
-64 KiB into memory regardless of how much the server actually sends, and the
-acknowledgement is parsed as JSON the same way any other malformed input
-would be -- by raising, which ``boundary.py``'s fault isolation (RQ-21)
-turns into a warning, not by swallowing the error here. This module's
-contract stays "send, or raise" -- nothing here decides whether a failure is
-fatal.
+The response side is bounded and defensive because the server is not trusted
+to behave: ``resp.read(MAX_RESPONSE_BYTES)`` never buffers more than 64 KiB,
+and a malformed acknowledgement raises like any other bad input. ``send``
+and ``send_heartbeat`` are "send, or raise" -- nothing here decides whether a
+failure is fatal; ``boundary.py`` turns any exception into a warning.
 """
 
 from __future__ import annotations
@@ -26,8 +21,7 @@ _INGESTION_PATH = "/api/v1/runs"
 _HEARTBEAT_PATH_SUFFIX = "/heartbeat"
 _CAPABILITIES_PATH = "/api/v1/capabilities"
 
-# design.md threat matrix "Untrusted response": the acknowledgement body is
-# never expected to be more than a few dozen bytes
+# The acknowledgement body is a few dozen bytes
 # (`{"run_id": ..., "status": ..., "ignored": []}`); 64 KiB is comfortably
 # larger than that while still refusing to buffer an unbounded response.
 MAX_RESPONSE_BYTES = 64 * 1024
@@ -43,8 +37,6 @@ def send(address: str, report: dict[str, object], *, timeout: float) -> None:
     Raises on any transport failure -- connection refused, timeout, DNS
     failure, a non-2xx status via ``urllib.error.HTTPError``, a response
     body that is not valid JSON -- this function catches nothing itself.
-    Turning a raised exception here into a warning instead of an unhandled
-    error (design.md D6, RQ-21) is ``boundary.py``'s job.
     """
     url = address.rstrip("/") + _INGESTION_PATH
     body = json.dumps(report).encode("utf-8")
@@ -64,19 +56,13 @@ def send(address: str, report: dict[str, object], *, timeout: float) -> None:
 
 
 def send_heartbeat(address: str, run_id: str, *, timeout: float) -> None:
-    """POST an empty liveness beat to ``{address}/api/v1/runs/{run_id}/heartbeat``
-    (design.md D31, D33).
+    """POST an empty liveness beat to ``{address}/api/v1/runs/{run_id}/heartbeat``.
 
-    A distinct function rather than a `path` parameter on `send` above --
-    `send`'s contract and docstring stay true to "one session report", and
-    the two calls differ in more than their path: this one sends no body of
-    meaning (design.md D33: `{}`, read by nothing) and is bounded by the
-    liveness timeout, never the report timeout. Declared here in Phase 2 so
-    this module's shape settles once; nothing calls it until Phase 4 wires
-    the heartbeat hook.
+    Separate from `send` because the two differ in more than their path: the
+    body is a meaningless `{}`, the response is not parsed, and the caller
+    bounds it by the liveness timeout rather than the report timeout.
 
-    Raises on any transport failure, exactly like `send` -- turning that
-    into a warning instead of an unhandled error is `boundary.py`'s job.
+    Raises on any transport failure, exactly like `send`.
     """
     url = address.rstrip("/") + _INGESTION_PATH + f"/{run_id}" + _HEARTBEAT_PATH_SUFFIX
     http_request = urllib_request.Request(  # noqa: S310
@@ -91,24 +77,18 @@ def send_heartbeat(address: str, run_id: str, *, timeout: float) -> None:
 
 def fetch_capabilities(address: str, *, timeout: float) -> bool:
     """GET ``{address}/api/v1/capabilities`` and answer whether the server
-    advertises the ``session_lifecycle`` capability (design decisions
-    D38-D40, `plugin-server-compatibility`).
+    advertises the ``session_lifecycle`` capability.
 
-    Returns ``True`` for exactly one shape: a `200` response whose JSON body
+    Returns ``True`` for exactly one shape: a 2xx response whose JSON body
     is a mapping carrying ``"session_lifecycle": true``. Every other outcome
-    degrades to ``False`` -- the `404` an older server (one that predates
-    this route entirely) answers (D39), a connection failure, a timeout, any
-    other non-2xx status, a body that is not valid JSON, JSON of the wrong
-    shape (not a mapping at all, or ``session_lifecycle`` missing, falsy, or
-    not literally the JSON boolean ``true``).
+    is ``False`` -- the `404` from an older server that has no such route, a
+    connection failure, a timeout, any other non-2xx status, a body that is
+    not valid JSON, or JSON of the wrong shape (not a mapping, or
+    ``session_lifecycle`` missing or anything but the JSON boolean ``true``).
 
-    Unlike `send`/`send_heartbeat`, whose contract is "send, or raise" and
-    leave turning the exception into a warning to `boundary.py`, this
-    function IS the fail-closed boundary (D40): it never propagates. Catching
-    broadly here, not in the caller, is deliberate -- a capability check that
-    could ever raise out to its caller would let one overlooked exception
-    path fail OPEN by accident, exactly the defect this change exists to
-    prevent.
+    Unlike `send` and `send_heartbeat`, this never raises: it fails closed
+    itself, so no overlooked exception path in a caller can accidentally
+    turn the lifecycle on.
     """
     url = address.rstrip("/") + _CAPABILITIES_PATH
     try:

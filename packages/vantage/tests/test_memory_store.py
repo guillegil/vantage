@@ -1,4 +1,4 @@
-"""RQ-30.1: the core's storage contract, run against the in-memory adapter."""
+"""The core's storage contract, run against the in-memory adapter."""
 
 from __future__ import annotations
 

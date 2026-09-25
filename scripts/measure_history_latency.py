@@ -1,29 +1,26 @@
-"""Manual harness for history-read-api's latency obligation (design.md D64,
-task 7.7-7.8). **Not a pytest test, never collected by the suite** -- same
-flaky-in-CI reasoning as the script it imports from and re-runs below,
-`measure_vcs_overhead.py`::
+"""Measure the server-side latency of `GET /api/v1/tests/history`.
+
+Not collected by the test suite: a hard timing assertion is flaky in CI, so
+this reports a distribution for a person to read. Run it by hand::
 
     uv run --extra dev python scripts/measure_history_latency.py
 
-Transcribe the printed p95, max, and 10 ms-profile overhead into the
-"Measurements" paragraph of `history-read-api` -> *Test history latency*
-(task 7.8). A future change to the history query or its indexes MUST re-run
-this script and update that paragraph.
+Re-run it after any change to the history query or its indexes. The target
+is a p95 under 100 ms; the slowest single response is printed alongside it.
 
 Fixture: 500 runs x 200 results (100,000 results), ~200 distinct node ids,
-built through `record_session` via the real SQLite adapter -- never
-hand-written `INSERT`s, which could diverge from what production writes
-(D64). One target node id is present in every run; a second is present in
-exactly one -- the join `history-read-api` sizes at ~500 index-ranged rows
-(D63). Driven through the ASGI app in-process (`TestClient`, no socket): the
-obligation is server-side, and a loopback socket would measure the kernel
-too. 5 warm-up requests discarded, then 200 timed with
-`time.perf_counter_ns`; p95 by nearest-rank on the sorted samples, plus the
-slowest single response, both required by the scenario.
+written through `record_session` on the real SQLite adapter rather than with
+hand-written `INSERT`s, which could diverge from what production writes. The
+queried node id is present in every run, so its history spans ~500 rows; a
+second target is present in exactly one run. Requests go through the ASGI app
+in-process (`TestClient`, no socket), because a loopback socket would measure
+the kernel too. 5 warm-up requests are discarded, then 200 are timed with
+`time.perf_counter_ns`; p95 is nearest-rank on the sorted samples.
 
-Also re-runs `measure_vcs_overhead.py`'s synthetic-repository 10 ms profile
-(D63) -- the number the read path's headroom is checked against, from one
-sitting rather than a stale figure.
+An index added to speed up this query also slows every recorded session's
+write, so the script also re-runs `measure_vcs_overhead.py`'s
+synthetic-repository 10 ms profile (recording off vs on), giving both numbers
+from the same sitting.
 """
 
 from __future__ import annotations
@@ -59,7 +56,7 @@ _SAMPLES = 200
 def _node_ids_for_run(run_index: int) -> list[str]:
     """`_RESULTS_PER_RUN` ids: the always-present target; the once-present
     target only in run 0; the rest from a rotating `_DISTINCT_NODE_IDS`-wide
-    pool -- ~200 distinct ids across the whole fixture (D64)."""
+    pool -- ~200 distinct ids across the whole fixture."""
     ids = [_TARGET_ALWAYS, *([_TARGET_ONCE] if run_index == 0 else [])]
     ids += [
         f"tests/test_pool_{(run_index + i) % _DISTINCT_NODE_IDS:03d}.py::test_it"
@@ -125,7 +122,7 @@ def _history_latencies_ns(client: TestClient) -> list[int]:
 
 def _nearest_rank_p95(samples: list[int]) -> int:
     ordered = sorted(samples)
-    rank = -(-95 * len(ordered) // 100)  # ceil(95% of n) -- nearest-rank, stated per D64
+    rank = -(-95 * len(ordered) // 100)  # ceil(95% of n): nearest-rank
     return ordered[rank - 1]
 
 
@@ -152,7 +149,7 @@ def main() -> None:
     print(f"max (single slowest response):    {max_ms:.2f} ms")
 
     print()
-    print("== D63 re-run: synthetic-repository 10 ms profile ==")
+    print("== Recording overhead, off vs on: synthetic repository, 10 ms profile ==")
     with _synthetic_repository() as synth_root:
         off_median, on_median = _paired_session_overhead(synth_root, 1000, 0.010)
     delta_ms = (on_median - off_median) * 1000

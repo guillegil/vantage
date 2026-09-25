@@ -1,27 +1,18 @@
 """The four sections routes: `GET`/`POST`/`DELETE /api/v1/config/sections`
-and `GET /api/v1/runs/{run_id}/sections` (design.md D85, D87, D88, D89).
+and `GET /api/v1/runs/{run_id}/sections`.
 
-**A section name is never a path segment.** D54 already decided that a
-value which may contain `/` cannot ride in a path segment, and a section
-name may -- so the name travels as a body field on write and as a query
-value on delete, never as `{name}` in the path (design.md D87). All four
-routes live in this one module together with the namespace constant and the
-definition loader, because they share both. `run_id` is not a section name --
-it is the same 32-hex identity segment `routes/read.py` already uses -- so
-the aggregate route's path parameter is not the case D54 speaks to.
+**A section name is never a path segment.** A section name may contain `/`,
+and an encoded slash in a path is decoded before routing, so the name
+travels as a body field on write and as a query value on delete. `run_id` in the aggregate
+route is the same 32-hex identity segment `routes/read.py` uses, so it does
+not have that problem.
 
-**One cheap typing improvement, taken only inside this module.**
-`request.app.state.store` resolves to `Any` at every pre-existing call site;
-each handler here binds it once as `store: ExecutionStore =
-request.app.state.store`, restoring checking inside this module without
-touching a single existing route (design.md D87).
+Each handler binds `store: ExecutionStore = request.app.state.store`, because
+`app.state` is untyped and every store call would otherwise go unchecked.
 
-**Section definitions are read fresh on every call, never cached
-(design.md D88).** `_load_definitions` is called once per request by every
-handler that needs the current definitions, including the aggregate below --
-no `app.state` field remembers them between requests, so an edit takes
-effect on the very next read, with no restart and no invalidation logic to
-get wrong.
+**Section definitions are read fresh on every request, never cached.** No
+`app.state` field remembers them between requests, so an edit takes effect
+on the very next read, with no restart and no invalidation logic.
 """
 
 from __future__ import annotations
@@ -66,15 +57,14 @@ _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 router = APIRouter()
 
 TEST_SECTIONS_NAMESPACE = "test_sections"
-"""Service vocabulary, not store vocabulary (design.md D87) -- the store
-takes this as an ordinary namespace parameter and attaches no meaning to it."""
+"""Service vocabulary, not store vocabulary -- the store takes this as an
+ordinary namespace parameter and attaches no meaning to it."""
 
 
 def _load_definitions(store: ExecutionStore) -> list[SectionDefinition]:
-    """Every stored section, read fresh on every call (design.md D88) --
-    never cached. Raises `UnreadableSettingError` the moment one row's
-    `value` fails `SectionValue` (design.md D83), naming the row's key and
-    never the value."""
+    """Every stored section, read fresh on every call -- never cached.
+    Raises `UnreadableSettingError` the moment one row's `value` fails
+    `SectionValue`, naming the row's key and never the value."""
     definitions: list[SectionDefinition] = []
     for setting in store.list_settings(TEST_SECTIONS_NAMESPACE):
         try:
@@ -146,12 +136,10 @@ def _section_summary_response(summary: SectionSummary) -> SectionSummaryResponse
 async def get_run_sections(
     request: Request, run_id: str = Path(pattern=_IDENTITY_PATTERN)
 ) -> RunSectionSummaryResponse:
-    """`GET /api/v1/runs/{run_id}/sections` (design.md D85, D87, D88). An
-    unknown `run_id` is `404 unknown_run`, checked the same cheap way
-    `list_results` does (`get_execution`, not a full detail read). Section
-    definitions are loaded fresh through `_load_definitions` -- never cached
-    -- and `store.get_run_case_outcomes` supplies the aggregate's other
-    input; `summarize_sections` does every count and every round, once."""
+    """`GET /api/v1/runs/{run_id}/sections`. An unknown `run_id` is
+    `404 unknown_run`, checked the same cheap way `list_results` does
+    (`get_execution`, not a full detail read). `summarize_sections` does
+    every count and every rounding, once."""
     store: ExecutionStore = request.app.state.store
     if store.get_execution(run_id) is None:
         raise UnknownRunError()

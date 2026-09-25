@@ -1,8 +1,8 @@
-"""`resolve_server_config` precedence (design.md D11).
+"""`resolve_server_config` precedence.
 
 Plain function calls throughout -- no server, no filesystem I/O, no pytest
 session. Purity itself (no directory ever created) is proved separately in
-`test_path_authority.py`, which is the threat-matrix "Path authority" test.
+`test_path_authority.py`.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ def test_default_database_falls_back_to_home_when_xdg_data_home_unset() -> None:
 
 
 def test_config_source_is_a_str_enum_not_strenum() -> None:
-    # `StrEnum` is 3.11+; the floor is 3.10 (CLAUDE.md, design.md D11).
+    # `StrEnum` is 3.11+; the supported floor is Python 3.10.
     assert issubclass(ConfigSource, str)
     assert isinstance(ConfigSource.CLI, str)
     assert ConfigSource.CLI.value == "cli"
@@ -88,19 +88,16 @@ def test_cli_host_and_port_override_the_default() -> None:
     assert config.port == 9000
 
 
-@pytest.mark.req(id="RQ-44")
 def test_default_grace_period_is_900_seconds_from_the_default_source() -> None:
-    """design.md D34: 900.0 seconds, expressed in source as `30 * 30.0` -- a
-    multiple of the default heartbeat interval, not an invented round
-    number. No environment variable exists for this (CLI-only, matching
-    `host`/`port`'s own precedent)."""
+    """900.0 seconds, expressed in source as `30 * 30.0` -- a multiple of the
+    default heartbeat interval, not an invented round number. CLI-only, like
+    `host` and `port`."""
     config = _resolve()
 
     assert config.grace_period_seconds == 900.0
     assert config.grace_source is ConfigSource.DEFAULT
 
 
-@pytest.mark.req(id="RQ-44")
 def test_cli_grace_period_overrides_the_default() -> None:
     config = _resolve(cli_grace_period=60.0)
 
@@ -108,19 +105,13 @@ def test_cli_grace_period_overrides_the_default() -> None:
     assert config.grace_source is ConfigSource.CLI
 
 
-@pytest.mark.req(id="RQ-44")
 def test_cli_main_carries_the_resolved_grace_period_into_the_app(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The seam between a resolved config and a running app, which neither
-    half's own test can see.
-
-    `test_cli_grace_period_overrides_the_default` proves resolution, and
-    `test_create_app_exposes_the_configured_grace_period` proves the app
-    stores what it is handed. Nothing proved that `main` passes one to the
-    other -- dropping `grace_period_seconds=` from the `create_app` call
-    leaves the whole suite green while `--grace-period 60` silently runs at
-    the 900-second default. Verified by mutation.
+    half's own test can see: if `main` drops `grace_period_seconds=` from the
+    `create_app` call, `--grace-period 60` silently runs at the 900-second
+    default.
 
     `uvicorn.run` is replaced because the point is the app it is handed, not
     serving it.
@@ -143,16 +134,14 @@ def test_cli_main_carries_the_resolved_grace_period_into_the_app(
     assert app.state.grace_period == 60.0  # type: ignore[attr-defined]
 
 
-@pytest.mark.req(id="RQ-44")
 @pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
 def test_a_nonsensical_grace_period_is_refused_at_resolution(value: float) -> None:
     """`argparse type=float` accepts 0, -1, nan and inf.
 
-    Any of the first three makes every unfinished run derive as abandoned the
-    instant it is read -- including sessions heartbeating normally -- so the
-    server would run and answer wrong rather than refuse to start. The plugin
-    already rejects a nonsensical timeout this way; this is the server-side
-    equivalent. Found by review, 2026-08-19.
+    0 and -1 make every unfinished run derive as abandoned the instant it is
+    read -- including sessions heartbeating normally -- and nan or inf cannot
+    even become a `timedelta`. The server must refuse to start rather than
+    run and answer wrong.
     """
     with pytest.raises(ServerConfigError):
         _resolve(cli_grace_period=value)

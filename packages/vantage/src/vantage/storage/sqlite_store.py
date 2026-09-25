@@ -1,57 +1,38 @@
-"""SQLite adapter for `ExecutionStore` (RQ-30.1, RQ-38.1) -- design.md D5, D8,
-D19-D22, D25-D27, D33.
+"""SQLite adapter for `ExecutionStore`.
 
-A run row is now written by `INSERT ... ON CONFLICT(id) DO UPDATE`, not
-`DO NOTHING` (D25): a start-write and a finish-write share one `id`, and the
-finish-write must be able to apply over a row the start-write already
-created. The `DO UPDATE`'s own `WHERE run.exit_status IS NULL AND
-excluded.exit_status IS NOT NULL` is the monotonic guard -- `exit_status`,
-never `finished_at`, is the discriminator, because a Ctrl-C session reports
-an integer exit status with a null finish time. `received_at` and
-`started_at` are never advanced on the conflict path.
+A start-write and a finish-write share one run `id`, so the run row is written
+by `INSERT ... ON CONFLICT(id) DO UPDATE ... WHERE run.exit_status IS NULL AND
+excluded.exit_status IS NOT NULL`: a finish applies over a start-only row,
+never the reverse. `exit_status` rather than `finished_at` is the
+discriminator because a Ctrl-C session reports an exit status with a null
+finish time. `received_at` and `started_at` never change on the conflict path.
 
-Under `DO UPDATE`, `cursor.rowcount` can no longer answer "was this row
-created?" -- an applied conflict also reports one changed row (D26). One
-`SELECT 1 FROM run WHERE id = ?` immediately after `BEGIN IMMEDIATE`, before
-the write, decides `created` instead. This *is* a `SELECT`-then-write shape,
-and the reasoning that used to rule that out still applies to every other
-use of this connection -- but not here: `BEGIN IMMEDIATE` takes the
-`RESERVED` lock for the whole transaction before the `SELECT` runs, and
-`self._lock` serialises the server's threadpool, so the probe reads under
-precisely the lock the write will write under. There is no window here for
-two concurrent replays to both pass the `SELECT` and both attempt the write.
+Under `DO UPDATE`, `cursor.rowcount` cannot tell an insert from an applied
+update, so `created` comes from a `SELECT 1 FROM run WHERE id = ?` probe run
+right after `BEGIN IMMEDIATE`. The transaction already holds the `RESERVED`
+lock and `self._lock`, so no other write can land between probe and upsert.
 
-Concurrency is a two-layer net (D8), and neither layer alone is sufficient:
-a `threading.Lock` held across the whole transaction serialises the several
-threads of one process (the server runs this handler in a threadpool), while
-`open_database`'s WAL mode, `check_same_thread=False` connection and 5s busy
-timeout are the cross-process net for two separate processes sharing one
-file -- no in-process lock can reach across a process boundary. Every write
-takes the lock up front with `BEGIN IMMEDIATE`, never a deferred
-transaction, because a deferred transaction that upgrades to a write
-mid-statement is the classic two-writer deadlock.
+Concurrency needs two layers: `self._lock`, held across every write
+transaction, serialises the server's threadpool threads, which share one
+connection; WAL mode and the connection's busy timeout cover a second process
+on the same file, which no in-process lock can reach. Multi-statement writes
+start with `BEGIN IMMEDIATE` because a deferred transaction that upgrades to a
+write mid-statement is the classic two-writer deadlock.
 
-Results and the catalogue join the same transaction (D22): run insert, the
-catalogue upsert, the surrogate-key resolve, and the result insert are four
-statements inside one `BEGIN IMMEDIATE` -- never four separate calls, and
-never `RETURNING` (needs SQLite >= 3.35, above the 3.10 floor). The
-catalogue upsert (D20) advances `last_seen_at` with `MAX` rather than an
-unconditional overwrite, so a late-arriving report with an older
-`run.started_at` cannot roll a test's last-seen timestamp backwards. The
-result insert (D19 layer 3) is `ON CONFLICT(run_id, node_id, attempt) DO
-NOTHING`, which makes a replayed report a silent no-op rather than an error
-(RQ-41).
+A session's run, catalogue, result and metadata rows are written in one
+transaction, without `RETURNING`: it needs SQLite >= 3.35, newer than some
+Python 3.10 builds link against. The catalogue
+advances `last_seen_at` with `MAX`, so a late report with an older
+`started_at` cannot move it backwards, and the result insert is `ON
+CONFLICT(run_id, node_id, attempt) DO NOTHING`, so a replayed report is a
+silent no-op.
 
-`last_contact_at` is written by the creating report only (D27): the insert
-branch of `_UPSERT_RUN` sets it to `received_at`, and the conflict branch
-never advances it -- a finished or interrupted run is not stale, it is done.
-`touch_last_contact`'s `_TOUCH_LAST_CONTACT` is its own monotonic `UPDATE`
-(D33), mirroring `_UPSERT_RUN`'s `exit_status` guard with a `last_contact_at
-< ?` comparison instead. That comparison is lexicographic, correct only at
-fixed width -- `_fixed_width_isoformat` mirrors
-`pytest_vantage.recorder.isoformat_utc` so every value this module writes to
-`last_contact_at` carries the same width, the same latent hazard D27 records
-for `test_case.last_seen_at`'s `MAX` but does not fix.
+`last_contact_at` is set by the creating report only -- a finished or
+interrupted run is done, not stale -- and advanced by `touch_last_contact`'s
+monotonic `last_contact_at < ?` update. That comparison is on TEXT, so every
+value written to the column goes through `_fixed_width_isoformat`.
+`test_case.last_seen_at`'s `MAX` and the `started_at` ordering compare plain
+`.isoformat()` text and rely on the service normalising timestamps to UTC.
 """
 
 from __future__ import annotations
@@ -92,23 +73,15 @@ from vantage.storage.connection import open_database
 
 # SQLITE_MAX_VARIABLE_NUMBER is 999 on older SQLite builds; 500 leaves
 # headroom without needing to introspect the running library's compile-time
-# limit (design.md D20).
+# limit.
 _MAX_PLACEHOLDERS = 500
 
-# `last_contact_at` is written on the insert branch only (D27) -- the
-# conflict branch's `DO UPDATE SET` list never names it, so a finish-write
-# applied over an existing start-only row leaves it exactly where the
-# creating report set it.
-#
-# The six `vcs_*` columns join the conflict branch under the SAME row-level
-# `exit_status` guard (design.md D48) -- not a second, independent
-# condition. `COALESCE(excluded.vcs_*, run.vcs_*)` is monotonic in the only
-# direction that matters: null -> value, never value -> null, so a
-# finish-write that carries no vcs data cannot clobber a snapshot the
-# start-write already recorded. `vcs_commit_subject_truncated` is NOT
-# coalesced independently -- its `CASE` keys on whether the INCOMING subject
-# is non-null, so the flag always travels with the value it describes,
-# never surviving a subject that came from the other report.
+# `last_contact_at` is set on the insert branch only; the `DO UPDATE SET`
+# list never names it. The `vcs_*` columns update under the same
+# `exit_status` guard, each through `COALESCE(excluded, run)`, so a report
+# without VCS data never nulls a value an earlier report recorded.
+# `vcs_commit_subject_truncated` follows whichever subject is kept, so the
+# flag always describes the stored subject.
 _UPSERT_RUN = """
     INSERT INTO run (
         id, received_at, last_contact_at, started_at, finished_at,
@@ -135,11 +108,8 @@ _UPSERT_RUN = """
 
 _PROBE_RUN_EXISTS = "SELECT 1 FROM run WHERE id = ?"
 
-# D33's monotonic guard: mirrors `_UPSERT_RUN`'s `exit_status` `WHERE`, but on
-# `last_contact_at` itself rather than a separate discriminator column -- an
-# out-of-order beat (an earlier or equal `contacted_at` than what is already
-# stored) changes zero rows, exactly like a reordered start-write changes
-# zero rows under `_UPSERT_RUN`.
+# Monotonic: a `contacted_at` earlier than or equal to the stored one changes
+# zero rows.
 _TOUCH_LAST_CONTACT = """
     UPDATE run
        SET last_contact_at = ?
@@ -155,8 +125,7 @@ _SELECT_RUN = """
 """
 
 # `get_run_detail`'s SELECT -- `_SELECT_RUN`'s columns plus `last_contact_at`
-# appended last, so the first twelve values still unpack straight into
-# `_row_to_execution` unchanged (design.md D57, D58).
+# last, so the first twelve values unpack straight into `_row_to_execution`.
 _SELECT_RUN_DETAIL = """
     SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
            vcs_commit, vcs_branch, vcs_commit_subject, vcs_commit_subject_truncated,
@@ -164,15 +133,11 @@ _SELECT_RUN_DETAIL = """
     FROM run WHERE id = ?
 """
 
-# `list_runs`' SELECT -- the lean-list projection happens here, in SQL, not
-# in Python after the fact (design.md D57): `substr`/`length` bound the
-# commit subject to `LIST_COMMIT_SUBJECT_CHARS` *before* it leaves SQLite,
-# so a 64 KiB subject is never pulled into memory only to be sliced down.
-# `vcs_root` is selected only to feed the null-projection check below -- it
-# never appears in `RunListEntry`'s `VcsProjection` (design.md D59). The
-# `COALESCE` in the `CASE` is load-bearing: `length(NULL) > ?` is SQL
-# `NULL`, not `0`, and a null subject must produce a `0` (false) flag, never
-# a null one (design.md D60).
+# `list_runs`' SELECT. `substr`/`length` bound the commit subject to
+# `LIST_COMMIT_SUBJECT_CHARS` in SQL, so a 64 KiB subject is never loaded
+# only to be sliced. `vcs_root` feeds only the all-null check; it never
+# reaches `VcsProjection`. The `COALESCE` matters: `length(NULL) > ?` is
+# NULL, and a null subject must yield a `0` flag, not NULL.
 _LIST_RUNS = """
     SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
            last_contact_at,
@@ -187,29 +152,15 @@ _LIST_RUNS = """
     LIMIT ? OFFSET ?
 """
 
-# The `metadata_key`/`metadata_value`-filtered sibling of `_LIST_RUNS`
-# (design.md D100) -- same columns, same total order, one filter added
-# rather than a second, diverging query.
+# `_LIST_RUNS` filtered to runs holding one `(key, value)` metadata pair.
 #
-# `IN (SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value
-# = ?)`, NOT `WHERE EXISTS (... WHERE rm.run_id = run.id AND ...)` (fixed
-# by sdd-verify CRITICAL-2). The `EXISTS` form correlates the subquery on
-# `rm.run_id = run.id` and SQLite's planner anchors there, preferring
-# `PRIMARY KEY (run_id, key)`'s autoindex over `idx_run_metadata_key_value`
-# -- one scalar subquery evaluated once per row of `run`, i.e. cost
-# proportional to the TOTAL run count, not the matching one, exactly the
-# outcome the index exists to prevent (schema.sql). The `IN` form has no
-# correlation to anchor on: the subquery runs once, seeks `idx_run_metadata_
-# key_value` directly on `(key, value)`, and the outer query then does one
-# indexed point lookup per returned `run_id`. No `DISTINCT` is needed --
-# `(run_id, key)` is `run_metadata`'s primary key, so at most one row per
-# `run_id` can carry a given `key`, and therefore at most one can match a
-# given `(key, value)` pair. `rm.value = ?` still does the status filtering
-# for free -- `value` is NULL for any non-`'captured'` row (schema.sql), and
-# SQL NULL never equals a bound string, so a declared-but-dropped entry can
-# never satisfy this filter by accident. See
-# `test_list_runs_by_metadata_uses_the_key_value_index` for the `EXPLAIN
-# QUERY PLAN` regression this rewrite is pinned against.
+# `id IN (subquery)`, not a correlated `EXISTS`: with `EXISTS`, SQLite anchors
+# on `rm.run_id = run.id` and probes the primary-key autoindex once per `run`
+# row, so cost grows with the total run count. The uncorrelated `IN` seeks
+# `idx_run_metadata_key_value` once, then looks each `run` up by primary key.
+# `value` is NULL for any non-captured row, and NULL never equals a bound
+# string, so a declared-but-dropped entry never matches.
+# `test_list_runs_by_metadata_uses_the_key_value_index` pins the plan.
 _LIST_RUNS_BY_METADATA = """
     SELECT id, started_at, finished_at, exit_status, interrupted, interrupt_reason,
            last_contact_at,
@@ -227,11 +178,9 @@ _LIST_RUNS_BY_METADATA = """
     LIMIT ? OFFSET ?
 """
 
-# Q2's horizon, first half (design.md D100): the earliest `started_at` among
-# runs holding ANY `run_metadata` row for `key`, of any status -- left-
-# anchored on `key` alone, so this is the same `idx_run_metadata_key_value`
-# seeked on its leading column only, not the two-column point lookup
-# `_LIST_RUNS_BY_METADATA` performs.
+# `count_runs_predating_metadata_key`, step one: the earliest `started_at`
+# among runs holding any `run_metadata` row for `key`, whatever its status.
+# Seeks `idx_run_metadata_key_value` on its leading column.
 _METADATA_KEY_FIRST_SEEN = """
     SELECT MIN(run.started_at)
     FROM run_metadata rm
@@ -239,14 +188,13 @@ _METADATA_KEY_FIRST_SEEN = """
     WHERE rm.key = ?
 """
 
-# Q2's horizon, second half: how many runs are strictly older than
-# `first_seen` -- served by `idx_run_started_at`, the same index `_LIST_RUNS`
-# already orders by.
+# Step two: how many runs are strictly older than that, served by
+# `idx_run_started_at`.
 _COUNT_RUNS_BEFORE = "SELECT COUNT(*) FROM run WHERE started_at < ?"
 
-# Conflict target is `node_id` -- the Phase 1 identity key (schema.sql
-# comment). `stable_id` carries the identical string in Phase 1, so its own
-# UNIQUE index cannot be violated by the row this statement updates.
+# Conflict target is `node_id`, the catalogue's identity key. `stable_id` is
+# written with the same string, so its own UNIQUE constraint cannot be
+# violated by the row this statement updates.
 _UPSERT_TEST_CASE = """
     INSERT INTO test_case (
         stable_id, node_id, file_path, class_name, function_name,
@@ -262,12 +210,8 @@ _UPSERT_TEST_CASE = """
         last_seen_at     = MAX(test_case.last_seen_at, excluded.last_seen_at)
 """
 
-# Widened from 14 to 31 bound columns (design.md D80): the thirteen
-# `FailureEvidence` fields plus the four `CapturedOutput` fields, appended
-# after `worker_id` -- `worker_id` itself keeps its original position so the
-# first fourteen values are unchanged (`_result_rows` below). `schema.sql`
-# is NOT touched by this widening: RQ-29 already created these columns at
-# first use, so nothing here is a migration.
+# The thirteen `FailureEvidence` columns and the four `CapturedOutput`
+# columns follow `worker_id`, in the order `_result_rows` builds them.
 _INSERT_RESULT = """
     INSERT INTO result (
         run_id, test_case_id, node_id, outcome, duration, started_at, finished_at,
@@ -288,13 +232,8 @@ _INSERT_RESULT = """
     ON CONFLICT(run_id, node_id, attempt) DO NOTHING
 """
 
-# `INSERT OR IGNORE` on the primary key is what makes D98's "written once,
-# never updated" true mechanically, not by convention -- the same
-# idempotence `_INSERT_RESULT`'s `ON CONFLICT ... DO NOTHING` already relies
-# on. Both statements are appended after the result insert, inside the same
-# `BEGIN IMMEDIATE ... COMMIT`: `PRAGMA foreign_keys=ON` is set on every
-# connection, and both new tables reference `run(id)`, created earlier in
-# the same transaction (design.md D98).
+# `INSERT OR IGNORE` on the primary key makes metadata write-once: a replay,
+# even one carrying different values, never changes a stored row.
 _INSERT_METADATA_FILE = """
     INSERT OR IGNORE INTO run_metadata_file (run_id, source_file, content_type, status)
     VALUES (?, ?, ?, ?)
@@ -305,9 +244,8 @@ _INSERT_METADATA_ENTRY = """
     VALUES (?, ?, ?, ?, ?)
 """
 
-# Widened from 16 to 33 columns (design.md D80) -- the full, unbounded
-# record `get_results`/`get_result` return; every failure/captured-output
-# column is selected here, unlike the lean `_LIST_RESULTS` below.
+# The full, unbounded record `get_results` returns: every failure and
+# captured-output column, unlike the lean `_LIST_RESULTS` below.
 _SELECT_RESULTS_FOR_RUN = """
     SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
            r.outcome, r.duration, r.started_at, r.finished_at,
@@ -328,7 +266,7 @@ _SELECT_RESULTS_FOR_RUN = """
 """
 
 # `get_result`'s SELECT -- the same full-record column set as
-# `_SELECT_RESULTS_FOR_RUN`, narrowed to one `node_id` (design.md D77, D78).
+# `_SELECT_RESULTS_FOR_RUN`, narrowed to one `node_id`.
 _SELECT_RESULT = """
     SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
            r.outcome, r.duration, r.started_at, r.finished_at,
@@ -347,12 +285,10 @@ _SELECT_RESULT = """
     WHERE r.run_id = ? AND r.node_id = ?
 """
 
-# `list_results`' SELECT -- the paginated, LEAN sibling of
-# `_SELECT_RESULTS_FOR_RUN` (design.md D57, D76): same shape, same `r.id`
-# order, `LIMIT`/`OFFSET` added, but the failure projection here is the
-# `substr`/`length`-bounded, disjoined shape `_LIST_RUNS` already uses for
-# the commit subject -- and no `failure_repr`/`traceback`/captured-output
-# column is selected at all, the SQL half of D76's structural exclusion.
+# `list_results`' SELECT -- the paginated, lean sibling of
+# `_SELECT_RESULTS_FOR_RUN`. `failure_message` is bounded in SQL the way
+# `_LIST_RUNS` bounds the commit subject, and no `failure_repr`, `traceback`
+# or captured-output column is selected at all.
 _LIST_RESULTS = """
     SELECT r.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
            r.outcome, r.duration, r.started_at, r.finished_at,
@@ -371,13 +307,10 @@ _LIST_RESULTS = """
     LIMIT ? OFFSET ?
 """
 
-# `list_history`' SELECT -- the join design.md D63 sizes: `node_id` (a bound
-# parameter, never interpolated, matching `_resolve_test_case_ids`'s existing
-# discipline) resolves through `idx_test_case_node_id` (unique) to one
-# `test_case.id`, then `idx_result_test_case_id` for that test's results,
-# then `run` by primary key. Same `substr`/`length` projection and the same
-# total order as `_LIST_RUNS` (design.md D60, D61) -- both list a run,
-# ordered the same way.
+# `list_history`' SELECT: `node_id` resolves through the unique
+# `idx_test_case_node_id` to one `test_case.id`, then
+# `idx_result_test_case_id` finds that test's results, then `run` is read by
+# primary key. Same subject projection and total order as `_LIST_RUNS`.
 _LIST_HISTORY = """
     SELECT r.run_id, run.started_at, run.finished_at, run.last_contact_at,
            r.outcome, r.duration,
@@ -401,16 +334,12 @@ _SELECT_TEST_CASE = """
     FROM test_case WHERE node_id = ?
 """
 
-# `_LIST_SETTINGS`: alphabetical by key == alphabetical by section name
-# (design.md D85, D86).
+# Ordered by `key`, i.e. alphabetically by section name.
 _LIST_SETTINGS = """
     SELECT namespace, key, value, updated_at
     FROM user_setting WHERE namespace = ? ORDER BY key
 """
 
-# `_UPSERT_SETTING`: the existence probe precedes it inside the same
-# `BEGIN IMMEDIATE`, because `rowcount` cannot distinguish insert from
-# update under `DO UPDATE` (design.md D26's reason, unchanged).
 _PROBE_SETTING_EXISTS = "SELECT 1 FROM user_setting WHERE namespace = ? AND key = ?"
 
 _UPSERT_SETTING = """
@@ -424,8 +353,8 @@ _UPSERT_SETTING = """
 # `_DELETE_SETTING`: `rowcount == 1` is the "it existed" answer.
 _DELETE_SETTING = "DELETE FROM user_setting WHERE namespace = ? AND key = ?"
 
-# `_SELECT_RUN_CASE_OUTCOMES`: the per-run aggregate read (design.md D85,
-# D86). No index on `test_case.file_path` -- deliberate, see design.md D86.
+# The per-run aggregate read. It filters on `result.run_id` and joins
+# `test_case` by primary key; `file_path` is only read, so it needs no index.
 _SELECT_RUN_CASE_OUTCOMES = """
     SELECT tc.file_path, r.outcome
     FROM result r
@@ -437,28 +366,24 @@ _SELECT_RUN_CASE_OUTCOMES = """
 def _fixed_width_isoformat(moment: datetime) -> str:
     """Fixed-width ISO-8601 UTC text: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`.
 
-    Mirrors `pytest_vantage.recorder.isoformat_utc` exactly (D27). Every
-    `astimezone(timezone.utc)` first, rather than trusting the caller.
-    `touch_last_contact` is a public port method whose signature accepts any
-    `datetime`, and `strftime` alone would stamp a `+02:00` value with a
-    `+00:00` suffix -- storing it two hours ahead of the truth and then
-    comparing it lexicographically against genuinely-UTC rows. The in-memory
-    adapter compares real `datetime` objects and gets that input right, so
-    trusting the caller is also what would make the two adapters disagree.
+    The same format as `pytest_vantage.recorder.isoformat_utc`. Converts to
+    UTC first rather than trusting the caller: `strftime` alone would stamp a
+    `+02:00` value with `+00:00`, storing it two hours off and breaking the
+    text comparison against UTC rows (the in-memory adapter compares real
+    `datetime` objects and would disagree).
 
-    Used only for `last_contact_at`,
-    the one column this module compares lexicographically (`< ?`); every
-    other timestamp column keeps plain `.isoformat()`, unaffected.
+    Used for `last_contact_at`, the column compared as text (`< ?`), and for
+    `user_setting.updated_at`; other timestamp columns use `.isoformat()`.
     """
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
 def _vcs_columns(vcs: VcsContext | None) -> tuple[object, ...]:
-    """The six `vcs_*` `_UPSERT_RUN` parameters (design.md D48).
+    """The six `vcs_*` `_UPSERT_RUN` parameters.
 
-    `vcs_dirty` is `INTEGER NULL` with no default -- written as `1`, `0` or
-    `NULL`, and never `0` for "unknown", which would have a run recorded
-    outside a repository claim a clean working tree.
+    `vcs_dirty` is written as `1`, `0` or `NULL`, never `0` for "unknown",
+    which would have a run recorded outside a repository claim a clean
+    working tree.
     """
     if vcs is None:
         return (None, None, None, 0, None, None)
@@ -473,11 +398,9 @@ def _vcs_columns(vcs: VcsContext | None) -> tuple[object, ...]:
 
 
 def _row_to_vcs_context(row: tuple[object, ...]) -> VcsContext | None:
-    """The all-null normalisation rule (design.md D48), applied to the five
-    value columns -- `vcs_commit_subject_truncated` is excluded from the
-    check, matching `_to_execution`'s own rule (task 3.5/3.9): a run
-    recorded outside a repository reads back as `None`, never as a
-    `VcsContext` full of nulls."""
+    """`None` when all five value columns are null -- the truncation flag is
+    ignored, as in the service's `_to_vcs_context` -- so a run recorded
+    outside a repository never reads back as a `VcsContext` full of nulls."""
     commit, branch, commit_subject, commit_subject_truncated, dirty, root = row
     if (
         commit is None
@@ -528,11 +451,10 @@ def _row_to_vcs_projection(
     dirty: object,
     root: object,
 ) -> VcsProjection | None:
-    """The same all-null normalisation rule as `_row_to_vcs_context`
-    (design.md D48), applied to the `_LIST_RUNS` projection columns.
-    `root` is one of the five inputs to the null check even though
-    `VcsProjection` itself carries no `root` field (design.md D59) -- a run
-    whose only known field is `root` must not be misread as absent."""
+    """The same all-null rule as `_row_to_vcs_context`, over the list
+    projection columns. `root` takes part in the check although
+    `VcsProjection` has no `root` field, so a run whose only known field is
+    `root` is not misread as having no VCS data."""
     if (
         commit is None
         and branch is None
@@ -573,7 +495,7 @@ def _row_to_run_list_entry(row: tuple[object, ...]) -> RunListEntry:
         exit_status=exit_status if isinstance(exit_status, int) else None,
         interrupted=bool(interrupted),
         interrupt_reason=interrupt_reason if isinstance(interrupt_reason, str) else None,
-        vcs=None,  # the lean projection rides beside it in `vcs`, not here (design.md D57)
+        vcs=None,  # the lean projection is carried in `RunListEntry.vcs` instead
     )
     return RunListEntry(
         execution=execution,
@@ -617,11 +539,9 @@ def _row_to_history_entry(row: tuple[object, ...]) -> HistoryEntry:
 
 
 def _row_to_failure_evidence(row: tuple[object, ...]) -> FailureEvidence | None:
-    """The all-null-or-false normalisation rule (design.md D48, D77),
-    applied to all thirteen stored `FailureEvidence` columns -- mirrors
-    `_row_to_vcs_context`'s rule, widened from five value columns to
-    thirteen: a result with no failure evidence at all reads back as
-    `None`, never as a `FailureEvidence` full of nulls."""
+    """`None` when all thirteen failure columns are null or false, so a
+    result without failure evidence never reads back as a `FailureEvidence`
+    full of nulls."""
     (
         failure_type,
         failure_message,
@@ -671,9 +591,8 @@ def _row_to_failure_evidence(row: tuple[object, ...]) -> FailureEvidence | None:
 
 
 def _row_to_captured_output(row: tuple[object, ...]) -> CapturedOutput:
-    """Never `None` (design.md D77's asymmetry) -- reads the four columns
-    straight through, so a stored `''` reads back as `''`, never coerced to
-    `None`."""
+    """Never `None`. Reads the four columns straight through, so a stored
+    `''` reads back as `''`, never coerced to `None`."""
     stdout, stdout_truncated, stderr, stderr_truncated = row
     return CapturedOutput(
         stdout=cast("str | None", stdout),
@@ -693,7 +612,7 @@ def _row_to_failure_projection(
     xfail_reason: object,
 ) -> FailureProjection | None:
     """The same all-null-or-false rule as `_row_to_failure_evidence`, over
-    only the seven lean columns `_LIST_RESULTS` selects (design.md D76)."""
+    only the seven lean columns `_LIST_RESULTS` selects."""
     if (
         failure_type is None
         and failure_message is None
@@ -846,15 +765,15 @@ def _catalogue_rows(
 ) -> list[tuple[str, str, str, str | None, str, str | None, str, str, str]]:
     started_at = execution.started_at.isoformat()
     run_id = execution.identity.value
-    # Keyed by node_id so a report carrying the same node id twice (should
-    # not happen -- the service layer rejects it, D19 layer 2) still yields
-    # one upsert row rather than a batch containing a duplicate key.
+    # Keyed by node_id so a report carrying the same node id twice (the
+    # service rejects that) still yields one upsert row rather than a batch
+    # containing a duplicate key.
     by_node_id: dict[str, CaseIdentity] = {
         result.identity.node_id: result.identity for result in results
     }
     return [
         (
-            identity.node_id,  # stable_id -- identical to node_id in Phase 1 (D20)
+            identity.node_id,  # stable_id -- the same value as node_id
             identity.node_id,
             identity.file_path,
             identity.class_name,
@@ -882,10 +801,9 @@ def _metadata_entry_rows(
 
 
 def _failure_columns(failure: FailureEvidence | None) -> tuple[object, ...]:
-    """The thirteen `FailureEvidence` `_INSERT_RESULT` parameters (design.md
-    D77). `None` writes every column NULL/0, mirroring `_vcs_columns`'s
-    `None` branch -- `failure=None` means no failure evidence at all, not
-    an evidence record whose fields all happen to be null."""
+    """The thirteen `FailureEvidence` `_INSERT_RESULT` parameters. `None`
+    writes every column NULL/0 -- no failure evidence at all, not a record
+    whose fields all happen to be null."""
     if failure is None:
         return (None, None, 0, None, None, None, 0, None, 0, None, 0, None, 0)
     return (
@@ -906,11 +824,10 @@ def _failure_columns(failure: FailureEvidence | None) -> tuple[object, ...]:
 
 
 def _captured_columns(captured: CapturedOutput) -> tuple[object, ...]:
-    """The four `CapturedOutput` `_INSERT_RESULT` parameters (design.md
-    D77). `captured.stdout`/`.stderr` are written through UNCHANGED -- never
+    """The four `CapturedOutput` `_INSERT_RESULT` parameters.
+    `captured.stdout`/`.stderr` are written through unchanged -- never
     `value or None` or any other truthy check, which would collapse `""`
-    (captured, empty) into SQL `NULL` (never captured) and destroy the
-    distinction the `failure-evidence` capability requires."""
+    (captured, empty) into SQL `NULL` (never captured)."""
     return (
         captured.stdout,
         1 if captured.stdout_truncated else 0,
@@ -976,13 +893,12 @@ def _row_to_user_setting(row: tuple[object, ...]) -> UserSetting:
 class SqliteExecutionStore:
     """Implements `vantage.core.ports.storage.ExecutionStore` against SQLite.
 
-    One connection per process, `check_same_thread=False` (D8) -- opened via
-    `open_database`, which already applies D9's permissions and WAL. Every
-    write acquires `self._lock` for the whole transaction: the in-process
-    half of D8's "neither lock alone is sufficient". `BEGIN IMMEDIATE` and
-    the connection's busy timeout are the cross-process half, and neither
-    substitutes for the other -- the Python lock has no effect on a second
-    server process sharing the same file.
+    One connection per process, shared across threads
+    (`check_same_thread=False`) and opened via `open_database`, which sets
+    file permissions and WAL. Every write holds `self._lock` for its whole
+    transaction to serialise this process's threads; `BEGIN IMMEDIATE` and
+    the busy timeout handle a second process sharing the file. Neither
+    substitutes for the other.
     """
 
     def __init__(self, path: Path) -> None:
@@ -997,14 +913,11 @@ class SqliteExecutionStore:
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
-        # Five statements, one transaction, one fixed order (design.md D22,
-        # extended by D26): existence probe, run upsert, catalogue upsert,
-        # surrogate-key resolve, result insert. The order is required, not
-        # tidy -- `PRAGMA foreign_keys=ON` is set on every connection, so
-        # `result.run_id`, `test_case.last_seen_run_id` and
-        # `result.test_case_id` each need their referent to exist first.
-        # The two metadata inserts (design.md D98) are appended after the
-        # result insert, in the same transaction, for the same reason.
+        # One transaction, fixed order: existence probe, run upsert,
+        # catalogue upsert, surrogate-key resolve, result insert, metadata
+        # inserts. The order is required -- `PRAGMA foreign_keys=ON` is set on
+        # every connection, so each row's `run_id`/`test_case_id` referent
+        # must exist first.
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
             try:
@@ -1092,9 +1005,9 @@ class SqliteExecutionStore:
         metadata_key: str | None = None,
         metadata_value: str | None = None,
     ) -> Page[RunListEntry]:
-        # Fetch `min(limit, 200) + 1` rows (design.md D61): the extra row is
-        # what distinguishes a truncated page from an exhausted one without
-        # a second `COUNT` query that could race the first.
+        # Fetch one row past the page: its presence distinguishes a
+        # truncated page from an exhausted one without a second `COUNT`
+        # query that could race the first.
         page_limit = min(limit, MAX_PAGE_ITEMS)
         if metadata_key is not None and metadata_value is not None:
             rows = self._conn.execute(
@@ -1145,10 +1058,6 @@ class SqliteExecutionStore:
         )
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
-        # The paginated, LEAN sibling of `get_results` (design.md D57, D76):
-        # same `min(limit, 200) + 1` clamp/`has_more` mechanism as
-        # `list_runs`, with the failure data bounded in SQL before it ever
-        # leaves SQLite (design.md D76).
         page_limit = min(limit, MAX_PAGE_ITEMS)
         rows = self._conn.execute(
             _LIST_RESULTS,
@@ -1171,8 +1080,6 @@ class SqliteExecutionStore:
         return _row_to_result(row)
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
-        # `node_id` is always a bound parameter, never interpolated into SQL
-        # (design.md D63; matches `_resolve_test_case_ids`'s discipline).
         page_limit = min(limit, MAX_PAGE_ITEMS)
         rows = self._conn.execute(
             _LIST_HISTORY,
@@ -1193,9 +1100,8 @@ class SqliteExecutionStore:
         return tuple(_row_to_user_setting(row) for row in rows)
 
     def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
-        # Same existence-probe-then-upsert shape as `record_session`
-        # (design.md D26): `rowcount` cannot distinguish insert from update
-        # under `DO UPDATE`.
+        # Probe first, as `record_session` does: `rowcount` cannot
+        # distinguish insert from update under `DO UPDATE`.
         formatted = _fixed_width_isoformat(updated_at)
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")

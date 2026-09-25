@@ -1,5 +1,4 @@
-"""Where the plugin is allowed to send a report (design.md D6, threat matrix
-"Outbound request target").
+"""Where the plugin is allowed to send a report, and what it may capture.
 
 The address the plugin POSTs to can arrive from ``--vantage-server``, the
 ``vantage_server`` ini value or the ``VANTAGE_SERVER`` environment variable
@@ -15,17 +14,14 @@ from urllib.parse import urlparse
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
-# design.md D11: "8765 is a memorable unregistered high port; the plugin's
-# default address is the same, so --vantage alone means something."
+# The server's default bind address too, so `--vantage` alone reaches a
+# server started with no options.
 _DEFAULT_ADDRESS = "http://127.0.0.1:8765"
-# design.md D6: report_timeout, the bound on every socket operation of the
-# report itself (distinct from connect_timeout, PR12's preflight probe).
+# Bounds every socket operation of the report itself; the preflight probe
+# has its own, shorter bound.
 _DEFAULT_REPORT_TIMEOUT = 10.0
-# design.md D31: the ceiling this design imposes on a liveness request
-# (start-write, heartbeat) -- a fixed ~200-byte payload that must not stall
-# as long as the (potentially much larger) finish-write report is allowed
-# to, distinct from `_DEFAULT_REPORT_TIMEOUT`, which is the ceiling the
-# user chose via `--vantage-timeout`.
+# Ceiling on a liveness request (start-write, heartbeat): a small fixed
+# payload that must not stall as long as the finish report may.
 _MAX_SHORT_TIMEOUT = 2.0
 
 
@@ -57,14 +53,13 @@ def resolve_server_address(*, cli_url: str | None, env_url: str | None, ini_url:
     `vantage_server` ini value > the default (`http://127.0.0.1:8765`).
 
     CLI over environment over ini mirrors the server's own precedence
-    (`resolve_server_config`, design.md D11): the most explicit,
-    session-specific source wins, and an environment variable -- how CI
-    configures a container -- outranks a value committed to `pyproject.toml`
-    or `pytest.ini`, which everyone who checks the project out shares.
+    (`resolve_server_config`): the most explicit, session-specific source
+    wins, and an environment variable -- how CI configures a container --
+    outranks a value committed to `pyproject.toml` or `pytest.ini`, which
+    everyone who checks the project out shares.
 
-    Validates the resolved address's scheme before returning it (design.md
-    D6, threat matrix "Outbound request target") -- every caller gets a
-    validated address, never a raw configured string.
+    Validates the resolved address's scheme before returning it -- every
+    caller gets a validated address, never a raw configured string.
     """
     address = cli_url or env_url or ini_url or _DEFAULT_ADDRESS
     return resolve_and_validate_address(address)
@@ -72,9 +67,9 @@ def resolve_server_address(*, cli_url: str | None, env_url: str | None, ini_url:
 
 def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | None) -> float:
     """The bound on the reporting request: `--vantage-timeout` > the
-    `vantage_timeout` ini value > the default (`10.0` seconds, design.md
-    D6's `report_timeout`). No environment variable is defined for the
-    timeout -- only the address has one.
+    `vantage_timeout` ini value > the default (`10.0` seconds). No
+    environment variable is defined for the timeout -- only the address has
+    one.
     """
     if cli_timeout is not None:
         return cli_timeout
@@ -84,59 +79,36 @@ def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | None
 
 
 def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool) -> bool:
-    """Whether `EvidenceCollector` should be registered for this session
-    (design.md D72, revised after Phase 9's RQ-25 measurement: capture is
-    now opt-in, absent by default). A single monotone conjunction, never a
-    case list: `resolve(...) <= activated` for every one of the four input
-    combinations -- no opt-in source can turn a session on when recording
-    itself was never activated. `cli_opt_in` can only WIDEN an
-    already-activated session's capture from absent to present, never
-    narrow it -- the opt-in is monotone INCREASING in it, the exact mirror
-    of the opt-out's monotone-decreasing property it replaces.
+    """Whether `EvidenceCollector` should be registered for this session.
 
-    **The invocation flag is the only means, by construction: this
-    signature carries no ini parameter and no environment-variable
-    parameter.** The capability spec forbids a committed configuration file
-    from being the means by which capture is enabled, and `_activation_
-    requested` holds the identical line for `--vantage` itself -- ini values
-    configure WHERE a report goes, they never switch anything on. Stored
-    failure text is unredacted (ADR-0016), so a file one person commits
-    would otherwise ship everyone's tracebacks, credentials included,
-    without them asking -- and put RQ-25's overhead back on the default
-    path this polarity exists to keep clean.
+    Capture is opt-in: `cli_opt_in` can only widen an activated session's
+    capture, never enable recording on its own. The signature deliberately
+    has no ini or environment-variable parameter: stored failure text is
+    unredacted, so a committed config file enabling it would ship everyone's
+    tracebacks, credentials included, without them asking.
     """
     return activated and cli_opt_in
 
 
 def resolve_metadata_capture(*, activated: bool, cli_opt_in: bool) -> bool:
     """Whether the plugin should attempt to read the metadata declaration
-    for this session (design.md D99, opt-in-activation's "Metadata capture
-    flag inertness" requirement, RQ-2 extended). The identical monotone
-    conjunction `resolve_failure_text_capture` uses: `resolve(...) <=
-    activated` for every input combination, and `cli_opt_in` only WIDENS an
-    already-activated session's capture from absent to present, never
-    narrows it or enables recording on its own.
+    for this session.
 
-    **The invocation flag is the only means, by construction: this
-    signature carries no ini parameter and no environment-variable
-    parameter**, the same structural guarantee `resolve_failure_text_
-    capture` holds -- a committed configuration file can never be the
-    means by which a filesystem read this design authorises (ADR-0017) is
-    enabled for everyone who checks the project out.
+    The same rule as `resolve_failure_text_capture`, likewise with no ini or
+    environment-variable parameter: a committed configuration file must
+    never enable a filesystem read for everyone who checks the project out.
     """
     return activated and cli_opt_in
 
 
 def resolve_liveness_timeout(report_timeout: float) -> float:
     """The bound on a liveness request (start-write, heartbeat): `min(2.0,
-    report_timeout)` (design.md D31).
+    report_timeout)`.
 
-    `report_timeout` is a ceiling the *user* chose via `--vantage-timeout`;
-    `_MAX_SHORT_TIMEOUT` is a ceiling this *design* imposes on top of it.
-    Taking the smaller honours both: a user who configured a timeout below
-    2.0 seconds meant it, and never gets more than they asked for, while a
-    user who configured a larger (or default) timeout still gets a liveness
-    request bounded well below the time a full report is allowed to take.
+    Taking the smaller honours both ceilings: a user who configured a
+    timeout below 2.0 seconds never gets more than they asked for, while a
+    larger (or default) timeout still leaves a liveness request bounded well
+    below the time a full report is allowed to take.
     """
     return min(_MAX_SHORT_TIMEOUT, report_timeout)
 

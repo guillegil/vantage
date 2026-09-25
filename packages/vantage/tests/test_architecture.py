@@ -1,8 +1,7 @@
-"""RQ-26: `vantage.core` imports only the standard library.
+"""`vantage.core` imports only the standard library.
 
-Also covers RQ-30.2 as a corollary -- an import walk that rejects every
-non-stdlib import necessarily rejects an import of either storage
-implementation, since neither is stdlib (design.md, D10).
+That also keeps the core from importing any storage adapter or the service,
+since neither is stdlib.
 """
 
 from __future__ import annotations
@@ -11,7 +10,6 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pytest
 from importwalk import walk_package
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -20,8 +18,6 @@ _CORE_DIR = _SRC_ROOT / "vantage" / "core"
 _STDLIB = frozenset(sys.stdlib_module_names)
 
 
-@pytest.mark.req(id="RQ-26")
-@pytest.mark.req(id="RQ-30")
 def test_every_core_import_resolves_to_the_standard_library() -> None:
     result = walk_package(
         _CORE_DIR,
@@ -35,7 +31,6 @@ def test_every_core_import_resolves_to_the_standard_library() -> None:
     ]
 
 
-@pytest.mark.req(id="RQ-26")
 def test_the_walk_is_not_vacuous() -> None:
     result = walk_package(
         _CORE_DIR,
@@ -53,12 +48,13 @@ def test_the_walk_is_not_vacuous() -> None:
 
 
 def test_the_walk_rejects_a_relative_import_into_a_sibling_subpackage(tmp_path: Path) -> None:
-    """`level > 0` alone is not sufficient permission (design.md, D10).
+    """A relative import (`level > 0`) is not allowed merely for being
+    relative.
 
     A synthetic package stands in for `vantage.core`/`vantage.storage`:
     `fakepkg/core/leaf.py` reaches for `fakepkg/storage.py` with
-    `from ..storage import X`, which is exactly the sibling-subpackage
-    coupling RQ-26/RQ-30.2 exist to forbid.
+    `from ..storage import X`, the sibling-subpackage coupling the core must
+    never have.
     """
     src_root = tmp_path / "src"
     core_dir = src_root / "fakepkg" / "core"

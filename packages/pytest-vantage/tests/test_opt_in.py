@@ -1,11 +1,11 @@
-"""RQ-2: absence of ``--vantage`` is the plugin's fully inert default state.
+"""Absence of ``--vantage`` is the plugin's fully inert default state.
 
-**Differential, never absolute** (CLAUDE.md's RQ-2 trap): pytest itself writes
-``.pytest_cache`` and ``__pycache__``, so "no file was created" can only be made
-to pass by lying about what it checks. The test of record instead runs the same
-project twice -- once bare, once with ``-p no:vantage`` (the control: pytest
-with this plugin definitively absent) -- and asserts the two resulting project
-trees are byte-identical: the same relative paths, and the same file content.
+**Differential, never absolute**: pytest itself writes ``.pytest_cache`` and
+``__pycache__``, so "no file was created" can only be made to pass by lying
+about what it checks. Instead the same project runs twice -- once bare, once
+with ``-p no:vantage`` (the control: pytest with this plugin definitively
+absent) -- and the two resulting project trees must be byte-identical: the
+same relative paths, and the same file content.
 
 The stronger half is the socket-level assertion below: with no recording
 option present, no connection is even *attempted* -- not "no data sent", no
@@ -53,7 +53,6 @@ def _forbidden_create_connection(*args: object, **kwargs: object) -> tuple[objec
     raise AssertionError("socket.create_connection must not be called when --vantage is absent")
 
 
-@pytest.mark.req(id="RQ-2")
 def test_project_tree_is_byte_identical_with_plugin_absent(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -75,8 +74,8 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
     """
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
 
-    bare_root = tmp_path_factory.mktemp("vantage-rq2-bare")
-    control_root = tmp_path_factory.mktemp("vantage-rq2-control")
+    bare_root = tmp_path_factory.mktemp("vantage-bare")
+    control_root = tmp_path_factory.mktemp("vantage-control")
     (bare_root / "test_sample.py").write_text(_SAMPLE_TEST)
     (control_root / "test_sample.py").write_text(_SAMPLE_TEST)
 
@@ -88,31 +87,21 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
     assert _tree_snapshot(bare_root) == _tree_snapshot(control_root)
 
 
-@pytest.mark.req(id="RQ-2")
 def test_failure_text_opt_in_ini_alone_cannot_enable_capture(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """failure-evidence -> Capture is opt-in, absent by default -> A
-    committed configuration file cannot enable capture on its own.
+    """A committed configuration file cannot enable failure-text capture.
 
-    RQ-2's own established differential (above), applied to the
-    failure-text opt-in specifically (design.md D72, revised after Phase
-    9's RQ-25 measurement, and further corrected to remove the ini surface
-    entirely): with no invocation flag on either run -- neither `--vantage`
-    nor `--vantage-failure-text` -- a committed `vantage_failure_text =
-    true` ini value changes nothing. The scenario under test is that
-    failure-text capture behaves *identically* whether the configuration
-    file is present or absent, and the established differential form for
-    that is tree-identity: the project tree -- excluding the ini file
-    itself, which is the one deliberate difference between the two runs --
-    must still be byte-identical.
+    The same differential as above: with no invocation flag on either run,
+    a committed `vantage_failure_text = true` ini value changes nothing --
+    the project tree, excluding the ini file itself, must be byte-identical
+    with and without it.
 
-    `vantage_failure_text` is not a registered option any more (the whole
-    point of this correction), so pytest now warns `Unknown config option`
-    on the run that carries the ini value. That warning is asserted
-    *present*, not absent: it is honest feedback that the knob does not
-    exist, and it is exactly what proves the ini value is inert rather than
-    silently consulted.
+    `vantage_failure_text` is not a registered option, so pytest warns
+    `Unknown config option` on the run that carries the ini value. That
+    warning is asserted *present*: it is honest feedback that the knob does
+    not exist, and it proves the ini value is inert rather than silently
+    consulted.
     """
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
 
@@ -132,7 +121,6 @@ def test_failure_text_opt_in_ini_alone_cannot_enable_capture(
     assert with_snapshot == _tree_snapshot(without_ini_root)
 
 
-@pytest.mark.req(id="RQ-2")
 def test_no_connection_is_attempted_with_no_recording_option(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -148,8 +136,7 @@ def test_no_connection_is_attempted_with_no_recording_option(
     result = pytester.runpytest()
 
     # `warnings=0` explicitly, not omitted: `assert_outcomes` leaves any
-    # count it is not given UNCHECKED, so the spec's "and emits no warning"
-    # half was silently unverified while this line read `passed=1` alone.
+    # count it is not given UNCHECKED, and an inert plugin emits no warning.
     result.assert_outcomes(passed=1, warnings=0)
 
 
@@ -175,17 +162,11 @@ class _IniOnlyConfig:
 
 
 def test_a_committed_ini_cannot_be_the_means_by_which_capture_is_enabled() -> None:
-    """failure-evidence -> Capture is opt-in, absent by default: "no
-    committed configuration file MAY be the means by which capture is
-    enabled".
-
-    The invocation activates recording but never asks for failure text; a
-    committed `vantage_failure_text = true` does. Capture must stay absent,
-    for the same reason `_activation_requested` reads only `--vantage`:
-    a file one person commits must never silently turn capture on for
-    everyone who checks the project out -- and stored failure text is
-    unredacted (ADR-0016), so the harm here is disclosure, not only the
-    RQ-25 overhead this polarity exists to avoid.
+    """The invocation activates recording but never asks for failure text; a
+    committed `vantage_failure_text = true` does. Capture must stay absent
+    and the ini value must not even be read: a file one person commits must
+    never silently turn capture on for everyone who checks the project out,
+    and stored failure text is unredacted, so the harm would be disclosure.
     """
     config = _IniOnlyConfig()
 
@@ -195,19 +176,12 @@ def test_a_committed_ini_cannot_be_the_means_by_which_capture_is_enabled() -> No
     )
 
 
-@pytest.mark.req(id="RQ-2")
 def test_the_shipped_help_text_advertises_no_ini_equivalent(tmp_path: Path) -> None:
-    """failure-evidence -> Capture is opt-in, absent by default: "no
-    committed configuration file MAY be the means by which capture is
-    enabled".
-
-    `_IniOnlyConfig` above proves the *behaviour*; this proves the
-    *promise*. `pytest --help` is the surface a user reads before deciding
-    how to enable capture, and for a while it read "capture never happens
-    unless this or the ini equivalent is given" -- advertising exactly the
-    means the requirement forbids, and inviting someone to commit a file
-    that would then silently do nothing. Removing a configuration surface
-    is not finished until the help text stops offering it.
+    """`_IniOnlyConfig` above proves the *behaviour*; this proves the
+    *promise*. `pytest --help` is what a user reads before deciding how to
+    enable capture, so it must actively deny an ini equivalent: offering
+    one would invite someone to commit a file that then silently does
+    nothing.
     """
     result = _run_pytest(tmp_path, "--help")
     assert result.returncode == 0, result.stderr
@@ -225,32 +199,28 @@ def test_the_shipped_help_text_advertises_no_ini_equivalent(tmp_path: Path) -> N
     )
 
 
-# --- Metadata capture flag inertness (opt-in-activation, RQ-2 extended, ------
-# --- design.md D99, tasks 5.3/5.5/5.6) ---------------------------------------
+# --- Metadata capture flag inertness -----------------------------------------
 #
 # `--vantage-metadata` is its own invocation flag, gated identically to
 # `--vantage` and `--vantage-failure-text`: no ini equivalent, the shipped
-# `--help` actively denies one (C3), the declaration is opened only after
-# both gates pass (C2), and the whole surface stays byte-inert with the flag
-# absent even when a `vantage-metadata.json` sits in the project root (C1).
+# `--help` actively denies one, the declaration is opened only after both
+# gates pass, and the whole surface stays byte-inert with the flag absent
+# even when a `vantage-metadata.json` sits in the project root.
 
 
-@pytest.mark.req(id="RQ-2")
 def test_project_tree_is_byte_identical_with_a_metadata_declaration_present_but_the_flag_absent(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """opt-in-activation: "No read or connection without the metadata flag"
-    (C1). The same differential `test_project_tree_is_byte_identical_with_
-    plugin_absent` uses above, with one deliberate addition: a
-    `vantage-metadata.json` sits in both project roots. Its mere presence
+    """The same differential as `test_project_tree_is_byte_identical_with_plugin_absent`,
+    with a `vantage-metadata.json` in both project roots. Its mere presence
     must not change a single byte the bare run produces relative to the
-    `-p no:vantage` control -- the flag, not the file, is what the
-    capability spec's inertness requirement gates on.
+    `-p no:vantage` control -- the flag, not the file, enables metadata
+    capture.
     """
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
 
-    bare_root = tmp_path_factory.mktemp("vantage-metadata-rq2-bare")
-    control_root = tmp_path_factory.mktemp("vantage-metadata-rq2-control")
+    bare_root = tmp_path_factory.mktemp("vantage-metadata-bare")
+    control_root = tmp_path_factory.mktemp("vantage-metadata-control")
     declaration = '{"version": 1, "files": []}\n'
     (bare_root / "test_sample.py").write_text(_SAMPLE_TEST)
     (control_root / "test_sample.py").write_text(_SAMPLE_TEST)
@@ -265,14 +235,12 @@ def test_project_tree_is_byte_identical_with_a_metadata_declaration_present_but_
     assert _tree_snapshot(bare_root) == _tree_snapshot(control_root)
 
 
-@pytest.mark.req(id="RQ-2")
 def test_no_connection_is_attempted_with_a_metadata_declaration_present_but_no_flags(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """opt-in-activation (C1), the socket-level half: a `vantage-metadata.json`
-    present in the project root, with no `--vantage` or `--vantage-metadata`
-    given, must not cause even a single connection attempt. Same shape as
-    `test_no_connection_is_attempted_with_no_recording_option` above.
+    """The socket-level half: a `vantage-metadata.json` present in the
+    project root, with no `--vantage` or `--vantage-metadata` given, must
+    not cause even a single connection attempt.
     """
     pytester.makepyfile(test_sample=_SAMPLE_TEST)
     (pytester.path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
@@ -283,13 +251,9 @@ def test_no_connection_is_attempted_with_a_metadata_declaration_present_but_no_f
     result.assert_outcomes(passed=1, warnings=0)
 
 
-@pytest.mark.req(id="RQ-2")
 def test_the_shipped_help_text_advertises_no_ini_equivalent_for_metadata(tmp_path: Path) -> None:
-    """opt-in-activation: "The shipped `--help` denies an ini equivalent for
-    the metadata flag" (C3). The identical assertion shape
-    `test_the_shipped_help_text_advertises_no_ini_equivalent` above proves
-    for `--vantage-failure-text`, inherited verbatim (design.md D99) for
-    `--vantage-metadata`.
+    """The shipped `--help` denies an ini equivalent for `--vantage-metadata`,
+    exactly as it does for `--vantage-failure-text`.
     """
     result = _run_pytest(tmp_path, "--help")
     assert result.returncode == 0, result.stderr
@@ -309,12 +273,9 @@ def test_the_shipped_help_text_advertises_no_ini_equivalent_for_metadata(tmp_pat
 
 class _UnactivatedConfig:
     """A config whose invocation never activated recording at all. Reading
-    ``vantage_metadata`` here at all is what this double is built to catch
-    -- `_metadata_capture_requested` must short-circuit on
-    `_activation_requested` before touching the opt-in surface (design.md
-    D99, mirroring `plugin.py:157-158`), the same guarantee that keeps
-    `test_xdist_guard.py`'s `_WorkerConfigDouble` (whose allow-list does not
-    include ``vantage_metadata``) from ever seeing that option read.
+    ``vantage_metadata`` here is what this double is built to catch --
+    `_metadata_capture_requested` must short-circuit on
+    `_activation_requested` before touching the opt-in surface.
     """
 
     def getoption(self, name: str) -> object:
@@ -324,9 +285,9 @@ class _UnactivatedConfig:
 
 
 def test_metadata_capture_requested_short_circuits_when_not_activated() -> None:
-    """design.md D99: an unactivated session reads `"vantage"` alone,
-    exactly as `_failure_text_capture_requested` already does -- proves the
-    gate is structural, not merely a happy-path default."""
+    """An unactivated session reads `"vantage"` alone, exactly as
+    `_failure_text_capture_requested` does -- the gate is structural, not
+    merely a happy-path default."""
     assert _metadata_capture_requested(_UnactivatedConfig()) is False  # type: ignore[arg-type]
 
 
@@ -356,11 +317,9 @@ def _patch_path_open_recorder(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
 def test_declaration_is_not_opened_when_metadata_capture_was_not_requested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """C2 (design.md D99): "The declaration is read only after both gates
-    pass." A `Recorder` constructed with `metadata_requested=False` --
-    which is what either gate closed collapses to, since
-    `_metadata_capture_requested` has already combined both before this
-    keyword is ever set -- must never open the declaration file.
+    """The declaration is read only after both gates pass. A `Recorder`
+    constructed with `metadata_requested=False` -- what either closed gate
+    collapses to -- must never open the declaration file.
     """
     (tmp_path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
     paths_opened = _patch_path_open_recorder(monkeypatch)
@@ -380,10 +339,10 @@ def test_declaration_is_not_opened_when_metadata_capture_was_not_requested(
 def test_declaration_is_opened_when_metadata_capture_was_requested(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The other half of C2: once both gates pass, the declaration IS
-    consulted -- `metadata_requested=True` must reach the filesystem,
-    proving the earlier test's zero-calls result is not an implementation
-    that never opens anything at all."""
+    """Once both gates pass, the declaration IS consulted --
+    `metadata_requested=True` must reach the filesystem, proving the
+    previous test's zero-calls result is not an implementation that never
+    opens anything at all."""
     (tmp_path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
     paths_opened = _patch_path_open_recorder(monkeypatch)
     monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
@@ -402,12 +361,10 @@ def test_declaration_is_opened_when_metadata_capture_was_requested(
 def test_recorder_warns_exactly_once_when_metadata_requested_and_declaration_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
 ) -> None:
-    """Q3 (design.md D92): setting `--vantage-metadata` is a deliberate
-    act, so a missing declaration warns once instead of silently capturing
-    nothing -- the one place this design departs from
-    `recording-fault-tolerance`'s silent posture, and bounded to the
-    declaration itself: a malformed *declared document* never warns and
-    never fails ingestion (D97), a different thing entirely.
+    """Setting `--vantage-metadata` is a deliberate act, so a missing
+    declaration warns once instead of silently capturing nothing. The
+    warning is bounded to the declaration itself: a malformed *declared
+    document* never warns and never fails ingestion.
     """
     monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
 
@@ -427,9 +384,8 @@ def test_recorder_warns_exactly_once_when_metadata_requested_and_declaration_abs
 def test_recorder_emits_no_warning_when_metadata_requested_and_declaration_present(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
 ) -> None:
-    """Q3's other half: a declaration that IS present emits no warning at
-    all -- the departure from silence is bounded to the declaration's own
-    absence, never triggered by its mere presence."""
+    """A declaration that IS present emits no warning at all -- the warning
+    is reserved for the declaration's absence."""
     (tmp_path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
     monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
 

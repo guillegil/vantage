@@ -1,19 +1,17 @@
 """One test's phase-resolved outcome, its decomposed identity, and its
 catalogue entry.
 
-Stdlib dataclasses (RQ-26) -- no Pydantic, no ORM, no third-party
-validation, matching `execution.py`. Naming avoids ``Test*`` on purpose:
-pytest would collect ``TestResult`` or ``TestCase`` as a test class and warn
-on every run (CLAUDE.md).
+Stdlib dataclasses -- no Pydantic, no ORM, no third-party validation,
+matching `execution.py`. Naming avoids ``Test*`` on purpose: pytest would
+collect ``TestResult`` or ``TestCase`` as a test class and warn on every run.
 
 ``OUTCOMES`` is a module-level ``frozenset``, never an ``Enum`` --
-``class X(str, Enum)`` changes ``__format__`` between Python 3.10 and 3.11,
-and this project supports both (design.md, D21).
+``class X(str, Enum)`` changes ``__format__`` between supported Python
+versions.
 
 The forbidden idiom throughout this module is ``x or None``: it turns a
 genuine ``0.0`` duration or a genuine ``""`` parameter id into ``None``,
-which is exactly the absent-versus-empty confusion RQ-5.2 and RQ-9.2/9.3
-exist to prevent (design.md, D17-D18).
+confusing "absent" with "empty".
 """
 
 from __future__ import annotations
@@ -27,7 +25,7 @@ OUTCOMES = frozenset({"passed", "failed", "error", "skipped", "xfailed", "xpasse
 
 @dataclass(frozen=True, slots=True)
 class CaseIdentity:
-    """A test's decomposed identity (design.md, D18).
+    """A test's decomposed identity.
 
     ``class_name`` is `None` for a module-level test, never `""`.
     ``param_id`` is `None` for an unparametrised test and `""` for a
@@ -44,15 +42,12 @@ class CaseIdentity:
 
 @dataclass(frozen=True, slots=True)
 class FailureEvidence:
-    """What a failed or errored result additionally records (design.md D69,
-    D77). ``None``/``False`` in every field means no failure evidence was
-    captured -- `Result.failure` normalises that all-null shape to `None`
-    (D48's rule, inherited), so a bare `FailureEvidence` with everything
-    unset is never constructed directly by a caller building a `Result`.
+    """What a failed or errored result additionally records.
 
-    Nested on `Result` rather than flattened, following `Execution.vcs`
-    (the house pattern) instead of adding thirteen flat fields to a
-    dataclass that already has twelve.
+    ``None``/``False`` in every field means no failure evidence was captured;
+    that shape is carried as `Result.failure is None`, never as a
+    `FailureEvidence` full of nulls. Nested on `Result` rather than flattened
+    into thirteen more fields, like `Execution.vcs`.
     """
 
     failure_type: str | None
@@ -72,13 +67,12 @@ class FailureEvidence:
 
 @dataclass(frozen=True, slots=True)
 class CapturedOutput:
-    """A result's captured stdout/stderr (design.md D71, D77).
+    """A result's captured stdout/stderr.
 
     ``stdout``/``stderr`` are `None` when never captured (e.g. `-s`) and
-    `""` when captured and empty -- the empty-versus-absent distinction the
-    `failure-evidence` capability requires. Unlike `FailureEvidence`,
-    `Result.captured` is never `None`: that distinction lives INSIDE this
-    type, in the `str | None` fields, so collapsing an all-null
+    `""` when captured and empty. Unlike `FailureEvidence`,
+    `Result.captured` is never `None`: whether output was captured already
+    lives in the `str | None` fields, so collapsing an all-null
     `CapturedOutput` to `None` would put the same fact in two places.
     """
 
@@ -90,26 +84,19 @@ class CapturedOutput:
 
 @dataclass(frozen=True, slots=True)
 class Result:
-    """One test's resolved outcome for one run (design.md, D17).
+    """One test's resolved outcome for one run.
 
     ``outcome`` is the derived, overall verdict; the three ``*_outcome``
     fields are the per-phase verdicts the derivation was computed from, kept
     so the derivation is auditable rather than trusted. A phase that never
     ran stores `None` for both its outcome and its duration -- never `0.0`.
 
-    ``failure`` is `None` when the result carries no failure evidence at all
-    -- a failure either happened or it did not (design.md D77). ``captured``
-    is never `None` (see `CapturedOutput`).
+    ``failure`` is `None` when the result carries no failure evidence at
+    all. ``captured`` is never `None` (see `CapturedOutput`).
 
-    ``failure``/``captured`` default to the "no evidence captured" shape so
-    every `Result` constructed before this change's later phases wire
-    failure evidence through -- ``sqlite_store.py``, ``routes/runs.py``,
-    ``vantage_port_contract.py`` and ``scripts/measure_history_latency.py``
-    -- keeps compiling and passing without modification. Phase 6/7 of this
-    change replace these defaults with real values at each of those call
-    sites; the defaults themselves are never a claim that a failure did not
-    happen, only that this `Result` was built by code that does not yet know
-    about failure evidence.
+    Both default to the "no evidence captured" shape. A default is not a
+    claim that no failure happened, only that the constructing code supplied
+    no evidence.
     """
 
     identity: CaseIdentity
@@ -138,7 +125,7 @@ class Result:
 
 @dataclass(frozen=True, slots=True)
 class CatalogueEntry:
-    """A test's catalogue row (design.md, D20, RQ-13).
+    """A test's catalogue row.
 
     ``last_seen_at`` advances monotonically at the storage layer; this
     dataclass carries whatever the store read back and does not enforce

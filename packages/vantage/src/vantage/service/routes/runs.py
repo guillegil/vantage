@@ -1,42 +1,26 @@
-"""`POST /api/v1/runs` -- session report ingestion (RQ-41, RQ-42, design.md D3, D5).
+"""`POST /api/v1/runs` -- session report ingestion -- and the run heartbeat.
 
-**The 201-vs-200 decision comes from the boolean `record_session` already
-returns.** `record_session` is `INSERT ... ON CONFLICT(id) DO NOTHING`,
-deciding its own return value from the INSERT's own row count -- no
-preceding `SELECT`. This route does not ask the store whether the id exists
-and then decide: that would reintroduce, at the HTTP layer, precisely the
-check-then-act race the storage adapter's `ON CONFLICT` avoids at the SQL
-layer. One call, one boolean, one branch.
+**201 versus 200 comes from the boolean `record_session` returns**, which
+the store decides inside its own write transaction. Asking the store whether
+the id exists before calling it would reintroduce a check-then-act race at
+the HTTP layer.
 
-**The media type and size checks both run before the body is touched.**
-This route does *not* declare `payload: SessionReport` as a parameter --
-that would make FastAPI parse and fully buffer the body itself before this
-function's first line ever runs, which is exactly the ordering hazard RQ-42
-warns against: a check performed after the bytes are already buffered has
-protected nothing. Instead the body is read by hand, in the order the
-threat matrix requires:
+**The media type and size checks run before the body is buffered.** The
+route does not declare `payload: SessionReport` as a parameter, because
+FastAPI would then read and parse the whole body before the first line
+runs. Instead:
 
-1. `Content-Type` is read off the header alone (`_require_json_media_type`)
-   -- zero body bytes have been touched yet.
-2. `_read_bounded_body` streams the body through `request.stream()` and
-   raises the instant the running total exceeds `MAX_REPORT_BYTES`, without
-   asking the stream for another chunk. That is the one line doing the
-   actual protecting -- it does not trust `Content-Length`, which can be
-   absent, wrong, or simply a lie. A client that disconnects mid-transfer
-   (RQ-3) surfaces here too, as `starlette.requests.ClientDisconnect`,
-   converted to `IncompleteBodyError` rather than left to propagate.
-3. Only once a complete, capped byte string exists is it parsed as JSON,
-   then validated against `SessionReport`.
+1. `Content-Type` is checked from the header alone.
+2. `_read_bounded_body` streams the body and stops the moment the running
+   total exceeds `MAX_REPORT_BYTES`; `Content-Length` is never trusted. A
+   client disconnect mid-transfer becomes `IncompleteBodyError`.
+3. Only a complete, capped body is parsed as JSON and validated.
 
-Nothing is written before all three steps succeed, so a rejection at any
-step leaves `count_executions() == 0`.
+Nothing is written unless all three succeed.
 
-**`results` is optional and its absence is not an error (design.md D15).**
-`payload.results` is `None` (section absent) or `[]` (nothing collected) as
-often as it is a populated list -- both mean zero result rows, not a
-rejection. `record_session`'s `results` parameter is keyword-only and
-required (design.md D21), so this route always passes a list, even an empty
-one, rather than special-casing the absent-section case.
+**`results` is optional.** `None` (section absent) and `[]` both mean zero
+result rows, not a rejection; the route always passes a list to
+`record_session`.
 """
 
 from __future__ import annotations
@@ -84,21 +68,15 @@ _JSON_MEDIA_TYPE = "application/json"
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 
 _KNOWN_METADATA_CONTENT_TYPES = frozenset({"json", "yaml", "toml"})
-"""Mirrors `run_metadata_file.content_type`'s SQL `CHECK` exactly
-(schema.sql). `MetadataFileReport.format` carries no Pydantic constraint
-(design.md D96's trap), so a value outside this set can never be written --
-rather than let it reach `record_session` and raise a
-`sqlite3.IntegrityError` mid-transaction (rolling back the run row with it,
-the exact outcome D97's governing rule forbids), the whole file entry is
-dropped: the same "well-behaved plugin cannot produce this" bucket D97
-class 11 already uses for a rejected `source_file`."""
+"""Mirrors the SQL `CHECK` on `run_metadata_file.content_type` (schema.sql).
+`MetadataFileReport.format` is unconstrained on the wire, so a file entry
+with any other format -- which the schema cannot store -- is dropped here,
+with its keys, before it reaches the store. A well-behaved plugin never
+sends one."""
 
 _MAX_DECLARED_PATH_CHARS = 1024
-"""Mirrors `pytest_vantage.metadata.MAX_DECLARED_PATH_CHARS` (design.md D94)
-across the RQ-24/ADR-4 package boundary -- `vantage` cannot import
-`pytest-vantage`, so the two distributions each carry their own copy of this
-bound, the same second-mechanism discipline the two storage adapters already
-use for each other (design.md D98)."""
+"""Mirrors `pytest_vantage.metadata.MAX_DECLARED_PATH_CHARS`. The two
+distributions cannot import each other, so each carries its own copy."""
 
 
 @overload
@@ -106,20 +84,16 @@ def _normalize_to_utc(value: datetime) -> datetime: ...
 @overload
 def _normalize_to_utc(value: None) -> None: ...
 def _normalize_to_utc(value: datetime | None) -> datetime | None:
-    """The one helper every timestamp that reaches the store goes through
-    (Phase 5 UTC-normalization addendum, Engram observation 62's resolution).
+    """Normalize every timestamp that reaches the store to UTC.
 
-    `test_case.last_seen_at` is TEXT and D20's monotonicity guard advances it
-    with `MAX(...)` -- a **lexicographic** comparison, correct only when
-    every stored string carries the same offset and the same width. The
-    plugin already normalizes (`pytest_vantage.recorder.isoformat_utc`), but
-    ADR-9 exists precisely so a client in another language can talk to this
-    server without normalizing, so the boundary must not trust the wire.
+    Stored timestamps are TEXT, and `test_case.last_seen_at` only moves
+    forward via `MAX(...)` -- a lexicographic comparison, correct only when
+    every string has the same offset. The plugin already sends UTC, but any
+    HTTP client can report here, so the server does not trust the wire.
 
-    An **aware** value converts with `astimezone(timezone.utc)`. A **naive**
-    value is stamped `replace(tzinfo=timezone.utc)` -- never `astimezone()`
-    on a naive value, which silently assumes the SERVER's local zone and
-    would make the stored instant depend on where the server happens to run.
+    An aware value converts with `astimezone(timezone.utc)`. A naive value is
+    stamped as UTC with `replace()` -- `astimezone()` on a naive value would
+    assume the server's local zone.
     """
     if value is None:
         return None
@@ -129,12 +103,10 @@ def _normalize_to_utc(value: datetime | None) -> datetime | None:
 
 
 def _to_vcs_context(vcs: VcsReport | None) -> VcsContext | None:
-    """Normalises the `vcs` section (design.md D48): `None` when the
-    section is absent OR every field in it is null -- a session recorded
-    outside a repository reads back as `execution.vcs is None`, never as a
-    `VcsContext` full of nulls. `truncate()` is applied to `commit_subject`
-    here, and only here, so `commit_subject_truncated` is always set
-    consistently with the value it describes (design.md D49).
+    """Normalise the `vcs` section: `None` when the section is absent or
+    every field in it is null, so a session recorded outside a repository
+    reads back as `execution.vcs is None`, never as a `VcsContext` full of
+    nulls. `commit_subject` is truncated here, together with its flag.
     """
     if vcs is None:
         return None
@@ -158,12 +130,11 @@ def _to_vcs_context(vcs: VcsReport | None) -> VcsContext | None:
 
 
 def _declared_path_shape_is_valid(path: str) -> bool:
-    """D93's server-side re-check: the server has no access to the client's
-    filesystem, so containment itself cannot be re-verified here -- only
-    shape. `source_file` must be short, relative, and free of `..`, the
-    three properties `pytest_vantage.metadata.resolve_declared_path` also
-    checks before ever touching a disk. A path failing this is dropped
-    whole (D97 class 11), never rejected."""
+    """Re-check a declared path's shape: short, relative, and free of `..`.
+
+    The server cannot see the client's filesystem, so it cannot re-verify
+    containment -- only the shape `pytest_vantage.metadata` also enforces.
+    A path failing this is dropped, never rejected."""
     if len(path) > _MAX_DECLARED_PATH_CHARS:
         return False
     candidate = PurePath(path)
@@ -173,18 +144,14 @@ def _declared_path_shape_is_valid(path: str) -> bool:
 
 
 def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
-    """Normalises the `metadata` section (design.md D96, D97, D98),
-    following `_to_vcs_context`'s shape: `None` when the section is absent.
+    """Normalise the `metadata` section; `EMPTY_RUN_METADATA` when absent.
 
-    Every declared file becomes exactly one `MetadataFile` row and every one
-    of its declared keys becomes exactly one `MetadataEntry` row, whether or
-    not either was captured (D95) -- drop-whole everywhere, `truncate()` is
-    never called, and this function never raises. A file whose `source_file`
-    fails the server's own shape re-check, or whose unconstrained `status`/
-    `format` fields (D96's trap) are not values this server can ever write,
-    is dropped in its entirety: neither it nor its keys produce a row (D97
-    class 11 and its two wire-shape siblings) -- a well-behaved plugin
-    cannot produce any of these.
+    Every declared file becomes one `MetadataFile` row and each of its
+    declared keys one `MetadataEntry` row, captured or not. Values are never
+    truncated, and this function never raises, so bad metadata cannot block
+    the run from being stored. A file whose path fails the shape re-check,
+    or whose `status` or `format` this server cannot store, is dropped with
+    all its keys; a well-behaved plugin never sends one.
     """
     if metadata is None:
         return EMPTY_RUN_METADATA
@@ -201,8 +168,8 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
             continue
 
         if file_report.status != "captured" or file_report.content is None:
-            # D97 classes 1-6: the plugin's own status is trusted verbatim
-            # -- the server has no way to verify it independently.
+            # The plugin's own status is trusted verbatim -- the server has
+            # no way to verify it.
             files.append(
                 MetadataFile(
                     source_file=file_report.path,
@@ -223,7 +190,7 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
 
         parsed = metadata_parse.parse(file_report.content, file_report.format, file_report.keys)
         if parsed is None:
-            # D97 class 7: server-detected parse failure.
+            # The server could not parse the document.
             files.append(
                 MetadataFile(
                     source_file=file_report.path,
@@ -242,8 +209,7 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
             )
             continue
 
-        # D97 classes 8-10, plus the `captured` case: `metadata_parse.parse`
-        # already classified every declared key against the document.
+        # `metadata_parse.parse` already classified every declared key.
         files.append(
             MetadataFile(
                 source_file=file_report.path,
@@ -274,18 +240,14 @@ def _to_execution(run: RunReport, vcs: VcsReport | None) -> Execution:
 
 
 def _to_failure_evidence(item: ResultReport) -> FailureEvidence | None:
-    """Normalises the failure-evidence fields (design.md D75, D77) --
-    `None` when every field is null-or-false, mirroring `_to_vcs_context`'s
-    D48 rule: a failure either happened or it did not.
+    """Normalise the failure evidence fields: `None` when every field is
+    null or false.
 
-    `truncate()` applies the server's own 64 KiB bound to every string
-    field, exactly as `_to_vcs_context` applies it to `commit_subject`
-    (D49). The truncation flag is a **disjunction** of the client's report
-    and the server's own result, never a plain assignment: `truncate(None)`
-    returns `(None, False)`, so a server that assigns `stored_flag =
-    server_flag` would silently clear a budget drop the client already
-    reported (design.md D75) -- the client is the only side that knows a
-    field was dropped for budget rather than never captured.
+    Every string field is truncated to the server's 64 KiB bound. Each
+    stored flag is the client's flag OR the server's own: the client is the
+    only side that knows a field was dropped for its report budget, and
+    `truncate(None)` returns `(None, False)`, so assigning the server's flag
+    alone would erase that.
     """
     failure_message, message_cut = truncate(item.failure_message)
     failure_message_truncated = bool(item.failure_message_truncated) or message_cut
@@ -333,12 +295,9 @@ def _to_failure_evidence(item: ResultReport) -> FailureEvidence | None:
 
 
 def _to_captured_output(item: ResultReport) -> CapturedOutput:
-    """Normalises captured stdout/stderr (design.md D71, D77). Never
-    `None` -- the empty-versus-absent distinction lives INSIDE this type,
-    in the `str | None` fields, so `Result.captured` is always a
-    `CapturedOutput` instance. `truncate()`'s `(None, False)` result for a
-    `None` input keeps `None` (never captured) distinct from `""`
-    (captured, empty) all the way through the bound.
+    """Normalise captured stdout/stderr. Never `None`: `None` (never
+    captured) versus `""` (captured, empty) lives in the fields, and
+    `truncate()` preserves that distinction.
     """
     stdout, stdout_cut = truncate(item.captured_stdout)
     stderr, stderr_cut = truncate(item.captured_stderr)
@@ -351,10 +310,6 @@ def _to_captured_output(item: ResultReport) -> CapturedOutput:
 
 
 def _to_result(item: ResultReport) -> Result:
-    # `started_at`/`finished_at` go through `_normalize_to_utc`, same as
-    # `_to_execution` above -- one path, not two (Phase 5 UTC-normalization
-    # addendum). This used to be deliberately absent (see the Phase 3-era
-    # Engram observation 62 finding); it stops being true here.
     return Result(
         identity=CaseIdentity(
             node_id=item.node_id,
@@ -381,14 +336,11 @@ def _to_result(item: ResultReport) -> Result:
 
 def _ignored_result_keys(results: Sequence[ResultReport]) -> list[str]:
     """Deduplicated `results[].<name>` for every unknown key tolerated by
-    `ResultReport`'s `extra="allow"` (design.md D15).
+    `ResultReport`'s `extra="allow"`.
 
-    Insertion order, one entry per key name regardless of how many results
-    carried it -- 500 results sharing one unknown key produce one entry, not
-    500 (D15's own example). Each name is routed through the same
-    `safe_segment` allow-list `errors.py` uses for rejection bodies: an
-    unknown result key is client-chosen text, exactly the kind of value that
-    allow-list exists to make safe to echo (design.md, Threat Matrix).
+    One entry per key name in first-seen order, however many results carry
+    it. Each name goes through `safe_segment`, because an unknown key is
+    client-chosen text echoed back in the response.
     """
     seen: dict[str, None] = {}
     for item in results:
@@ -406,34 +358,23 @@ def _require_json_media_type(request: Request) -> None:
 
 
 async def _read_bounded_body(request: Request) -> bytes:
-    """Stream the body, aborting before the buffer can exceed the cap.
+    """Stream the body, aborting as soon as it exceeds the cap.
 
-    Deliberately does not rely on `Content-Length`: it can be absent, wrong,
-    or an outright lie, and none of those excuse buffering an unbounded
-    body. The check below runs on every chunk actually received, so the
-    buffer is structurally incapable of growing past `MAX_REPORT_BYTES`.
+    `Content-Length` is not relied on: it can be absent, wrong or a lie.
+    The check runs on every chunk received, so the buffer never grows much
+    past `MAX_REPORT_BYTES`.
 
-    A client that disconnects before sending the whole body -- a process
-    killed mid-write (RQ-3.1), a network partition mid-transfer (RQ-3.2) --
-    surfaces here as `starlette.requests.ClientDisconnect`, raised from
-    inside `request.stream()` itself. Catching it and converting it to
-    `IncompleteBodyError` is what keeps this the one exception-handling
-    path every rejection goes through (design.md D5); the alternative is
-    letting it propagate unhandled out of the ASGI application, which is
-    exactly what task 3.7's raw-socket test caught before this existed.
-    Either way `count_executions()` stays at zero: no streaming parse, no
-    partial-parse path, nothing is written before this function returns a
-    complete body.
+    A client that disconnects mid-body (a killed process, a dropped
+    connection) surfaces as `ClientDisconnect` from `request.stream()`; it
+    is converted to `IncompleteBodyError` so it takes the same rejection
+    path as everything else instead of escaping the ASGI app unhandled.
     """
     buffer = bytearray()
     try:
         async for chunk in request.stream():
             buffer += chunk
             if len(buffer) > MAX_REPORT_BYTES:
-                # THE LINE THAT PROTECTS: raised the moment the running
-                # total crosses the cap, before the loop asks
-                # `request.stream()` for another chunk -- the read stops
-                # here, it does not continue and check afterwards.
+                # Stop reading now; never ask the stream for another chunk.
                 raise PayloadTooLargeError()
     except ClientDisconnect as exc:
         raise IncompleteBodyError() from exc
@@ -480,14 +421,12 @@ async def create_run(request: Request) -> JSONResponse:
 async def heartbeat(
     request: Request, run_id: str = Path(pattern=_IDENTITY_PATTERN)
 ) -> HeartbeatAcknowledgement:
-    """Advance `run_id`'s last contact (design.md D33).
+    """Advance `run_id`'s last contact.
 
-    The request body is `{}`, read by nothing -- the strongest form of "MUST
-    NOT accept or apply `finished_at`, `exit_status`, `interrupted` or
-    `interrupt_reason`" is that there is no field to send. `get_execution`,
-    not `touch_last_contact`'s own boolean, decides the 404: a zero-rowcount
-    update is ambiguous between "unknown run" and "a newer contact is
-    already recorded", and only the former is a rejection.
+    The request body is never read, so a heartbeat cannot change a run's
+    finish fields. `get_execution`, not `touch_last_contact`'s boolean,
+    decides the 404: a no-op update means either "unknown run" or "a newer
+    contact is already recorded", and only the former is a rejection.
     """
     store = request.app.state.store
     if store.get_execution(run_id) is None:

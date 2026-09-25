@@ -1,14 +1,10 @@
-"""Shared contract for any `ExecutionStore` implementation (RQ-30).
+"""Shared contract for any `ExecutionStore` implementation.
 
-Never collected directly by pytest -- it is not named ``test_*`` -- and never
-shipped in a wheel: the ``pytest`` import here would break ``vantage.core``'s
-stdlib-only rule (RQ-26) if this module lived inside the package instead of
-alongside the tests. Each adapter's own ``test_*_store.py`` subclasses
+Never collected directly by pytest -- it is not named ``test_*`` -- and kept
+beside the tests rather than in the package, because ``vantage.core`` must not
+import pytest. Each adapter's ``test_*_store.py`` subclasses
 ``ExecutionStoreContract``, provides a ``store`` fixture, and inherits every
-test method unchanged -- that is what proves the core suite "passes
-unchanged" against a second adapter (RQ-30.1). ``vantage.storage`` implements
-this now (``test_memory_store.py``); ``vantage.storage.sqlite_store`` does
-the same in PR5.
+test unchanged, so both adapters are held to the same behaviour.
 """
 
 from __future__ import annotations
@@ -57,9 +53,9 @@ def _execution(
 def _start_only_execution(
     hex_id: str, *, started: datetime | None = None, vcs: VcsContext | None = None
 ) -> Execution:
-    """The shape a start-write reports (design.md D25/D32): `exit_status` is
-    the only field never sent, `interrupted`/`interrupt_reason` are their
-    defaults because nothing is yet known about how the session will end."""
+    """The shape a start-write reports: `exit_status` is the only field never
+    sent, `interrupted`/`interrupt_reason` are their defaults because nothing
+    is yet known about how the session will end."""
     started = (
         started if started is not None else datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
     )
@@ -79,12 +75,9 @@ def _vcs(
     commit: str | None = "a" * 40,
     branch: str | None = "main",
     commit_subject: str | None = "a commit subject",
-    # `True` by default, deliberately. With `False`, both branches of the
-    # conflict clause's `CASE WHEN excluded.vcs_commit_subject IS NOT NULL`
-    # return the same value, so replacing the whole CASE with a bare
-    # `excluded.vcs_commit_subject_truncated` left every test green while
-    # producing a subject stored whole and flagged as untruncated -- a false
-    # zero the server cannot detect. Found by mutation, 2026-08-20.
+    # `True` by default: with `False`, both branches of the conflict clause's
+    # `CASE WHEN excluded.vcs_commit_subject IS NOT NULL` return the same
+    # value, so a broken CASE would go unnoticed.
     commit_subject_truncated: bool = True,
     dirty: bool | None = False,
     root: str | None = "/repo",
@@ -192,11 +185,9 @@ def _captured(
 
 
 def _stored_metadata_files(store: ExecutionStore, run_id: str) -> frozenset[MetadataFile]:
-    """Adapter-agnostic introspection of `run_metadata_file` rows -- no port
-    read method exists for this table until Phase 10 (design.md D100), so
-    the contract proves the write path the only way it can this slice:
-    reading each adapter's own storage directly, mirroring
-    `test_sqlite_store.py`'s existing `store._conn.execute(...)` pattern."""
+    """Adapter-agnostic introspection of `run_metadata_file` rows. No port
+    method reads these rows back, so this reads each adapter's own storage
+    directly."""
     if isinstance(store, SqliteExecutionStore):
         rows = store._conn.execute(  # noqa: SLF001
             "SELECT source_file, content_type, status FROM run_metadata_file WHERE run_id = ?",
@@ -241,7 +232,6 @@ class ExecutionStoreContract:
     def store(self) -> ExecutionStore:
         raise NotImplementedError("subclasses must override the `store` fixture")
 
-    @pytest.mark.req(id="RQ-30")
     def test_first_write_creates_a_row(self, store: ExecutionStore) -> None:
         execution = _execution("a" * 32)
 
@@ -252,7 +242,6 @@ class ExecutionStoreContract:
         assert created is True
         assert store.count_executions() == 1
 
-    @pytest.mark.req(id="RQ-30")
     def test_replaying_the_same_id_reports_no_new_row(self, store: ExecutionStore) -> None:
         execution = _execution("b" * 32)
         store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
@@ -264,7 +253,6 @@ class ExecutionStoreContract:
         assert created_again is False
         assert store.count_executions() == 1
 
-    @pytest.mark.req(id="RQ-30")
     def test_get_execution_returns_what_was_stored(self, store: ExecutionStore) -> None:
         execution = _execution("c" * 32, finished=False)
         store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
@@ -273,11 +261,9 @@ class ExecutionStoreContract:
 
         assert found == execution
 
-    @pytest.mark.req(id="RQ-30")
     def test_get_execution_returns_none_for_an_unknown_id(self, store: ExecutionStore) -> None:
         assert store.get_execution("d" * 32) is None
 
-    @pytest.mark.req(id="RQ-30")
     def test_recording_a_session_with_results_persists_both(self, store: ExecutionStore) -> None:
         execution = _execution("e" * 32)
         results = (_result("t.py::test_a"), _result("t.py::test_b"))
@@ -289,7 +275,6 @@ class ExecutionStoreContract:
         assert created is True
         assert store.count_results() == 2
 
-    @pytest.mark.req(id="RQ-41")
     def test_replaying_the_same_report_does_not_duplicate_results(
         self, store: ExecutionStore
     ) -> None:
@@ -304,11 +289,10 @@ class ExecutionStoreContract:
         assert replayed is False
         assert store.count_results() == 2
 
-    @pytest.mark.req(id="RQ-3")
     def test_finish_after_start_applies_in_full(self, store: ExecutionStore) -> None:
-        """design.md D25, task 1.1: a finish-write following an accepted
-        start-write for the same run id applies in full -- `exit_status`
-        goes NULL -> int, and the finish's other fields and results land."""
+        """A finish-write following an accepted start-write for the same run id
+        applies in full -- `exit_status` goes NULL -> int, and the finish's
+        other fields and results land."""
         identity = "1" + "0" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
@@ -326,13 +310,11 @@ class ExecutionStoreContract:
         assert stored.interrupt_reason == finish.interrupt_reason
         assert store.count_results() == 1
 
-    @pytest.mark.req(id="RQ-3")
     def test_reordered_start_after_finish_never_nulls_the_recorded_finish(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D25, task 1.2: `run-recording`'s 'A reordered
-        start-write never nulls a recorded finish' -- the finish, its exit
-        fields and its result rows survive a start-write arriving late."""
+        """A start-write arriving after the finish never nulls it -- the
+        finish, its exit fields and its result rows survive."""
         identity = "1" + "1" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         finish = _execution(identity, finished=True, started=started)
@@ -346,11 +328,9 @@ class ExecutionStoreContract:
         assert stored == finish
         assert store.count_results() == 1
 
-    @pytest.mark.req(id="RQ-41")
     def test_replayed_finish_is_a_no_op_first_finish_wins(self, store: ExecutionStore) -> None:
-        """design.md D25, task 1.3: finish-after-finish (replay) is a no-op
-        -- the first accepted finish wins, unchanged semantics (RQ-41),
-        now expressed through the same discriminator as every other case."""
+        """A second finish for the same run is a no-op -- the first accepted
+        finish wins."""
         identity = "1" + "2" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         first_finish = _execution(identity, finished=True, started=started)
@@ -369,11 +349,10 @@ class ExecutionStoreContract:
         stored = store.get_execution(identity)
         assert stored == first_finish
 
-    @pytest.mark.req(id="RQ-30")
     def test_duplicate_start_after_start_is_a_no_op(self, store: ExecutionStore) -> None:
-        """design.md D25, task 1.4: a second start-write for the same run id
-        changes nothing -- `excluded.exit_status IS NULL` never satisfies
-        the conflict `WHERE`, regardless of what `run.exit_status` holds."""
+        """A second start-write for the same run id changes nothing --
+        `excluded.exit_status IS NULL` never satisfies the conflict `WHERE`,
+        regardless of what `run.exit_status` holds."""
         identity = "1" + "3" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         first_start = _start_only_execution(identity, started=started)
@@ -385,12 +364,11 @@ class ExecutionStoreContract:
         stored = store.get_execution(identity)
         assert stored == first_start
 
-    @pytest.mark.req(id="RQ-30")
     def test_created_is_true_only_on_a_true_first_insert(self, store: ExecutionStore) -> None:
-        """design.md D26, task 1.5: `record_session` returns True only for a
-        true first insert. A finish applied over an existing start-only row,
-        and a true duplicate, both return False -- `rowcount` can no longer
-        answer this under `DO UPDATE`, so the adapter must probe first."""
+        """`record_session` returns True only for a true first insert. A finish
+        applied over an existing start-only row, and a true duplicate, both
+        return False -- `rowcount` cannot answer this under `DO UPDATE`, so
+        the adapter must probe first."""
         identity = "1" + "4" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
@@ -410,7 +388,6 @@ class ExecutionStoreContract:
         )
         assert created_by_duplicate is False
 
-    @pytest.mark.req(id="RQ-5")
     def test_get_results_preserves_phase_outcomes_and_durations_exactly(
         self, store: ExecutionStore
     ) -> None:
@@ -438,7 +415,6 @@ class ExecutionStoreContract:
         assert stored["t.py::test_setup_failure"].setup_outcome == "failed"
         assert stored["t.py::test_instant"].call_duration == 0.0
 
-    @pytest.mark.req(id="RQ-9")
     def test_empty_param_id_is_distinct_from_no_param_id(self, store: ExecutionStore) -> None:
         execution = _execution("3" + "c" * 31)
         empty_param = _result("t.py::test_x[]", param_id="")
@@ -457,7 +433,6 @@ class ExecutionStoreContract:
         without_param = [r for r in stored if r.identity.param_id is None]
         assert [r.identity.node_id for r in without_param] == ["t.py::test_y"]
 
-    @pytest.mark.req(id="RQ-13")
     def test_catalogue_entry_advances_last_seen_and_keeps_first_seen(
         self, store: ExecutionStore
     ) -> None:
@@ -490,7 +465,6 @@ class ExecutionStoreContract:
         assert entry_after_second.last_seen_at == second_execution.started_at
         assert entry_after_second.last_seen_run_id == second_execution.identity.value
 
-    @pytest.mark.req(id="RQ-13")
     def test_an_older_session_does_not_roll_back_the_catalogue_entry(
         self, store: ExecutionStore
     ) -> None:
@@ -516,7 +490,6 @@ class ExecutionStoreContract:
         assert entry.last_seen_at == later_execution.started_at
         assert entry.last_seen_run_id == later_execution.identity.value
 
-    @pytest.mark.req(id="RQ-13")
     def test_a_report_without_a_node_id_leaves_its_catalogue_entry_untouched(
         self, store: ExecutionStore
     ) -> None:
@@ -541,15 +514,13 @@ class ExecutionStoreContract:
         entry_after = store.get_catalogue_entry(stable_node_id)
         assert entry_after == entry_before
 
-    @pytest.mark.req(id="RQ-44")
     def test_touch_last_contact_is_monotonic_and_reports_unknown_runs(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D33, task 4.1: `touch_last_contact` advances on a known
-        run (returns True); a second, earlier-or-equal contact leaves it
-        unchanged (returns False, the monotonic guard); an unknown execution
-        id also returns False -- the route disambiguates the two `False`
-        cases itself, by calling `get_execution` (D33), not this method."""
+        """`touch_last_contact` advances on a known run (returns True); an
+        earlier-or-equal contact leaves it unchanged (returns False); an
+        unknown execution id also returns False -- the route tells the two
+        `False` cases apart by calling `get_execution`."""
         identity = "2" + "0" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
@@ -569,14 +540,9 @@ class ExecutionStoreContract:
 
         assert store.touch_last_contact("9" * 32, later_contact) is False
 
-        # A heartbeat touches the contact clock and NOTHING else. Without
-        # this read-back the assertions above are satisfied by the return
-        # value alone, and an adapter whose UPDATE also fabricated a
-        # `finished_at` would pass every one of them -- verified by
-        # mutation, which left the whole suite green. The store is the only
-        # place that can say so, because the route never reads these fields
-        # back and `Execution` is what the client reported, not what was
-        # stored beside it.
+        # A heartbeat touches the contact clock and nothing else. The return
+        # values above cannot show that: an UPDATE that also wrote
+        # `finished_at` would satisfy all of them.
         after = store.get_execution(identity)
         assert after is not None
         assert after.started_at == started
@@ -588,12 +554,11 @@ class ExecutionStoreContract:
     def test_second_report_with_null_vcs_section_leaves_recorded_vcs_intact(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D48, task 4.1: a start-write carries a vcs snapshot; the
-        finish-write that follows carries no `vcs` section at all
-        (`vcs=None`). The conflict branch's per-column `COALESCE` (SQL) /
-        `merged_over` (memory) must leave the previously-recorded vcs values
-        untouched -- a report with no vcs data is not a report that nulls
-        the vcs it does not carry."""
+        """A start-write carries a vcs snapshot; the finish-write that follows
+        carries no `vcs` section at all (`vcs=None`). The conflict branch's
+        per-column `COALESCE` (SQL) / `merged_over` (memory) must leave the
+        previously-recorded vcs values untouched -- a report with no vcs data
+        is not a report that nulls the vcs it does not carry."""
         identity = "2" + "1" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started, vcs=_vcs())
@@ -609,20 +574,13 @@ class ExecutionStoreContract:
     def test_a_partial_finish_snapshot_does_not_clobber_a_fuller_start_one(
         self, store: ExecutionStore
     ) -> None:
-        """The case that discriminates a per-FIELD merge from a per-OBJECT one.
+        """The case that discriminates a per-field merge from a whole-object
+        swap: the other vcs tests give both writes the same snapshot or none,
+        where the two agree.
 
-        Every other vcs contract test hands both writes the same snapshot or
-        no snapshot at all, and under either of those a whole-object swap and
-        a per-column `COALESCE` agree. So `merged_over` shipped correct but
-        unguarded: reverting it to
-        `stored.vcs if execution.vcs is None else execution.vcs` left all 326
-        tests green while the two adapters silently diverged. Found by
-        mutation, 2026-08-20.
-
-        The asymmetry is not contrived. A detached HEAD yields a snapshot with
-        a null branch, and a repository with no commits yields one with a null
-        commit and a null subject -- so a report whose snapshot is a strict
-        subset of an earlier one is what git itself produces.
+        A partial snapshot is what git itself produces: a detached HEAD has a
+        null branch, and a repository with no commits has a null commit and
+        subject.
         """
         identity = "2" + "6" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
@@ -656,10 +614,9 @@ class ExecutionStoreContract:
     def test_identical_vcs_snapshots_across_start_and_finish_apply_once(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D47, task 4.2: both reports of one session carry the
-        identical vcs snapshot, so the upsert is idempotent -- the finish's
-        (identical) snapshot applying over the start's own is a no-op, not a
-        divergence."""
+        """Both reports of one session carry the identical vcs snapshot, so the
+        upsert is idempotent -- the finish's (identical) snapshot applying over
+        the start's own is a no-op, not a divergence."""
         identity = "2" + "2" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         snapshot = _vcs(commit="b" * 40)
@@ -676,9 +633,9 @@ class ExecutionStoreContract:
     def test_reordered_start_after_finish_never_nulls_vcs_columns(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D48, task 4.3: a start-write arriving after the finish
-        fails the row-level `exit_status` guard and changes nothing -- vcs
-        columns included, same as every other field."""
+        """A start-write arriving after the finish fails the row-level
+        `exit_status` guard and changes nothing -- vcs columns included, same
+        as every other field."""
         identity = "2" + "3" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         finish_snapshot = _vcs(commit="c" * 40)
@@ -696,11 +653,10 @@ class ExecutionStoreContract:
     def test_vcs_none_normalizes_the_same_whether_absent_or_all_null(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D48, task 4.5: an absent `vcs` section and a section
-        whose five value fields are all null both read back as
-        `execution.vcs is None`, in every adapter -- proven independently of
-        `_to_execution`'s own normalisation (which never runs in this
-        contract test) so the two normalisation rules cannot drift apart."""
+        """An absent `vcs` section and a section whose five value fields are
+        all null both read back as `execution.vcs is None`, in every adapter --
+        independently of the service's `_to_vcs_context` normalisation, which
+        never runs here."""
         absent_id = "2" + "4" * 31
         all_null_id = "2" + "5" * 31
         absent = _execution(absent_id, vcs=None)
@@ -725,18 +681,9 @@ class ExecutionStoreContract:
         assert stored_all_null is not None
         assert stored_all_null.vcs is None
 
-    @pytest.mark.req(id="RQ-23")
     def test_absent_repository_run_is_retrievable_in_storage(self, store: ExecutionStore) -> None:
-        """design.md D48, task 4.9. Storage-level regression guard, kept
-        alongside the route-level demonstration `read-api` now provides
-        (`test_list_runs_includes_absent_repository_run_undistinguished`,
-        `test_absent_repository_run_appears_in_list_undistinguished`): a
-        deferral this docstring used to name -- "awaiting `read-api`", "not
-        claimed as met until a run list exists" -- is retired, because a run
-        list exists now. Verified here at the storage level via
-        `count_executions` and `get_execution`; renamed in verify round 1
-        (SUGGESTION-3) after its "pending a run list" name outlived the
-        deferral it described."""
+        """A run recorded outside a repository is stored and reads back with
+        `vcs is None`."""
         identity = "2" + "6" * 31
         execution = _execution(identity, vcs=None)
 
@@ -747,12 +694,12 @@ class ExecutionStoreContract:
         assert found is not None
         assert found.vcs is None
 
-    # -- list_runs / get_run_detail (read-api Phase 2, design.md D57-D61) --
+    # -- list_runs / get_run_detail --
 
     def test_list_runs_orders_newest_first_with_total_tiebreak(self, store: ExecutionStore) -> None:
-        """design.md D61: two runs sharing one `started_at`; `id DESC`
-        breaks the tie so the order is total, not merely partial -- a page
-        boundary can never fall inside the tie group."""
+        """Two runs sharing one `started_at`; `id DESC` breaks the tie so the
+        order is total, not merely partial -- a page boundary can never fall
+        inside the tie group."""
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         store.record_session(_execution("a" * 32, started=started), results=(), received_at=started)
         store.record_session(_execution("b" * 32, started=started), results=(), received_at=started)
@@ -765,8 +712,8 @@ class ExecutionStoreContract:
         ]
 
     def test_list_runs_caps_at_200_items(self, store: ExecutionStore) -> None:
-        """history-read-api -> Bounded pagination: a list response never
-        exceeds 200 items, even when the caller asks for more."""
+        """A list response never exceeds 200 items, even when the caller asks
+        for more."""
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         for i in range(MAX_PAGE_ITEMS + 1):
             identity = f"{i:032x}"
@@ -784,9 +731,9 @@ class ExecutionStoreContract:
     def test_list_runs_has_more_distinguishes_exhaustion_from_truncation(
         self, store: ExecutionStore
     ) -> None:
-        """history-read-api -> Bounded pagination: the more-items flag
-        distinguishes exhaustion (exactly 200 stored) from truncation (201
-        stored) -- both drawn from the same fetch, never a second query."""
+        """The more-items flag distinguishes exhaustion (exactly 200 stored)
+        from truncation (201 stored) -- both drawn from the same fetch, never a
+        second query."""
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         for i in range(MAX_PAGE_ITEMS):
             identity = f"{i:032x}"
@@ -809,8 +756,8 @@ class ExecutionStoreContract:
         assert truncated.has_more is True
 
     def test_list_runs_honors_a_smaller_requested_page_size(self, store: ExecutionStore) -> None:
-        """history-read-api -> Bounded pagination: a caller-requested page
-        size under the cap is honored, not silently rounded up to 200."""
+        """A caller-requested page size under the cap is honored, not silently
+        rounded up to 200."""
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         for i in range(10):
             identity = f"{i:032x}"
@@ -828,11 +775,9 @@ class ExecutionStoreContract:
     def test_list_runs_includes_absent_repository_run_undistinguished(
         self, store: ExecutionStore
     ) -> None:
-        """version-control-context -> Absent repository: a run recorded
-        outside a repository appears in the run list at its ordinary
-        chronological position, `vcs is None`, no positional distinction
-        from a run recorded inside one -- the criterion `version-control-
-        context` deferred to this change by name."""
+        """A run recorded outside a repository appears in the run list at its
+        ordinary chronological position, with `vcs is None` and no other
+        distinction from a run recorded inside one."""
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         store.record_session(
             _execution("a" * 32, started=base, vcs=_vcs()),
@@ -861,9 +806,8 @@ class ExecutionStoreContract:
         assert by_id["b" * 32].vcs is None
 
     def test_list_runs_bounds_commit_subject_at_display_width(self, store: ExecutionStore) -> None:
-        """history-read-api -> Lean list projections: the commit subject is
-        bounded in list responses -- proves the SQL projection agrees with
-        `project_vcs` (design.md D57, D60)."""
+        """The commit subject is bounded in list responses, and the SQL
+        projection agrees with `project_vcs`."""
         subject = "x" * 200
         store.record_session(
             _execution(
@@ -884,9 +828,8 @@ class ExecutionStoreContract:
     def test_list_runs_flags_capture_truncated_subject_even_when_short(
         self, store: ExecutionStore
     ) -> None:
-        """history-read-api -> Lean list projections: the truncation flag
-        never surfaces independently of its subject -- the other input to
-        the disjunction, at adapter level (design.md D60)."""
+        """A subject already truncated at capture keeps its flag in the list
+        even when it is shorter than the display width."""
         store.record_session(
             _execution(
                 "a" * 32,
@@ -904,9 +847,8 @@ class ExecutionStoreContract:
         assert entry.vcs.commit_subject_truncated is True
 
     def test_list_runs_null_subject_flag_is_false_not_null(self, store: ExecutionStore) -> None:
-        """design.md D60's `COALESCE` edge case: a run with
-        `vcs_commit_subject IS NULL` reports `commit_subject_truncated is
-        False`, never `None`."""
+        """A run with `vcs_commit_subject IS NULL` reports
+        `commit_subject_truncated is False`, never `None`."""
         store.record_session(
             _execution(
                 "a" * 32,
@@ -924,10 +866,9 @@ class ExecutionStoreContract:
         assert entry.vcs.commit_subject_truncated is False
 
     def test_get_run_detail_returns_full_untruncated_subject(self, store: ExecutionStore) -> None:
-        """design.md D58, D59: `get_run_detail` is the lean-list rule's
-        complement -- the full record stays reachable at the whole stored
-        subject, with `commit_subject_truncated` reflecting only
-        capture-time truncation, unchanged meaning."""
+        """`get_run_detail` is the lean list's complement -- the full record
+        stays reachable at the whole stored subject, with
+        `commit_subject_truncated` reflecting only capture-time truncation."""
         subject = "y" * 200
         execution = _execution(
             "a" * 32, vcs=_vcs(commit_subject=subject, commit_subject_truncated=False)
@@ -944,12 +885,12 @@ class ExecutionStoreContract:
     def test_get_run_detail_returns_none_for_unknown_id(self, store: ExecutionStore) -> None:
         assert store.get_run_detail("f" * 32) is None
 
-    # -- list_results / list_history (read-api Phase 3, design.md D57-D63) --
+    # -- list_results / list_history --
 
     def test_list_history_orders_newest_first_with_full_vcs(self, store: ExecutionStore) -> None:
-        """history-read-api -> Test history: executions return newest first,
-        and every entry carries its full VCS context -- commit, branch,
-        commit subject, truncation flag, dirty flag -- and its duration."""
+        """Executions return newest first, and every entry carries its full VCS
+        context -- commit, branch, commit subject, truncation flag, dirty flag
+        -- and its duration."""
         node_id = "t.py::test_recurring"
         older = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         newer = older + timedelta(hours=1)
@@ -981,17 +922,15 @@ class ExecutionStoreContract:
         assert oldest.duration == 0.5
 
     def test_list_history_unknown_node_id_is_empty_not_error(self, store: ExecutionStore) -> None:
-        """history-read-api -> Test history: an unknown test identity yields
-        an empty history, not an error."""
+        """An unknown test identity yields an empty history, not an error."""
         page = store.list_history(node_id="t.py::test_never_ran", limit=10, offset=0)
 
         assert page.items == ()
         assert page.has_more is False
 
     def test_list_history_null_vcs_entry_present_not_omitted(self, store: ExecutionStore) -> None:
-        """history-read-api -> Test history: an execution recorded outside a
-        git repository is present in the history with a null VCS context,
-        not omitted."""
+        """An execution recorded outside a git repository is present in the
+        history with a null VCS context, not omitted."""
         node_id = "t.py::test_no_repo"
         store.record_session(
             _execution("a" * 32, vcs=None),
@@ -1005,9 +944,8 @@ class ExecutionStoreContract:
         assert page.items[0].vcs is None
 
     def test_list_history_caps_and_reports_more_like_list_runs(self, store: ExecutionStore) -> None:
-        """history-read-api -> Bounded pagination, reused for the history
-        endpoint: the same 200/201 clamp and `has_more` transition as
-        `list_runs`."""
+        """History pagination has the same 200/201 clamp and `has_more`
+        transition as `list_runs`."""
         node_id = "t.py::test_hot_path"
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         for i in range(MAX_PAGE_ITEMS):
@@ -1033,9 +971,8 @@ class ExecutionStoreContract:
         assert truncated.has_more is True
 
     def test_list_results_paginates_a_runs_results(self, store: ExecutionStore) -> None:
-        """design.md D57: `list_results` is the paginated sibling of
-        `get_results` -- respects `limit`/`offset`/`has_more` over one run's
-        results."""
+        """`list_results` is the paginated sibling of `get_results` -- respects
+        `limit`/`offset`/`has_more` over one run's results."""
         execution = _execution("a" * 32)
         results = tuple(_result(f"t.py::test_{i}") for i in range(5))
         store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
@@ -1057,16 +994,14 @@ class ExecutionStoreContract:
         assert page.items == ()
         assert page.has_more is False
 
-    # -- list_results / get_result failure evidence (failure-capture Phase 7, design.md D76-D78) --
+    # -- list_results / get_result failure evidence --
 
     def test_list_results_projects_failure_evidence_via_failure_projection(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D76 -- the two-mechanism agreement: a stored result
-        with a >200-character message; the `list_results` entry's `failure`
-        agrees with `project_failure`'s own bounding and disjunction rule,
-        the same pattern `project_vcs`/SQL `substr` already proves for the
-        commit subject."""
+        """A stored result with a >200-character message: the `list_results`
+        entry's `failure` agrees with `project_failure`'s bounding and
+        truncation-flag rule."""
         long_message = "E" * (LIST_FAILURE_MESSAGE_CHARS + 51)
         failure = _failure(failure_message=long_message, failure_message_truncated=False)
         execution = _execution("a" * 32)
@@ -1087,10 +1022,9 @@ class ExecutionStoreContract:
     def test_list_results_excludes_the_heavy_fields_structurally(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D76 -- `ResultListEntry` has no field to carry
-        `traceback`, `failure_repr` or captured output, proven against the
-        type `list_results` actually returns, not merely `ResultListEntry`
-        in isolation."""
+        """`ResultListEntry` has no field to carry `traceback`, `failure_repr`
+        or captured output, proven against the type `list_results` actually
+        returns, not merely `ResultListEntry` in isolation."""
         execution = _execution("a" * 32)
         store.record_session(
             execution,
@@ -1108,10 +1042,8 @@ class ExecutionStoreContract:
         assert "captured" not in field_names
 
     def test_get_result_returns_the_full_record_hit(self, store: ExecutionStore) -> None:
-        """history-read-api -> Single result detail -> The full record is
-        reachable (port half, design.md D77, D78): `get_result` returns the
-        whole stored `Result`, `failure`/`captured` populated in full,
-        unbounded."""
+        """`get_result` returns the whole stored `Result`, `failure` and
+        `captured` populated in full, unbounded."""
         execution = _execution("a" * 32)
         failure = _failure()
         captured = _captured(stdout="captured output", stderr="")
@@ -1137,9 +1069,9 @@ class ExecutionStoreContract:
         assert store.get_result(execution.identity.value, node_id="t.py::test_never_ran") is None
 
     def test_get_result_truncation_flag_travels_with_the_field(self, store: ExecutionStore) -> None:
-        """A bounded field's truncation flag travels with it -- port half
-        (design.md D77): `get_result`'s `traceback_truncated` is exactly
-        what was stored, never dropped or defaulted."""
+        """A bounded field's truncation flag travels with it: `get_result`'s
+        `traceback_truncated` is exactly what was stored, never dropped or
+        defaulted."""
         execution = _execution("a" * 32)
         failure = _failure(traceback="a truncated traceback", traceback_truncated=True)
         store.record_session(
@@ -1158,10 +1090,9 @@ class ExecutionStoreContract:
     def test_captured_output_empty_versus_absent_round_trips_through_storage(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D77's asymmetry: `""` (captured, empty) and `None`
-        (never captured) round-trip distinctly through storage, both
-        adapters -- collapsing `""` to `None` (a truthy check on the
-        string) would make the two indistinguishable."""
+        """`""` (captured, empty) and `None` (never captured) round-trip
+        distinctly through storage, both adapters -- collapsing `""` to `None`
+        (a truthy check on the string) would make the two indistinguishable."""
         execution = _execution("a" * 32)
         empty_captured = _captured(stdout="", stderr=None)
         store.record_session(
@@ -1177,7 +1108,7 @@ class ExecutionStoreContract:
         assert found.captured.stdout_truncated is False
         assert found.captured.stderr is None
 
-    # user-configuration: namespaced setting persistence, create/replace/delete/parity.
+    # -- settings: namespaced persistence, create/replace/delete --
 
     def test_list_settings_is_empty_for_an_unknown_namespace(self, store: ExecutionStore) -> None:
         assert store.list_settings("test_sections") == ()
@@ -1269,8 +1200,8 @@ class ExecutionStoreContract:
         assert sorted(outcomes) == sorted([("t.py", "passed"), ("t.py", "failed")])
 
     def test_recording_metadata_persists_both_tables(self, store: ExecutionStore) -> None:
-        """design.md D91, D98: a metadata-carrying report writes one
-        `run_metadata_file` row and one `run_metadata` row."""
+        """A metadata-carrying report writes one `run_metadata_file` row and
+        one `run_metadata` row."""
         execution = _execution("1" * 32)
         metadata = RunMetadata(
             files=(
@@ -1300,9 +1231,9 @@ class ExecutionStoreContract:
     def test_a_declared_but_dropped_file_and_key_still_record_a_row(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D95: absence is a row, not a missing row -- a file
-        dropped for being too large and its key's `source_unavailable`
-        entry both persist, with the entry's `value` NULL."""
+        """Absence is a row, not a missing row -- a file dropped for being too
+        large and its key's `source_unavailable` entry both persist, with the
+        entry's `value` NULL."""
         execution = _execution("2" * 32)
         metadata = RunMetadata(
             files=(
@@ -1331,9 +1262,8 @@ class ExecutionStoreContract:
         assert next(iter(entries)).value is None
 
     def test_replaying_the_same_metadata_is_a_no_op(self, store: ExecutionStore) -> None:
-        """design.md D98: both metadata inserts are `INSERT OR IGNORE` --
-        write-once, mechanically. A second `record_session` call for the
-        same run with the identical metadata changes nothing."""
+        """Both metadata inserts are write-once. A second `record_session` call
+        for the same run with the identical metadata changes nothing."""
         execution = _execution("3" * 32)
         metadata = RunMetadata(
             files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
@@ -1355,15 +1285,11 @@ class ExecutionStoreContract:
     def test_replaying_metadata_with_a_different_value_does_not_backfill(
         self, store: ExecutionStore
     ) -> None:
-        """`run-metadata` R7: a stored value is unchanged from what was
-        written at ingestion (`sdd-verify` SUGGESTION-1). Identical-metadata
-        replay, above, proves `INSERT OR IGNORE` is idempotent -- it does
-        NOT prove no-backfill, since idempotence holds trivially when the
-        two writes agree. This asserts the requirement directly: a second
-        `record_session` call for the same run, same key, a DIFFERENT
-        value, must leave the FIRST value on read -- `INSERT OR IGNORE`
-        silently discards the second write's row rather than updating it,
-        which is a different, stronger claim than "replaying is a no-op"."""
+        """A stored value never changes after ingestion: a second
+        `record_session` call for the same run and key with a different value
+        leaves the first value on read. The identical-metadata replay above
+        cannot show this, since idempotence holds trivially when the two writes
+        agree."""
         execution = _execution("8" * 32)
         first = RunMetadata(
             files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
@@ -1388,11 +1314,10 @@ class ExecutionStoreContract:
     def test_a_finish_only_session_records_the_same_rows_a_start_finish_pair_would(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D96, D98: metadata is frozen once and sent unchanged
-        on both writes. A start-write followed by a finish-write, both
-        carrying the identical `RunMetadata`, must leave the same stored
-        rows a single finish-only report would (task 4.3's third contract
-        obligation) -- proving write-once tolerates either arrival order."""
+        """Metadata is frozen once and sent unchanged on both writes. A
+        start-write followed by a finish-write, both carrying the identical
+        `RunMetadata`, leaves the same stored rows a single finish-only report
+        would."""
         metadata = RunMetadata(
             files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
             entries=(MetadataEntry(key="k", value="v", source_file="a.yaml", status="captured"),),
@@ -1427,8 +1352,7 @@ class ExecutionStoreContract:
     def test_a_session_with_no_metadata_argument_persists_no_metadata_rows(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D98: the defaulted keyword's whole point -- an
-        existing caller that never passes `metadata=` (the empty default,
+        """A caller that never passes `metadata=` (the empty default,
         `EMPTY_RUN_METADATA`) writes zero rows to either table."""
         execution = _execution("8" * 32)
 

@@ -1,13 +1,11 @@
-"""Plugin-local decomposition of the pytest node id (design.md D18, RQ-9),
-and -- from Phase 7 -- phase accumulation, outcome derivation and result
-payload assembly (design.md D16, D17).
+"""Node-id decomposition, phase accumulation, outcome derivation and result
+payload assembly for the plugin.
 
 `vantage.core.domain.result.CaseIdentity`/`Result` are the shapes this
-information eventually takes, but `pytest-vantage` cannot import `vantage`
-(RQ-24) -- this module owns plain stdlib structures of its own instead.
-Standard library and `pytest` only -- never `xdist` (`test_plugin_imports.py`
-is the guard); `pytest` itself is this distribution's one declared
-dependency, and every report `Recorder` hands here IS a `pytest.TestReport`.
+information eventually takes, but the plugin must stay installable without
+the server, so it cannot import `vantage` and owns plain stdlib structures
+instead. Standard library and `pytest` only -- never `xdist`
+(`test_plugin_imports.py` is the guard).
 """
 
 from __future__ import annotations
@@ -21,12 +19,11 @@ import pytest
 class DecomposedIdentity(NamedTuple):
     """A test's identity, decomposed from its pytest node id.
 
-    ``class_name`` is `None` for a module-level test, never `""` (RQ-9.2).
+    ``class_name`` is `None` for a module-level test, never `""`.
     ``param_id`` is `None` for an unparametrised test and `""` for a
     parametrised test whose parameter id is itself the empty string -- the
-    brackets are the evidence of parametrisation, not their content
-    (RQ-9.3, design.md D18). The forbidden idiom here is ``x or None``: it
-    would turn a genuine ``""`` into ``None`` and erase that distinction.
+    brackets are the evidence of parametrisation, not their content. Never
+    write ``x or None`` here: it would turn a genuine ``""`` into ``None``.
     """
 
     node_id: str
@@ -37,7 +34,7 @@ class DecomposedIdentity(NamedTuple):
 
 
 def decompose(node_id: str) -> DecomposedIdentity:
-    """Split a pytest node id into its identity components (design.md D18).
+    """Split a pytest node id into its identity components.
 
     The parameter section (a parametrised test's ``[...]`` suffix) is
     arbitrary user data supplied to ``@pytest.mark.parametrize`` -- it MAY
@@ -100,19 +97,18 @@ def decompose(node_id: str) -> DecomposedIdentity:
 
 def _isoformat_utc(moment: datetime) -> str:
     """Fixed-width ISO-8601 UTC text, matching `recorder.py`'s
-    `isoformat_utc` exactly (design.md D1) -- duplicated here rather than
-    imported, since `recorder.py` imports FROM this module and the reverse
-    would be circular.
+    `isoformat_utc` exactly -- duplicated rather than imported, since
+    `recorder.py` imports from this module and the reverse would be circular.
     """
     return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
 class _Pending:
     """Accumulates the up-to-three reports pytest emits for one test's
-    lifecycle, keyed by node id in `Recorder._results` (design.md D16). A
-    `dict[str, _Pending]` gives insertion order for free, and a duplicate
-    report for the same node id and phase overwrites rather than duplicates
-    (D19 layer 1's supporting mechanism).
+    lifecycle, keyed by node id in `Recorder._results`.
+    A `dict[str, _Pending]` gives insertion order for free, and a duplicate
+    report for the same node id and phase overwrites rather than duplicates,
+    so a report delivered twice never becomes a second result.
     """
 
     __slots__ = ("setup", "call", "teardown")
@@ -127,34 +123,33 @@ class _Pending:
 
 
 def accumulate(pending: dict[str, _Pending], report: pytest.TestReport) -> None:
-    """Record one phase report into `pending`, keyed by `report.nodeid`
-    (design.md D16). Called from `Recorder.pytest_runtest_logreport`, once
-    per phase report pytest fires -- never sends anything itself."""
+    """Record one phase report into `pending`, keyed by `report.nodeid`.
+    Called from `Recorder.pytest_runtest_logreport`, once per phase report
+    pytest fires -- never sends anything itself."""
     pending.setdefault(report.nodeid, _Pending()).record(report)
 
 
 def derive_outcome(
     setup: pytest.TestReport, call: pytest.TestReport | None, teardown: pytest.TestReport
 ) -> str:
-    """Derive the overall outcome from the three phase reports, in design.md
-    D17's fixed nine-row precedence order. `call` is `None` only when
+    """Derive the overall outcome from the three phase reports; the checks
+    run in a fixed precedence order. `call` is `None` only when
     `setup.outcome` is not `"passed"` (pytest never runs call after a failed
     or skipped setup).
 
     Two consequences easy to get wrong: a teardown failure downgrades ONLY a
-    `passed` call result (row 8) -- every other verdict keeps its own word.
-    A **strict** `xfail` that passes has `outcome="failed"` with `wasxfail`
-    entirely ABSENT (verified against `_pytest/skipping.py`), so row 7
-    cannot fire for it and it falls through to row 6 (`failed`), not
-    `xpassed`. `wasxfail`'s PRESENCE (`hasattr`), never its truthiness, is
-    what matters -- pytest sometimes sets the reason to `""`.
+    `passed` call result to `error` -- every other verdict keeps its own
+    word. A **strict** `xfail` that passes has `outcome="failed"` with
+    `wasxfail` entirely absent (see `_pytest/skipping.py`), so it is
+    `failed`, not `xpassed`. `wasxfail`'s presence (`hasattr`), never its
+    truthiness, is what matters -- pytest sometimes sets the reason to `""`.
     """
     if setup.outcome == "failed":
         return "error"
     if setup.outcome == "skipped":
         return "skipped"
     if call is None:
-        raise AssertionError("setup passed but no call report was recorded (design.md D17)")
+        raise AssertionError("setup passed but no call report was recorded")
     if call.outcome == "skipped":
         return "xfailed" if hasattr(call, "wasxfail") else "skipped"
     if call.outcome == "failed":
@@ -167,9 +162,9 @@ def derive_outcome(
 
 
 def _phase_duration(report: pytest.TestReport | None) -> float | None:
-    """`None` when the phase never ran, never `0.0` (design.md D17, RQ-5.2).
-    Plain attribute access, never `report.duration or None`, which would
-    turn a genuine `0.0` into `None`.
+    """`None` when the phase never ran, never `0.0`. Plain attribute access,
+    never `report.duration or None`, which would turn a genuine `0.0` into
+    `None`.
     """
     if report is None:
         return None
@@ -178,8 +173,8 @@ def _phase_duration(report: pytest.TestReport | None) -> float | None:
 
 def _phase_timestamp(report: pytest.TestReport, attribute: str) -> str | None:
     """`getattr(report, "start"/"stop", None)` -- epoch floats on pytest
-    >= 8 (design.md D16) -- via `datetime.fromtimestamp(..., timezone.utc)`.
-    Never `datetime.UTC` (3.11+, above this project's 3.10 floor).
+    >= 8 -- via `datetime.fromtimestamp(..., timezone.utc)`. Never
+    `datetime.UTC`, which needs 3.11 and this project supports 3.10.
     """
     epoch = getattr(report, attribute, None)
     if epoch is None:
@@ -188,9 +183,9 @@ def _phase_timestamp(report: pytest.TestReport, attribute: str) -> str | None:
 
 
 def _worker_id(report: pytest.TestReport) -> str | None:
-    """A `getattr` chain, never an xdist import (RQ-24, design.md D16):
-    `report.worker_id` first, then `report.node.gateway.id`. `None` when
-    neither is present.
+    """A `getattr` chain, never an xdist import, so the plugin works with
+    xdist absent: `report.worker_id` first, then `report.node.gateway.id`.
+    `None` when neither is present.
     """
     worker_id = getattr(report, "worker_id", None)
     if worker_id is not None:
@@ -206,9 +201,9 @@ def _select_evidence_phase(
     teardown: pytest.TestReport,
     outcome: str,
 ) -> pytest.TestReport | None:
-    """Which phase report's `vantage_evidence` (design.md D68) belongs in
-    the recorded result -- design.md D69's phase-precedence table, keyed
-    off the DERIVED outcome, never restated as an independent condition:
+    """Which phase report's `vantage_evidence` belongs in the recorded
+    result, keyed off the DERIVED outcome, never restated as an independent
+    condition:
 
     | Derived outcome    | Evidence taken from                          |
     | ------------------- | --------------------------------------------- |
@@ -229,7 +224,7 @@ def _select_evidence_phase(
         return call
     if outcome == "skipped":
         return setup if setup.outcome == "skipped" else call
-    return None  # xpassed, passed -- design.md D69
+    return None  # xpassed, passed
 
 
 def _captured_output(
@@ -238,16 +233,16 @@ def _captured_output(
     teardown: pytest.TestReport,
 ) -> dict[str, object]:
     """`captured_stdout`/`captured_stderr`, concatenated across every phase
-    that ran, in setup->call->teardown order, with NO delimiter (design.md
-    D71) -- independent of `_select_evidence_phase`'s D69 failure-evidence
-    precedence, because captured output is a record of what ran, not of
-    what went wrong: even a passing test's output is included.
+    that ran, in setup->call->teardown order, with no delimiter (an in-band
+    phase header could be forged by a test printing that exact line).
+    Independent of `_select_evidence_phase`, because captured output is a
+    record of what ran, not of what went wrong: even a passing test's output
+    is included.
 
     Absent entirely from the returned dict (never a dict of nulls) when
-    `EvidenceCollector` never ran on ANY phase of this test -- e.g. the
-    opt-in absent (D72, revised for RQ-25: capture defaults off) -- the same
-    convention `build_result`'s failure-evidence merge already follows
-    below.
+    `EvidenceCollector` never ran on ANY phase of this test -- e.g. without
+    `--vantage-failure-text` -- the same convention `build_result`'s
+    evidence merge follows.
 
     `capture_disabled` is one session-constant flag every phase's `_extract`
     call receives identically (`evidence.py::_captured_fields`), so a phase
@@ -281,11 +276,10 @@ def _captured_output(
 
 
 def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
-    """Build one wire-shape `results[]` entry from an accumulated `_Pending`
-    (design.md D16-D18). Returns `None` -- dropped, never invented -- when
-    the teardown report was never seen: a half-observed test (e.g. one
-    interrupted mid-call) is worse reported as whole than not at all
-    ("resolution, not attendance", D16).
+    """Build one wire-shape `results[]` entry from an accumulated `_Pending`.
+    Returns `None` -- dropped, never invented -- when the teardown report
+    was never seen: a half-observed test (e.g. one interrupted mid-call) is
+    worse reported as whole than not at all.
     """
     if pending.teardown is None:
         return None
@@ -323,29 +317,25 @@ def build_result(node_id: str, pending: _Pending) -> dict[str, object] | None:
         "worker_id": _worker_id(setup),
     }
 
-    # design.md D69: the evidence `EvidenceCollector` attached to whichever
-    # phase report D69's precedence table selects, merged in -- absent
-    # entirely (never a dict of nulls) when that phase carries none, e.g. a
-    # session with `EvidenceCollector` never registered (the opt-in absent,
-    # D72, revised for RQ-25).
+    # The evidence `EvidenceCollector` attached to the selected phase report,
+    # merged in -- absent entirely (never a dict of nulls) when that phase
+    # carries none, e.g. without `--vantage-failure-text`.
     evidence_report = _select_evidence_phase(setup, call, teardown, outcome)
     evidence = getattr(evidence_report, "vantage_evidence", None)
     if isinstance(evidence, dict):
         result.update(evidence)
 
-    # design.md D71: captured output is concatenated across ALL phases,
-    # never just the one D69's failure-evidence precedence selected above --
-    # applied AFTER the evidence merge so it overrides any single-phase
-    # captured_stdout/captured_stderr that merge may have carried in.
+    # Captured output spans ALL phases, not just the one selected above --
+    # applied after the evidence merge so it overrides the single-phase
+    # captured_stdout/captured_stderr that merge carried in.
     result.update(_captured_output(setup, call, teardown))
 
     return result
 
 
 def assemble_results(pending: dict[str, _Pending]) -> list[dict[str, object]]:
-    """Build the `results` array in insertion (execution) order (design.md
-    D16). Entries with no teardown report are dropped (`build_result`
-    returning `None`).
+    """Build the `results` array in insertion (execution) order. Entries
+    with no teardown report are dropped (`build_result` returning `None`).
     """
     results: list[dict[str, object]] = []
     for entry_node_id, entry in pending.items():

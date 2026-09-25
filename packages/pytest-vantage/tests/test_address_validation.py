@@ -1,10 +1,6 @@
-"""Threat matrix "Outbound request target" (design.md D6/threat matrix):
-the plugin POSTs to a URL that can come from CLI, ini or an environment
-variable, so the scheme allow-list is the whole defence. Only ``http`` and
-``https`` are ever accepted. No numbered requirement drives this row of the
-matrix, so these tests carry no ``@pytest.mark.req`` -- the same convention
-PR2's rot-detector used for a threat-matrix test with no requirement of its
-own (design.md, tasks.md Review Workload Forecast).
+"""The plugin POSTs to a URL that can come from CLI, ini or an environment
+variable, so the scheme allow-list is the whole defence against an
+unintended outbound request. Only ``http`` and ``https`` are ever accepted.
 
 The bare-host case is the sneaky one: ``urlparse("localhost:8765")`` does
 not raise -- it happily returns a scheme of ``"localhost"`` and a path of

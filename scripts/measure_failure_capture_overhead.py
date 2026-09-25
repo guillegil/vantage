@@ -1,44 +1,31 @@
-"""Manual harness for RQ-25's failure-capture overhead measurement (design.md
-D79, task 9.1). **Not a pytest test and never collected by the suite** -- it
-spawns a real HTTP server and real pytest subprocesses, and this benchmark
-alone runs dozens of thousand-test sessions; a network-disabled or
-time-boxed CI job is exactly the wrong place for it. Run it by hand::
+"""Measure what ``--vantage-failure-text`` adds to a recorded pytest session.
+
+Not collected by the test suite: it spawns a real HTTP server and runs dozens
+of thousand-test pytest sessions, far too slow for CI. Run it by hand::
 
     uv run --extra dev python scripts/measure_failure_capture_overhead.py
 
-Transcribe the printed six-cell table into the "Measurements" paragraph of
-``openspec/changes/failure-capture/specs/failure-evidence/spec.md`` (task
-9.2). A future change to `evidence.py`'s rendering or `budget.py`'s spend
-loop MUST re-run this script and update that paragraph.
+Re-run it after any change to how ``evidence.py`` renders failures or how
+``budget.py`` spends the failure-text budget.
 
-Follows ``scripts/measure_vcs_overhead.py``'s own harness shape --
-**paired, interleaved A/B/A/B... runs, medians reported, never means** --
-with three changes design.md D79 specifies:
+Same harness shape as ``measure_vcs_overhead.py``: interleaved A/B pairs,
+medians reported, never means.
 
-- **Baseline (A) is current `main` with recording ON**: recording and VCS
-  capture on, failure-text capture absent -- the default, no invocation flag
-  given (design.md D72, revised after this very measurement to flip the
-  polarity from opt-out to opt-in). Not recording-off --
-  `version-control-context`'s own table already spent part of RQ-25's budget
-  on the git read, and measuring against recording-off would re-measure that
-  cost and hide this change's own.
-- **Treatment (B) is the identical session with failure capture opted in**
-  via `--vantage-failure-text` -- the only difference between A and B is
-  this change's second rendering, budget spend and captured-output plumbing.
-- **Two new axes, crossed**: failure density (1%, 10%, 100% of 1,000 tests
-  at ~10 ms) and the display flag (`--tb=auto`, `--tb=no`) -- six cells.
-  `--tb=no` is measured separately because D79 forecasts it as the more
-  expensive branch: under `--tb=auto` pytest already rendered the failure
-  once, so the source files are warm in the linecache for this change's
-  second rendering; under `--tb=no` nothing was rendered first and this
-  change's rendering pays the cold cost alone.
+- **A**: recording on, failure-text capture off (the default).
+- **B**: the same session with ``--vantage-failure-text``. The A->B delta is
+  the cost of failure capture alone. Measuring against recording off would
+  fold in the git read and the report as well.
+- **Cells**: failure density (1%, 10% and 100% of 1,000 tests at ~10 ms)
+  crossed with ``--tb=auto`` and ``--tb=no``. Under ``--tb=auto`` pytest has
+  already rendered each failure for the terminal, so the source lines are
+  warm in the linecache. Under ``--tb=no`` the capture's own rendering pays
+  the cold cost alone.
 
-Also reported, once per profile (not crossed with `--tb`, since recording-off
-never renders anything and so cannot depend on the display flag): the
-recording-off median, so the numbers stay commensurable with
-`version-control-context`'s existing table. Measured with fewer repeats
-(3, not 5) since it is context, not the primary A/B comparison this script
-exists to make.
+Each cell also prints a recording-off (OFF) median from three runs, so the
+total cost of recording stays visible. It is context, not the comparison the
+script exists to make. Read the deltas against the overhead budget of 2% of
+suite runtime; ``per-failure`` is the A->B delta divided by the number of
+failing tests.
 """
 
 from __future__ import annotations
@@ -57,26 +44,15 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-_PAIRS = 5  # five interleaved A/B pairs, per design.md D79's own harness description
+_PAIRS = 5  # interleaved A/B pairs per cell
 _OFF_REPEATS = 3  # context only, not the primary comparison -- see module docstring
+_OVERHEAD_BUDGET = "2% of suite runtime"
 
-# 1,000 tests at ~10 ms (RQ-25 criterion 1's ~10 s suite) at three failure densities.
+# 1,000 tests at ~10 ms (a ~10 s suite) at three failure densities.
 _TEST_COUNT = 1000
 _PER_TEST_SLEEP = 0.010
 _DENSITIES: dict[str, float] = {"1%": 0.01, "10%": 0.10, "100%": 1.00}
 _TB_FLAGS: tuple[str, ...] = ("auto", "no")
-
-# The pre-measurement forecast this script's result is allowed to disagree
-# with (design.md D79's own text) -- printed alongside the measured numbers
-# so neither quietly replaces the other.
-_FORECAST = (
-    "~55 ms of RQ-25 headroom remains after version-control-context's own "
-    "spend; a style='long' rendering is expected in the 1-5 ms range warm, "
-    "more cold. The 1% profile (10 failures) is expected to fit; the 10% "
-    "profile to be marginal; the 100% profile to exceed RQ-25's 2% budget. "
-    "--tb=no is expected to be the more expensive branch (cold rendering, "
-    "nothing pre-rendered for the terminal)."
-)
 
 
 def _write_synthetic_suite(
@@ -94,7 +70,7 @@ def _write_synthetic_suite(
         "",
         "def _raise_at_depth(n: int) -> None:",
         "    if n <= 0:",
-        "        assert False, 'synthetic failure for RQ-25 overhead measurement'",
+        "        assert False, 'synthetic failure for overhead measurement'",
         "    _raise_at_depth(n - 1)",
         "",
         "",
@@ -243,7 +219,7 @@ def main() -> None:
     print(f"date: {time.strftime('%Y-%m-%d')}")
     print(f"machine: {platform.platform()} / {platform.processor() or platform.machine()}")
     print(f"python: {platform.python_version()}")
-    print(f"pre-measurement forecast: {_FORECAST}")
+    print(f"overhead budget: {_OVERHEAD_BUDGET}")
     print()
     print(
         f"== {_PAIRS} interleaved A/B pairs per cell (A=default/absent, B=opted-in), "

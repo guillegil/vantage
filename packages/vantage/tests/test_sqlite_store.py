@@ -1,10 +1,5 @@
-"""RQ-30.1: the core's storage contract, run against the SQLite adapter.
-
-Completes RQ-30.1: the same `ExecutionStoreContract` (`test_memory_store.py`
-runs it against `InMemoryExecutionStore`) now runs unchanged against
-`SqliteExecutionStore`, proving the port was never shaped around one
-implementation.
-"""
+"""The shared `ExecutionStoreContract` run against `SqliteExecutionStore`, plus
+SQLite-specific checks that read the database directly."""
 
 from __future__ import annotations
 
@@ -21,12 +16,10 @@ from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import _LIST_RUNS_BY_METADATA, SqliteExecutionStore
 from vantage_port_contract import ExecutionStoreContract, _execution, _start_only_execution
 
-# The pre-`failure-capture` `_INSERT_RESULT` shape (14 bound columns, no
-# failure/captured-output columns at all) -- kept here as a fixture-building
-# constant, never imported from `sqlite_store.py`, so a future edit to the
-# CURRENT `_INSERT_RESULT` cannot accidentally rewrite history under this
-# test's feet.
-_OLD_INSERT_RESULT = """
+# A result insert naming none of the failure or captured-output columns, so
+# they keep their schema defaults. Defined here rather than derived from
+# `_INSERT_RESULT`, so edits to the adapter cannot change what this writes.
+_INSERT_RESULT_WITHOUT_EVIDENCE = """
     INSERT INTO result (
         run_id, test_case_id, node_id, outcome, duration, started_at, finished_at,
         setup_outcome, call_outcome, teardown_outcome,
@@ -43,17 +36,13 @@ class TestSqliteExecutionStore(ExecutionStoreContract):
         adapter.close()
 
 
-@pytest.mark.req(id="RQ-3")
 def test_finish_write_leaves_received_at_started_at_and_last_contact_at_untouched(
     tmp_path: Path,
 ) -> None:
-    """W2: `received_at`, `started_at` and `last_contact_at` are not fields
-    on `Execution`, so no contract test built on `get_execution` can observe
-    them -- they are read directly off the `run` row here instead. Adding
-    `last_contact_at = excluded.last_contact_at` to `_UPSERT_RUN`'s `DO
-    UPDATE SET` list currently leaves every other test in this suite green
-    while making a finished run's last contact jump on a later finish-write
-    -- exactly the "a finished run is not stale" invariant D27 states.
+    """A finish-write leaves `received_at`, `started_at` and `last_contact_at`
+    as the start-write set them -- a finished run's last contact must not jump
+    forward. None of the three is a field on `Execution`, so they are read off
+    the `run` row directly.
     """
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:
@@ -66,12 +55,8 @@ def test_finish_write_leaves_received_at_started_at_and_last_contact_at_untouche
         select_run = "SELECT received_at, started_at, last_contact_at FROM run WHERE id = ?"
         before = store._conn.execute(select_run, (identity,)).fetchone()  # noqa: SLF001
 
-        # A DIFFERENT start time on the finish-write, deliberately. Handing it
-        # the same `started` literal made the assertion below compare a value
-        # with itself: it held whether or not the upsert overwrote the column,
-        # and adding `started_at = excluded.started_at` to the DO UPDATE list
-        # left the whole suite green. Its `received_at` and `last_contact_at`
-        # siblings already bite, because their values differ.
+        # A different start time on the finish-write, so the `started_at`
+        # assertion below fails if the upsert overwrites the column.
         disagreeing_start = started + timedelta(hours=3)
         finish = _execution(identity, finished=True, started=disagreeing_start)
         later_received = received + timedelta(hours=1)
@@ -88,19 +73,14 @@ def test_finish_write_leaves_received_at_started_at_and_last_contact_at_untouche
         store.close()
 
 
-@pytest.mark.req(id="RQ-44")
 def test_touch_last_contact_normalizes_a_non_utc_contact_before_storing_it(
     tmp_path: Path,
 ) -> None:
-    """`touch_last_contact` is a public port method: its signature accepts any
-    aware `datetime`, not only the UTC ones the route happens to pass today.
+    """`touch_last_contact` accepts any aware `datetime`, not only UTC.
 
     Stamping a `+02:00` value with a `+00:00` suffix would store it two hours
-    ahead of the truth and then compare it lexicographically against
-    genuinely-UTC rows. The in-memory adapter compares real `datetime` objects
-    and gets this input right, so trusting the caller is also what would make
-    the two adapters disagree on an input the shared contract suite never
-    exercises. Found by review, 2026-08-19.
+    off and break the text comparison against UTC rows; the in-memory adapter
+    compares real `datetime` objects, so the two adapters would also disagree.
     """
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:
@@ -127,10 +107,10 @@ def test_touch_last_contact_normalizes_a_non_utc_contact_before_storing_it(
 def test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository(
     tmp_path: Path,
 ) -> None:
-    """design.md D48, task 4.4: a run recorded with `vcs=None` (outside a
-    repository) must write SQL `NULL` to `vcs_branch`, not `''` -- asserted
-    via `typeof(...)`, which distinguishes the two, never falsy-equality
-    (`not value`), which `''` would also satisfy."""
+    """A run recorded with `vcs=None` (outside a repository) must write SQL
+    `NULL` to `vcs_branch`, not `''` -- asserted via `typeof(...)`, which
+    distinguishes the two, never falsy-equality (`not value`), which `''` would
+    also satisfy."""
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:
         identity = "8" * 32
@@ -164,21 +144,16 @@ def test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository(
         store.close()
 
 
-def test_an_existing_pre_change_database_opens_unrefused_and_reads_back_its_rows(
+def test_a_result_row_without_evidence_columns_reads_back_with_no_failure_or_output(
     tmp_path: Path,
 ) -> None:
-    """ADR-0013's non-firing, proven not assumed (design.md D80): a
-    database written by the pre-`failure-capture` 14-column
-    `_INSERT_RESULT` (`schema_version` stays `2`, unchanged by this whole
-    change -- `git diff schema.sql` is empty, RQ-29) opens unrefused under
-    the widened adapter, and its pre-existing row reads back with `NULL` in
-    every new failure/captured-output column."""
-    db_path = tmp_path / "store" / "pre_change.db"
+    """A result row written without any failure or captured-output column (all
+    left at their schema defaults) reads back, through a freshly opened
+    adapter, as `failure=None` and an all-`None` `CapturedOutput`."""
+    db_path = tmp_path / "store" / "vantage.db"
 
-    # Phase 1: write the fixture with the OLD 14-column result insert,
-    # directly against a freshly-opened connection -- a database this
-    # change's widened `_INSERT_RESULT` never wrote a row into. The run row
-    # and catalogue entry go through the ordinary (unaffected) API.
+    # The run goes through the adapter; the catalogue entry and the result
+    # row are written directly, with the narrow insert above.
     writer = SqliteExecutionStore(db_path)
     try:
         execution = _execution("9" * 32)
@@ -205,7 +180,7 @@ def test_an_existing_pre_change_database_opens_unrefused_and_reads_back_its_rows
             "SELECT id FROM test_case WHERE node_id = ?", ("t.py::test_old",)
         ).fetchone()[0]
         conn.execute(
-            _OLD_INSERT_RESULT,
+            _INSERT_RESULT_WITHOUT_EVIDENCE,
             (
                 "9" * 32,
                 test_case_id,
@@ -227,9 +202,8 @@ def test_an_existing_pre_change_database_opens_unrefused_and_reads_back_its_rows
     finally:
         writer.close()
 
-    # Phase 2: open the SAME file as a brand-new adapter instance -- the
-    # assertion under test. Constructing `SqliteExecutionStore` re-runs
-    # `open_database`'s schema-version check; it must not raise.
+    # Reopen the same file with a new adapter instance, which re-runs
+    # `open_database`'s schema-version check.
     reader = SqliteExecutionStore(db_path)
     try:
         assert reader.get_execution("9" * 32) is not None
@@ -247,12 +221,9 @@ def test_an_existing_pre_change_database_opens_unrefused_and_reads_back_its_rows
 def test_a_v2_stamped_database_is_refused_naming_version_found_required_and_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """design.md D82: this change bumps `meta.schema_version` from 2 to 3.
-    A database stamped `2` by an earlier release -- exactly what every
-    developer database looks like before this change -- must be refused at
-    open, naming the version found, the version required and the database
-    path (ADR-0013), and it must issue no schema-altering statement in the
-    process (RQ-29's refusal scenario)."""
+    """A database stamped with an older schema version is refused at open,
+    naming the version found, the version required and the database path, and
+    no schema script runs against it."""
     db_path = tmp_path / "store" / "vantage.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     seed = sqlite3.connect(str(db_path))
@@ -282,32 +253,23 @@ def test_a_v2_stamped_database_is_refused_naming_version_found_required_and_path
         SqliteExecutionStore(db_path)
 
     message = str(exc_info.value)
-    assert "2" in message
-    assert "3" in message
+    assert "schema_version is 2," in message
+    assert "requires schema_version 4" in message
     assert str(db_path) in message
     assert captured == []
 
 
 def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
-    """sdd-verify CRITICAL-2: `_LIST_RUNS_BY_METADATA` MUST reach the
-    read filter's whole reason to exist -- `idx_run_metadata_key_value`
-    (schema.sql, docs/schema-manifest.md) -- rather than a full scan of
-    `run` with one correlated subquery per row.
+    """`_LIST_RUNS_BY_METADATA` uses `idx_run_metadata_key_value` rather than
+    scanning `run` with one correlated subquery per row.
 
-    A prior `WHERE EXISTS (SELECT 1 FROM run_metadata rm WHERE rm.run_id =
-    run.id AND rm.key = ? AND rm.value = ?)` form correlated the subquery on
-    `rm.run_id = run.id`, so SQLite's planner anchored there and preferred
-    `run_metadata`'s own `PRIMARY KEY (run_id, key)` autoindex instead --
-    `idx_run_metadata_key_value` was never touched, and cost was O(total
-    runs) rather than O(matching runs). Results were correct either way;
-    only the plan regressed silently, which is exactly why this asserts the
-    plan and not just the rows -- `test_run_list_metadata_filter_returns_
-    only_matching_runs` (`test_routes_read.py`) already covers correctness.
+    A correlated `EXISTS` form returns the same rows but makes SQLite prefer
+    `run_metadata`'s primary-key autoindex, so cost grows with the total run
+    count. That regression is silent, which is why this asserts the plan;
+    `test_routes_read.py` covers the rows.
 
-    No `ANALYZE` is run here, deliberately: production never runs it
-    either (no `sqlite_stat1` table exists), so the no-stats plan asserted
-    here is the plan production actually gets, not an optimistic one only
-    reachable after statistics collection.
+    No `ANALYZE` is run: production never runs it either, so the no-statistics
+    plan asserted here is the plan production gets.
     """
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:

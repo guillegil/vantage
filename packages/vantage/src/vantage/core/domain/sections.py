@@ -1,13 +1,9 @@
 """Section definitions, longest-prefix-wins derivation, and the per-run
-pass-percentage aggregate (design.md D84, D85).
+pass-percentage aggregate.
 
-Stdlib only (RQ-26) -- no Pydantic, no ORM, matching every other module in
-`vantage.core.domain`. ``UNASSIGNED`` is a module-level plain ``str``,
-never an ``Enum`` and never a one-member class: `liveness.PRESENTATIONS`
-and `result.OUTCOMES` already record why on this project's Python 3.10
-floor -- ``class X(str, Enum)`` changes ``__format__`` between interpreter
-versions -- and a third shape for the same kind of vocabulary is one shape
-too many.
+Stdlib only. ``UNASSIGNED`` is a module-level plain ``str``, never an
+``Enum`` and never a one-member class, for the ``__format__`` reason
+recorded in ``liveness.py``.
 """
 
 from __future__ import annotations
@@ -20,16 +16,16 @@ UNASSIGNED = "unassigned"
 
 SECTION_NAME_MAX_CHARS = 120
 """Bound on a section name -- `LIST_COMMIT_SUBJECT_CHARS`'s display width,
-the same class of value: a label read in a list (design.md D89)."""
+the same class of value: a label read in a list."""
 
 SECTION_PREFIX_MAX_CHARS = 1024
 """Bound on a section prefix -- `MAX_IDENTITY_CHARS`, already the bound on
-a path-shaped client value elsewhere in this codebase (design.md D89)."""
+a path-shaped client value elsewhere in this codebase."""
 
 MAX_SECTIONS = 200
 """Bound on stored sections -- `MAX_PAGE_ITEMS`. The run summary is
 unpaginated, so this cap on stored sections is also the bound on that
-response (design.md D89)."""
+response."""
 
 
 @dataclass(frozen=True, slots=True)

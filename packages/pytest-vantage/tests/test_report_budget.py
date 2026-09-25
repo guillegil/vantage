@@ -1,14 +1,10 @@
-"""The per-report failure-text budget (design.md D73, D74): the constant
-mirrored from the server, pinned by a test so a drift is a build failure
-rather than a silent 413 in production, and `spend_failure_text_budget`'s
-one-pass, execution-order, field-priority spending with drop-whole
-semantics.
+"""The per-report failure-text budget: the cap mirrored from the server,
+pinned so a drift fails the build rather than causing 413s in production,
+and `spend_failure_text_budget`'s one-pass, execution-order, field-priority
+spending with drop-whole semantics.
 
-Standard library and `pytest` only in production (`budget.py` itself,
-RQ-24) -- this test file's cross-package import of `vantage.service.errors`
-is test-only, the same established pattern `vantage_test_server.py` and
-`test_run_report.py` already use to reach `vantage.core`/`vantage.service`
-from this distribution's own tests.
+The import of `vantage.service.errors` is test-only; `budget.py` itself must
+not depend on the server package.
 """
 
 from __future__ import annotations
@@ -27,30 +23,25 @@ from vantage.service.errors import MAX_REPORT_BYTES
 
 
 def test_the_mirrored_cap_matches_the_server() -> None:
-    """design.md D73: `_REPORT_BYTES_CAP` mirrors the server's own
-    `MAX_REPORT_BYTES` across the RQ-24 boundary this plugin cannot import
-    across directly -- a divergence here IS a correctness bug (a mirror that
-    drifts high produces 413s that reject whole sessions), so the mirror is
-    pinned against the server's real value rather than trusted to stay in
-    sync by convention alone.
+    """`_REPORT_BYTES_CAP` mirrors the server's `MAX_REPORT_BYTES`, which the
+    plugin cannot import. A mirror that drifts high produces 413s that reject
+    whole sessions, so it is pinned against the server's real value.
     """
     assert _REPORT_BYTES_CAP == MAX_REPORT_BYTES
     assert MAX_FAILURE_TEXT_BYTES * 2 == MAX_REPORT_BYTES
 
 
-# --- spend_failure_text_budget (design.md D74) -------------------------------
+# --- spend_failure_text_budget ------------------------------------------------
 
 
 def test_spend_budget_charges_encoded_json_bytes_not_raw_len(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """design.md D74: the cost charged against the budget is
-    `len(json.dumps(value, ensure_ascii=False).encode("utf-8"))` -- the
-    encoded wire representation, escapes and quotes included -- never
-    `len(value)`. A quote/newline-heavy value makes the two numbers
-    genuinely differ (raw length 5, encoded length 9): budgeting to exactly
-    one byte short of the ENCODED cost still drops the field; budgeting to
-    the encoded cost keeps it whole.
+    """The cost charged against the budget is the JSON-encoded size, escapes
+    and quotes included, never `len(value)`. A quote/newline-heavy value
+    makes the two differ (raw length 5, encoded length 9): a budget one byte
+    short of the encoded cost drops the field; exactly the encoded cost
+    keeps it whole.
     """
     value = 'a"b\nc'
     encoded_cost = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
@@ -71,11 +62,9 @@ def test_spend_budget_charges_encoded_json_bytes_not_raw_len(
 
 
 def test_spend_budget_is_execution_order_first_come(monkeypatch: pytest.MonkeyPatch) -> None:
-    """design.md D74: allocation is first-come in execution order -- the
-    order `entries` already carries. Three identical over-budget results,
-    with room for exactly one whole one: the FIRST stays whole, the second
-    and third -- despite being identical in size -- drop, because they come
-    later, never because of any property of their own content.
+    """Allocation is first-come in the order `entries` already carries. Of
+    three identical results with room for exactly one, the first stays whole
+    and the other two drop because they come later.
     """
     big = "T" * 100
     cost = len(json.dumps(big, ensure_ascii=False).encode("utf-8"))
@@ -93,12 +82,10 @@ def test_spend_budget_is_execution_order_first_come(monkeypatch: pytest.MonkeyPa
 
 
 def test_spend_budget_field_priority_within_a_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    """design.md D74: field priority within one result is
-    `(failure_message, failure_repr, traceback, captured_stdout,
-    captured_stderr)` -- smallest-and-most-informative first. A budget sized
-    to fit exactly `failure_message` and nothing more leaves `traceback`
-    dropped in the SAME result, proving the order fields are charged in,
-    not merely that some field somewhere gets dropped.
+    """Within one result, fields are charged in the order `failure_message`,
+    `failure_repr`, `traceback`, `captured_stdout`, `captured_stderr`. A
+    budget that fits exactly `failure_message` keeps it and drops
+    `traceback` in the same result.
     """
     message = "M" * 50
     traceback_text = "T" * 50
@@ -115,10 +102,8 @@ def test_spend_budget_field_priority_within_a_result(monkeypatch: pytest.MonkeyP
 
 
 def test_short_fields_are_never_charged_or_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
-    """design.md D74: `failure_type`, `failure_path`, `failure_lineno`,
-    `skip_reason` and `xfail_reason` are outside the charged set entirely --
-    short by nature, and the columns index 5 groups on. A budget of zero,
-    fully exhausted before this entry is even reached, leaves every one of
+    """`failure_type`, `failure_path`, `failure_lineno`, `skip_reason` and
+    `xfail_reason` are never charged: a budget of zero leaves every one of
     them untouched.
     """
     monkeypatch.setattr(budget_module, "MAX_FAILURE_TEXT_BYTES", 0)
@@ -145,10 +130,9 @@ def test_short_fields_are_never_charged_or_dropped(monkeypatch: pytest.MonkeyPat
 def test_a_dropped_field_is_null_with_its_truncated_flag_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """failure-evidence -> Per-report failure-text budget -> A field dropped
-    for budget is flagged, not missing (design.md D74): the exact wire shape
-    is `{"traceback": null, "traceback_truncated": true}` -- the same
-    out-of-band flag the 64 KiB per-field bound uses, not a new column.
+    """A field dropped for budget is flagged, not missing: the wire shape is
+    `{"traceback": null, "traceback_truncated": true}` -- the same flag the
+    64 KiB per-field bound uses.
     """
     monkeypatch.setattr(budget_module, "MAX_FAILURE_TEXT_BYTES", 0)
     entries: list[dict[str, object]] = [{"traceback": "some traceback text"}]
@@ -160,12 +144,9 @@ def test_a_dropped_field_is_null_with_its_truncated_flag_set(
 
 
 def test_a_session_within_budget_sets_no_exhaustion_flags() -> None:
-    """failure-evidence -> Per-report failure-text budget -> A session
-    within budget carries no exhaustion flags: every field here is tiny,
-    well inside the real `MAX_FAILURE_TEXT_BYTES`, so nothing is charged
-    away and no `*_truncated` key appears at all -- not even set to
-    `False`, matching the "absent means never flagged by the budget pass"
-    convention `resolve_failure_text_capture`'s sibling fields already use.
+    """Every field here is well inside the real `MAX_FAILURE_TEXT_BYTES`, so
+    nothing is dropped and no `*_truncated` key appears at all -- not even
+    set to `False`.
     """
     entries: list[dict[str, object]] = [
         {
@@ -189,12 +170,9 @@ def test_a_session_within_budget_sets_no_exhaustion_flags() -> None:
 
 
 def test_a_field_is_dropped_whole_never_cut(monkeypatch: pytest.MonkeyPatch) -> None:
-    """design.md D74: a field that does not fit is dropped WHOLE, never
-    sliced to fit the remaining budget -- cutting is already what the 64
-    KiB per-field bound means, and a second cutting rule at a different
-    threshold would put two meanings behind one boolean. A 2,000-character
-    traceback (comfortably under the unrelated 64 KiB bound) against a
-    100-byte remainder becomes `None`, not a 100-byte slice of itself.
+    """A field that does not fit is dropped whole, never sliced to fit the
+    remaining budget: a 2,000-character traceback against a 100-byte budget
+    becomes `None`, not a 100-byte slice of itself.
     """
     big_traceback = "T" * 2000
     monkeypatch.setattr(budget_module, "MAX_FAILURE_TEXT_BYTES", 100)
@@ -206,23 +184,16 @@ def test_a_field_is_dropped_whole_never_cut(monkeypatch: pytest.MonkeyPatch) -> 
     assert entries[0]["traceback_truncated"] is True
 
 
-@pytest.mark.req(id="RQ-24")
 def test_the_budget_charges_exactly_what_transport_will_put_on_the_wire() -> None:
-    """`_encoded_cost` exists to measure the wire, so it must encode the way
-    `transport.send` encodes -- `json.dumps(report)` at line 50, with NO
-    `ensure_ascii` argument, which means the default `True`.
+    """`_encoded_cost` must encode the way `transport.send` does:
+    `json.dumps(report)` with the default `ensure_ascii=True`.
 
-    Measuring with `ensure_ascii=False` instead understates every codepoint
-    above 0x7F, because the wire spends `\\uXXXX` (six bytes per unit, twelve
-    for an astral pair) where UTF-8 spends two to four. Measured: 1.30x for
-    Spanish accents, 1.84x for Japanese, 1.65x for emoji. A suite whose
-    assertion messages are not English would then pass the budget and still
-    breach `MAX_REPORT_BYTES` on the wire -- the whole session discarded,
-    run included, which is the exact failure this budget exists to prevent.
-
-    An ASCII value is asserted alongside so the test cannot pass vacuously:
-    the two encodings agree there, and only the non-ASCII case separates a
-    correct implementation from the understating one.
+    Measuring with `ensure_ascii=False` understates every code point above
+    0x7F, because the wire spends a six-byte `\\uXXXX` escape per code unit
+    where UTF-8 spends two to four. A suite with non-English assertion
+    messages would then pass the budget and still exceed `MAX_REPORT_BYTES`,
+    losing the whole session. Only the non-ASCII case separates the two
+    encodings; the ASCII case is a baseline.
     """
     ascii_value = "assertion failed: expected 3, got 4"
     assert _encoded_cost(ascii_value) == len(json.dumps(ascii_value).encode("utf-8"))

@@ -1,7 +1,6 @@
-"""`truncate()` -- RQ-22's uniform 64 KiB bound, its first writer
-(design.md D49). The bound is on UTF-8 BYTES, cut at a character boundary:
-`value[:65536]` counts characters, not bytes, and can store four times the
-intended amount for a wide-character-heavy string.
+"""`truncate()` -- the uniform 64 KiB bound on stored text. The bound is on
+UTF-8 bytes, cut at a character boundary: `value[:65536]` counts characters,
+not bytes, and can store four times the intended amount.
 """
 
 from __future__ import annotations
@@ -9,9 +8,9 @@ from __future__ import annotations
 import pytest
 from vantage.service.truncation import MAX_TEXT_FIELD_BYTES, truncate
 
-# design.md D49: the plugin's own cap, `64 * 1024 + 1024`, sits ABOVE the
-# server's bound. `vantage.service` never imports `pytest_vantage`
-# (RQ-24/RQ-26), so the plugin's constant is reproduced here as a literal.
+# The plugin's commit subject cap (`pytest_vantage.vcs._MAX_SUBJECT_BYTES`),
+# which sits above the server's bound. Reproduced as a literal because it is
+# private to the plugin.
 _PLUGIN_CAP_BYTES = 64 * 1024 + 1024
 
 
@@ -63,10 +62,9 @@ def test_truncate_never_splits_a_multi_byte_character_on_the_boundary() -> None:
     ids=["just_over_server_bound", "at_plugin_cap"],
 )
 def test_truncate_sets_the_flag_for_any_subject_the_plugin_can_ever_send(length: int) -> None:
-    """design.md D49's false-zero defect, asserted directly: every subject
-    length the plugin can let through -- from one byte over the server's
-    bound up to the plugin's own cap -- must trip the truncation flag. A
-    server bound wrongly raised to meet the plugin's cap fails this test.
+    """Every length the plugin can send above the server's bound, up to the
+    plugin's own cap, sets the truncation flag. A server bound raised to
+    meet the plugin's cap would store those subjects unflagged.
     """
     subject = "a" * length
 

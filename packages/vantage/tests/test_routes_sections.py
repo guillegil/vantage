@@ -1,12 +1,10 @@
-"""Definitions API -- the three CRUD routes for `test_sections` (design.md
-D87, D89; spec `test-sections`, `user-configuration`).
+"""The sections routes: the three CRUD routes for `test_sections` and the
+per-run section summary.
 
-Runs the app factory against an injected `InMemoryExecutionStore`, the same
-choice `test_ingestion.py` makes for a route slice that does not depend on
-the SQLite row-to-domain mappers -- the port contract
-(`vantage_port_contract.py`) already proves the two adapters agree beneath
-the port. No `req` marker: each test names its capability and scenario in
-its own docstring.
+Runs the app factory against an injected `InMemoryExecutionStore`. These
+routes do not depend on the SQLite row-to-domain mappers, and the port
+contract (`vantage_port_contract.py`) already proves the two adapters agree
+beneath the port.
 """
 
 from __future__ import annotations
@@ -68,7 +66,7 @@ def test_posting_an_existing_name_returns_200_not_201(client: TestClient) -> Non
 
 
 def test_a_missing_trailing_slash_is_coerced_on_write(client: TestClient) -> None:
-    """Scenario: A missing trailing slash is coerced on write."""
+    """A prefix without a trailing slash is stored with one."""
     response = _upsert(client, "Billing", "tests/billing")
 
     assert response.json()["prefix"] == "tests/billing/"
@@ -78,7 +76,6 @@ def test_a_missing_trailing_slash_is_coerced_on_write(client: TestClient) -> Non
 
 
 def test_an_empty_or_whitespace_only_name_is_rejected(client: TestClient) -> None:
-    """Scenario: An empty or whitespace-only name is rejected."""
     response = _upsert(client, "   ", "tests/x")
 
     assert response.status_code == 422
@@ -87,7 +84,6 @@ def test_an_empty_or_whitespace_only_name_is_rejected(client: TestClient) -> Non
 
 @pytest.mark.parametrize("name", ["Unassigned", "UNASSIGNED", "unassigned"])
 def test_unassigned_is_reserved_regardless_of_casing(client: TestClient, name: str) -> None:
-    """Scenario: "unassigned" is reserved regardless of casing."""
     response = _upsert(client, name, "tests/x")
 
     assert response.status_code == 422
@@ -125,7 +121,7 @@ def test_too_many_sections_is_rejected_at_the_bound(client: TestClient) -> None:
 
 
 def test_delete_then_delete_again_is_204_then_404(client: TestClient) -> None:
-    """Scenario: A deleted setting is not read back."""
+    """A deleted section is gone: deleting it again is a `404`."""
     _upsert(client, "Checkout", "tests/checkout")
 
     first = client.delete(_SECTIONS, params={"name": "Checkout"})
@@ -140,7 +136,6 @@ def test_delete_then_delete_again_is_204_then_404(client: TestClient) -> None:
 
 
 def test_an_upserted_section_is_listed(client: TestClient) -> None:
-    """Scenario: An upserted section is listed."""
     _upsert(client, "Checkout", "tests/checkout")
 
     response = client.get(_SECTIONS)
@@ -149,15 +144,15 @@ def test_an_upserted_section_is_listed(client: TestClient) -> None:
     assert response.json() == {"items": [{"name": "Checkout", "prefix": "tests/checkout/"}]}
 
 
-# --- Threat matrix: no echo, byte-identical quoting -------------------------
+# --- Hostile input: no echo, byte-identical quoting -------------------------
 
 
 def test_a_crlf_and_script_tag_name_is_rejected_without_appearing_in_the_body(
     client: TestClient,
 ) -> None:
-    """Threat matrix: "Client-chosen text reaching a rejection body" -- a
-    name made hostile AND over-length still triggers only the fixed
-    `invalid_section_name` message; the submitted text never rides along."""
+    """Client-chosen text never reaches a rejection body: a name made
+    hostile and over-length still triggers only the fixed
+    `invalid_section_name` message."""
     hostile = ("\r\n</script>\r\n" * 20) + ("x" * SECTION_NAME_MAX_CHARS)
 
     response = _upsert(client, hostile, "tests/x")
@@ -168,9 +163,9 @@ def test_a_crlf_and_script_tag_name_is_rejected_without_appearing_in_the_body(
 
 
 def test_a_quoting_shaped_name_round_trips_byte_identically(client: TestClient) -> None:
-    """Threat matrix: "Client-chosen text reaching SQL" -- bound parameters
-    only; a name containing quote characters is stored and returned intact,
-    never escaped or normalised."""
+    """Client-chosen text reaches SQL only as a bound parameter: a name
+    containing quote characters is stored and returned intact, never escaped
+    or normalised."""
     name = 'He said "hi", didn\'t he?'
 
     response = _upsert(client, name, "tests/quoting")
@@ -182,7 +177,7 @@ def test_a_quoting_shaped_name_round_trips_byte_identically(client: TestClient) 
     assert listing.json()["items"][0]["name"] == name
 
 
-# --- GET /runs/{run_id}/sections: the run aggregate (Phase 4) ---------------
+# --- GET /runs/{run_id}/sections: the run aggregate -------------------------
 
 _SECTIONED_START = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
 
@@ -192,8 +187,6 @@ def _run_sections(client: TestClient, run_id: str) -> httpx.Response:
 
 
 def test_run_sections_summary_unknown_run_is_404(client: TestClient) -> None:
-    """Scenario: A run's summary reflects its sections -- the unknown-run
-    half (design.md D87's fourth route)."""
     response = _run_sections(client, _UNKNOWN_RUN_ID)
 
     assert response.status_code == 404
@@ -203,10 +196,9 @@ def test_run_sections_summary_unknown_run_is_404(client: TestClient) -> None:
 def test_run_sections_summary_worked_example_yields_94_4_percent(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Scenario: The worked example yields 94.4% (spec test-sections: pass
-    percentage) -- 80 passed, 5 xfailed, 2 xpassed, 3 failed, 10 skipped,
-    reached through the live route rather than `summarize_sections`
-    directly."""
+    """80 passed, 5 xfailed, 2 xpassed, 3 failed and 10 skipped yield 94.4%
+    (xfailed counts as passing, skipped leaves the denominator), reached
+    through the live route rather than `summarize_sections` directly."""
     _upsert(client, "Billing", "tests/billing")
     run_id = "1" * 32
     outcomes = (
@@ -237,9 +229,8 @@ def test_run_sections_summary_worked_example_yields_94_4_percent(
 def test_run_sections_summary_totals_reconcile_with_unassigned_results(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Scenario: Section totals plus unassigned equal the run total (spec
-    test-sections: `unassigned` bucket is always present and reconciles) --
-    a run carrying results that match no section."""
+    """Section totals plus the `unassigned` bucket equal the run's result
+    count, for a run carrying results that match no section."""
     _upsert(client, "Billing", "tests/billing")
     run_id = "2" * 32
     results = [
@@ -264,10 +255,9 @@ def test_run_sections_summary_totals_reconcile_with_unassigned_results(
 def test_renaming_a_section_regroups_history_with_zero_writes(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Scenario: Renaming a section re-groups history with no backfill (spec
-    test-sections: longest-prefix-wins derivation at read time) -- the
-    load-bearing test for "derived at read time": the run/result rows must
-    be byte-identical before and after the rename."""
+    """Sections are derived at read time, so renaming one regroups existing
+    results with no backfill: the run and result rows are identical before
+    and after the rename."""
     _upsert(client, "Billing", "tests/billing")
     run_id = "3" * 32
     results = [_result("tests/billing/test_x.py::test_0")]
@@ -296,8 +286,8 @@ def test_renaming_a_section_regroups_history_with_zero_writes(
 def test_run_sections_summary_malformed_stored_value_is_500(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Scenario: a stored `value` failing its namespace's model is a named
-    `500`, never a traceback (design.md D89 -- `UnreadableSettingError`)."""
+    """A stored `value` failing its namespace's model is a named `500`
+    (`UnreadableSettingError`), never a traceback."""
     run_id = "4" * 32
     store.record_session(
         _execution(run_id, started=_SECTIONED_START), results=[], received_at=_SECTIONED_START

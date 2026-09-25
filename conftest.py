@@ -1,11 +1,8 @@
 """Workspace-root conftest.
 
-pytest requires enabling its own ``pytester`` plugin from a genuine
-top-level conftest.py -- a package-level one is rejected (and, from PR10
-onward, needed by ``packages/pytest-vantage/tests/test_opt_in.py`` and
-``test_xdist_guard.py`` to run other pytest sessions under test). It has no
-effect beyond making the ``pytester`` fixture available; nothing else in
-the workspace requests it.
+Enables pytest's ``pytester`` plugin, which the plugin tests use to run
+inner pytest sessions. pytest only honours ``pytest_plugins`` in a
+top-level conftest.py, so it cannot live in a package-level one.
 """
 
 from __future__ import annotations

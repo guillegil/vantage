@@ -1,43 +1,25 @@
-"""`Recorder` -- the hook implementation registered by `plugin.py` only once
-activation and the reachability preflight both succeed (design.md D2a, D6).
-Assembles the session report and sends it exactly once, from
-`pytest_sessionfinish`, never per test (RQ-25's shape).
+"""`Recorder`: the hook implementation `plugin.py` registers once activation
+and the reachability preflight both succeed. It assembles the session report
+in memory and sends it once, from `pytest_sessionfinish`, never per test.
 
-`pytest_sessionstart` (design.md D32) sends a second, narrower report before
-the first test runs: the session's identity and start time, `finished_at:
-null`, no `results`. It is wrapped in
-`pytest_vantage.boundary.liveness_isolated`, never `fault_isolated` -- a
-failed start-write must never cost the session its results. Its loss costs
-only the observability of a session that never finishes; the finish-write's
-own `INSERT` branch produces exactly today's complete row when no start row
-exists, which is what makes degrading quietly past one warning acceptable
-rather than a new half-state.
+`pytest_sessionstart` sends a narrower start report before the first test
+runs (the run's identity and start time, `finished_at: null`, no `results`)
+so that a session which never finishes still leaves a row. It is wrapped in
+`liveness_isolated`, never `fault_isolated`: a failed start-write must never
+cost the session its results, and the finish-write inserts a complete row on
+its own when no start row exists.
 
-`pytest_runtest_logreport` accumulates every phase report in memory (design.md
-D16) and, from Phase 4, calls `_maybe_beat()` afterwards -- a separately
-`liveness_isolated`-wrapped helper, never a decorator on the hook itself,
-because a beat that raised inside the already-`fault_isolated` hook body
-would be caught by the OUTER decorator and latch `_disabled`, taking result
-accumulation down with it (design.md D30). `accumulate` runs first, always,
-so a beat failure can never precede the accumulation of the report that
-triggered it. `_last_beat_at` is assigned before the send, not after, so a
-failing or slow send is not retried on the very next report -- one stall per
-interval, never one per test. `time.monotonic()` only, never wall clock, so
-an NTP step or a DST transition cannot fire a beat storm or suppress beats
-for an hour. `_maybe_beat` shares `liveness_isolated`'s `_liveness_disabled`
-flag with `pytest_sessionstart` (design.md D29): a failed start-write already
-latches the liveness path before the first beat opportunity, so a session
-whose start-write fails never attempts a beat at all, and either way the
-whole liveness path is at most one warning, never one per attempt.
+`pytest_runtest_logreport` accumulates every phase report, then calls
+`_maybe_beat()`. The beat is a separately `liveness_isolated` helper rather
+than a decorator on the hook: a beat raising inside the `fault_isolated` hook
+body would latch `_disabled` and stop result accumulation with it. The
+start-write and the beats share `_liveness_disabled`, so the whole liveness
+path warns at most once.
 
-Every other hook is wrapped in `pytest_vantage.boundary.fault_isolated`: an
-error raised anywhere in the reporting path -- assembling the report,
-sending it, a server that never answers -- becomes one warning and never the
-suite's exit status (RQ-21).
+Every other hook is wrapped in `fault_isolated`: an error anywhere in the
+reporting path becomes one warning and never changes the suite's exit status.
 
-Never imports `pytest_vantage.plugin`: registration is the plugin's job, not
-this module's (RQ-24 keeps every import here to stdlib and `pytest`, same as
-the rest of this package).
+Never imports `pytest_vantage.plugin`, which imports this module.
 """
 
 from __future__ import annotations
@@ -56,29 +38,21 @@ from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.config import resolve_liveness_timeout
 from pytest_vantage.transport import send, send_heartbeat
 
-# design.md D51: `vcs.capture` never raises by its own contract (D43) -- this
-# text is used only if that contract is somehow defeated (e.g. a test
-# mutating it, per the recording-fault-tolerance spec's own verification
-# note). It is deliberately the same wording `vcs.py` itself uses for its
-# "gate failed" cases, so a user sees one consistent phrase regardless of
-# which layer actually caught the failure.
+# Used only if something escapes `vcs.capture`, which handles its own failures
+# and never raises. Same wording `vcs.py` uses when it cannot read the
+# repository, so the user sees one phrase whichever layer caught the failure.
 _VCS_CAPTURE_ESCAPED_WARNING = "could not read the git repository"
 
 
 def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
-    """The third, non-latching isolation path (design.md D43, D51): not
-    `fault_isolated`, not `liveness_isolated` -- both latch, and reusing
-    either would turn "record the run with nulls" into "record nothing"
-    (the exact wrong implementation RQ-23 criterion 2 exists to catch). No
-    flag on `Recorder` backs this function; every call is independent, and
-    there is only ever one call, from `__init__`.
+    """Capture the VCS snapshot, degrading to an empty one on any error.
 
-    `vcs.capture` already handles every failure it can encounter internally
-    and never raises -- this wrapper exists only so that anything which
-    somehow escapes it still degrades to an empty snapshot and one warning,
-    rather than reaching pytest's own `wrap_session` as an INTERNALERROR:
-    `Recorder.__init__` runs inside `pytest_configure`, which is not
-    hook-wrapped (RQ-21 criterion 5's named failure).
+    Deliberately neither `fault_isolated` nor `liveness_isolated`: both latch,
+    and a git failure must record the run with null VCS fields, not stop
+    recording. `vcs.capture` never raises on its own; this net catches
+    anything that escapes it anyway, because `Recorder.__init__` runs inside
+    `pytest_configure`, which is not fault-isolated, and an exception there
+    would surface as a pytest INTERNALERROR.
     """
     try:
         return vcs.capture(rootpath)
@@ -86,17 +60,14 @@ def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
         return vcs.VcsSnapshot(warning=_VCS_CAPTURE_ESCAPED_WARNING)
 
 
-# design.md D30: activity-driven, not a timer thread -- a beat is only ever
-# attempted from inside `pytest_runtest_logreport`, at most this often.
-# RQ-25's measured profile (1,000 tests at ~10 ms, a ~10-second suite) never
-# reaches this interval, so it fires zero beats.
+# Beats are activity-driven, not a timer thread: one is only attempted from
+# `pytest_runtest_logreport`, at most this often. A suite of 1,000 ~10 ms
+# tests finishes well inside one interval and sends none.
 _BEAT_INTERVAL_SECONDS = 30.0
 
 # `pytest.ExitCode.INTERRUPTED` (2) and `pytest.ExitCode.INTERNAL_ERROR` (3):
-# design.md D1 -- `finished_at` is null iff the session did not end in an
-# orderly way, and these are the two exit statuses that mean it did not.
-# Compared as plain ints, not `pytest.ExitCode` members, so this module has
-# no reason to import anything but `exitstatus` itself off the hook call.
+# the session did not end in an orderly way, so `finished_at` is sent as null.
+# Plain ints, compared against `int(exitstatus)`.
 _NULL_FINISH_EXIT_STATUSES = frozenset({2, 3})
 _INTERRUPTED_EXIT_STATUS = 2
 
@@ -104,11 +75,9 @@ _INTERRUPTED_EXIT_STATUS = 2
 def isoformat_utc(moment: datetime) -> str:
     """Fixed-width ISO-8601 UTC text: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`.
 
-    `datetime.isoformat()` alone omits the microsecond component when it is
-    exactly zero, which would make the width variable -- design.md D1
-    requires fixed width so lexicographic order stays chronological order.
-    `strftime("%f")` always emits six digits regardless of value, which
-    `isoformat()` alone does not guarantee.
+    `datetime.isoformat()` omits the microseconds when they are exactly zero;
+    `strftime("%f")` always emits six digits. Fixed width keeps lexicographic
+    order equal to chronological order.
     """
     return moment.strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
@@ -117,64 +86,32 @@ class Recorder:
     """Registered by `plugin.py::pytest_configure` once activation and the
     reachability preflight both succeed.
 
-    One finish-write per session (RQ-25): the report is assembled in memory
-    and sent exactly once, from `pytest_sessionfinish`. `_results`
-    accumulates every phase report `pytest_runtest_logreport` receives
-    (design.md D16). `_config` is kept only so a hook that fails can route
-    its warning through the terminal reporter (`boundary._warn`); `_disabled`
-    is the fault-isolation latch `fault_isolated` reads and sets -- once
-    `True`, every further reporting hook call on this instance is a silent
-    no-op. `_liveness_disabled` is the independent latch `liveness_isolated`
-    reads and sets for `pytest_sessionstart` -- it never reads or sets
-    `_disabled`, and `_disabled` never reads or sets it (design.md D29).
-
-    `_started_at` is captured once, here, so the start-write and the
-    finish-write report the identical value (design.md D32) -- a second
-    `datetime.now()` call in `pytest_sessionstart` would make the two
-    disagree. `_liveness_timeout` is `resolve_liveness_timeout(timeout)`
-    (design.md D31): a fixed ~200-byte liveness request must not be bounded
-    by the same, potentially much larger, timeout the full finish-write
-    report is allowed. `_last_beat_at` is captured here too, at
-    `time.monotonic()` -- the start-write already establishes freshness
-    (`last_contact_at = received_at`, design.md D27), so the first beat
-    opportunity does not fire until a full interval after construction, not
-    immediately at the first test.
-
-    `_lifecycle_available` is what `plugin.py`'s capability probe found
-    (design decisions D38-D42, `plugin-server-compatibility`), defaulting to
-    `True` for a caller that never passes it (this module's own direct-
-    construction tests predate the probe). `False` means the server cannot
-    finish the job a start-write or heartbeat would begin -- both
-    `pytest_sessionstart` and `_maybe_beat` return immediately rather than
-    attempting either, and `pytest_sessionstart` warns exactly once, on the
-    liveness latch, before doing so (D41: the previous release's shape, not
-    a new half-state). `pytest_sessionfinish` is untouched either way -- that
-    is what makes "degraded" mean "record exactly as before", not a third
-    state.
-
-    `_vcs` is captured once here, via `_capture_vcs` (design.md D51), never
-    re-read -- `_vcs_section()` serialises the SAME snapshot for both
-    `pytest_sessionstart` and `pytest_sessionfinish`, so the two reports can
-    never disagree about the repository state that produced the results.
-    Safe to call unconditionally in `__init__`, which runs inside
-    `pytest_configure` and is not itself hook-wrapped, only because
-    `_capture_vcs` cannot raise. A non-`None` warning is emitted at most
-    once, through the same `_warn` the preflight and every hook already use.
-
-    `metadata_requested` is `plugin.py`'s `_metadata_capture_requested(config)`
-    (design.md D99) -- both the base activation gate and the
-    `--vantage-metadata` opt-in have already passed by the time this
-    constructor runs, since a `Recorder` is never constructed at all
-    otherwise. When `True`, `self._metadata` is `metadata.capture_metadata(...)`,
-    called exactly once here, exactly like `_vcs` above -- the declaration
-    is read, validated and every file it names bounded and captured exactly
-    once per session regardless of worker count, since no `Recorder` is
-    ever constructed on an xdist worker. `capture_metadata` warns at most
-    once, through the same `_warn` `_vcs` uses, and never raises (design.md
-    D97); when it returns `None` (no declaration, or an invalid one),
-    `self._metadata` stays `None` and `_metadata_section()` omits the
-    `metadata` key from both reports entirely, the same way an absent
-    `--vantage-metadata` flag does.
+    - `_results` accumulates every phase report; it is resolved into
+      `results[]` entries only in `pytest_sessionfinish`.
+    - `_disabled` is the `fault_isolated` latch: once set, every reporting
+      hook on this instance is a silent no-op. `_liveness_disabled` is the
+      independent `liveness_isolated` latch for the start-write and the
+      beats. Neither decorator reads or sets the other's flag.
+    - `_started_at` is captured once, so the start report and the finish
+      report carry the identical value.
+    - `_liveness_timeout` bounds the small start-write and heartbeat
+      requests, which must not wait as long as the full finish-write report
+      is allowed to.
+    - `_last_beat_at` starts at construction: the start-write already
+      refreshes the server's last-contact time, so the first beat is due one
+      full interval later, not at the first test.
+    - `_lifecycle_available` is what the plugin's capability probe found.
+      When `False`, the server cannot accept a start-write or heartbeat, so
+      neither is sent; `pytest_sessionfinish` records exactly as it would
+      otherwise.
+    - `_vcs` and `_metadata` are captured once here and never re-read, so
+      both reports describe the same repository state and the same metadata.
+      Each capture warns at most once and never raises, which is what makes
+      calling them from `__init__` (inside the unwrapped `pytest_configure`)
+      safe. No `Recorder` is constructed on an xdist worker, so each happens
+      once per session. `_metadata` is `None` when `--vantage-metadata` was
+      not passed or the declaration is missing or invalid; the `metadata`
+      key is then omitted from both reports.
     """
 
     def __init__(
@@ -205,9 +142,7 @@ class Recorder:
             self._metadata = metadata.capture_metadata(config, Path(str(config.rootpath)))
 
     def _vcs_section(self) -> dict[str, object]:
-        """Serialises the snapshot held since `__init__` (design.md D51) --
-        never re-read, so the start report and the finish report describe
-        the identical repository state that produced the results."""
+        """Serialises the snapshot captured in `__init__`."""
         return {
             "commit": self._vcs.commit,
             "branch": self._vcs.branch,
@@ -217,16 +152,9 @@ class Recorder:
         }
 
     def _metadata_section(self) -> dict[str, object] | None:
-        """Serialises the section held since `__init__` (design.md D51's
-        freeze rule, extended to metadata by D96) -- never re-read, so the
-        start report and the finish report describe the identical metadata
-        capture, exactly like `_vcs_section()` above.
-
-        `None` when metadata capture was not requested, or `capture_metadata`
-        found no valid declaration to capture (it has already warned at most
-        once for that, in `__init__`) -- the caller omits the `metadata` key
-        entirely in that case, never sends it as `null`, the same additive-
-        section shape `vcs` and `results` already establish.
+        """Serialises the metadata captured in `__init__`, or `None` when there
+        is none -- the caller then omits the `metadata` key rather than
+        sending it as `null`.
         """
         if self._metadata is None:
             return None
@@ -247,17 +175,11 @@ class Recorder:
     @liveness_isolated
     def pytest_sessionstart(self) -> None:
         """Reports the session's identity and start time before the first
-        test runs (design.md D32). `finished_at: null`, no `results` --
-        `_UPSERT_RUN`'s insert branch (design.md D25) takes this report's
-        `exit_status: None` as "no finish yet", never as an error.
+        test runs: `finished_at: null`, `exit_status: null`, no `results`.
 
-        Degrades instead when `_lifecycle_available` is `False` (design
-        decisions D38-D41): the server cannot finish the job a start-write
-        would begin, so none is sent. Warns once here, naming the address,
-        and latches `_liveness_disabled` directly -- the same flag
-        `liveness_isolated` itself sets on a raised exception -- so every
-        later `_maybe_beat` call this session is a silent no-op via the
-        decorator's own latch check, without a second warning.
+        When `_lifecycle_available` is `False`, sends nothing: warns once,
+        naming the address, and latches `_liveness_disabled` directly so every
+        later `_maybe_beat` is a silent no-op without a second warning.
         """
         if not self._lifecycle_available:
             self._liveness_disabled = True
@@ -293,11 +215,9 @@ class Recorder:
 
     @fault_isolated
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
-        """The one hook xdist forwards to the controller (design.md D16,
-        D19 layer 1). Accumulates first, always -- resolution into a
-        `results[]` entry happens later, in `pytest_sessionfinish` -- then
-        offers a beat opportunity, wrapped separately so it cannot raise
-        into this already-`fault_isolated` hook body (design.md D30).
+        """The one hook xdist forwards to the controller. Accumulates first,
+        always, then offers a beat opportunity through `_maybe_beat`, which
+        is isolated separately so a beat failure cannot latch `_disabled`.
         """
         accumulate(self._results, report)
         self._maybe_beat()
@@ -305,19 +225,14 @@ class Recorder:
     @liveness_isolated
     def _maybe_beat(self) -> None:
         """Send a heartbeat if `_BEAT_INTERVAL_SECONDS` has elapsed since the
-        last one (design.md D30). `_last_beat_at` is assigned before the
-        send, not after -- a failing or slow send is not retried on the very
-        next report, one stall per interval rather than one per test.
+        last one.
 
-        Returns immediately when `_lifecycle_available` is `False` (design
-        decisions D38-D41), same as `pytest_sessionstart` -- in the ordinary
-        case `pytest_sessionstart` has already latched `_liveness_disabled`
-        by the time any beat opportunity arises, so `liveness_isolated`'s own
-        latch check already skips this body without reaching here at all.
-        This check stays anyway rather than relying on that ordering: it is
-        what makes "no heartbeat when the lifecycle is unavailable" true of
-        this function by its own logic, not merely a side effect of when it
-        happens to be called.
+        `_last_beat_at` is assigned before the send, so a failing or slow send
+        costs one stall per interval, not one per test. `time.monotonic()`,
+        never wall clock, so a clock step cannot cause a burst of beats or
+        suppress them. The `_lifecycle_available` check is normally redundant
+        (`pytest_sessionstart` has already latched `_liveness_disabled`) but
+        keeps this method correct on its own regardless of call order.
         """
         if not self._lifecycle_available:
             return
@@ -334,9 +249,9 @@ class Recorder:
         finished_at = datetime.now(timezone.utc) if orderly else None
 
         results = assemble_results(self._results)
-        # design.md D74: spent before the report exists -- a 413 costs the
-        # whole session, and `truncate()` (server-side, D75) is structurally
-        # too late to help a session that never gets that far.
+        # Applied before the report is built: the server rejects an oversized
+        # body whole, losing the entire session, so failure text has to be
+        # bounded client-side.
         spend_failure_text_budget(results)
 
         report: dict[str, object] = {

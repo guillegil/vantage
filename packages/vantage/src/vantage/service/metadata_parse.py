@@ -1,64 +1,34 @@
-"""Parse a *declared document* named by a metadata section (design.md D97,
-ADR-0017 C4). **The only module in this project that imports `yaml`** --
-`deptry` and the RQ-24/RQ-26 architecture tests can state where the
-dependency lives precisely because nothing else reaches it.
+"""Parse a *declared document*: a file named by a metadata declaration, read
+and shipped by the plugin, and parsed here on the server. This is the only
+module in the project that imports `yaml`.
 
 This is not the declaration parser. `pytest_vantage.metadata.read_declaration`
-parses the plugin's OWN file (`vantage-metadata.json`) and may reject it
-outright, because refusing it captures nothing -- the same posture the
-flag-absent path already has. A *declared document* -- the file a
-declaration names, read and shipped by the plugin, parsed here on the server
--- is different: **it MUST NOT fail the run's ingestion.** A parse failure
-degrades to "this file contributed no keys," and every failure this module
-detects becomes exactly one thing: `None` for the whole document, or a
-per-key `KeyResult` whose status is never `"captured"`. Nothing here ever
-raises past its own boundary; `parse()`'s only exit is a return value.
+parses the plugin's own `vantage-metadata.json` and may reject it outright. A
+declared document, by contrast, must never fail ingestion of the run: every
+failure becomes either `None` for the whole document or a per-key `KeyResult`
+whose status is not `"captured"`. `parse()` never raises.
 
-**YAML is parsed with `yaml.compose()`, never `yaml.safe_load()` or
-`yaml.load()`.** This is a security decision, not a style preference, and it
-buys three separate properties:
+YAML is parsed with `yaml.compose()`, never `yaml.safe_load()` or
+`yaml.load()`:
 
-1. **No Python object is ever constructed.** `compose()` builds PyYAML's
-   node graph and stops -- it never calls a tag's constructor. The
-   `!!python/object/apply` class of remote code execution is not merely
-   unreached here, it is unreachable: nothing this module does could ever
-   invoke it, with or without a hostile document.
-2. **Non-scalar values fall out for free.** A `SequenceNode` or
-   `MappingNode` is simply not a `ScalarNode` -- classifying a declared
-   key's value as scalar-or-not needs no separate type check beyond asking
-   which `Node` subclass the walk produced.
-3. **The alias-expansion bomb is defused.** `yaml.safe_load()` offers no
-   depth or expansion limit, and a few hundred bytes of nested YAML aliases
-   expands to gigabytes during construction -- because `safe_load` builds
-   the aliased Python objects out fully, once per reference. A node graph
-   instead *shares* aliases: the same `Node` object is referenced wherever
-   an alias points at it, never duplicated, so `compose()`'s work is
-   bounded by the size of the *source text*, not by how many times an alias
-   is referenced. The 8 KiB per-file read bound (`pytest_vantage.metadata`)
-   therefore actually bounds the work here; against `safe_load` it would
-   not, because expansion is exponential in source size, independent of
-   that bound.
+1. No Python object is ever constructed. `compose()` builds the node graph and
+   never calls a tag's constructor, so `!!python/object/apply` and similar
+   tags cannot execute anything.
+2. Non-scalar values are recognised by node type: a `SequenceNode` or
+   `MappingNode` is simply not a `ScalarNode`.
+3. Alias bombs stay harmless. The node graph shares an aliased node instead
+   of copying it, and only top-level scalars are read, so the work is bounded
+   by the size of the source text.
 
-A `ScalarNode.value` is always the raw literal text as written in the
-source -- YAML never resolves it to a typed Python value here, so
-`firmware_version: 2.1` and `firmware_version: "2.1"` both come back as the
-string `"2.1"`. That is what D91 means by "comparison is string equality...
-the declaration names keys, not types": there is no type to lose, because
-no type was ever constructed.
+A `ScalarNode.value` is the raw literal text, so `firmware_version: 2.1` and
+`firmware_version: "2.1"` both yield the string `"2.1"`. Values are compared
+as strings; no type is ever constructed that could be lost.
 
-JSON is parsed with stdlib `json.loads`, which has neither an
-object-construction hazard nor an alias hazard -- but deep nesting raises
-**`RecursionError`, not `JSONDecodeError`**, because `json`'s decoder is a
-recursive-descent parser and Python's default recursion limit is far below
-what 8 KiB of nested brackets can produce. Both exceptions are caught here,
-alongside `yaml.YAMLError`, and all three collapse to the same `None`.
-
-A document whose top level is not a mapping (JSON: not a `dict`; YAML: not
-a `MappingNode`) cannot hold any declared key at all, so it is treated the
-same as a malformed document -- `None` -- rather than a well-formed
-document with zero keys. `compose()` returning `None` for a genuinely empty
-document falls into this same branch, since `None` is not a `MappingNode`
-either.
+`json.loads` raises `RecursionError`, not `JSONDecodeError`, on deeply nested
+input. Both are caught, alongside `yaml.YAMLError`, and collapse to `None`. A
+document whose top level is not a mapping (including an empty YAML document,
+for which `compose()` returns `None`) cannot hold a declared key and is also
+`None`.
 """
 
 from __future__ import annotations
@@ -73,22 +43,17 @@ from yaml.nodes import MappingNode, ScalarNode
 from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES
 
 _ADMISSIBLE_CONTENT_TYPES = frozenset({"json", "yaml"})
-"""`sdd-verify` SUGGESTION-2: narrower than `routes/runs.py`'s
-`_KNOWN_METADATA_CONTENT_TYPES` (which also admits `"toml"`) on purpose --
-this is load-bearing, not an oversight to reconcile. Storage must match
-`schema.sql`'s CHECK, which already includes `toml` for a future slice;
-this parser supports exactly two formats today and routes `toml` to
-`"malformed"` like any other unsupported type. Widening this set to match
-the other would silently start attempting to parse a format `parse()` has
-no branch for."""
+"""Deliberately narrower than `routes/runs.py`'s
+`_KNOWN_METADATA_CONTENT_TYPES`, which also admits `"toml"` to match the
+`schema.sql` CHECK. This parser has no TOML branch, so `toml` is treated as
+malformed; adding it here would make `parse()` hand TOML to the YAML parser."""
 
 
 @dataclass(frozen=True, slots=True)
 class KeyResult:
-    """The outcome for one declared key against one parsed document
-    (design.md D97 classes 8-10). `value` is `None` whenever `status` is
-    not `"captured"` -- the same "declared-but-dropped is a row" contract
-    D95 states for the storage side."""
+    """The outcome for one declared key against one parsed document.
+    `value` is `None` whenever `status` is not `"captured"`; the key is still
+    reported, so a declared-but-dropped key is stored with its status."""
 
     status: str
     value: str | None
@@ -97,16 +62,14 @@ class KeyResult:
 def parse(content: str, content_type: str, keys: Sequence[str]) -> dict[str, KeyResult] | None:
     """Parse `content` as `content_type` and classify every name in `keys`.
 
-    Returns `None` when the document itself could not be used at all --
-    a parser exception (`json.JSONDecodeError`, `yaml.YAMLError`,
-    `RecursionError`), an unsupported `content_type`, or a top level that
-    is not a mapping. That `None` is design.md D97 class 7, `"malformed"`;
-    the caller marks the whole file `malformed` and every one of its
-    declared keys `source_unavailable`.
+    Returns `None` when the document cannot be used at all: a parser
+    exception (`json.JSONDecodeError`, `yaml.YAMLError`, `RecursionError`),
+    an unsupported `content_type`, or a top level that is not a mapping. The
+    caller then marks the whole file `malformed` and each of its declared
+    keys `source_unavailable`.
 
-    Otherwise returns exactly one `KeyResult` per entry of `keys`, in no
-    particular order requirement -- `absent` (class 8), `not_scalar`
-    (class 9), `value_too_large` (class 10), or `captured`.
+    Otherwise returns one `KeyResult` per entry of `keys`, with status
+    `absent`, `not_scalar`, `value_too_large` or `captured`.
     """
     if content_type not in _ADMISSIBLE_CONTENT_TYPES:
         return None

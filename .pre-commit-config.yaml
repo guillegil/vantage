@@ -1,16 +1,10 @@
-# Pre-commit gate (CLAUDE.md's "Quality gates" table).
-#
 # Two stages, matched to the time budget each check fits:
-#   - `pre-commit`  (< 2-3s): ruff format, ruff check --fix, and hygiene
-#     hooks. All of these run on modified files only, which is why they are
-#     fast enough for this stage -- a whole-project pass belongs at
-#     pre-push or CI, never here.
+#   - `pre-commit` (< 2-3s): ruff format, ruff check --fix, and hygiene
+#     hooks, on modified files only. Whole-project passes belong at
+#     pre-push or in CI.
 #   - `pre-push`: `mypy --strict` over the whole project (a type checker
-#     needs the whole project to be correct, not just the files that
-#     changed -- CLAUDE.md's own reasoning for why mypy is not at
-#     pre-commit) plus the fast unit-test suite (~10s locally, one Python
-#     version, no matrix -- the matrix itself belongs to CI, not a local
-#     git hook).
+#     needs every file, not just the changed ones) plus the test suite on
+#     one Python version; the version matrix runs in CI.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:

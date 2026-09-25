@@ -1,6 +1,5 @@
 """`VantageTestServer` -- a real `vantage` server for `pytest-vantage`'s own
-end-to-end tests (design.md D2a), and the `vantage_server` fixture that
-wraps it.
+end-to-end tests, and the `vantage_server` fixture that wraps it.
 
 A separate, non-`test_*` module rather than a `conftest.py`: a package-level
 `conftest.py` alongside the workspace-root one both resolve to the bare
@@ -8,14 +7,11 @@ module name `conftest` under this project's plain (non-package) test
 layout, which mypy rejects as a duplicate module -- pytest itself tolerates
 it (each is loaded through its own path-keyed machinery), but a second
 `conftest.py` here would fail `mypy --strict` outright. Importing the
-fixture function directly into the one test module that needs it
-(`test_run_report.py`) is the standard pytest idiom for a fixture that does
-not need conftest.py's directory-wide auto-application, and it sidesteps
-the collision entirely. `vantage_port_contract.py` and `importwalk.py`
-(both PR1) already establish the same "shared, non-test module living
-directly inside a `tests/` directory" pattern.
+fixture function directly into each test module that needs it sidesteps the
+collision entirely. `vantage_port_contract.py` and `importwalk.py` follow
+the same "shared, non-test module inside a `tests/` directory" pattern.
 
-Dev-only: never packaged (RQ-24 constrains `src/`, not `tests/`).
+Dev-only and never packaged, so it may import the server and `uvicorn`.
 """
 
 from __future__ import annotations
@@ -89,18 +85,18 @@ class VantageTestServer:
 
     def results(self) -> list[Result]:
         """Every result the server has stored so far, across every
-        execution, in no particular order (task 8.1). `get_results` on the
-        port needs an execution id the caller rarely knows ahead of time --
-        same reasoning as `executions()` above, and the same private-attribute
+        execution, in no particular order. `get_results` on the port needs
+        an execution id the caller rarely knows ahead of time -- same
+        reasoning as `executions()` above, and the same private-attribute
         reach-in rather than scattering it across every test that needs it.
         """
         return list(self.store._results.values())  # noqa: SLF001
 
     def catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         """The catalogue entry for one node id, or `None` if the server has
-        never observed it (task 8.1). A thin pass-through -- `get_catalogue_entry`
-        is already public on the port and already takes exactly this argument,
-        so no private reach-in is needed here (unlike `executions()`/`results()`).
+        never observed it. A thin pass-through -- `get_catalogue_entry` is
+        already public on the port and takes exactly this argument, so no
+        private reach-in is needed here (unlike `executions()`/`results()`).
         """
         return self.store.get_catalogue_entry(node_id)
 

@@ -1,10 +1,9 @@
-"""End-to-end result capture (design.md D16-D18, phase 8): a real subprocess
-pytest invocation (`pytester.runpytest_subprocess`) against a real `vantage`
-server (`vantage_server` -- `vantage_test_server.py`), proving the five
-outcome shapes (RQ-4), duration measurement (RQ-5) and identity storage
-(RQ-9) survive the whole hop from pytest's own hooks through the plugin,
-over HTTP, and into the server's in-memory store -- never a stub of either
-side of that boundary.
+"""End-to-end result capture: a real subprocess pytest invocation
+(`pytester.runpytest_subprocess`) against a real `vantage` server
+(`vantage_server` -- `vantage_test_server.py`), proving the five outcome
+shapes, duration measurement and identity storage survive the whole hop from
+pytest's own hooks through the plugin, over HTTP, and into the server's
+in-memory store -- never a stub of either side of that boundary.
 """
 
 from __future__ import annotations
@@ -18,15 +17,15 @@ from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 
 
 def _by_function_name(results: list[Result], name: str) -> Result:
     """Exactly one result whose `function_name` matches, or fail loudly --
-    a `>1` match would mean two of this test file's own scenarios collided
-    on a name, and a `0` match would mean the scenario was never resolved.
+    a `>1` match would mean two generated tests collided on a name, and a
+    `0` match would mean the test was never recorded.
     """
     matches = [result for result in results if result.identity.function_name == name]
     assert len(matches) == 1, f"expected exactly one result for {name!r}, got {matches!r}"
     return matches[0]
 
 
-# --- Task 8.2: the five outcome shapes, RQ-4.1-4.5, end to end --------------
+# --- the five outcome shapes, end to end ------------------------------------
 
 _FIVE_OUTCOME_SHAPES = """
 import pytest
@@ -41,17 +40,17 @@ def test_setup_raises(broken_fixture):
     assert True
 
 
-@pytest.mark.skip(reason="RQ-4.2")
+@pytest.mark.skip(reason="synthetic skip")
 def test_marked_skip():
     assert True
 
 
-@pytest.mark.xfail(reason="RQ-4.3")
+@pytest.mark.xfail(reason="synthetic xfail")
 def test_xfail_that_fails():
     assert False
 
 
-@pytest.mark.xfail(reason="RQ-4.4, non-strict")
+@pytest.mark.xfail(reason="synthetic non-strict xfail")
 def test_xfail_that_passes():
     assert True
 
@@ -67,16 +66,15 @@ def test_passes_but_teardown_raises(raising_teardown_fixture):
 """
 
 
-@pytest.mark.req(id="RQ-4")
 def test_five_outcome_shapes_recorded_end_to_end(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """RQ-4.1 (setup failure -> error), RQ-4.2 (`@pytest.mark.skip` ->
-    skipped), RQ-4.3 (failing xfail -> xfailed), RQ-4.4 (passing non-strict
-    xfail -> xpassed), RQ-4.5 (a test whose body passed but whose teardown
-    raised is NOT `passed` -- it is `error`, because the fixture's own
-    failure is real information a bare `passed` would hide).
+    """Setup failure -> error, `@pytest.mark.skip` -> skipped, failing
+    xfail -> xfailed, passing non-strict xfail -> xpassed, and a test whose
+    body passed but whose teardown raised is NOT `passed` -- it is `error`,
+    because the fixture's own failure is real information a bare `passed`
+    would hide.
     """
     pytester.makepyfile(test_outcomes=_FIVE_OUTCOME_SHAPES)
 
@@ -93,7 +91,7 @@ def test_five_outcome_shapes_recorded_end_to_end(
     assert teardown_raised.teardown_outcome == "failed"
 
 
-# --- Task 8.3: duration measurement, RQ-5.1/5.2, end to end -----------------
+# --- duration measurement, end to end ---------------------------------------
 
 _SLOW_SETUP_FAST_BODY = """
 import time
@@ -114,18 +112,15 @@ def test_with_slow_setup(slow_fixture):
 
 
 @pytest.mark.slow
-@pytest.mark.req(id="RQ-5")
 def test_setup_and_call_durations_are_measured_independently(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """RQ-5.1: `setup_duration` and `call_duration` are pytest's own
-    per-phase timings, not one lump sum -- an 8-second fixture body against
-    a 0.1-second test body proves the split is real and not two aliases of
-    the same number. The 8 seconds are a real, literal sleep: RQ-5.1 is a
-    *measurement* of the recorded duration, and a mocked clock would not
-    measure anything -- see the phase report for the wall-clock cost and
-    slow-test-marker recommendation this carries.
+    """`setup_duration` and `call_duration` are pytest's own per-phase
+    timings, not one lump sum -- an 8-second fixture body against a
+    0.1-second test body proves the split is real and not two aliases of the
+    same number. The sleep is real because a mocked clock would not measure
+    anything; hence the `slow` marker.
     """
     pytester.makepyfile(test_slow_setup=_SLOW_SETUP_FAST_BODY)
 
@@ -152,17 +147,13 @@ def test_it(broken_fixture):
 """
 
 
-@pytest.mark.req(id="RQ-5")
 def test_setup_failure_leaves_call_duration_null_not_zero(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """RQ-5.2: a phase that never ran (`call`, here, because `setup` failed)
-    is `None`, never `0.0` -- the forbidden idiom is `x or None`, which would
-    turn a genuine `0.0` into `None` but would also happily let a phase that
-    never ran default to `0.0` if the guard were ever inverted by mistake.
-    This is the end-to-end hop of the same guard `test_capture.py` already
-    proves at the pure-function level (design.md D17).
+    """A phase that never ran (`call`, here, because `setup` failed) is
+    `None`, never `0.0`. The end-to-end hop of the same guard
+    `test_capture.py` proves at the pure-function level.
     """
     pytester.makepyfile(test_setup_failure_only=_SETUP_FAILURE_ONLY)
 
@@ -173,22 +164,20 @@ def test_setup_failure_leaves_call_duration_null_not_zero(
     assert result.call_outcome is None
 
 
-# --- Task 8.4: identity storage, RQ-9.1/9.2, end to end ---------------------
+# --- identity storage, end to end -------------------------------------------
 
 _TWO_TESTS_IN_ONE_FILE = "def test_one():\n    assert True\n\n\ndef test_two():\n    assert True\n"
 
 
-@pytest.mark.req(id="RQ-9")
 def test_filtering_by_file_path_returns_every_test_defined_in_that_file(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """RQ-9.1: `file_path` alone is enough to recover every test that file
-    defines. Two files, two tests each, run in the same session -- filtering
-    by one file's path must return exactly its own two tests, not the other
-    file's, and not a subset of its own (an over-aggressive dedup filter, the
-    exact class of defect a prior review already caught once in this change,
-    would silently produce a subset here).
+    """`file_path` alone is enough to recover every test that file defines.
+    Two files, two tests each, run in the same session -- filtering by one
+    file's path must return exactly its own two tests, not the other file's,
+    and not a subset of its own (an over-aggressive dedup filter would
+    silently produce a subset here).
     """
     pytester.makepyfile(test_multi_a=_TWO_TESTS_IN_ONE_FILE, test_multi_b=_TWO_TESTS_IN_ONE_FILE)
 
@@ -209,12 +198,11 @@ def test_filtering_by_file_path_returns_every_test_defined_in_that_file(
     assert from_file_b == {"test_one", "test_two"}
 
 
-@pytest.mark.req(id="RQ-9")
 def test_module_level_test_stores_a_null_class_name(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """RQ-9.2: a module-level test's `class_name` is `None`, never `""` --
+    """A module-level test's `class_name` is `None`, never `""` --
     the two carry different meanings and the wire/storage hops must not
     collapse them. `pytest_p.py::TestInClass::test_in_class` sits alongside
     the module-level test in the same run so the assertion is discriminating
@@ -242,11 +230,10 @@ def test_module_level():
     assert in_class.identity.class_name == "TestInClass"
 
 
-# --- Task 9.8: the last unproven hop of the ""-vs-NULL guard (D18) ---------
+# --- empty parameter id, end to end -----------------------------------------
 
-# The repo's OWN test suite, not a hand-built payload (design.md D18's
-# example is this exact node id): `test_execution.py`'s own parametrize
-# list includes `""` among its "bad value" cases, so
+# The repo's OWN test suite, not a hand-built payload: `test_execution.py`'s
+# own parametrize list includes `""` among its "bad value" cases, so
 # `...test_identity_rejects_anything_but_32_lowercase_hex_characters[]` is a
 # real, already-existing parametrised test whose id is the empty string.
 _TEST_EXECUTION_FILE = (
@@ -254,19 +241,15 @@ _TEST_EXECUTION_FILE = (
 )
 
 
-@pytest.mark.req(id="RQ-9")
 def test_empty_param_id_survives_the_real_server_hop_end_to_end(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """D18 names four hops for `""`-vs-`None` (JSON, Pydantic, the core
-    dataclass, SQLite); Phases 1, 3, 4, 6 and 7 each prove one, and task
-    8.4 proved `class_name`/`file_path` end to end -- but nothing before
-    this ran the WHOLE chain (pytest's own hooks, through the plugin, over
-    HTTP, into the server) for a real parametrised test whose parameter id
-    is itself the empty string. Runs the actual in-repo case alongside a
-    genuinely unparametrised test from the same file, in the same session,
-    so both ends of the absent-versus-empty distinction are proven together.
+    """A real parametrised test whose parameter id is the empty string keeps
+    `param_id == ""` through the WHOLE chain (pytest's own hooks, the plugin,
+    HTTP, the server). Runs alongside a genuinely unparametrised test from
+    the same file, in the same session, so both ends of the
+    absent-versus-empty distinction are proven together.
     """
     empty_param_case = (
         f"{_TEST_EXECUTION_FILE}::test_identity_rejects_anything_but_32_lowercase_hex_characters[]"

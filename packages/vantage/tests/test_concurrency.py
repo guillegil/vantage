@@ -1,10 +1,5 @@
-"""RQ-38: concurrent sessions do not corrupt each other's writes. Criterion 1
-(two sessions reporting concurrently leave two run entries with different
-identifiers, design.md D8) predates result persistence. Phase 9 adds
-criterion 2 (two concurrent 200-test sessions leave 400 result rows) and
-criterion 3 (ten simultaneous sessions leave ten run entries and raise
-nothing) now that `record_session` actually writes results and the
-catalogue (D20-D22).
+"""Concurrent sessions recorded through one `SqliteExecutionStore` do not
+corrupt or drop each other's writes.
 """
 
 from __future__ import annotations
@@ -13,7 +8,6 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import pytest
 from vantage.core.domain.execution import Execution, Identity
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _result
@@ -31,7 +25,6 @@ def _execution(hex_id: str) -> Execution:
     )
 
 
-@pytest.mark.req(id="RQ-38")
 def test_two_concurrent_sessions_both_leave_a_run_entry(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:
@@ -60,14 +53,12 @@ def test_two_concurrent_sessions_both_leave_a_run_entry(tmp_path: Path) -> None:
         store.close()
 
 
-@pytest.mark.req(id="RQ-38")
 def test_two_concurrent_two_hundred_test_sessions_leave_four_hundred_results(
     tmp_path: Path,
 ) -> None:
-    """RQ-38.2: two sessions, each reporting 200 results, racing through the
-    same `BEGIN IMMEDIATE` transaction (D22) via the process-wide
-    `threading.Lock`, leave exactly 400 result rows -- neither session's
-    batch clobbers or drops rows from the other's.
+    """Two sessions, each reporting 200 results, racing through the store's
+    `threading.Lock` and `BEGIN IMMEDIATE` transaction, leave exactly 400
+    result rows -- neither batch clobbers or drops rows from the other.
     """
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:
@@ -95,13 +86,12 @@ def test_two_concurrent_two_hundred_test_sessions_leave_four_hundred_results(
         store.close()
 
 
-@pytest.mark.req(id="RQ-38")
 def test_ten_simultaneous_sessions_leave_ten_run_entries_and_raise_nothing(
     tmp_path: Path,
 ) -> None:
-    """RQ-38.3: ten sessions reporting at once each leave their own run
-    entry and none raises -- the process-wide lock (D8) serialises the
-    ten transactions rather than letting any of them fail.
+    """Ten sessions reporting at once each leave their own run entry and
+    none raises -- the store's lock serialises the ten transactions rather
+    than letting any of them fail.
     """
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:

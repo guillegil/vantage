@@ -1,13 +1,11 @@
-"""Where the server's own database and bind address come from (design.md D11).
+"""Where the server's own database and bind address come from.
 
 **Pure -- no filesystem access, ever.** Resolution only computes a path; it
-never stats, creates or opens anything. That is the whole of the
-threat-matrix "Path authority" defence: if resolving *created* the
-directory, then merely asking where the database would go -- to display it,
-to validate a `--database` value that turns out to be a typo -- would
-materialise it as a side effect of asking. Creating anything belongs to
-whoever acts on the resolved path (`service/cli.py`), never to resolution
-itself.
+never stats, creates or opens anything. If resolving created the directory,
+merely asking where the database would go -- to display it, or to validate a
+`--database` value that turns out to be a typo -- would materialise it as a
+side effect. Creating anything belongs to whoever acts on the resolved path
+(`service/cli.py`).
 """
 
 from __future__ import annotations
@@ -20,12 +18,10 @@ from pathlib import Path
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
 
-# design.md D34: the default grace period is a multiple of the default
-# heartbeat interval, not an invented round number -- the "hint" name marks
-# that `pytest_vantage.recorder._BEAT_INTERVAL_SECONDS` is declared
-# separately, on the other side of the HTTP boundary (RQ-24/ADR-9 forbid
-# sharing code across it); this copy only derives a default, so a divergence
-# between the two changes the multiple, never correctness.
+# The default grace period is a multiple of the plugin's heartbeat interval.
+# "Hint" because `pytest_vantage.recorder._BEAT_INTERVAL_SECONDS` is declared
+# separately: the plugin shares no code with the server. This copy only
+# derives a default, so a divergence changes the multiple, never correctness.
 _BEAT_INTERVAL_HINT_SECONDS = 30.0
 _DEFAULT_GRACE_BEATS = 30
 _DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_BEATS * _BEAT_INTERVAL_HINT_SECONDS  # 900.0
@@ -33,7 +29,7 @@ _DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_BEATS * _BEAT_INTERVAL_HINT_SECON
 
 class ConfigSource(str, Enum):
     """Where a resolved value came from. **Never `StrEnum`** -- that is
-    3.11+ and the floor is 3.10 (CLAUDE.md).
+    3.11+ and the supported floor is Python 3.10.
     """
 
     CLI = "cli"
@@ -67,15 +63,13 @@ def resolve_server_config(
 
     Database precedence: ``--database`` > ``VANTAGE_DATABASE`` >
     ``$XDG_DATA_HOME/vantage/vantage.db``, default
-    ``~/.local/share/vantage/vantage.db``. Environment configuration is
-    allowed here although RQ-2 forbids it on the plugin -- the threat
-    differs, not the mechanism: RQ-2 stops a committed value silently
-    enabling recording in someone else's project, while this server is
-    started deliberately by whoever runs it.
+    ``~/.local/share/vantage/vantage.db``. The plugin's activation switch is
+    flag-only so shared configuration can never silently turn recording on;
+    the environment is fine here because this server is started deliberately
+    by whoever runs it.
 
     Host, port and the grace period each take only a CLI value or a fixed
-    default -- design.md D11/D34 name no environment variable for any of
-    the three.
+    default; none has an environment variable.
     """
     database_path, database_source = _resolve_database_path(
         cli_database, env_database, home, xdg_data_home
@@ -102,11 +96,10 @@ class ServerConfigError(ValueError):
 
 def _resolve_grace_period(cli_grace_period: float | None) -> tuple[float, ConfigSource]:
     if cli_grace_period is not None:
-        # `argparse type=float` accepts 0, -1, nan and inf. Any of them makes
-        # every unfinished run derive as abandoned the instant it is read,
-        # including sessions heartbeating normally -- a silently useless server
-        # rather than one that refused to start. The plugin already rejects a
-        # nonsensical timeout this way; this is the server-side equivalent.
+        # `argparse type=float` accepts 0, -1, nan and inf. Any of them breaks
+        # abandonment derivation for every unfinished run, including sessions
+        # heartbeating normally -- a silently useless server rather than one
+        # that refuses to start.
         if not math.isfinite(cli_grace_period) or cli_grace_period <= 0:
             raise ServerConfigError(
                 f"--grace-period must be a positive number of seconds, got {cli_grace_period!r}"
@@ -130,9 +123,8 @@ def _resolve_database_path(
 
 
 DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_PERIOD_SECONDS
-"""Public alias for `service/app.py`'s `create_app` default (design.md D34) --
-so the "30 beats" derivation lives in exactly one place rather than being
-duplicated as a bare literal at the `create_app` call site."""
+"""Public alias for `service/app.py`'s `create_app` default, so the "30 beats"
+derivation lives in one place rather than as a bare literal at the call site."""
 
 __all__ = [
     "ConfigSource",

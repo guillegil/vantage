@@ -1,39 +1,30 @@
-"""Manual harness for RQ-25's metadata-capture overhead measurement (design.md
-D102, task 11.1). **Not a pytest test and never collected by the suite** --
-built by copying ``measure_vcs_overhead.py``'s harness rather than inventing a
-second one, for the same reason that script gives: a benchmark inside the
-3.10-3.13 x xdist CI matrix is a check people learn to skip. Run it by hand::
+"""Measure what ``--vantage-metadata`` adds to a recorded pytest session.
+
+Not collected by the test suite, for the same reasons as
+``measure_vcs_overhead.py``, whose harness this copies. Run it by hand::
 
     uv run --extra dev python scripts/measure_metadata_overhead.py
 
-Transcribe the printed medians into the "Measurements" paragraph of
-``openspec/changes/run-metadata-capture/specs/run-metadata/spec.md`` (task
-11.3). A future change to the declaration read or its bounds MUST re-run this
-script and update that paragraph.
+Re-run it after any change to how the declaration is read or bounded.
 
-Design, per design.md D102:
+Every arm has recording on, so the git read runs in all of them and cancels
+out of the deltas, leaving the cost of metadata capture alone:
 
-- **Same shape as the `vcs` harness** -- the same two RQ-25 profiles (1,000 x
-  ~10 ms for criterion 1, 1,000 x ~1 ms for criterion 3), the same five
-  interleaved A/B/A/B... pairs, medians reported never means, the same
-  in-process ``_LiveServer`` over ``InMemoryExecutionStore``.
-- **One deliberate change from the `vcs` harness's arms**: both arms here
-  already have recording ON. Arm A is ``--vantage`` alone; arm B is
-  ``--vantage --vantage-metadata`` against the worst legitimate declaration
-  (``MAX_DECLARED_FILES`` = 16 files at ``MAX_DECLARED_FILE_BYTES`` = 8 KiB
-  each). The delta isolates *this change*'s added cost -- git capture runs in
-  both arms and cancels out -- rather than recording as a whole, which the
-  `vcs` harness already measured.
-- **A third, unpriced arm** (C) is also measured for context: the flag given
-  with no declaration file present at all -- the presence-check-and-warn path
-  Q3 exercises, expected to cost close to nothing.
-- **Two repositories**: this repository, and a synthetic repository with
-  >= 20,000 tracked files, generated here -- synthetic data only (CLAUDE.md).
-  Both arms run inside a real git repository because ``Recorder.__init__``
-  always calls ``vcs.capture()`` once recording is on, regardless of
-  ``--vantage-metadata`` -- that cost is identical in both arms and cancels
-  out of the delta, but running in a repo with no ``.git`` at all would
-  change what ``vcs.capture`` does, not just how long it takes.
+- **A**: ``--vantage`` alone, the baseline.
+- **B**: ``--vantage --vantage-metadata`` with a declaration naming
+  ``MAX_DECLARED_FILES`` (16) files of just under ``MAX_DECLARED_FILE_BYTES``
+  (8 KiB) each. Only the first four fit the 32 KiB metadata section budget,
+  so the plugin reads five and never opens the rest.
+- **C**: ``--vantage --vantage-metadata`` with no declaration file at all,
+  the check-and-warn path, expected to cost close to nothing.
+
+A and B run as interleaved pairs. C needs the declaration absent, so it runs
+separately afterwards. Medians are reported, never means, for two synthetic
+suites (1,000 tests of ~10 ms and of ~1 ms), both in this repository and in
+a generated repository of 20,000 tracked files. Both are real git
+repositories because recording always runs ``vcs.capture``, and a directory
+with no ``.git`` would change what that does, not just how long it takes.
+Read the deltas against the overhead budget of 2% of suite runtime.
 """
 
 from __future__ import annotations
@@ -54,28 +45,20 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-_PAIRS = 5  # five interleaved A/B pairs, per design.md's own harness description
+_PAIRS = 5  # interleaved A/B pairs (and C runs) per profile per repository
 _SYNTHETIC_TRACKED_FILES = 20_000
+_OVERHEAD_BUDGET = "2% of suite runtime"
 
 _DECLARATION_FILENAME = "vantage-metadata.json"
 _WORST_CASE_FILES = 16  # MAX_DECLARED_FILES
 _WORST_CASE_FILE_BYTES = 8 * 1024  # MAX_DECLARED_FILE_BYTES
 _DECLARED_SUBDIR = "_vantage_bench_declared"
 
-# Both of RQ-25's own profiles: (test count, per-test sleep in seconds).
+# Synthetic suites: (test count, per-test sleep in seconds).
 _PROFILES: dict[str, tuple[int, float]] = {
-    "10ms (RQ-25 criterion 1, ~10s suite)": (1000, 0.010),
-    "1ms (RQ-25 criterion 3, ~1s suite)": (1000, 0.001),
+    "10ms (~10s suite)": (1000, 0.010),
+    "1ms (~1s suite)": (1000, 0.001),
 }
-
-# The pre-measurement forecast this script's result is allowed to disagree
-# with (design.md D102's own text) -- printed alongside the measured numbers
-# so neither quietly replaces the other.
-_FORECAST = (
-    "under 2 ms once per session -- an order of magnitude below vcs.capture's "
-    "measured cost, because no subprocess is spawned -- i.e. under 0.02% of "
-    "the 10ms profile and under 0.12% of the 1ms profile"
-)
 
 
 def _git_version() -> str:
@@ -105,9 +88,8 @@ def _git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
 
 @contextmanager
 def _synthetic_repository(num_files: int = _SYNTHETIC_TRACKED_FILES) -> Iterator[Path]:
-    """A generated repository with `num_files` tracked files, one commit, a
-    clean tree -- synthetic data only, no content copied from anywhere
-    (CLAUDE.md)."""
+    """A generated repository with `num_files` tracked files, one commit and
+    a clean tree."""
     with tempfile.TemporaryDirectory(prefix="vantage-metadata-bench-") as tmp:
         root = Path(tmp)
         _git(root, ["init", "--quiet"])
@@ -123,17 +105,15 @@ def _synthetic_repository(num_files: int = _SYNTHETIC_TRACKED_FILES) -> Iterator
 
 
 # ---------------------------------------------------------------------------
-# The worst legitimate declaration (design.md D102's third arm)
+# Arm B's declaration: the most files, each near the per-file size limit
 # ---------------------------------------------------------------------------
 
 
 @contextmanager
 def _worst_case_declaration(rootpath: Path) -> Iterator[None]:
-    """Write `MAX_DECLARED_FILES` files at `MAX_DECLARED_FILE_BYTES` each,
-    plus the `vantage-metadata.json` declaring all of them, directly at
-    `rootpath` -- removed again in `finally`, the same transient-write-then-
-    clean pattern `measure_vcs_overhead.py` already uses for its own
-    `_vantage_bench_suite` test directory inside a real repository."""
+    """Write `MAX_DECLARED_FILES` files of just under `MAX_DECLARED_FILE_BYTES`
+    each, plus a `vantage-metadata.json` at `rootpath` declaring them all;
+    everything is removed again on exit."""
     declared_dir = rootpath / _DECLARED_SUBDIR
     declared_dir.mkdir(exist_ok=True)
     declaration_path = rootpath / _DECLARATION_FILENAME
@@ -142,9 +122,8 @@ def _worst_case_declaration(rootpath: Path) -> Iterator[None]:
     try:
         for i in range(_WORST_CASE_FILES):
             key = f"key_{i:02d}"
-            # A little under MAX_DECLARED_FILE_BYTES, well inside "at most 8
-            # KiB" -- the padding value is what accounts for nearly all of
-            # each file's raw size.
+            # Leaves room for the JSON wrapper, so each file lands just under
+            # MAX_DECLARED_FILE_BYTES.
             padding = "x" * (_WORST_CASE_FILE_BYTES - 64)
             content = json.dumps({key: padding})
             file_path = declared_dir / f"declared_{i:02d}.json"
@@ -168,7 +147,7 @@ def _worst_case_declaration(rootpath: Path) -> Iterator[None]:
 
 
 # ---------------------------------------------------------------------------
-# Component 2: whole-session overhead, three arms, interleaved
+# Whole-session overhead, three arms
 # ---------------------------------------------------------------------------
 
 
@@ -318,7 +297,7 @@ def main() -> None:
     print(f"machine: {platform.platform()} / {platform.processor() or platform.machine()}")
     print(f"python: {platform.python_version()}")
     print(f"git: {_git_version()}")
-    print(f"pre-measurement forecast: {_FORECAST}")
+    print(f"overhead budget: {_OVERHEAD_BUDGET}")
     print()
 
     print(

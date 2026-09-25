@@ -1,10 +1,8 @@
-"""Threat matrix "Path authority": resolving a database path answers a
-question and must never act on the answer, and a path this process cannot
-use must fail loudly at startup rather than silently at the first write.
+"""Resolving a database path answers a question and must never act on the
+answer, and a path this process cannot use must fail loudly at startup
+rather than silently at the first write.
 
-POSIX-only for the read-only-parent case -- Windows ACL semantics are a
-different check this project has not decided (RQ-40's own notes make the
-same call).
+The read-only-parent case is POSIX-only: Windows ACLs need a different check.
 """
 
 from __future__ import annotations

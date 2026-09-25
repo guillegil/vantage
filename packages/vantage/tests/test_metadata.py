@@ -1,12 +1,9 @@
 """`FILE_STATUSES`/`KEY_STATUSES` vocabulary and the three bounds
-`core/domain/metadata.py` carries (design.md D91, D94, D95).
+`core/domain/metadata.py` carries.
 
-Stdlib only, no I/O -- this module is pure vocabulary, matching
-`liveness.py`'s and `result.py`'s precedent: a vocabulary is a module-level
-`frozenset` of plain `str`, never an `Enum`. `class X(str, Enum)` changes
-`__format__` between Python 3.10 and 3.13 on this project's own supported
-range (measured, `liveness.py`'s module docstring), and a third shape for
-the same kind of value is one shape too many.
+Stdlib only, no I/O. A vocabulary is a module-level `frozenset` of plain
+`str`, never an `Enum`: `class X(str, Enum)` changes `__format__` between
+Python 3.10 and 3.13.
 """
 
 from __future__ import annotations
@@ -21,8 +18,8 @@ from vantage.core.domain.metadata import (
 
 
 def test_file_statuses_match_run_metadata_files_check_constraint_exactly() -> None:
-    """`design.md` D91: `run_metadata_file.status`'s SQL `CHECK` names exactly
-    these eight values, in `schema.sql`'s own order."""
+    """`run_metadata_file.status`'s SQL `CHECK` names exactly these eight
+    values, in `schema.sql`'s own order."""
     assert FILE_STATUSES == {
         "captured",
         "not_found",
@@ -36,8 +33,8 @@ def test_file_statuses_match_run_metadata_files_check_constraint_exactly() -> No
 
 
 def test_key_statuses_match_run_metadata_check_constraint_exactly() -> None:
-    """`design.md` D91: `run_metadata.status`'s SQL `CHECK` names exactly
-    these five values, in `schema.sql`'s own order."""
+    """`run_metadata.status`'s SQL `CHECK` names exactly these five values,
+    in `schema.sql`'s own order."""
     assert KEY_STATUSES == {
         "captured",
         "absent",
@@ -48,8 +45,7 @@ def test_key_statuses_match_run_metadata_check_constraint_exactly() -> None:
 
 
 def test_file_statuses_is_a_plain_str_frozenset_never_an_enum() -> None:
-    """`liveness.PRESENTATIONS`'s measured 3.10-vs-3.13 `__format__` reason,
-    applied to this module's own vocabulary."""
+    """Plain `str` members, for the 3.10-vs-3.13 `__format__` reason."""
     assert type(FILE_STATUSES) is frozenset
     for status in FILE_STATUSES:
         assert type(status) is str
@@ -62,23 +58,18 @@ def test_key_statuses_is_a_plain_str_frozenset_never_an_enum() -> None:
 
 
 def test_max_metadata_value_bytes_is_max_identity_chars_value() -> None:
-    """design.md D94: bounded at `MAX_IDENTITY_CHARS`'s value (1024) for
-    D89's reason -- a short, indexed, client-supplied string, not
-    `MAX_TEXT_FIELD_BYTES` (P-2)."""
+    """Bounded at `MAX_IDENTITY_CHARS`'s value (1024) -- a short, indexed,
+    client-supplied string, not a `MAX_TEXT_FIELD_BYTES` text field."""
     assert MAX_METADATA_VALUE_BYTES == 1024
 
 
 def test_max_metadata_key_chars_is_max_identity_chars_value() -> None:
-    """design.md's file-changes table names `MAX_METADATA_KEY_CHARS` beside
-    `MAX_METADATA_VALUE_BYTES` and `MAX_METADATA_ENTRIES` (D94, D95) without
-    a separate derivation row of its own; a declared key is the same class of
-    short, client-supplied, indexed string D89 already bounds at
-    `MAX_IDENTITY_CHARS`, so it carries the identical value the sibling
-    bounds in the same table both use."""
+    """A declared key is the same class of short, client-supplied, indexed
+    string as an identity, so it carries `MAX_IDENTITY_CHARS`'s value."""
     assert MAX_METADATA_KEY_CHARS == 1024
 
 
 def test_max_metadata_entries_is_max_page_items_value() -> None:
-    """design.md D94: bounded at `MAX_PAGE_ITEMS` (200) -- a run's metadata
-    is presented unpaginated, so the stored-entry cap is the response bound."""
+    """Bounded at `MAX_PAGE_ITEMS` (200) -- a run's metadata is presented
+    unpaginated, so the stored-entry cap is the response bound."""
     assert MAX_METADATA_ENTRIES == 200

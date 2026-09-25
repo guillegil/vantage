@@ -1,11 +1,6 @@
-"""`open_database` applies `schema.sql` once, inside one transaction, and never
-re-issues DDL against an existing, already-schema'd database (RQ-29.2).
-
-RQ-29's verification method is Inspection, not Test -- `docs/schema-manifest.md`
-(PR2) is the verification of record. This file is not tagged
-`@pytest.mark.req(id="RQ-29")`, for the same reason PR3's rot-detector isn't
-(plain comment instead): it mechanises/protects the same guarantee the
-Inspection already covers, rather than being the Inspection itself.
+"""`open_database` applies `schema.sql` once, inside one transaction, never
+re-issues DDL against an existing database, and refuses a database stamped
+with a different schema version.
 """
 
 from __future__ import annotations
@@ -96,7 +91,6 @@ def test_the_if_not_exists_check_catches_a_bare_create_table() -> None:
     assert _statements_missing_if_not_exists(sql) == ["TABLE widget"]
 
 
-# RQ-29.2: opening an existing database issues no schema-altering statement.
 def test_reopening_an_existing_database_issues_no_ddl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -115,8 +109,8 @@ def test_reopening_an_existing_database_issues_no_ddl(
 def _seed_meta_only_database(db_path: Path, *, schema_version_value: str | None) -> None:
     """Simulate a database whose `meta` table exists (so `open_database` treats
     the schema as already applied) but whose `schema_version` row is absent or
-    set to an arbitrary value -- exactly the shape D28 found every pre-change
-    database in, and the shape a database from a different release would have.
+    set to an arbitrary value -- the shape a database from a different release
+    has.
 
     Built with a plain `sqlite3.connect`, never `open_database`, so the test
     controls the stamped version independently of whatever `schema.sql` itself
@@ -144,8 +138,8 @@ def test_opening_a_database_with_no_schema_version_row_is_refused(tmp_path: Path
         open_database(db_path)
 
     message = str(exc_info.value)
-    assert "absent" in message
-    assert "3" in message
+    assert "schema_version is absent" in message
+    assert "requires schema_version 4" in message
 
 
 def test_opening_a_database_with_an_older_schema_version_is_refused(tmp_path: Path) -> None:
@@ -156,8 +150,8 @@ def test_opening_a_database_with_an_older_schema_version_is_refused(tmp_path: Pa
         open_database(db_path)
 
     message = str(exc_info.value)
-    assert "1" in message
-    assert "4" in message
+    assert "schema_version is 1," in message
+    assert "requires schema_version 4" in message
 
 
 def test_opening_a_database_with_a_newer_schema_version_is_refused(tmp_path: Path) -> None:
@@ -168,16 +162,11 @@ def test_opening_a_database_with_a_newer_schema_version_is_refused(tmp_path: Pat
         open_database(db_path)
 
     message = str(exc_info.value)
-    assert "5" in message
-    assert "4" in message
+    assert "schema_version is 5," in message
+    assert "requires schema_version 4" in message
 
 
-# RQ-29 (`recording-schema`): "A database from an older schema version is
-# refused, not altered". `schema_version='3'` is exactly the shape a database
-# created before this change has -- predating `run_metadata` and the bump to
-# 4 -- so this proves the concrete scenario the requirement names, not only
-# the general "some other version" cases above.
-@pytest.mark.req(id="RQ-29")
+# `3` is the schema version immediately before the current one.
 def test_opening_a_database_created_by_the_previous_schema_version_is_refused(
     tmp_path: Path,
 ) -> None:
@@ -188,8 +177,8 @@ def test_opening_a_database_created_by_the_previous_schema_version_is_refused(
         open_database(db_path)
 
     message = str(exc_info.value)
-    assert "3" in message
-    assert "4" in message
+    assert "schema_version is 3," in message
+    assert "requires schema_version 4" in message
     assert str(db_path) in message
 
 
@@ -252,15 +241,11 @@ def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies
 def test_creating_a_database_survives_a_username_lookup_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`getpass.getuser()` only normalises its failures to `OSError` on 3.13+;
-    its own docstring records the change. On 3.10-3.12 -- three of this
-    project's four CI legs -- it raises `KeyError` from `pwd.getpwuid`, which
-    is what a container run as an unmapped uid with no `LOGNAME`/`USER` in the
-    environment produces.
+    """Before 3.13, `getpass.getuser()` raises `KeyError` from `pwd.getpwuid`
+    in a container run as an unmapped uid with no `LOGNAME`/`USER` set.
 
-    `created_by` is a convenience row. Losing it must cost nothing; aborting
-    `open_database` would stop the server from starting at all. Found by
-    review, 2026-08-19.
+    `created_by` is a convenience row; losing it must not stop the server
+    from starting.
     """
 
     def _no_such_user() -> str:

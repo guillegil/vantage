@@ -1,10 +1,6 @@
 """The read types on the storage port: `Page`, `RunListEntry`, `RunDetail`,
-`HistoryEntry`, and the pagination constants (design.md D57, D58, D61).
-
-Phase 1 adds these types and constants only -- `ExecutionStore` itself gains
-no method in this slice, so no adapter goes out of structural conformance
-mid-slice (tasks.md Phase 1). New tests carry no `req` marker -- this change
-mints no numeric requirement identifiers (CLAUDE.md).
+`ResultListEntry`, `HistoryEntry`, the run-metadata types, and the pagination
+constants.
 """
 
 from __future__ import annotations
@@ -45,19 +41,17 @@ def _execution() -> Execution:
 
 
 def test_max_page_items_is_200() -> None:
-    """history-read-api -> Bounded pagination -> A list response never
-    exceeds 200 items (D61)."""
+    """A list response never exceeds 200 items."""
     assert MAX_PAGE_ITEMS == 200
 
 
 def test_max_identity_chars_is_1024() -> None:
-    """D54's 1,024-character identity bound."""
     assert MAX_IDENTITY_CHARS == 1024
 
 
 def test_page_carries_items_and_has_more_and_no_total() -> None:
-    """D58: `Page[T]` is a two-field envelope -- no `total`, because no
-    scenario asks for one and a total requires a `COUNT(*)` on every page."""
+    """`Page[T]` is a two-field envelope with no `total`, which would cost a
+    `COUNT(*)` on every page."""
     page: Page[int] = Page(items=(1, 2, 3), has_more=True)
 
     assert page.items == (1, 2, 3)
@@ -66,7 +60,7 @@ def test_page_carries_items_and_has_more_and_no_total() -> None:
 
 
 def test_run_list_entry_carries_execution_last_contact_at_and_vcs_projection() -> None:
-    """D58, D59: `RunListEntry` is the lean list type -- its `vcs` field is a
+    """`RunListEntry` is the lean list type -- its `vcs` field is a
     `VcsProjection`, distinct from `RunDetail`'s full `VcsContext`."""
     projection = VcsProjection(
         commit="a" * 40,
@@ -84,7 +78,7 @@ def test_run_list_entry_carries_execution_last_contact_at_and_vcs_projection() -
 
 
 def test_run_detail_carries_execution_and_last_contact_at_only() -> None:
-    """D58: `RunDetail` is the full-record type -- its `execution.vcs` is
+    """`RunDetail` is the full-record type -- its `execution.vcs` is
     the whole `VcsContext`, unbounded, so `RunDetail` itself carries no
     separate `vcs` field."""
     detail = RunDetail(execution=_execution(), last_contact_at=_STARTED)
@@ -95,11 +89,10 @@ def test_run_detail_carries_execution_and_last_contact_at_only() -> None:
 
 
 def test_result_list_entry_carries_identity_outcome_timings_worker_and_failure_projection() -> None:
-    """D77: `ResultListEntry` is the lean-list type for `list_results` --
-    identity, outcome, every phase timing `_result_item` already reads off
-    the pre-existing `/runs/{id}/results` wire contract, `worker_id`, and a
-    `FailureProjection | None` -- no field to carry `traceback`,
-    `failure_repr` or captured output (design.md D76)."""
+    """`ResultListEntry` is the lean list type for `list_results` --
+    identity, outcome, phase timings, `worker_id`, and a
+    `FailureProjection | None` -- with no field to carry `traceback`,
+    `failure_repr` or captured output."""
     identity = CaseIdentity(
         node_id="t.py::test_x",
         file_path="t.py",
@@ -150,7 +143,7 @@ def test_result_list_entry_carries_identity_outcome_timings_worker_and_failure_p
 
 
 def test_history_entry_carries_run_shape_fields_and_vcs_projection() -> None:
-    """D57, D58, D59: `HistoryEntry` is the lean list type for a test's
+    """`HistoryEntry` is the lean list type for a test's
     execution history -- one entry per run that test appeared in."""
     entry = HistoryEntry(
         run_id="a" * 32,
@@ -172,8 +165,8 @@ def test_history_entry_carries_run_shape_fields_and_vcs_projection() -> None:
 
 
 def test_metadata_file_carries_source_file_content_type_and_status() -> None:
-    """D91, D98: `MetadataFile` mirrors one `run_metadata_file` row --
-    `source_file` is the DECLARED path (P-1), never the resolved one."""
+    """`MetadataFile` mirrors one `run_metadata_file` row -- `source_file` is
+    the declared path, never the resolved one."""
     metadata_file = MetadataFile(
         source_file="config/firmware.yaml", content_type="yaml", status="captured"
     )
@@ -184,7 +177,7 @@ def test_metadata_file_carries_source_file_content_type_and_status() -> None:
 
 
 def test_metadata_file_is_frozen_and_uses_slots() -> None:
-    """D98: matches every other port dataclass's shape (`frozen=True,
+    """Matches every other port dataclass's shape (`frozen=True,
     slots=True`), so a caller cannot mutate a stored row in place."""
     metadata_file = MetadataFile(source_file="a", content_type="json", status="captured")
 
@@ -194,7 +187,7 @@ def test_metadata_file_is_frozen_and_uses_slots() -> None:
 
 
 def test_metadata_entry_value_is_none_when_status_is_not_captured() -> None:
-    """D95: a declared-but-uncaptured key is a row, `value` NULL -- the
+    """A declared-but-uncaptured key is a row with `value` NULL -- the
     status says which rule dropped it."""
     entry = MetadataEntry(
         key="firmware_version",
@@ -210,7 +203,7 @@ def test_metadata_entry_value_is_none_when_status_is_not_captured() -> None:
 
 
 def test_metadata_entry_carries_a_captured_value() -> None:
-    """D91: a captured key's row carries a non-null `value`."""
+    """A captured key's row carries a non-null `value`."""
     entry = MetadataEntry(
         key="firmware_version", value="2.1", source_file="config/firmware.yaml", status="captured"
     )
@@ -228,10 +221,9 @@ def test_metadata_entry_is_frozen_and_uses_slots() -> None:
 
 
 def test_run_metadata_defaults_to_empty_files_and_entries() -> None:
-    """D98: `RunMetadata()` is the empty aggregate a session with no
-    declaration reports -- one frozen aggregate, not two collections a
-    caller could pass out of step (D95's "entries without files" state
-    the type system must make unrepresentable)."""
+    """`RunMetadata()` is the empty aggregate a session with no declaration
+    reports -- one frozen aggregate, not two collections a caller could pass
+    out of step."""
     metadata = RunMetadata()
 
     assert metadata.files == ()
@@ -239,7 +231,7 @@ def test_run_metadata_defaults_to_empty_files_and_entries() -> None:
 
 
 def test_empty_run_metadata_equals_a_freshly_constructed_empty_instance() -> None:
-    """D98: `EMPTY_RUN_METADATA` is `record_session`'s default -- it must
+    """`EMPTY_RUN_METADATA` is `record_session`'s default -- it must
     equal `RunMetadata()` by value, not merely share identity, since a
     caller building its own empty instance still gets the same result."""
     assert RunMetadata() == EMPTY_RUN_METADATA

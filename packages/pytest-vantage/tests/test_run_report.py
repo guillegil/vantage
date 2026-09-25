@@ -1,14 +1,10 @@
-"""RQ-1 (a run entry per invocation) and RQ-31 (its timestamps), proven
-end-to-end (design.md D2a): a real `vantage` server (the `vantage_server`
-fixture in `vantage_test_server.py`) and a real subprocess pytest invocation
-(`pytester.runpytest_subprocess`), never a mock of either side of the HTTP
-boundary.
+"""Recording a run: one run entry per invocation, with its timestamps.
 
-Also carries the registration test for task 6.3/6.4 (whether `Recorder` is
-wired into `pytest_configure`) and the timestamp-formatting unit tests for
-task 6.1/6.2 -- both prerequisites the end-to-end scenarios above depend on,
-kept in this file rather than split out because `design.md`'s own file table
-lists only this one new test file for D2a.
+The end-to-end tests use a real `vantage` server (the `vantage_server`
+fixture in `vantage_test_server.py`) and a real subprocess pytest
+invocation, never a mock of either side of the HTTP boundary. The file also
+covers the start-write, `Recorder` registration, VCS and metadata wiring,
+heartbeats, the report budget and timestamp formatting.
 """
 
 from __future__ import annotations
@@ -34,11 +30,9 @@ _SLOW_TEST = "import time\n\n\ndef test_slow():\n    time.sleep(5)\n"
 
 def _wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> Execution:
     """Poll `server` until its first run entry has landed, or raise after
-    `timeout` seconds -- a bounded observable condition, not a fixed sleep
-    (task 5.1's own instruction: a fixed sleep before a signal is how a
-    test becomes flaky on a loaded CI runner). Used to prove a kill or a
-    liveness query happens strictly after `pytest_sessionstart`'s
-    start-write has been accepted, never before it.
+    `timeout` seconds. A bounded wait on an observable condition rather than
+    a fixed sleep, which is flaky on a loaded CI runner. Used to act only
+    after `pytest_sessionstart`'s start-write has been accepted.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -49,15 +43,11 @@ def _wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> 
     raise TimeoutError(f"no run entry appeared within {timeout}s")
 
 
-# --- Unit: fixed-width ISO-8601 timestamps (design.md D1) -------------------
+# --- Unit: fixed-width ISO-8601 timestamps ----------------------------------
 #
-# `datetime.isoformat()` alone omits the microsecond component when it is
-# exactly zero, which would make the width variable -- lexicographic order
-# would then stop being chronological order for a session that happens to
-# finish on an exact second. Neither the end-to-end scenarios below nor the
-# server's pydantic parsing would catch that regression (pydantic's datetime
-# parser tolerates variable width), so it needs a direct, function-local
-# test of its own.
+# A variable-width timestamp breaks lexicographic ordering. Neither the
+# end-to-end tests nor the server's pydantic parsing (which tolerates variable
+# width) would catch that regression, so it is tested directly.
 
 
 def test_isoformat_utc_is_fixed_width_even_at_zero_microseconds() -> None:
@@ -81,10 +71,9 @@ def test_isoformat_utc_preserves_nonzero_microseconds() -> None:
     assert formatted == "2026-08-15T09:14:02.481930+00:00"
 
 
-# --- The start-write (task 2.3/2.4, design.md D32) --------------------------
+# --- The start-write -------------------------------------------------------
 
 
-@pytest.mark.req(id="RQ-1")
 def test_session_start_sends_a_report_with_no_results_matching_the_finish_writes_started_at(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -93,8 +82,8 @@ def test_session_start_sends_a_report_with_no_results_matching_the_finish_writes
     """`pytest_sessionstart` sends a report with `finished_at: null`, no
     `results`, and the session's `run_id`; `_started_at` is captured once in
     `__init__`, so the value the start-write sends is the identical value
-    the finish-write sends later (design.md D32's "identical `started_at`"
-    claim) -- not a second, independent `datetime.now()` call.
+    the finish-write sends later -- not a second, independent
+    `datetime.now()` call.
 
     `send` is patched to capture every call rather than actually perform it,
     so both requests' exact bodies are directly inspectable; the preflight
@@ -120,19 +109,16 @@ def test_session_start_sends_a_report_with_no_results_matching_the_finish_writes
     assert start_report["run"]["started_at"] == finish_report["run"]["started_at"]  # type: ignore[index]
 
 
-@pytest.mark.req(id="RQ-21")
 def test_start_write_uses_the_liveness_timeout_not_the_report_timeout(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """design.md D31: the start-write is bounded by
-    `resolve_liveness_timeout(report_timeout)`, not the finish-write's own
-    `resolve_report_timeout` value -- a stall at t=0, before the first test
-    runs, is the exact "slow or stuck?" failure ADR-9 names. Configuring
-    `--vantage-timeout=5.0` makes the two bounds genuinely differ (`min(2.0,
-    5.0) == 2.0`), so a regression that reused the report timeout for both
-    requests is caught rather than accidentally passing.
+    """The start-write is bounded by `resolve_liveness_timeout(report_timeout)`,
+    not the finish-write's report timeout: a stall before the first test
+    runs must stay short. `--vantage-timeout=5.0` makes the two bounds differ
+    (`min(2.0, 5.0) == 2.0`), so reusing the report timeout for both
+    requests is caught.
     """
     timeouts: list[float] = []
 
@@ -150,24 +136,18 @@ def test_start_write_uses_the_liveness_timeout_not_the_report_timeout(
     assert timeouts == [2.0, 5.0]
 
 
-# --- Registration (task 6.3/6.4) --------------------------------------------
+# --- Registration ----------------------------------------------------------
 
 
-@pytest.mark.req(id="RQ-1")
 def test_recorder_registered_only_when_vantage_flag_is_present(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """Registration tracks activation AND reachability (design.md D6).
-
-    PR11 registered `Recorder` unconditionally once activation succeeded,
-    with no reachability gate -- disclosed there as this PR's job (task
-    6.8). Now that the preflight exists, `--vantage` against a genuinely
-    reachable server (`vantage_server`, real) is what proves the same
-    "activation implies registration" half; the inactive half is unchanged.
-    `test_failure_paths.py::test_recorder_is_not_registered_when_the_preflight_fails`
-    is this test's mirror image -- activation present, nothing reachable.
+    """Registration requires activation and a reachable server: `--vantage`
+    against the real `vantage_server` registers a `Recorder`, no flag
+    registers none. The mirror image, activation with nothing reachable, is
+    `test_failure_paths.py::test_recorder_is_not_registered_when_the_preflight_fails`.
     """
     from pytest_vantage.recorder import Recorder
 
@@ -180,14 +160,13 @@ def test_recorder_registered_only_when_vantage_flag_is_present(
     assert not any(isinstance(plugin, Recorder) for plugin in inactive.pluginmanager.get_plugins())
 
 
-# --- VCS wiring (task 2.1-2.8, design.md D43-D46, D51) -----------------------
+# --- VCS and metadata wiring ------------------------------------------------
 
 
 def _corrupt_git_repo(rootpath: Path) -> None:
-    """Reuses Phase 1's `test_vcs.py::test_corrupt_git_entry_records_nulls_and_warns_once`
-    fixture shape (a `.git` directory with a truncated `HEAD`, no objects) --
-    not a mock, a real repository `git` itself cannot read (design.md D45's
-    "corrupt repository" case, gate exits 128, `.git` exists)."""
+    """A `.git` directory with a truncated `HEAD` and no objects: not a mock,
+    a real repository `git` itself cannot read (it exits 128). Same shape as
+    `test_vcs.py::test_corrupt_git_entry_records_nulls_and_warns_once`."""
     (rootpath / ".git").mkdir(parents=True)
     (rootpath / ".git" / "HEAD").write_text("ref: ")
 
@@ -197,12 +176,10 @@ def test_vcs_section_is_identical_on_both_reports(
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """design.md D51: the snapshot is captured once, in `__init__`, and
-    never re-read -- both the start report and the finish report must
-    serialise the IDENTICAL snapshot. `vcs.capture` is patched to return a
-    DIFFERENT snapshot on every call it might receive; if `Recorder` re-read
-    at finish time, the two reports would disagree. They cannot, because
-    there is only ever one call to disagree with itself.
+    """The snapshot is captured once, in `__init__`, and never re-read, so
+    the start report and the finish report serialise the identical snapshot.
+    `vcs.capture` is patched to return a different snapshot on every call; a
+    re-read at finish time would make the two reports disagree.
     """
     call_count = [0]
 
@@ -235,28 +212,17 @@ def test_vcs_section_is_identical_on_both_reports(
     assert call_count[0] == 1
 
 
-@pytest.mark.req(id="RQ-25")
 def test_metadata_section_is_identical_on_both_reports(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """design.md D51, extended to metadata by D96: `self._metadata` is
-    captured once, in `__init__`, and never re-read -- both the start
-    report and the finish report must serialise the IDENTICAL section.
-    `capture_metadata` is patched to return a DIFFERENT `MetadataSection`
-    on every call it might receive; if `Recorder` re-read at finish time,
-    the two reports would disagree. They cannot, because there is only
-    ever one call to disagree with itself -- the same proof
-    `test_vcs_section_is_identical_on_both_reports` already uses for `vcs`.
-
-    `assert call_count[0] == 1` is also RQ-25's O(1)-per-session shape claim
-    (design.md D102): the declaration read and every file it names are read
-    exactly once per session, never once per test -- the same
-    process-count-does-not-scale proof `test_git_invocation_count_does_not_
-    scale_with_test_count` already carries for `vcs.capture`. The measured
-    number this shape claim predicts lives in `run-metadata/spec.md`'s own
-    Measurements paragraph (Analysis, not Test), not in an assertion here.
+    """The metadata section is captured once, in `__init__`, and never
+    re-read, so both reports serialise the identical section.
+    `capture_metadata` is patched to return a different section on every
+    call; a re-read at finish time would make the two reports disagree.
+    `call_count[0] == 1` also shows the declaration and the files it names
+    are read once per session, never once per test.
     """
     from pytest_vantage import metadata as metadata_module
 
@@ -325,7 +291,6 @@ def test_no_metadata_section_when_capture_was_not_requested(
     assert "metadata" not in finish_report
 
 
-@pytest.mark.req(id="RQ-39")
 def test_passing_suite_exit_status_survives_unreadable_repository(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -339,15 +304,13 @@ def test_passing_suite_exit_status_survives_unreadable_repository(
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    # A vacuous pass (git never invoked at all) would look identical to a
-    # real recovery -- this closes that gap: the corrupt repository IS read
-    # and IS what triggers exactly one warning (design.md D45).
+    # The corrupt repository is actually read: it triggers exactly one
+    # warning, which a vacuous pass (git never invoked) would not.
     output = result.stdout.str() + result.stderr.str()
     assert output.count("VantageWarning:") == 1
     assert "could not read the git repository" in output
 
 
-@pytest.mark.req(id="RQ-39")
 def test_failing_suite_exit_status_survives_unreadable_repository(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -366,17 +329,14 @@ def test_failing_suite_exit_status_survives_unreadable_repository(
     assert "could not read the git repository" in output
 
 
-@pytest.mark.req(id="RQ-25")
 def test_git_invocation_count_does_not_scale_with_test_count(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """RQ-25 process-count (design.md Testing Strategy row): `vcs.py`'s own
-    five-invocation ceiling (Phase 1) already bounds ONE `capture()` call --
-    this proves the wiring only ever makes that one call per SESSION, not
-    one per test. A session with five tests spawns exactly as many `git`
-    processes as a session with one -- never five times as many.
+    """VCS capture runs once per session, not once per test: a session with
+    five tests spawns exactly as many `git` processes as a session with one.
+    `vcs.py` itself caps a single `capture()` at five invocations.
     """
     real_run = subprocess.run
     calls: list[list[str]] = []
@@ -407,11 +367,9 @@ def test_git_invocation_count_does_not_scale_with_test_count(
     assert len(calls) - after_one_test == after_one_test
 
 
-# --- End-to-end (task 6.1, RQ-1 + RQ-31) ------------------------------------
+# --- End-to-end: one run entry per invocation ------------------------------
 
 
-@pytest.mark.req(id="RQ-1")
-@pytest.mark.req(id="RQ-31")
 def test_completed_session_writes_one_row_with_ordered_timestamps(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -430,7 +388,6 @@ def test_completed_session_writes_one_row_with_ordered_timestamps(
     assert execution.finished_at > execution.started_at
 
 
-@pytest.mark.req(id="RQ-1")
 def test_second_invocation_gets_a_distinct_identifier(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -446,7 +403,6 @@ def test_second_invocation_gets_a_distinct_identifier(
     assert executions[0].identity.value != executions[1].identity.value
 
 
-@pytest.mark.req(id="RQ-1")
 def test_zero_test_collection_still_writes_one_row(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -459,7 +415,6 @@ def test_zero_test_collection_still_writes_one_row(
     assert len(vantage_server.executions()) == 1
 
 
-@pytest.mark.req(id="RQ-1")
 def test_failed_collection_still_writes_one_row(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -471,22 +426,21 @@ def test_failed_collection_still_writes_one_row(
     )
 
     # The precondition, asserted rather than assumed: without it this passes
-    # just as well against a session that collected cleanly, and the scenario
+    # just as well against a session that collected cleanly, and this test
     # is specifically about the one that did not.
     assert result.ret == pytest.ExitCode.INTERRUPTED
     assert len(vantage_server.executions()) == 1
 
 
-@pytest.mark.req(id="RQ-31")
 def test_sigint_leaves_start_time_and_null_end_time(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     """`pytest`'s `wrap_session` calls `pytest_sessionfinish` from a
-    `finally` with `ExitCode.INTERRUPTED` (design.md D7) -- the report IS
-    sent, with `finished_at` null and `interrupted` true. Needs a raw
-    `Popen` (`pytester.popen`, not `runpytest_subprocess`) because the
-    signal has to be delivered to a still-running child process.
+    `finally` with `ExitCode.INTERRUPTED`, so the report is still sent, with
+    `finished_at` null and `interrupted` true. Needs a raw `Popen`
+    (`pytester.popen`, not `runpytest_subprocess`) because the signal has to
+    be delivered to a still-running child process.
     """
     pytester.makepyfile(test_slow=("import time\n\n\ndef test_slow():\n    time.sleep(5)\n"))
 
@@ -515,24 +469,21 @@ def test_sigint_leaves_start_time_and_null_end_time(
     assert execution.interrupted is True
 
 
-# --- The scenarios the task list forgot (Phase 5) ---------------------------
+# --- Sessions that have not finished ---------------------------------------
 
 
-@pytest.mark.req(id="RQ-1")
 def test_a_still_running_session_already_has_a_run_entry(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """`run-recording`'s "A still-running session already has a run entry"
-    (RQ-1.5): the database is queried WHILE the child is still executing,
-    before it finishes or is killed -- proving the row exists because of
-    the start-write alone, not merely that it exists once the session is
-    over, which every other RQ-1 test in this file already proves.
+    """A still-running session already has a run entry: the server is
+    queried while the child is still executing, proving the row exists
+    because of the start-write alone, not merely once the session is over.
 
     Needs a raw `Popen` (`pytester.popen`), not `runpytest_subprocess`,
     because the child must still be alive when the server is queried.
-    `stdin=subprocess.DEVNULL` for the same 3.10 `communicate()` reason
-    `test_sigint_leaves_start_time_and_null_end_time` above carries.
+    `stdin=subprocess.DEVNULL` because `pytester.popen` otherwise leaves a
+    closed stdin pipe, which `communicate()` fails to flush before Python 3.13.
     """
     pytester.makepyfile(test_slow=_SLOW_TEST)
 
@@ -561,27 +512,18 @@ def test_a_still_running_session_already_has_a_run_entry(
         process.wait(timeout=15)
 
 
-@pytest.mark.req(id="RQ-1")
-@pytest.mark.req(id="RQ-31")
 def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_reason(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """`run-recording`'s "A SIGKILL'd session's entry is present" (RQ-1.6)
-    and `run-recording`'s "SIGKILL'd session carries no interrupt reason"
-    (RQ-31.3), asserted together to make the contrast legible: SIGINT
-    (`test_sigint_leaves_start_time_and_null_end_time` above) is a signal
-    Python observes, so that entry carries `interrupted=True`. SIGKILL
-    cannot be caught, blocked or handled at all -- the process stops
-    between two instructions, and no code of this project ever runs to
-    record a reason. This test proves the negative directly: the run entry
-    the start-write already left behind stays exactly as it was, holding a
-    start time and a null end time, `interrupted=False`, and no
-    `interrupt_reason`.
+    """SIGKILL cannot be caught, so no plugin code runs after it: the run
+    entry the start-write left behind stays exactly as it was -- a start
+    time, a null end time, `interrupted=False` and no `interrupt_reason`.
+    Contrast SIGINT (`test_sigint_leaves_start_time_and_null_end_time`),
+    which Python observes and which yields `interrupted=True`.
 
-    SIGKILL, never SIGTERM or SIGINT, sent only after
-    `_wait_for_execution` confirms the start-write has already landed --
-    proving the kill happens after `pytest_sessionstart`, not before it.
+    The kill is sent only after `_wait_for_execution` confirms the
+    start-write has landed.
     """
     pytester.makepyfile(test_slow=_SLOW_TEST)
 
@@ -611,20 +553,18 @@ def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_re
     assert execution.interrupt_reason is None
 
 
-# --- Activity-driven beats (design.md D30, task 4.18) -----------------------
+# --- Activity-driven heartbeats --------------------------------------------
 
 
-@pytest.mark.req(id="RQ-25")
 def test_a_suite_exceeding_one_heartbeat_interval_sends_at_least_one_heartbeat(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`session-liveness`'s "A long suite's last contact advances during
-    execution" scenario -- `_BEAT_INTERVAL_SECONDS` shrunk to make every
-    `pytest_runtest_logreport` call a beat opportunity, proving the wiring
-    fires for real rather than merely never being due within the suite's
-    real wall-clock duration."""
+    """A long suite sends heartbeats during execution.
+    `_BEAT_INTERVAL_SECONDS` is shrunk to zero so every
+    `pytest_runtest_logreport` call is a beat opportunity, proving the wiring
+    fires rather than merely never being due."""
     beats: list[str] = []
 
     def _capture(address: str, run_id: str, *, timeout: float) -> None:
@@ -642,38 +582,22 @@ def test_a_suite_exceeding_one_heartbeat_interval_sends_at_least_one_heartbeat(
     assert len(beats) >= 1
 
 
-@pytest.mark.req(id="RQ-25")
 def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_contact(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`session-liveness`'s "A long suite's last contact advances during
-    execution" scenario, exercised for real: `send_heartbeat` is left
-    UNPATCHED, so the whole chain -- the plugin decides to beat, POSTs over
-    real HTTP, the route calls `touch_last_contact` -- runs end to end
-    against `vantage_server`, closing the gap the test above leaves open (it
-    monkeypatches `send_heartbeat` itself away and only ever observes its
-    own stub list, never the server).
+    """The server's last-contact time advances during a long suite, end to
+    end: `send_heartbeat` is left unpatched, so the plugin POSTs over real
+    HTTP and the route calls `touch_last_contact` on `vantage_server`. Only
+    `_BEAT_INTERVAL_SECONDS` is driven down, so the test does not sleep
+    through 30 real seconds.
 
-    Only `_BEAT_INTERVAL_SECONDS` is driven down here, the same technique
-    the test above already uses -- the production default (30.0) is never
-    touched, so a suite still "exceeds one heartbeat interval" without
-    sleeping through 30 real seconds.
-
-    The server's own `touch_last_contact` is wrapped, not replaced: the real
-    implementation still runs on every call, so `last_contact_at` is genuine
-    store state, not a captured client-side call. The wrapper's only job is
-    to read the store's value for this run BEFORE the first real heartbeat
-    overwrites it -- exactly the value the start-write alone recorded --
-    so the final assertion compares two real reads of the store, not a
-    stub's argument list. If the wire between `send_heartbeat` and this
-    route breaks (wrong path, wrong method, wrong run id), the wrapped
-    method is never called at all and `baseline_by_run` stays empty.
-
-    Verified by mutation (task 6.1): breaking
-    `transport._HEARTBEAT_PATH_SUFFIX` to `/HEARTBEAT-TYPO` makes this test
-    fail; reverting restores green. See `apply-progress` for both runs.
+    The store's `touch_last_contact` is wrapped, not replaced: the wrapper
+    only records the value the start-write set, before the first heartbeat
+    overwrites it, so the final assertion compares two real reads of the
+    store. If the path, method or run id on the wire is wrong, the wrapper
+    is never called and `baseline_by_run` stays empty.
     """
     monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
 
@@ -682,10 +606,8 @@ def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_cont
 
     def _spy_touch_last_contact(execution_id: str, contacted_at: datetime) -> bool:
         if execution_id not in baseline_by_run:
-            # The value `_last_contact` holds right now is exactly what the
-            # start-write's insert branch set (design.md D27) -- nothing
-            # else can have touched it before this, the first real
-            # heartbeat call this run has received.
+            # Before this run's first heartbeat, `_last_contact` holds
+            # exactly what the start-write set.
             baseline_by_run[execution_id] = vantage_server.store._last_contact[  # noqa: SLF001
                 execution_id
             ]
@@ -709,28 +631,18 @@ def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_cont
     assert last_contact_at > baseline_by_run[run_id]
 
 
-@pytest.mark.req(id="RQ-25")
 def test_a_fast_suite_emits_no_heartbeat(
     monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
 ) -> None:
-    """RQ-25's measured profile -- 1,000 tests at ~10 ms each is a
-    ~10-second suite, comfortably inside one `_BEAT_INTERVAL_SECONDS`
-    (30.0) window. Proven directly against `Recorder._maybe_beat`'s timing
-    guard, called 1,000 times in a tight loop right after construction,
-    rather than spawning 1,000 real subprocess tests -- the real elapsed
-    wall-clock time for that loop is a small fraction of a second, well
-    under the interval, exactly like RQ-25's own measured suite.
+    """1,000 tests at ~10 ms each is a ~10-second suite, well inside one
+    30-second `_BEAT_INTERVAL_SECONDS`. Proven directly against
+    `Recorder._maybe_beat`'s timing guard, called 1,000 times right after
+    construction, rather than by running 1,000 real tests.
 
-    `_maybe_beat` is wrapped in `@liveness_isolated` (design.md D30), which
-    swallows whatever the beat path raises and turns it into a
-    `VantageWarning` instead of propagating -- so `beats == []` alone
-    cannot distinguish "correctly suppressed, no attempt made" from "the
-    timing guard is broken and every attempt raised, silently, latched
-    after the first failure" (W3). Asserting the suite stayed warning-free
-    as well closes that gap: deleting `_last_beat_at` leaves `beats == []`
-    unchanged but emits exactly one `VantageWarning` -- confirmed by
-    reverting the fix and observing this assertion, and only this one,
-    fail.
+    `_maybe_beat` is `@liveness_isolated`, which turns an exception into a
+    `VantageWarning`, so `beats == []` alone cannot tell "correctly
+    suppressed" from "the first attempt raised and latched". Asserting that
+    no warning was emitted closes that gap.
     """
     from pytest_vantage.recorder import Recorder
 
@@ -763,24 +675,19 @@ def test_a_fast_suite_emits_no_heartbeat(
     assert len(recwarn) == 0, [str(w.message) for w in recwarn.list]
 
 
-# --- End-to-end xdist (task 6.5, RQ-1 + RQ-27) ------------------------------
+# --- End-to-end xdist ------------------------------------------------------
 
 
-@pytest.mark.req(id="RQ-1")
-@pytest.mark.req(id="RQ-27")
 def test_xdist_run_leaves_exactly_one_run_entry(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """Ties 5.3's unit-level xdist guard to a real `-n 4` subprocess run:
-    four workers plus the controller all execute `pytest_configure`, and
-    only the controller may end up with a registered `Recorder`.
+    """A real `-n 4` run: four workers plus the controller all execute
+    `pytest_configure`, and only the controller registers a `Recorder`, so
+    exactly one run entry is written.
 
-    RQ-27's "without xdist" matrix leg installs no `pytest-xdist` at all, so
-    `-n 4` is not a recognised pytest option in that environment. This test
-    is specifically about xdist's dedup behaviour and has nothing to assert
-    when xdist is absent; skip rather than fail so PR13's CI matrix reports
-    an honest "not applicable" instead of a false negative.
+    Skipped when `pytest-xdist` is not installed (the CI leg without it),
+    where `-n` is not a recognised option.
     """
     pytest.importorskip("xdist")
     pytester.makepyfile(
@@ -795,7 +702,7 @@ def test_xdist_run_leaves_exactly_one_run_entry(
     assert len(vantage_server.executions()) == 1
 
 
-# --- The per-report budget (design.md D73, D74, task 5.11) ------------------
+# --- The per-report failure-text budget ------------------------------------
 
 
 def test_a_session_of_many_large_failures_stays_within_the_report_size_cap(
@@ -803,24 +710,16 @@ def test_a_session_of_many_large_failures_stays_within_the_report_size_cap(
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """failure-evidence -> Per-report failure-text budget -> A session of
-    many large failures stays within the report size cap: ten tests each
-    raising an 80,000-character message would, unbudgeted, carry roughly
-    2.4 MB of failure text alone -- the same message independently
-    re-rendered into `failure_message`, `failure_repr` and `traceback`
-    (design.md D69) -- comfortably over the server's 1 MiB
-    `MAX_REPORT_BYTES` and rejected outright. `recorder.py` calling
-    `spend_failure_text_budget` between assembly and send (design.md D74) is
-    what keeps the finish-write's encoded body within budget.
+    """A session of many large failures stays within the report size cap.
+    Ten tests each raising an 80,000-character message would, unbudgeted,
+    carry roughly 2.4 MB of failure text -- the message is rendered into
+    `failure_message`, `failure_repr` and `traceback` independently -- well
+    over the server's 1 MiB `MAX_REPORT_BYTES`, and rejected outright.
 
-    `send` is patched to capture the exact report dict rather than actually
-    perform the request, the same technique
-    `test_session_start_sends_a_report_with_no_results_matching_the_finish_writes_started_at`
-    above already uses -- the preflight itself still runs for real against
-    `vantage_server`, proving activation, and the captured dict is encoded
-    with the identical `json.dumps(...).encode("utf-8")` call
-    `transport.send` itself would have made, so the byte count asserted here
-    is exactly what would have gone on the wire.
+    `send` is patched to capture the report while the preflight still runs
+    against `vantage_server`. The captured dict is encoded with the same
+    `json.dumps(...).encode("utf-8")` `transport.send` uses, so the byte
+    count is exactly what would have gone on the wire.
     """
     sent: list[dict[str, object]] = []
 

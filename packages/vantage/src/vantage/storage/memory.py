@@ -1,32 +1,17 @@
-"""An in-memory `ExecutionStore`, kept for tests and RQ-30's contract proof.
+"""An in-memory `ExecutionStore` for tests.
 
-No file, no lock, no adapter-specific pragmas -- everything the SQLite
-adapter has to earn back. It exists so the shared contract suite
-(``vantage_port_contract.py``) runs against two different mechanisms and the
-port stays honest (design.md, D10) rather than being satisfied by only one
-implementation that happens to agree with itself.
+The shared contract suite (``vantage_port_contract.py``) runs against both
+this and the SQLite adapter, so the port is proven by two independent
+mechanisms rather than one implementation agreeing with itself. It is a real
+implementation, not a stub: it mirrors the SQLite adapter's catalogue
+monotonicity, first-write-wins results keyed by ``(run_id, node_id,
+attempt)``, and the run upsert guard -- a finish-write (`exit_status` is not
+`None`) applies over a start-only row, never the reverse.
 
-This is a second mechanism, not a stub (RQ-30, design.md D22): the catalogue
-is keyed by node id with the same `MAX`-style monotonicity guard the SQLite
-adapter enforces with SQL (design.md D20), and results are keyed by
-``(run_id, node_id, attempt)`` with first-write-wins, mirroring the SQLite
-adapter's ``ON CONFLICT ... DO NOTHING`` (design.md D19 layer 3).
-
-`record_session` carries the same monotonic upsert guard as the SQLite
-adapter's ``DO UPDATE`` branch (design.md D25): a finish-write (`exit_status`
-is not `None`) applies over an existing start-only row (`stored.exit_status
-is None`), never the reverse, and a report that changes nothing is a no-op.
-The shared contract suite requires both adapters to agree, so this is a
-second mechanism proving the guard, not a stub copying it.
-
-``_last_contact`` is a second dict, keyed the same way as ``_executions``,
-because ``Execution`` itself carries no ``last_contact_at`` field (design.md
-D1) -- that column is a storage-adapter concern, not part of the domain
-dataclass. It is set only on the insert branch of ``record_session`` (D27),
-left alone on the conflict branch, and advanced by ``touch_last_contact``
-under the same monotonic guard the SQLite adapter enforces with SQL (D33) --
-no lexicographic-width hazard here, since real `datetime` objects compare
-exactly, unlike the SQLite adapter's stored TEXT.
+``_last_contact`` is a separate dict because ``Execution`` carries no
+``last_contact_at`` field; that column is a storage concern. It is set on
+the insert branch of ``record_session`` and advanced only by
+``touch_last_contact``, monotonically.
 """
 
 from __future__ import annotations
@@ -54,14 +39,9 @@ from vantage.core.ports.storage import (
 
 
 def _normalized_vcs(vcs: VcsContext | None) -> VcsContext | None:
-    """The same all-null normalisation rule the SQLite adapter's
-    `_row_to_execution` applies on every read (design.md D48) -- applied
-    here on write instead, because this adapter stores the Python object
-    directly rather than re-deriving it from row columns on every read. In
-    production `_to_execution` already normalises before either adapter
-    sees the value; this is the second, independent enforcement `vcs=None`
-    normalisation (task 4.5) proves at the contract level so the two
-    adapters cannot drift apart."""
+    """An all-null `VcsContext` becomes `None` -- the rule the SQLite
+    adapter's `_row_to_execution` applies on read, applied here on write
+    because this adapter stores the object itself."""
     if vcs is None:
         return None
     if (
@@ -75,8 +55,8 @@ def _normalized_vcs(vcs: VcsContext | None) -> VcsContext | None:
     return vcs
 
 
-# `attempt` is not on the wire (design.md D19); every result in Phase 1/2/3
-# is attempt 0, matching the schema's `DEFAULT 0`.
+# `attempt` is not on the wire; every result is attempt 0, matching the
+# schema's `DEFAULT 0`.
 _ATTEMPT = 0
 
 
@@ -100,11 +80,8 @@ class InMemoryExecutionStore:
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
-        # `received_at` is part of the port's signature (the two-clocks point,
-        # design.md D1); `get_execution` still returns only what the client
-        # reported, but `received_at` is now the insert-branch source for
-        # `_last_contact` (D27) -- the one place this adapter's contract
-        # surface reads it back is `touch_last_contact`'s monotonic guard.
+        # `received_at` is the server's clock, not the client's: it seeds
+        # `_last_contact` for a new run and is not part of `Execution`.
         identity = execution.identity.value
         stored = self._executions.get(identity)
         created = stored is None
@@ -112,19 +89,11 @@ class InMemoryExecutionStore:
             self._executions[identity] = replace(execution, vcs=_normalized_vcs(execution.vcs))
             self._last_contact[identity] = received_at
         elif stored.exit_status is None and execution.exit_status is not None:
-            # Mirrors the SQLite adapter's `DO UPDATE ... WHERE` (design.md
-            # D25): `exit_status`, never `finished_at`, is the discriminator,
-            # and `started_at` is never advanced on this path.
-            #
-            # `vcs` merges under the SAME guard, own task 4.12 (design.md
-            # D48): `execution.vcs.merged_over(stored.vcs)` is the per-FIELD
-            # coalesce -- null -> value only, never value -> null -- the
-            # in-memory mirror of the SQLite adapter's per-column SQL
-            # `COALESCE`. `stored.vcs if execution.vcs is None else
-            # execution.vcs` (whole-object coalesce) is NOT the same rule:
-            # it diverges the moment one report carries a partial snapshot
-            # (a detached HEAD, a repository with no commits), which a
-            # per-field merge tolerates and a whole-object swap does not.
+            # Mirrors the SQLite adapter's `DO UPDATE ... WHERE`: `exit_status`,
+            # never `finished_at`, is the discriminator, and `started_at` is
+            # never advanced on this path. `vcs` merges per field, like the
+            # SQLite adapter's per-column `COALESCE`, so a partial snapshot
+            # never nulls a stored value.
             merged_vcs = _normalized_vcs(
                 stored.vcs if execution.vcs is None else execution.vcs.merged_over(stored.vcs)
             )
@@ -144,10 +113,8 @@ class InMemoryExecutionStore:
             if key not in self._results:
                 self._results[key] = result
 
-        # `setdefault` is `INSERT OR IGNORE`'s second mechanism (design.md
-        # D98): a metadata file/entry is written once, and a second
-        # `record_session` call for the same run carrying the identical
-        # metadata changes nothing, mirroring the SQLite adapter exactly.
+        # `setdefault` mirrors the SQLite adapter's `INSERT OR IGNORE`: a
+        # metadata file/entry is written once and never updated.
         for metadata_file in metadata.files:
             self._metadata_files.setdefault((identity, metadata_file.source_file), metadata_file)
         for metadata_entry in metadata.entries:
@@ -168,7 +135,7 @@ class InMemoryExecutionStore:
 
         # Mirrors the SQLite `DO UPDATE`: identity fields always refresh, but
         # `last_seen_at`/`last_seen_run_id` advance only when the new run is
-        # strictly newer (design.md D20's monotonicity guard).
+        # strictly newer.
         advances = execution.started_at > existing.last_seen_at
         self._catalogue[identity.node_id] = CatalogueEntry(
             identity=identity,
@@ -213,20 +180,15 @@ class InMemoryExecutionStore:
         metadata_key: str | None = None,
         metadata_value: str | None = None,
     ) -> Page[RunListEntry]:
-        # Python sort/slice mirrors the SQLite adapter's `ORDER BY
-        # started_at DESC, id DESC` / `LIMIT min(limit, 200) + 1 OFFSET`
-        # exactly (design.md D57, D61): sorting descending on the same
-        # two-key tuple as the SQL `ORDER BY` gives the identical total
-        # order, and slicing `page_limit + 1` rows is the same
-        # truncation-vs-exhaustion signal without a second pass.
+        # Mirrors the SQLite adapter's `ORDER BY started_at DESC, id DESC` /
+        # `LIMIT min(limit, 200) + 1 OFFSET`: fetching one extra row is what
+        # sets `has_more` without a second query.
         page_limit = min(limit, MAX_PAGE_ITEMS)
         candidates: Iterable[Execution] = self._executions.values()
         if metadata_key is not None and metadata_value is not None:
-            # The in-memory mirror of `rm.key = ? AND rm.value = ?` served by
-            # `idx_run_metadata_key_value` (design.md D100): `entry.value` is
-            # `None` for any declared-but-dropped key, so this equality check
-            # excludes it exactly the way SQL NULL never equals a bound
-            # string does for the SQLite adapter.
+            # Mirrors `rm.key = ? AND rm.value = ?`: `entry.value` is `None`
+            # for a declared-but-uncaptured key, so it never matches, just as
+            # SQL NULL never equals a bound string.
             matching_run_ids = {
                 run_id
                 for (run_id, entry_key), entry in self._metadata_entries.items()
@@ -255,9 +217,9 @@ class InMemoryExecutionStore:
         return Page(items=items, has_more=has_more)
 
     def count_runs_predating_metadata_key(self, key: str) -> int:
-        # Q2's horizon (design.md D100): ANY row for `key`, of any status,
-        # counts towards `first_seen` -- mirroring the SQLite adapter's
-        # `run_metadata` join, which does not filter on `value` either.
+        # A row for `key` of any status counts towards `first_seen`,
+        # mirroring the SQLite adapter's `run_metadata` join, which does not
+        # filter on `value` either.
         run_ids_with_key = {
             run_id for (run_id, entry_key) in self._metadata_entries if entry_key == key
         }
@@ -282,11 +244,10 @@ class InMemoryExecutionStore:
         )
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
-        # Same clamp/`has_more` mechanism as `list_runs` (design.md D57,
-        # D61) -- the paginated, LEAN sibling of `get_results`. Dict
-        # insertion order mirrors the SQLite adapter's `ORDER BY r.id`.
-        # `project_failure` is the reference implementation the SQLite
-        # adapter's SQL is held to agreement with (design.md D76).
+        # The paginated, lean sibling of `get_results`, with the same
+        # clamp/`has_more` mechanism as `list_runs`. Dict insertion order
+        # mirrors the SQLite adapter's `ORDER BY r.id`, and `project_failure`
+        # is the reference the SQLite adapter's SQL must agree with.
         page_limit = min(limit, MAX_PAGE_ITEMS)
         matching = [
             result
@@ -321,8 +282,7 @@ class InMemoryExecutionStore:
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
         # Mirrors `list_runs`' total order -- `(started_at, run_id)`
         # descending -- over every execution that has a result for this
-        # `node_id` (design.md D57, D61, D63). An unknown `node_id` matches
-        # nothing and yields an empty page, never an error.
+        # `node_id`. An unknown `node_id` yields an empty page, never an error.
         page_limit = min(limit, MAX_PAGE_ITEMS)
         matches = [
             (run_id, result)
@@ -351,8 +311,7 @@ class InMemoryExecutionStore:
         return Page(items=items, has_more=has_more)
 
     def list_settings(self, namespace: str) -> Sequence[UserSetting]:
-        # `sorted()` on `key` mirrors the SQLite adapter's `ORDER BY key`
-        # (design.md D85, D86).
+        # `sorted()` on `key` mirrors the SQLite adapter's `ORDER BY key`.
         matching = [
             setting
             for (setting_namespace, _key), setting in self._settings.items()

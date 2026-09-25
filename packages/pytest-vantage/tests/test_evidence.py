@@ -1,16 +1,12 @@
 """`EvidenceCollector`: the second registered plugin object that runs
 `pytest_runtest_makereport` on the process that actually ran the test --
-under xdist that is a *worker*, never the controller (design.md D68).
+under xdist that is a *worker*, never the controller.
 
-`test_report_vantage_evidence_attribute_survives_the_xdist_wire` below is
-the test that proves D68 rather than assuming it: it runs a failing test
-under real `-n 2` and checks the SERIALIZED report the controller receives,
-not the worker's own in-memory object -- if the `TestReport.__dict__`
-round-trip reasoning in design.md were wrong, this is where it would
-surface, not a user's CI. It was written and confirmed failing, for the
-right reason (no `vantage_evidence` attribute on the controller's copy of
-the report, because nothing yet registers on the worker), before
-`pytest_vantage.evidence` existed at all.
+`test_report_vantage_evidence_attribute_survives_the_xdist_wire` runs a
+failing test under real `-n 2` and checks the SERIALIZED report the
+controller receives, not the worker's own in-memory object -- if the
+`TestReport.__dict__` round trip ever stopped carrying the attribute, this
+is where it would surface, not a user's CI.
 """
 
 from __future__ import annotations
@@ -41,8 +37,8 @@ class _ControllerConfigDouble:
     `workerinput`, so `EvidenceCollector` registration and the preflight
     both run. The configured server address (a closed low port) fails the
     preflight immediately rather than waiting out a connect timeout --
-    `EvidenceCollector` registers BEFORE that preflight runs either way
-    (design.md D68), so its outcome is irrelevant to what this test checks.
+    `EvidenceCollector` registers BEFORE that preflight runs either way, so
+    its outcome is irrelevant to what this test checks.
     """
 
     def __init__(self) -> None:
@@ -61,23 +57,21 @@ class _ControllerConfigDouble:
         return None
 
 
-@pytest.mark.req(id="RQ-27")
 def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
     pytester: pytest.Pytester,
 ) -> None:
-    """design.md D68: `report.vantage_evidence` is a flat
-    `dict[str, str | int | bool | None]`, set by `EvidenceCollector`'s
-    hookwrapper on the worker that ran the test, and it must still be
-    present on the report object the CONTROLLER's own
-    `pytest_runtest_logreport` receives after xdist forwards it -- the
-    mechanism `wasxfail` already relies on (`TestReport._to_json` copies
-    `__dict__`; `TestReport.__init__(**extra)` restores it).
+    """`report.vantage_evidence` is a flat `dict[str, str | int | bool | None]`,
+    set by `EvidenceCollector`'s hookwrapper on the worker that ran the
+    test, and it must still be present on the report object the
+    CONTROLLER's own `pytest_runtest_logreport` receives after xdist
+    forwards it -- the mechanism `wasxfail` already relies on
+    (`TestReport._to_json` copies `__dict__`; `TestReport.__init__(**extra)`
+    restores it).
 
     No live server is needed: a worker's `EvidenceCollector` never
-    preflights or opens a socket (design.md D68), so nothing here depends on
-    one being reachable, only on `--vantage` activating recording and
-    `--vantage-failure-text` opting into capture (design.md D72, revised
-    for RQ-25).
+    preflights or opens a socket, so nothing here depends on one being
+    reachable, only on `--vantage` activating recording and
+    `--vantage-failure-text` opting into capture.
 
     The conftest hook below distinguishes controller from worker via
     `hasattr(config, "workerinput")` and writes the marker file ONLY from
@@ -85,9 +79,9 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
     worker's own local (pre-serialization) object still carries the
     attribute it just set on itself.
 
-    RQ-27's "without xdist" CI matrix leg installs no `pytest-xdist` at all,
+    The CI leg that runs without xdist installs no `pytest-xdist` at all,
     so `-n 2` is not a recognised option there -- skip rather than fail, the
-    same pattern `test_xdist_capture.py` already uses.
+    same pattern `test_xdist_capture.py` uses.
     """
     pytest.importorskip("xdist")
     pytester.makeconftest(
@@ -119,7 +113,7 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
     pytester.makepyfile(
         test_wire="""
         def test_the_failure():
-            raise AssertionError("synthetic failure for the D68 xdist-wire test")
+            raise AssertionError("synthetic failure for the xdist-wire test")
         """
     )
 
@@ -137,12 +131,10 @@ def test_report_vantage_evidence_attribute_survives_the_xdist_wire(
 def test_absent_flag_means_evidencecollector_is_never_registered(
     pytester: pytest.Pytester,
 ) -> None:
-    """failure-evidence -> Capture is opt-in, absent by default (design.md
-    D72, revised after Phase 9's RQ-25 measurement): with `--vantage` alone
-    and no `--vantage-failure-text`, no `EvidenceCollector` is registered
-    anywhere -- a default session pays zero of the second-rendering cost,
-    because the hookwrapper does not exist, not because a flag is checked
-    per test.
+    """Capture is opt-in: with `--vantage` alone and no
+    `--vantage-failure-text`, no `EvidenceCollector` is registered anywhere
+    -- a default session pays none of the second-rendering cost, because the
+    hookwrapper does not exist, not because a flag is checked per test.
     """
     pytester.makeconftest(
         """
@@ -177,10 +169,8 @@ def test_absent_flag_means_evidencecollector_is_never_registered(
 def test_opt_in_flag_means_evidencecollector_is_registered(
     pytester: pytest.Pytester,
 ) -> None:
-    """failure-evidence -> Capture is opt-in, absent by default -> The
-    opt-in enables failure-text capture (design.md D72): with
-    `--vantage-failure-text` given alongside `--vantage`, exactly one
-    `EvidenceCollector` is registered.
+    """With `--vantage-failure-text` given alongside `--vantage`, exactly
+    one `EvidenceCollector` is registered.
 
     This is the tamper-proof counterpart to the absent-flag test above --
     together they prove the flag actually flips the outcome rather than
@@ -220,11 +210,10 @@ def test_absent_flag_does_not_suppress_outcome_timings_or_identity(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """failure-evidence -> Capture is opt-in, absent by default -> Capture
-    being absent does not suppress the rest of the result (design.md D72):
-    `Recorder` never consulted `EvidenceCollector` for outcome, timings or
-    identity, so a session invoked without the failure-capture opt-in still
-    records those in full against a real, live server.
+    """Without failure capture the rest of the result is still recorded:
+    `Recorder` never consults `EvidenceCollector` for outcome, timings or
+    identity, so a session without `--vantage-failure-text` still records
+    those in full against a real, live server.
     """
     pytester.makepyfile(
         test_sample="""
@@ -246,10 +235,10 @@ def test_absent_flag_does_not_suppress_outcome_timings_or_identity(
 
 
 def test_evidencecollector_registers_on_the_controller_when_activated() -> None:
-    """design.md D68: the non-xdist counterpart to the worker registration
-    test in `test_xdist_guard.py` -- `EvidenceCollector` is registered on
-    the controller too, since a session with no xdist workers at all still
-    needs failure evidence collected somewhere."""
+    """The non-xdist counterpart to the worker registration test in
+    `test_xdist_guard.py` -- `EvidenceCollector` is registered on the
+    controller too, since a session with no xdist workers at all still needs
+    failure evidence collected somewhere."""
     from pytest_vantage.evidence import EvidenceCollector
 
     config = _ControllerConfigDouble()
@@ -258,7 +247,7 @@ def test_evidencecollector_registers_on_the_controller_when_activated() -> None:
     assert any(isinstance(plugin, EvidenceCollector) for plugin in config.pluginmanager.registered)
 
 
-# --- Phase 3: rendering and field extraction (design.md D69, D70) -----------
+# --- rendering and field extraction -----------------------------------------
 
 
 def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[str, object] | None]:
@@ -270,10 +259,9 @@ def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[s
 
     An unreachable `--vantage-server` is given deliberately: `EvidenceCollector`
     registers and runs regardless of reachability (`plugin.py::pytest_configure`
-    registers it BEFORE the preflight, design.md D68), so no live server is
-    needed to observe what it extracted. `--vantage-failure-text` is given
-    unconditionally -- these tests exercise rendering and field extraction,
-    which (design.md D72, revised for RQ-25) now require the opt-in.
+    registers it BEFORE the preflight), so no live server is needed to
+    observe what it extracted. `--vantage-failure-text` is given
+    unconditionally -- rendering and field extraction only run with it.
     """
     pytester.makeconftest(
         """
@@ -303,11 +291,9 @@ def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[s
 
 
 def test_traceback_is_complete_under_tb_no(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Traceback capture invariant to display flags ->
-    The traceback is complete under `--tb=no` (design.md D69, Q1): the
-    stored traceback is rendered independently of the session's display
-    flag, so it still names every frame even when nothing was shown on the
-    terminal.
+    """The traceback is complete under `--tb=no`: the stored traceback is
+    rendered independently of the session's display flag, so it still names
+    every frame even when nothing was shown on the terminal.
     """
     pytester.makepyfile(
         test_tb_no="""
@@ -336,10 +322,8 @@ def test_traceback_is_complete_under_tb_no(pytester: pytest.Pytester) -> None:
 
 
 def test_traceback_is_complete_under_tb_line(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Traceback capture invariant to display flags ->
-    The traceback is complete under `--tb=line` (design.md D69): identical
-    obligation to the `--tb=no` case above, under the other display flag
-    that also renders nothing close to a full traceback for the terminal.
+    """The traceback is complete under `--tb=line`, the other display flag
+    that renders nothing close to a full traceback on the terminal.
     """
     pytester.makepyfile(
         test_tb_line="""
@@ -368,8 +352,7 @@ def test_traceback_is_complete_under_tb_line(pytester: pytest.Pytester) -> None:
 
 
 def test_failure_type_message_repr_come_from_excinfo(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Failure location, type and message (design.md
-    D69): `failure_type` is `excinfo.typename`, `failure_message` is
+    """`failure_type` is `excinfo.typename`, `failure_message` is
     `excinfo.exconly()`, `failure_repr` is `repr(excinfo.value)` -- three
     genuinely different granularities, none derived from another.
     """
@@ -394,10 +377,9 @@ def test_failure_type_message_repr_come_from_excinfo(pytester: pytest.Pytester) 
 
 
 def test_twenty_tests_failing_at_one_line_group_as_one(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Failure location, type and message -> Twenty
-    tests failing at one source line group as one (design.md D69): the
-    recorded `(failure_path, failure_lineno)` pair is the same for every
-    test that raises from the identical helper line.
+    """Twenty tests failing at one source line group as one: the recorded
+    `(failure_path, failure_lineno)` pair is the same for every test that
+    raises from the identical helper line.
     """
     lines = ["def _raise():", '    raise AssertionError("synthetic shared failure")', ""]
     for index in range(20):
@@ -418,9 +400,8 @@ def test_twenty_tests_failing_at_one_line_group_as_one(pytester: pytest.Pytester
 def test_recorded_location_is_the_raising_helper_not_the_test_function(
     pytester: pytest.Pytester,
 ) -> None:
-    """failure-evidence -> Failure location, type and message -> The
-    recorded location is the raising site (design.md D69): the helper's
-    raising line, never the test function's first line.
+    """The recorded location is the raising site: the helper's raising
+    line, never the test function's first line.
     """
     pytester.makepyfile(
         test_helper_location="""
@@ -444,10 +425,9 @@ def test_recorded_location_is_the_raising_helper_not_the_test_function(
 
 
 def test_skipped_test_records_skip_reason_not_failure_fields(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Failure location, type and message -> A skipped
-    test does not crash the recorder (design.md D70, row 3): `skip_reason`
-    is recorded verbatim, including pytest's own prefix; the failure
-    fields and traceback are absent, and recording itself does not raise.
+    """A skipped test does not crash the recorder: `skip_reason` is
+    recorded verbatim, including pytest's own prefix; the failure fields and
+    traceback are absent, and recording itself does not raise.
     """
     pytester.makepyfile(
         test_skip="""
@@ -470,9 +450,8 @@ def test_skipped_test_records_skip_reason_not_failure_fields(pytester: pytest.Py
 
 
 def test_bare_xfail_records_empty_reason_not_none(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Failure location, type and message (design.md
-    D70): `@pytest.mark.xfail` with no `reason=` records `xfail_reason ==
-    ""`, never absent -- the `hasattr` check, never truthiness.
+    """`@pytest.mark.xfail` with no `reason=` records `xfail_reason == ""`,
+    never absent -- the `hasattr` check, never truthiness.
     """
     pytester.makepyfile(
         test_bare_xfail="""
@@ -493,10 +472,9 @@ def test_bare_xfail_records_empty_reason_not_none(pytester: pytest.Pytester) -> 
 
 
 def test_xfail_precedes_skip_when_both_shapes_are_present(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Failure location, type and message (design.md
-    D70): a failing `@pytest.mark.xfail(reason=...)` arrives with
-    `report.outcome == "skipped"` AND `wasxfail` both present -- row 2
-    (`xfail_reason`) must win over row 3 (`skip_reason`).
+    """A failing `@pytest.mark.xfail(reason=...)` arrives with
+    `report.outcome == "skipped"` AND `wasxfail` both present --
+    `xfail_reason` must win over `skip_reason`.
     """
     pytester.makepyfile(
         test_xfail_and_skip_shape="""
@@ -518,10 +496,9 @@ def test_xfail_precedes_skip_when_both_shapes_are_present(pytester: pytest.Pytes
 
 
 def test_a_repr_that_raises_costs_only_that_field(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Failure location, type and message (design.md
-    D69): an exception whose `__repr__` raises costs only `failure_repr`
-    -- type, message, and traceback (all built from `str`, never `repr`)
-    are still recorded.
+    """An exception whose `__repr__` raises costs only `failure_repr` --
+    type, message, and traceback (all built from `str`, never `repr`) are
+    still recorded.
     """
     pytester.makepyfile(
         test_bad_repr="""
@@ -547,13 +524,11 @@ def test_a_repr_that_raises_costs_only_that_field(pytester: pytest.Pytester) -> 
     assert call_evidence["traceback"] is not None
 
 
-# --- Phase 4: captured output, empty distinct from absent (design.md D71) --
+# --- captured output, empty distinct from absent ---------------------------
 
 
 def test_silent_test_has_empty_captured_output_not_absent(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Captured output, empty distinct from absent ->
-    A silent test has empty captured output, not absent (design.md D71): a
-    test that prints nothing, run under the default (enabled) capture,
+    """A test that prints nothing, run under the default (enabled) capture,
     records `captured_stdout == ""` -- captured AND empty, never absent.
     """
     pytester.makepyfile(
@@ -572,12 +547,9 @@ def test_silent_test_has_empty_captured_output_not_absent(pytester: pytest.Pytes
 
 
 def test_capture_disabled_leaves_output_absent(pytester: pytest.Pytester) -> None:
-    """failure-evidence -> Captured output, empty distinct from absent ->
-    Capture disabled leaves output absent, not empty (design.md D71): a
-    session run with `-s` / `--capture=no` never observes output at all, so
-    `captured_stdout`/`captured_stderr` are `None`, not `""` -- the
-    distinguisher is the session's capture mode, never `text or None`
-    (RQ-5.2, RQ-9.3's forbidden idiom, applied to this field family).
+    """A session run with `-s` / `--capture=no` never observes output at
+    all, so `captured_stdout`/`captured_stderr` are `None`, not `""` -- the
+    distinguisher is the session's capture mode, never `text or None`.
     """
     pytester.makepyfile(
         test_capture_off="""
@@ -594,28 +566,19 @@ def test_capture_disabled_leaves_output_absent(pytester: pytest.Pytester) -> Non
     assert call_evidence["captured_stderr"] is None
 
 
-@pytest.mark.req(id="RQ-24")
-def test_the_private_rendering_method_this_change_depends_on_still_exists() -> None:
+def test_the_private_rendering_method_evidence_capture_depends_on_still_exists() -> None:
     """`_failure_fields` renders the traceback through
     `item._repr_failure_py(excinfo, style="long")`, a private-by-underscore
-    method, because the public `Function.repr_failure` dropped its `style`
-    keyword and now derives the style from `--tb` -- the exact dependence
-    decision Q1 exists to eliminate. `Node._repr_failure_py` is the shared
-    implementation both public overloads delegate to, and `Function` does
-    not override it.
+    method, because the public `Function.repr_failure` takes no `style` and
+    derives it from `--tb`, which would make the stored traceback depend on
+    the user's display flag.
 
     Without this test a pytest release that renames or removes that method
     degrades **silently**: the `AttributeError` lands in `_failure_fields`'
     deliberately broad per-field `except`, `traceback`, `failure_path` and
-    `failure_lineno` all become `None`, the session still records, and the
-    database looks healthy while holding no failure evidence at all. That is
-    Q1's failure mode arriving through a different door, and a per-field
-    guard that swallows it is exactly why the dependency has to be asserted
-    somewhere that goes red instead.
-
-    Asserted against the public `pytest.Item`, never by importing
-    `_pytest.nodes`: RQ-24's constraint is that no private *module* is
-    imported, and this keeps that true.
+    `failure_lineno` all become `None`, and the session still records while
+    holding no failure evidence at all. Asserted against the public
+    `pytest.Item`, never by importing the private `_pytest.nodes` module.
     """
     method = getattr(pytest.Item, "_repr_failure_py", None)
     assert method is not None, (
@@ -625,5 +588,5 @@ def test_the_private_rendering_method_this_change_depends_on_still_exists() -> N
     parameters = inspect.signature(method).parameters
     assert "style" in parameters, (
         "pytest.Item._repr_failure_py no longer accepts `style`; without it the"
-        " stored traceback follows the user's --tb flag, which decision Q1 forbids"
+        " stored traceback would follow the user's --tb flag"
     )

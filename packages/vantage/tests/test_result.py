@@ -1,10 +1,9 @@
-"""`Result`, `CaseIdentity` and `CatalogueEntry`'s frozen, nullable shape
-(design.md, Interfaces / Contracts and D17-D18).
+"""`Result`, `CaseIdentity` and `CatalogueEntry`'s frozen, nullable shape.
 
 Mirrors `test_execution.py`. The outcome vocabulary, the `""`-vs-`None`
 distinction on `param_id`, and the "a phase that never ran is NULL, never
-zero" rule are all proved at this layer because a design that gets any of
-them wrong at the dataclass hop gets them wrong everywhere downstream.
+zero" rule are all proved at this layer because getting any of them wrong
+at the dataclass hop gets them wrong everywhere downstream.
 """
 
 from __future__ import annotations
@@ -51,7 +50,7 @@ def _result(**overrides: object) -> Result:
     return Result(**fields)  # type: ignore[arg-type]
 
 
-# --- 1.2: outcome vocabulary -------------------------------------------------
+# --- outcome vocabulary ------------------------------------------------------
 
 
 @pytest.mark.parametrize("outcome", sorted(OUTCOMES))
@@ -70,7 +69,7 @@ def test_result_rejects_an_outcome_outside_outcomes() -> None:
         _result(outcome="not-a-real-outcome")
 
 
-# --- 1.3: ""-vs-None on param_id, the dataclass hop --------------------------
+# --- ""-vs-None on param_id, the dataclass hop -------------------------------
 
 
 def test_case_identity_empty_string_param_id_is_not_equal_to_none_param_id() -> None:
@@ -107,7 +106,7 @@ def test_case_identity_empty_string_param_id_survives_construction_unchanged() -
     assert identity.param_id is not None
 
 
-# --- 1.4: null class_name and a genuine 0.0 phase duration -------------------
+# --- null class_name and a genuine 0.0 phase duration ------------------------
 
 
 def test_case_identity_class_name_is_none_for_a_module_level_test() -> None:
@@ -157,11 +156,11 @@ def test_result_is_frozen() -> None:
         result.outcome = "failed"  # type: ignore[misc]
 
 
-# --- 1.6: Result gains failure and captured fields (design.md D77) ---------
+# --- failure and captured fields ---------------------------------------------
 
 
-def test_result_gains_failure_and_captured_fields() -> None:
-    """design.md D77: `Result` carries `failure: FailureEvidence | None` and
+def test_result_carries_failure_and_captured_fields() -> None:
+    """`Result` carries `failure: FailureEvidence | None` and
     `captured: CapturedOutput`; `FailureEvidence` carries its 13 named
     fields, `CapturedOutput` its 4."""
     result_field_names = {f.name for f in dataclasses.fields(Result)}

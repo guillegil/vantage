@@ -1,14 +1,12 @@
-"""RQ-37 (the server cannot be reached at all) and RQ-21 (something goes
-wrong while reporting to one that can) -- design.md D6's two client-side
-failure paths, proven end to end wherever a real socket is the only thing
-that can prove the behaviour, and as focused unit tests wherever the
-mechanism is a pure function or a decorator that does not need one.
+"""The plugin's two failure paths: the server cannot be reached at all, or
+something goes wrong while reporting to one that can. Proven end to end
+wherever only a real socket can prove the behaviour, and as focused unit
+tests wherever the mechanism is a pure function or a decorator.
 
 `_StubServer` stands in for `vantage_test_server.py`'s real `vantage`
-server in every test here: these scenarios are about a server that behaves
-badly (closes without responding, never responds, sends garbage back), not
-about the real ingestion endpoint, so a real `vantage` process would only
-add ceremony without adding proof.
+server wherever a test is about a server that behaves badly (closes without
+responding, never responds, sends garbage back) rather than about the real
+ingestion endpoint.
 """
 
 from __future__ import annotations
@@ -62,14 +60,12 @@ def _closed_port_address() -> str:
 class _StubServer:
     """A bare TCP server whose per-connection behaviour is entirely
     controlled by the caller's `handle_connection` -- no HTTP framework in
-    the loop, because the whole point of every test that uses this is to
-    hand the plugin's client code exactly the malformed or absent response
-    a well-behaved server never would (design.md threat matrix "Untrusted
-    response", D6's RQ-21 failure paths).
+    the loop, so a test can hand the plugin's client code exactly the
+    malformed or absent response a well-behaved server never would.
 
     Accepts connections in a loop, each handled on its own thread, because a
-    single session can open two: the preflight (task 6.8) and, if that
-    succeeds, the report itself.
+    single session opens several: the preflight, the capability probe, and
+    the start and finish reports.
     """
 
     def __init__(self, handle_connection: Callable[[socket.socket], None]) -> None:
@@ -114,13 +110,13 @@ class _StubServer:
 
 
 def _accept_then_close(conn: socket.socket) -> None:
-    """RQ-21's "accepts the connection and then closes it without
-    responding" scenario: no bytes back at all, not even a partial header.
+    """Accepts the connection and closes it without responding: no bytes
+    back at all, not even a partial header.
     """
 
 
 def _accept_and_hang(conn: socket.socket) -> None:
-    """RQ-21's "accepts and never responds" scenario. The sleep is far
+    """Accepts the connection and never responds. The sleep is far
     longer than any timeout a test configures -- the client's own
     ``--vantage-timeout`` is what must end this, never this function
     returning on its own.
@@ -160,7 +156,7 @@ def _respond_with_bare_500(conn: socket.socket) -> None:
     conn.sendall(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
 
 
-# --- Unit: the preflight probe itself (task 6.8) ----------------------------
+# --- Unit: the preflight probe itself -------------------------------------
 
 
 def test_preflight_reachable_is_false_on_connection_refused() -> None:
@@ -178,15 +174,12 @@ def test_preflight_reachable_is_true_when_something_listens() -> None:
         assert _preflight_reachable(server.address, timeout=1.0) is True
 
 
-# --- Unit: the fault-isolation decorator itself (RQ-21 "every hook is
-# fault-isolated") ------------------------------------------------------------
+# --- Unit: the fault-isolation decorator itself ---------------------------
 #
-# `Recorder`'s own hook bodies offer no seam to make BOTH
-# `pytest_report_header` and `pytest_sessionfinish` raise independently
-# without monkeypatching the already-decorated method itself, which would
-# bypass the very code this scenario exists to prove. A direct unit test
-# against the decorator proves the same contract for real, and does so
-# without depending on which of `Recorder`'s hooks happens to run first.
+# `Recorder`'s hooks offer no seam to make both `pytest_report_header` and
+# `pytest_sessionfinish` raise without monkeypatching the decorated method
+# itself, which would bypass the code under test. A direct unit test against
+# the decorator proves the same contract, independent of hook order.
 
 
 class _Instrumented:
@@ -205,7 +198,6 @@ class _Instrumented:
         raise KeyboardInterrupt
 
 
-@pytest.mark.req(id="RQ-21")
 def test_fault_isolated_catches_exception_and_latches_after_first_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -232,14 +224,12 @@ def test_fault_isolated_never_catches_keyboard_interrupt() -> None:
         instance.raises_keyboard_interrupt()
 
 
-# --- Unit: `liveness_isolated`, the second, non-latching-onto-`_disabled`
-# decorator (design.md D29) --------------------------------------------------
+# --- Unit: `liveness_isolated`, which latches its own flag -----------------
 #
-# `fault_isolated`'s own tests above are untouched -- its name, behaviour and
-# message are unchanged by the `_isolated(flag, description)` factory this
-# decorator is built from. These tests prove the new path is independent in
-# both directions: a liveness failure never sets `_disabled`, and the two
-# flags never read or write each other's state.
+# Both decorators come from the same `_isolated(flag, description)` factory.
+# These tests prove the two paths are independent in both directions: a
+# liveness failure never sets `_disabled`, and the two flags never read or
+# write each other's state.
 
 
 class _DualInstrumented:
@@ -314,10 +304,10 @@ def test_warn_emits_a_vantage_warning_by_default() -> None:
 def test_warn_falls_back_to_the_terminal_reporter_when_warnings_are_errors() -> None:
     """`filterwarnings = ["error"]` (or `-W error`) turns
     `warnings.warn(VantageWarning(...))` into a raised exception instead of
-    an ordinary warning -- design.md D6 requires the message to still reach
-    the user rather than let a reporting failure crash the session that
-    exact way. `warnings.catch_warnings` + `simplefilter("error")` recreates
-    that configuration directly, independent of how this suite's own
+    an ordinary warning -- the message must still reach the user rather
+    than let a reporting failure crash the session that way.
+    `warnings.catch_warnings` + `simplefilter("error")` recreates that
+    configuration directly, independent of how this suite's own
     `pyproject.toml` happens to be set up.
     """
     lines: list[str] = []
@@ -358,10 +348,9 @@ def test_warn_falls_back_to_stderr_when_no_terminal_reporter_is_registered(
     assert "vantage: something went wrong" in capsys.readouterr().err
 
 
-# --- RQ-37: the server cannot be reached at all (task 6.7) -------------------
+# --- The server cannot be reached at all -----------------------------------
 
 
-@pytest.mark.req(id="RQ-37")
 def test_closed_port_warns_naming_the_address_and_runs_unrecorded(
     pytester: pytest.Pytester,
 ) -> None:
@@ -377,7 +366,6 @@ def test_closed_port_warns_naming_the_address_and_runs_unrecorded(
     assert output.count("VantageWarning:") == 1
 
 
-@pytest.mark.req(id="RQ-37")
 def test_unresolvable_host_warns_naming_the_address_and_runs_unrecorded(
     pytester: pytest.Pytester,
 ) -> None:
@@ -393,7 +381,6 @@ def test_unresolvable_host_warns_naming_the_address_and_runs_unrecorded(
     assert output.count("VantageWarning:") == 1
 
 
-@pytest.mark.req(id="RQ-37")
 def test_recorder_is_not_registered_when_the_preflight_fails(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -401,7 +388,7 @@ def test_recorder_is_not_registered_when_the_preflight_fails(
 
     monkeypatch.delenv("VANTAGE_SERVER", raising=False)
     # `pytest.warns` rather than a bare call: the preflight failing here is
-    # the whole point of the scenario, so asserting the warning is part of
+    # the whole point of the test, so asserting the warning is part of
     # the proof -- and it stops this in-process `parseconfigure` from
     # leaking a `VantageWarning` into the summary of the suite running it.
     with pytest.warns(VantageWarning, match="cannot reach"):
@@ -410,7 +397,6 @@ def test_recorder_is_not_registered_when_the_preflight_fails(
     assert not any(isinstance(plugin, Recorder) for plugin in config.pluginmanager.get_plugins())
 
 
-@pytest.mark.req(id="RQ-37")
 def test_preflight_falls_back_to_the_scheme_default_port(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -426,7 +412,7 @@ def test_preflight_falls_back_to_the_scheme_default_port(
 
     `socket.create_connection` is intercepted rather than dialled: the
     assertion is about which port is chosen, and reaching the real
-    example.com would make a unit test depend on the network (RQ-28).
+    example.com would make a unit test depend on the network.
     """
     attempted: list[tuple[str, int]] = []
 
@@ -443,15 +429,12 @@ def test_preflight_falls_back_to_the_scheme_default_port(
     assert attempted == [("example.com", 80), ("example.com", 443), ("example.com", 8765)]
 
 
-@pytest.mark.req(id="RQ-37")
 def test_two_hundred_tests_produce_exactly_one_warning_naming_the_address(
     pytester: pytest.Pytester,
 ) -> None:
-    """The preflight runs once, in `pytest_configure`, entirely independent
-    of how many tests the session goes on to collect -- this is the same
-    mechanism `test_closed_port_warns_naming_the_address_and_runs_unrecorded`
-    already proves, exercised at the scale RQ-37.4 names explicitly (200
-    tests) rather than a second, different code path.
+    """The preflight runs once, in `pytest_configure`, independent of how
+    many tests the session collects: 200 tests still produce exactly one
+    warning.
     """
     address = _closed_port_address()
     pytester.makepyfile(
@@ -465,19 +448,14 @@ def test_two_hundred_tests_produce_exactly_one_warning_naming_the_address(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req(id="RQ-37")
 def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """RQ-37 criterion 3, mechanically RQ-21's path (design.md D6): the
-    preflight passes because the server WAS up when `pytest_configure` ran.
-    It is stopped before `pytest_sessionfinish` sends the report, so the
-    failure surfaces at report time through the same boundary this file's
-    RQ-21 tests exercise directly (task 6.9), not through a second
-    preflight. That means this scenario cannot go fully green until 6.10's
-    boundary decorator lands, even though it belongs to RQ-37 -- design.md
-    says so explicitly ("RQ-37 criterion 3 is mechanically RQ-21's path").
+    """The preflight passes because the server was up when `pytest_configure`
+    ran. It is stopped before `pytest_sessionfinish` sends the report, so
+    the failure surfaces at report time through `fault_isolated`, not
+    through a second preflight.
     """
     pytester.makepyfile(test_slow="import time\n\n\ndef test_slow():\n    time.sleep(2)\n")
 
@@ -491,12 +469,9 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        # `stdin` explicitly, because `pytester.popen` otherwise opens a pipe
-        # and closes it -- and on Python 3.10 `communicate()` still calls
-        # `self.stdin.flush()` on that closed file, raising
-        # `ValueError: flush of closed file`. Later versions guard it. Found
-        # by the RQ-27 matrix on its first real CI run: this passed on 3.13
-        # locally and failed on 3.10 only. `DEVNULL` leaves nothing to flush.
+        # `pytester.popen` otherwise opens a stdin pipe and closes it, and
+        # before Python 3.13 `communicate()` still flushes that closed file,
+        # raising `ValueError`. `DEVNULL` leaves nothing to flush.
         stdin=subprocess.DEVNULL,
     )
     # Give the child time to pass configure (preflight included) and enter
@@ -509,10 +484,9 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
     assert (stdout.decode() + stderr.decode()).count("VantageWarning:") == 1
 
 
-# --- RQ-21: something goes wrong while reporting (task 6.9) -----------------
+# --- Something goes wrong while reporting ---------------------------------
 
 
-@pytest.mark.req(id="RQ-21")
 def test_reporting_error_preserves_passing_exit_status_and_warns_once(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -533,15 +507,12 @@ def test_reporting_error_preserves_passing_exit_status_and_warns_once(
     monkeypatch.setattr("pytest_vantage.recorder.send", _raise)
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
-    # Two independent failures now, not one: the patched `send` raises for the
-    # start-write in `pytest_sessionstart` as well as for the finish-write.
-    # They are isolated by different decorators on purpose (design.md D29), so
-    # each warns once. Only the finish-write's warning reaches `RunResult` --
-    # a warning raised as early as `pytest_sessionstart` escapes an in-process
-    # run's capture and surfaces in THIS session instead, which is the same
-    # phenomenon `_combined_output`'s docstring records for `pytest_configure`.
-    # `pytest.warns` asserts that escaping warning rather than letting it leak
-    # into the suite's summary, where it would train a reader to ignore it.
+    # Two independent failures: the patched `send` raises for the start-write
+    # as well as the finish-write, and the two are isolated by different
+    # decorators, so each warns once. Only the finish-write's warning reaches
+    # `RunResult`; one raised as early as `pytest_sessionstart` escapes an
+    # in-process run's capture into THIS session (see `_combined_output`).
+    # `pytest.warns` asserts it rather than letting it leak into the summary.
     with pytest.warns(VantageWarning, match="session liveness"):
         result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
@@ -550,7 +521,6 @@ def test_reporting_error_preserves_passing_exit_status_and_warns_once(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req(id="RQ-21")
 def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -572,16 +542,15 @@ def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req(id="RQ-21")
 def test_failing_start_write_warns_once_and_the_session_still_completes(
     pytester: pytest.Pytester,
 ) -> None:
-    """design.md D32: the start-write is `@liveness_isolated`, not
-    `@fault_isolated` -- its own failure must never cost the session its
-    ordinary exit status. `_StubServer` fails only its SECOND accepted
-    connection (the start-write) and answers correctly from the THIRD
-    onward (the finish-write): the FIRST connection is the bare TCP
-    preflight, which needs no response at all to succeed.
+    """The start-write is `@liveness_isolated`, not `@fault_isolated`: its
+    own failure must never cost the session its ordinary exit status.
+    `_StubServer` fails only its second accepted connection (the
+    start-write) and answers correctly from the third onward (the
+    finish-write); the first is the bare TCP preflight, which needs no
+    response.
 
     `runpytest_subprocess`, not in-process `runpytest`: a `VantageWarning`
     raised this early (`pytest_sessionstart`, before the first test runs)
@@ -615,7 +584,6 @@ def test_failing_start_write_warns_once_and_the_session_still_completes(
     assert _combined_output(result).count("VantageWarning:") == 1
 
 
-@pytest.mark.req(id="RQ-21")
 def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester) -> None:
     with _StubServer(_accept_then_close) as server:
         pytester.makepyfile(test_sample=_PASSING_TEST)
@@ -623,14 +591,12 @@ def test_server_accepts_then_closes_without_responding(pytester: pytest.Pytester
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    # Two warnings, not one (design.md D29): `_accept_then_close` misbehaves
-    # for every connection it accepts, so both the start-write and the
-    # finish-write fail against it -- one liveness warning, one reporting
-    # warning. That is correct and must not collapse into one.
+    # Two warnings, not one: `_accept_then_close` misbehaves for every
+    # connection, so both the start-write and the finish-write fail -- one
+    # liveness warning, one reporting warning. They must not collapse into one.
     assert _combined_output(result).count("VantageWarning:") == 2
 
 
-@pytest.mark.req(id="RQ-21")
 def test_server_accepts_and_never_answers_finishes_within_timeout_plus_five_seconds(
     pytester: pytest.Pytester,
 ) -> None:
@@ -648,16 +614,12 @@ def test_server_accepts_and_never_answers_finishes_within_timeout_plus_five_seco
     result.assert_outcomes(passed=1)
     assert result.ret == 0
     assert elapsed < 1.0 + 5.0
-    # Two warnings, not one (design.md D29) -- see
+    # Two warnings, not one -- see
     # `test_server_accepts_then_closes_without_responding` above.
     assert _combined_output(result).count("VantageWarning:") == 2
 
 
-# --- Threat matrix "Untrusted response" (task 6.11/6.12) --------------------
-#
-# No numbered requirement drives this row directly -- the same convention
-# `test_address_validation.py` already uses for a threat-matrix test with no
-# requirement of its own.
+# --- Untrusted responses ---------------------------------------------------
 
 
 def test_oversized_response_is_bounded_and_does_not_hang(pytester: pytest.Pytester) -> None:
@@ -671,8 +633,8 @@ def test_oversized_response_is_bounded_and_does_not_hang(pytester: pytest.Pytest
     assert result.ret == 0
     # The truncated 64 KiB chunk of the unbounded body is not valid JSON
     # either, so this doubles as the "malformed acknowledgement is a
-    # warning, never an exception" proof. Two warnings, not one (design.md
-    # D29) -- see `test_server_accepts_then_closes_without_responding` above.
+    # warning, never an exception" proof. Two warnings, not one -- see
+    # `test_server_accepts_then_closes_without_responding` above.
     assert _combined_output(result).count("VantageWarning:") == 2
 
 
@@ -683,7 +645,7 @@ def test_non_json_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    # Two warnings, not one (design.md D29) -- see
+    # Two warnings, not one -- see
     # `test_server_accepts_then_closes_without_responding` above.
     assert _combined_output(result).count("VantageWarning:") == 2
 
@@ -695,25 +657,24 @@ def test_bare_500_response_is_a_warning_not_a_crash(pytester: pytest.Pytester) -
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    # Two warnings, not one (design.md D29) -- see
+    # Two warnings, not one -- see
     # `test_server_accepts_then_closes_without_responding` above.
     assert _combined_output(result).count("VantageWarning:") == 2
 
 
-# --- Activity-driven beats (design.md D30, task 4.16/4.17) ------------------
+# --- Activity-driven heartbeats --------------------------------------------
 
 
-@pytest.mark.req(id="RQ-21")
 def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still_recorded(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
-    """design.md D30: `_last_beat_at` is assigned before the send, so a
-    failing send is not retried on the very next report -- and `_maybe_beat`
-    is `@liveness_isolated`, which latches after its first failure. Across
-    five tests (five beat opportunities, forced by a near-zero
+    """`_last_beat_at` is assigned before the send, so a failing send is not
+    retried on the very next report -- and `_maybe_beat` is
+    `@liveness_isolated`, which latches after its first failure. Across
+    five tests (five beat opportunities, forced by a zero
     `_BEAT_INTERVAL_SECONDS`), that is exactly one warning, never one per
-    beat -- and `accumulate` running first (D30) means every test's result
+    beat -- and `accumulate` running first means every test's result
     still reaches the finish-write, whose own `send` is unpatched, so the
     real `vantage_server` ends up with all five.
 
@@ -745,20 +706,15 @@ def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still
     assert len(vantage_server.results()) == 5
 
 
-@pytest.mark.req(id="RQ-21")
 def test_start_write_and_heartbeat_failure_share_one_flag_leaving_two_warnings_total(
     pytester: pytest.Pytester,
 ) -> None:
-    """design.md D29: the start-write and the heartbeat are both wrapped by
-    `liveness_isolated`, sharing `_liveness_disabled`. When the start-write
-    fails against a server that fails every connection, the liveness path
-    latches before the first heartbeat is ever attempted -- forcing a beat
-    opportunity on every test (via the same near-zero
-    `_BEAT_INTERVAL_SECONDS` conftest trick) must not add a third warning on
-    top of the one liveness warning and the one reporting warning this
-    server already produces (mirrors
-    `test_server_accepts_then_closes_without_responding` above, with the
-    beat opportunity made real rather than merely absent by timing)."""
+    """The start-write and the heartbeat share `_liveness_disabled`. When the
+    start-write fails, the liveness path latches before the first heartbeat,
+    so forcing a beat opportunity on every test (a zero
+    `_BEAT_INTERVAL_SECONDS`) adds no third warning to the liveness and
+    reporting warnings `test_server_accepts_then_closes_without_responding`
+    already expects."""
     pytester.makeconftest(
         "import pytest_vantage.recorder as recorder\nrecorder._BEAT_INTERVAL_SECONDS = 0.0\n"
     )
@@ -773,14 +729,12 @@ def test_start_write_and_heartbeat_failure_share_one_flag_leaving_two_warnings_t
     assert _combined_output(result).count("VantageWarning:") == 2
 
 
-# --- Capability advertisement: fail-closed and degrade-to-previous-release
-# (design decisions D38-D42, tasks 1.3-1.6) ----------------------------------
+# --- Capability advertisement: fail closed, degrade for older servers -----
 
 
 def _respond_capability_with(body: bytes) -> Callable[[socket.socket], None]:
     """A 200 response carrying `body` verbatim as the capability probe's
-    acknowledgement -- the shape every row of the fail-closed table (D40)
-    needs, varying only the body.
+    answer -- the fail-closed cases below vary only the body.
     """
 
     def _handler(conn: socket.socket) -> None:
@@ -796,8 +750,8 @@ def _respond_capability_with(body: bytes) -> Callable[[socket.socket], None]:
 
 
 def _respond_capability_404(conn: socket.socket) -> None:
-    """D39: an older server's answer -- no `/api/v1/capabilities` route at
-    all, so it answers `404`. That is the signal, not a transport failure.
+    """An older server's answer: no `/api/v1/capabilities` route at all, so
+    it answers `404`. That is the signal, not a transport failure.
     """
     conn.recv(65536)
     body = b"Not Found"
@@ -824,12 +778,11 @@ _FAIL_CLOSED_CASES: list[tuple[str, Callable[[socket.socket], None]]] = [
 def test_fetch_capabilities_fails_closed_on_every_non_positive_answer(
     case_id: str, handle_connection: Callable[[socket.socket], None]
 ) -> None:
-    """D40's fail-closed table: only an explicit `{"session_lifecycle": true}`
-    may enable the lifecycle. Each row here is a way a naive capability check
-    could quietly fail open -- a malformed body, JSON of the wrong shape, an
-    explicit `false`, an empty response, a `500`, and a connection that hangs
-    past the bound this function is given -- and every one must answer
-    `False`, never raise (task 1.8: `fetch_capabilities` does not propagate).
+    """Only an explicit `{"session_lifecycle": true}` may enable the
+    lifecycle. Each case is a way a naive capability check could quietly
+    fail open -- a malformed body, JSON of the wrong shape, an explicit
+    `false`, an empty response, a `500`, and a connection that hangs past
+    the timeout -- and every one must answer `False`, never raise.
     """
     from pytest_vantage.transport import fetch_capabilities
 
@@ -838,9 +791,8 @@ def test_fetch_capabilities_fails_closed_on_every_non_positive_answer(
 
 
 def test_fetch_capabilities_returns_true_for_the_one_explicit_positive_answer() -> None:
-    """Triangulation: the fail-closed table above proves every negative case
-    degrades -- this proves the positive case is not also accidentally
-    degraded."""
+    """The fail-closed cases above prove every negative answer degrades;
+    this proves the positive answer is not also accidentally degraded."""
     from pytest_vantage.transport import fetch_capabilities
 
     with _StubServer(_respond_capability_with(b'{"session_lifecycle": true}')) as server:
@@ -848,9 +800,8 @@ def test_fetch_capabilities_returns_true_for_the_one_explicit_positive_answer() 
 
 
 def test_fetch_capabilities_returns_false_when_the_route_is_missing() -> None:
-    """D39: an older server's `404` degrades exactly like every other row in
-    the fail-closed table -- it is simply the one row every already-published
-    server produces."""
+    """An older server's `404` degrades exactly like every fail-closed case
+    above."""
     from pytest_vantage.transport import fetch_capabilities
 
     with _StubServer(_respond_capability_404) as server:
@@ -859,10 +810,9 @@ def test_fetch_capabilities_returns_false_when_the_route_is_missing() -> None:
 
 def _capturing_handler(requests_seen: list[bytes]) -> Callable[[socket.socket], None]:
     """Records the raw bytes of every connection this stub server accepts,
-    in order, then answers each one as a well-behaved current server would:
-    the bare TCP preflight gets nothing back (none is needed), a capability
-    probe is answered `404` (D39, this handler stands in for an older
-    `vantage`), and anything else -- the finish-write -- is acknowledged
+    in order, and answers as an older `vantage` would: the bare TCP
+    preflight gets nothing back (none is needed), the capability probe is
+    answered `404`, and anything else -- the finish-write -- is acknowledged
     `201 Created`.
     """
 
@@ -891,19 +841,15 @@ def _capturing_handler(requests_seen: list[bytes]) -> Callable[[socket.socket], 
     return _handler
 
 
-@pytest.mark.req(id="RQ-44")
 def test_capability_probe_404_sends_no_start_write_and_no_heartbeat(
     pytester: pytest.Pytester,
 ) -> None:
-    """Task 1.3: a server that answers the capability probe `404` (an older
-    `vantage`) records the session with no start-write and no heartbeat.
-    Exactly three connections are opened -- the bare preflight, the
-    capability probe, and the finish-write -- never a fourth for a
-    start-write, proving nothing extra was sent, not just that the outcome
-    looked right. The finish-write's JSON body carries exactly `RunReport`'s
-    shape (design.md D1) -- the same shape `pytest_sessionfinish` has always
-    sent (task 1.10: that function is unchanged), never an extra lifecycle
-    field smuggled in by the degraded path.
+    """A server that answers the capability probe `404` (an older `vantage`)
+    records the session with no start-write and no heartbeat. Exactly three
+    connections are opened -- the bare preflight, the capability probe, and
+    the finish-write -- never a fourth for a start-write. The finish-write's
+    JSON body has exactly the ordinary report shape, with no lifecycle field
+    added by the degraded path.
     """
     requests_seen: list[bytes] = []
     with _StubServer(_capturing_handler(requests_seen)) as server:
@@ -931,13 +877,12 @@ def test_capability_probe_404_sends_no_start_write_and_no_heartbeat(
     assert payload["run"]["finished_at"] is not None
 
 
-@pytest.mark.req(id="RQ-44")
 def test_capability_probe_404_warns_once_and_still_records_the_result(
     pytester: pytest.Pytester,
 ) -> None:
-    """Task 1.4: the degradation warns exactly once, on the liveness latch,
-    naming the address -- and must not disable result recording (D29): the
-    finish-write's `results` array still carries the one test that ran.
+    """The degradation warns exactly once, on the liveness latch, naming the
+    address -- and does not disable result recording: the finish-write's
+    `results` array still carries the one test that ran.
     """
     requests_seen: list[bytes] = []
     with _StubServer(_capturing_handler(requests_seen)) as server:
@@ -959,14 +904,11 @@ def test_capability_probe_404_warns_once_and_still_records_the_result(
 def test_capability_probe_is_bounded_by_the_liveness_timeout_not_the_report_timeout(
     pytester: pytest.Pytester,
 ) -> None:
-    """Task 1.6, D42: the capability probe is bounded by
-    `resolve_liveness_timeout(report_timeout)` (~2.0s by default), never the
-    much larger report timeout the user configured -- a capability probe
-    that hung until the report timeout would put that cost in front of every
-    session, exactly what D42 exists to prevent. The finish-write answers
-    normally here, so a correct implementation finishes quickly; only a
-    capability probe wrongly bounded by the 10-second report timeout would
-    make this run long.
+    """The capability probe is bounded by `resolve_liveness_timeout` (at most
+    2.0s), never the larger report timeout: a probe that hung until the
+    report timeout would put that cost in front of every session. The
+    finish-write answers normally, so only a probe wrongly bounded by the
+    10-second report timeout would make this run long.
     """
     connections_seen = itertools.count(1)
 
@@ -1005,10 +947,9 @@ def test_capability_probe_is_bounded_by_the_liveness_timeout_not_the_report_time
 def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Task 1.10, unit level: `pytest_sessionstart` and `_maybe_beat` both
-    return immediately when `lifecycle_available=False`, without ever
-    calling `send`/`send_heartbeat` -- the previous release's shape, not a
-    new half-state.
+    """`pytest_sessionstart` and `_maybe_beat` both return immediately when
+    `lifecycle_available=False`, without ever calling `send` or
+    `send_heartbeat`.
     """
     from pytest_vantage.recorder import Recorder
 
@@ -1044,7 +985,7 @@ def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
     assert calls == []
 
 
-# --- VCS capture isolation (design.md D43, D51; recording-fault-tolerance) --
+# --- VCS capture isolation -------------------------------------------------
 
 
 def test_git_failure_disables_nothing_else(
@@ -1052,13 +993,10 @@ def test_git_failure_disables_nothing_else(
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """recording-fault-tolerance: "A git failure disables nothing else in
-    the same session". Mutation-shaped, per the spec's own verification
-    note: `vcs.capture` itself never raises by its own contract (design.md
-    D43), so patching it TO raise is what proves the WRAPPER around it -- a
-    third, non-latching isolation path, neither `fault_isolated` nor
-    `liveness_isolated` -- rather than `vcs.capture`'s own behaviour.
-    Neither latch flag may be touched by this failure, and the session must
+    """A git failure disables nothing else in the same session.
+    `vcs.capture` never raises on its own, so patching it to raise tests the
+    wrapper around it -- a non-latching path, neither `fault_isolated` nor
+    `liveness_isolated`. Neither latch flag may be set, and the session must
     survive with nulls, not merely without a crash: every result and the
     run row itself must still land.
     """
@@ -1107,12 +1045,11 @@ def test_hung_git_does_not_delay_session(
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """recording-fault-tolerance: "A hung git is bounded at five seconds".
-    A fake `git` on `PATH` that sleeps well past the whole-capture budget,
-    wired through a REAL `Recorder` -- unlike `test_vcs.py`'s
-    component-level precursor of the same name, this proves the budget
-    bounds `Recorder.__init__` itself, and that the run is still stored
-    with all five snapshot fields null.
+    """A hung git is bounded by the five-second whole-capture budget. A fake
+    `git` on `PATH` sleeps well past it, wired through a real `Recorder` --
+    unlike `test_vcs.py`'s capture-level test, this proves the budget bounds
+    `Recorder.__init__` itself, and that the run is still reported with all
+    five snapshot fields null.
     """
     shim_dir = pytester.path / "shim"
     shim_dir.mkdir()
@@ -1147,18 +1084,13 @@ def test_hung_git_does_not_delay_session(
     }
 
 
-@pytest.mark.req(id="RQ-21")
 def test_every_recorder_hook_is_fault_isolated() -> None:
-    """RQ-21 says *every* hook is fault-isolated, and the two that exist are.
+    """Every `pytest_*` hook on `Recorder` is wrapped by an isolation
+    decorator. The hooks are enumerated, so one added later without a
+    decorator fails here rather than leaving the suite green.
 
-    Nothing else proves the rule rather than the instances: a third hook
-    added later without the decorator would leave the suite green and break
-    the requirement silently, because no test enumerates them. This one
-    does, so the failure lands on whoever adds the hook.
-
-    `functools.wraps` is what makes `__wrapped__` the reliable marker --
-    `fault_isolated` applies it, so an undecorated hook is exactly the
-    attribute that lacks it.
+    Both decorators apply `functools.wraps`, so an undecorated hook is
+    exactly one that lacks `__wrapped__`.
     """
     from pytest_vantage.recorder import Recorder
 

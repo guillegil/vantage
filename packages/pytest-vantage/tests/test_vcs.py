@@ -1,9 +1,9 @@
-"""`pytest_vantage.vcs` -- the plugin's one bounded git read per session
-(design.md D43-D46). Every fixture is a real repository built with
-`subprocess`/`tmp_path`, never mocked git output (spec's own verification
-method). Tests that patch `subprocess.run` still spawn real processes via
-`_CallRecorder` -- the patch only counts or forwards calls, never
-fabricates stdout.
+"""`pytest_vantage.vcs` -- the plugin's one bounded git read per session.
+
+Every fixture is a real repository built with `subprocess`/`tmp_path`, never
+mocked git output. Tests that patch `subprocess.run` still spawn real
+processes via `_CallRecorder` -- the patch only counts or forwards calls,
+never fabricates stdout.
 """
 
 from __future__ import annotations
@@ -93,7 +93,6 @@ class _CallRecorder:
         return self._real_run(argv, **kwargs)
 
 
-@pytest.mark.req(id="RQ-10")
 def test_dirty_tracked_file_marks_run_dirty(tmp_path: Path) -> None:
     # Arm 1: an unstaged worktree modification to a tracked file.
     worktree_repo = _repo_with_one_commit(tmp_path / "worktree-dirty")
@@ -108,15 +107,14 @@ def test_dirty_tracked_file_marks_run_dirty(tmp_path: Path) -> None:
 
     assert vcs.capture(staged_repo).dirty is True
 
-    # Triangulation: `--untracked-files=no` (design.md D44) makes an
-    # untracked-only file invisible to `dirty` -- RQ-10.1 says *tracked*.
+    # `--untracked-files=no` makes an untracked-only file invisible to
+    # `dirty`: only changes to tracked files count.
     untracked_repo = _repo_with_one_commit(tmp_path / "untracked-only")
     (untracked_repo / "untracked.txt").write_text("never added\n")
 
     assert vcs.capture(untracked_repo).dirty is False
 
 
-@pytest.mark.req(id="RQ-10")
 def test_clean_tree_matches_independent_head_read(tmp_path: Path) -> None:
     repo = _repo_with_one_commit(tmp_path / "clean")
     expected_commit = _independent_head(repo)
@@ -126,7 +124,6 @@ def test_clean_tree_matches_independent_head_read(tmp_path: Path) -> None:
     assert snapshot.commit == expected_commit and snapshot.dirty is False
 
 
-@pytest.mark.req(id="RQ-10")
 def test_detached_head_records_commit_null_branch(tmp_path: Path) -> None:
     repo = _repo_with_one_commit(tmp_path / "detached")
     (repo / "tracked.txt").write_text("second version\n")
@@ -140,7 +137,6 @@ def test_detached_head_records_commit_null_branch(tmp_path: Path) -> None:
     assert snapshot.branch is None
 
 
-@pytest.mark.req(id="RQ-10")
 def test_no_commits_yet_stores_null_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _init_repo(tmp_path / "empty-repo")
     recorder = _CallRecorder()
@@ -149,15 +145,13 @@ def test_no_commits_yet_stores_null_commit(tmp_path: Path, monkeypatch: pytest.M
     snapshot = vcs.capture(repo)
 
     assert snapshot.commit is None
-    # Invocation 4 (`git show ... HEAD`) must never be spawned when
-    # invocation 2 (`git rev-parse --verify --quiet HEAD`) returned null --
-    # design.md D44's "skipped entirely" rule. That leaves exactly four
-    # invocations: show-toplevel, rev-parse HEAD, symbolic-ref, status.
+    # `git show ... HEAD` is never spawned when `git rev-parse --verify
+    # --quiet HEAD` returned null. That leaves exactly four invocations:
+    # show-toplevel, rev-parse HEAD, symbolic-ref, status.
     assert len(recorder.calls) == 4
     assert not any(argv[1] == "show" for argv, _kwargs in recorder.calls)
 
 
-@pytest.mark.req(id="RQ-23")
 def test_not_a_repository_records_nulls_and_no_warning(tmp_path: Path) -> None:
     bare_dir = tmp_path / "not-a-repo"
     bare_dir.mkdir()
@@ -168,7 +162,6 @@ def test_not_a_repository_records_nulls_and_no_warning(tmp_path: Path) -> None:
     assert snapshot.warning is None
 
 
-@pytest.mark.req(id="RQ-39")
 def test_corrupt_git_entry_records_nulls_and_warns_once(tmp_path: Path) -> None:
     # Fixture 1: a `.git` *file* with garbage, not a `gitdir: ...` pointer.
     garbage_file_repo = tmp_path / "corrupt-git-file"
@@ -191,12 +184,11 @@ def test_corrupt_git_entry_records_nulls_and_warns_once(tmp_path: Path) -> None:
     assert dir_snapshot.warning is not None
 
 
-@pytest.mark.req(id="RQ-39")
 def test_missing_git_executable_records_nulls_silently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Scrubs PATH for real -- never mock.patch("subprocess.run"), which
-    # proves the mock, not FileNotFoundError (spec's own verification note).
+    # Empties PATH for real rather than mocking `subprocess.run`, which
+    # would only prove the mock.
     repo = _repo_with_one_commit(tmp_path / "repo-with-real-git")
     empty_path_dir = tmp_path / "empty-path"
     empty_path_dir.mkdir()
@@ -208,7 +200,6 @@ def test_missing_git_executable_records_nulls_silently(
     assert snapshot.warning is None
 
 
-@pytest.mark.req(id="RQ-39")
 @pytest.mark.skipif(
     os.geteuid() == 0 if hasattr(os, "geteuid") else True,
     reason="chmod 000 is a no-op as root; skip rather than pass vacuously",
@@ -246,7 +237,7 @@ def test_argv_discipline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
     vcs.capture(repo)
 
-    assert recorder.calls, "no subprocess.run calls recorded -- the inspection would pass vacuously"
+    assert recorder.calls, "no subprocess.run calls recorded -- the checks would pass vacuously"
     repo_str = str(repo)
     for argv, kwargs in recorder.calls:
         assert argv[0] == "git"
@@ -320,17 +311,13 @@ def test_whole_capture_budget_not_per_invocation(
 def test_a_huge_commit_subject_is_bounded_before_it_reaches_the_wire(
     tmp_path: Path,
 ) -> None:
-    """`git`'s `%s` is unbounded.
-
-    Measured: a commit whose first paragraph is 200 000 characters yields a
-    200 001-byte subject. Nothing capped it, so it would ride the session
-    report whole -- and a large enough one pushes the report past
-    `MAX_REPORT_BYTES`, which the server rejects as a unit. Every result in
-    that session would be lost to a commit message.
+    """`git`'s `%s` is unbounded: a commit whose first paragraph is 200 000
+    characters yields a 200 001-byte subject. Uncapped, a large enough one
+    pushes the session report past `MAX_REPORT_BYTES`, which the server
+    rejects as a unit, losing every result in the session.
 
     The cap sits deliberately ABOVE the server's 64 KiB bound so the server
-    still sees something to truncate and its flag stays honest (design.md
-    D49). Found by review after Phase 1 shipped without it.
+    still sees something to truncate and its flag stays honest.
     """
     repo = tmp_path / "huge"
     repo.mkdir()

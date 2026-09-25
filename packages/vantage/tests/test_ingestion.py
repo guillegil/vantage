@@ -1,9 +1,7 @@
-"""RQ-41: session report ingestion -- happy path and idempotent replay.
+"""Session report ingestion through `POST /api/v1/runs` and the heartbeat.
 
-Runs the app factory (`vantage.service.app.create_app`) against an injected
-`InMemoryExecutionStore`, per design.md's ordering note: B does not depend on
-A2 (schema/SQLite adapter, PR2-PR5). Wiring the real `SqliteExecutionStore`
-in here would reintroduce a dependency this slice is explicitly free of.
+Most tests run `create_app` against an injected `InMemoryExecutionStore`;
+the few that depend on how SQLite stores timestamps use the real adapter.
 """
 
 from __future__ import annotations
@@ -38,7 +36,7 @@ def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
 
 
 def _vcs_section(**overrides: Any) -> dict[str, Any]:
-    """One well-formed `vcs` section (design.md D47's wire shape)."""
+    """One well-formed `vcs` section."""
     section: dict[str, Any] = {
         "commit": "a" * 40,
         "branch": "main",
@@ -51,11 +49,10 @@ def _vcs_section(**overrides: Any) -> dict[str, Any]:
 
 
 def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
-    """One well-formed `results[]` entry (design.md D15 interface example).
+    """One well-formed `results[]` entry.
 
-    `overrides` lets a test carry an extra, undeclared key (task 4.4) or
-    override a single field (task 4.5's `param_id`/`duration`) without
-    repeating every other field.
+    `overrides` adds an undeclared key or replaces a single field without
+    repeating every other one.
     """
     entry: dict[str, Any] = {
         "node_id": node_id,
@@ -80,9 +77,7 @@ def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
 
 
 def _failing_result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
-    """A `results[]` entry carrying failure evidence -- the wire shape
-    design.md's "Interfaces / Contracts" example gives (D75), for the
-    newer-plugin ingestion scenarios."""
+    """A `results[]` entry carrying every failure evidence field."""
     entry = _result_entry(node_id, outcome="failed", **overrides)
     entry.setdefault("failure_type", "AssertionError")
     entry.setdefault("failure_message", "AssertionError: assert 1200 == 1320")
@@ -116,11 +111,9 @@ def client(store: InMemoryExecutionStore) -> TestClient:
 
 @pytest.fixture
 def sqlite_store(tmp_path: Path) -> Iterator[SqliteExecutionStore]:
-    """The real SQLite adapter (tasks 5.9/5.10): the D20 `MAX` monotonicity
-    guard is a lexicographic comparison of stored TEXT, so only this adapter
-    -- not `InMemoryExecutionStore`, which compares real `datetime` objects
-    and is already correct -- can reproduce the un-normalized-timestamp bug
-    (Engram observation 62)."""
+    """The real SQLite adapter. Its `last_seen_at` guard compares stored TEXT
+    lexicographically, so only this adapter -- not `InMemoryExecutionStore`,
+    which compares `datetime` objects -- exposes un-normalized timestamps."""
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     yield adapter
     adapter.close()
@@ -131,7 +124,6 @@ def sqlite_client(sqlite_store: SqliteExecutionStore) -> TestClient:
     return TestClient(create_app(sqlite_store))
 
 
-@pytest.mark.req(id="RQ-41")
 def test_well_formed_report_is_stored_and_acknowledged(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -145,7 +137,6 @@ def test_well_formed_report_is_stored_and_acknowledged(
     assert store.get_execution("a" * 32) is not None
 
 
-@pytest.mark.req(id="RQ-41")
 def test_retried_report_is_idempotent(client: TestClient, store: InMemoryExecutionStore) -> None:
     report = _well_formed_report("b" * 32)
 
@@ -163,8 +154,6 @@ def test_retried_report_is_idempotent(client: TestClient, store: InMemoryExecuti
 def test_report_with_vcs_section_persists_six_fields(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """design.md D47/D48, task 4.6. *(Scenario: A report carrying a vcs
-    section persists its six fields, `session-ingestion`)*."""
     report = _well_formed_report("2" + "0" * 31)
     report["vcs"] = _vcs_section()
 
@@ -185,9 +174,7 @@ def test_report_with_vcs_section_persists_six_fields(
 def test_report_without_vcs_section_still_records_run(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """design.md D47, task 4.7 -- the supported skew case for a plugin that
-    predates this change. *(Scenario: A report with no vcs section still
-    records its run, `session-ingestion`)*."""
+    """A plugin that does not send `vcs` is a supported version skew."""
     report = _well_formed_report("2" + "1" * 31)
     assert "vcs" not in report
 
@@ -203,10 +190,8 @@ def test_report_without_vcs_section_still_records_run(
 def test_vcs_section_accepted_without_capability_check(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """design.md D47, task 4.8 -- `routes/capabilities.py` is unchanged, no
-    flag ever advertises a vcs-related capability, and none is required
-    before this section is accepted. *(Scenario: The endpoint accepts a vcs
-    section without any capability check, `session-ingestion`)*."""
+    """No capability flag has to be advertised or negotiated before a `vcs`
+    section is accepted."""
     report = _well_formed_report("2" + "2" * 31)
     report["vcs"] = _vcs_section()
 
@@ -218,7 +203,6 @@ def test_vcs_section_accepted_without_capability_check(
     assert execution.vcs is not None
 
 
-@pytest.mark.req(id="RQ-41")
 @pytest.mark.parametrize("path", ["/runs", "/api/runs"])
 def test_unversioned_path_is_refused(client: TestClient, path: str) -> None:
     response = client.post(path, json=_well_formed_report())
@@ -226,15 +210,11 @@ def test_unversioned_path_is_refused(client: TestClient, path: str) -> None:
     assert response.status_code == 404
 
 
-@pytest.mark.req(id="RQ-41")
 def test_report_carrying_results_stores_them_with_the_run(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """RQ-41.1: a report carrying N results stores N result rows with the run.
-
-    Also proves the results survive the round trip, not just their count --
-    two entries with different outcomes read back with the outcomes they
-    were sent with.
+    """A report carrying N results stores N result rows with the run, and
+    each reads back with the outcome it was sent with.
     """
     report = _well_formed_report("c" * 32)
     report["results"] = [
@@ -252,14 +232,12 @@ def test_report_carrying_results_stores_them_with_the_run(
     assert stored["packages/vantage/tests/test_a.py::test_two"].outcome == "failed"
 
 
-@pytest.mark.req(id="RQ-41")
 @pytest.mark.parametrize("results_value", [None, []], ids=["null", "empty-list"])
 def test_report_with_null_or_empty_results_section_writes_no_result_rows(
     client: TestClient, store: InMemoryExecutionStore, results_value: list[Any] | None
 ) -> None:
-    """RQ-41.1, D15: `results: null` and `results: []` both record the run
-    and write zero result rows -- the supported plugin/server skew case, not
-    an error.
+    """`results: null` and `results: []` both record the run and write zero
+    result rows -- not an error.
     """
     run_id = "d" * 32 if results_value is None else "d" * 31 + "e"
     report = _well_formed_report(run_id)
@@ -272,15 +250,12 @@ def test_report_with_null_or_empty_results_section_writes_no_result_rows(
     assert store.count_results() == 0
 
 
-@pytest.mark.req(id="RQ-41")
 @pytest.mark.parametrize("results_value", [None, []], ids=["null", "empty-list"])
 def test_session_report_accepts_a_null_or_empty_results_section(
     results_value: list[Any] | None,
 ) -> None:
-    """The schema-level RED for the same scenario: `SessionReport.results`
-    must exist and round-trip the sent value, rather than being silently
-    dropped by the envelope's `extra="ignore"` (which is what would happen
-    today, before `results` is a declared field)."""
+    """`SessionReport.results` is a declared field that round-trips the sent
+    value, not a section the envelope's `extra="ignore"` silently drops."""
     from vantage.service.schemas import SessionReport
 
     payload = SessionReport.model_validate({**_well_formed_report(), "results": results_value})
@@ -288,12 +263,11 @@ def test_session_report_accepts_a_null_or_empty_results_section(
     assert payload.results == results_value
 
 
-@pytest.mark.req(id="RQ-41")
 def test_replayed_report_with_results_does_not_duplicate_them(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """RQ-41.2, D19 layer 3: replaying an already-stored report leaves the
-    same result rows in place and is acknowledged, never rejected."""
+    """Replaying an already-stored report leaves the same result rows in
+    place and is acknowledged, never rejected."""
     report = _well_formed_report("f" * 32)
     report["results"] = [_result_entry("packages/vantage/tests/test_b.py::test_one")]
 
@@ -306,12 +280,11 @@ def test_replayed_report_with_results_does_not_duplicate_them(
     assert store.count_results() == 1
 
 
-@pytest.mark.req(id="RQ-41")
 def test_unknown_result_key_is_tolerated_and_named_deduplicated_in_ignored(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """D15: an unknown key on a *result* is tolerated (`extra="allow"`), and
-    its **name** is reported back deduplicated as `results[].<name>` -- one
+    """An unknown key on a *result* is tolerated (`extra="allow"`), and its
+    **name** is reported back deduplicated as `results[].<name>` -- one
     entry for two results carrying the same unknown key, never a per-index
     path."""
     report = _well_formed_report("1" + "a" * 31)
@@ -331,10 +304,8 @@ def test_unknown_result_key_is_tolerated_and_named_deduplicated_in_ignored(
 def test_an_older_plugin_omitting_failure_fields_still_stores_run_and_results(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """session-ingestion → An older plugin omitting the fields still stores
-    its run and results (task 6.10): a report shaped exactly like every
-    pre-`failure-capture` report -- no failure-evidence keys at all -- still
-    stores one run and its results, every failure field absent."""
+    """A report with no failure evidence keys at all still stores one run
+    and its results, every failure field absent."""
     report = _well_formed_report("5" + "0" * 31)
     report["results"] = [_result_entry("packages/vantage/tests/test_d.py::test_one")]
 
@@ -352,9 +323,8 @@ def test_an_older_plugin_omitting_failure_fields_still_stores_run_and_results(
 def test_a_newer_plugins_failure_evidence_fields_are_persisted(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """session-ingestion → A newer plugin's failure-evidence fields are
-    persisted (task 6.11): a report carrying the new fields round-trips
-    through storage."""
+    """A report carrying failure evidence fields round-trips through
+    storage."""
     report = _well_formed_report("5" + "2" * 31)
     report["results"] = [_failing_result_entry("packages/vantage/tests/test_g.py::test_one")]
 
@@ -375,10 +345,9 @@ def test_a_newer_plugins_failure_evidence_fields_are_persisted(
 def test_an_older_server_tolerates_unrecognized_failure_evidence_keys(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """session-ingestion → An older server tolerates a newer plugin's
-    failure-evidence fields (task 6.12): an unrecognized key under
-    `ResultReport`'s existing `extra="allow"` tolerance is accepted and its
-    name surfaces, deduplicated, in `Acknowledgement.ignored`."""
+    """An unrecognized failure evidence key on a result is accepted under
+    `ResultReport`'s `extra="allow"`, and its name surfaces in
+    `Acknowledgement.ignored`."""
     report = _well_formed_report("5" + "1" * 31)
     report["results"] = [
         _result_entry(
@@ -399,9 +368,8 @@ def test_an_older_server_tolerates_unrecognized_failure_evidence_keys(
 def test_a_report_carrying_failure_evidence_within_the_cap_is_accepted_normally(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """session-ingestion → A report carrying failure evidence within the cap
-    is accepted normally (task 6.14): one run row, results stored with their
-    fields, response acknowledges."""
+    """A report carrying failure evidence within the size cap is accepted:
+    one run row, its result stored, the response acknowledges."""
     report = _well_formed_report("5" + "3" * 31)
     report["results"] = [_failing_result_entry("packages/vantage/tests/test_h.py::test_one")]
 
@@ -414,13 +382,10 @@ def test_a_report_carrying_failure_evidence_within_the_cap_is_accepted_normally(
     assert store.count_results() == 1
 
 
-@pytest.mark.req(id="RQ-9")
 def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
-    """The Pydantic hop of the four-hop `""`-vs-`None` guard (design.md D18):
-    `param_id: ""` and `param_id: null` on the wire must arrive as distinct
-    Python values. No `min_length=1`, no falsy-to-`None` coercion -- the same
-    rule applies to a duration of `0.0`, which must survive as `0.0`, not be
-    coerced to `None`."""
+    """`param_id: ""` and `param_id: null` on the wire arrive as distinct
+    Python values, and a duration of `0.0` survives as `0.0` -- no
+    falsy-to-`None` coercion."""
     from vantage.service.schemas import ResultReport
 
     empty_param = ResultReport.model_validate(
@@ -439,16 +404,14 @@ def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
     assert zero_duration.duration == 0.0
 
 
-@pytest.mark.req(id="RQ-13")
 def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
     sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
 ) -> None:
-    """Reproduces the Phase 3 finding (Engram observation 62): `last_seen_at`
-    is TEXT and D20's `MAX` guard compares it lexicographically, which is
-    only correct once every writer normalizes to the same UTC offset. Before
-    the boundary normalizes, `'...T12:00:00+02:00'` (10:00 UTC, genuinely
-    earlier) sorts AFTER `'...T11:00:00+00:00'` (11:00 UTC) as a string and
-    rolls the catalogue forward -- exactly what D20 exists to prevent."""
+    """`last_seen_at` is TEXT compared with `MAX`, which is only correct when
+    every stored value has the same UTC offset. Un-normalized,
+    `'...T12:00:00+02:00'` (10:00 UTC, earlier) sorts after
+    `'...T11:00:00+00:00'` (11:00 UTC) and would wrongly advance the
+    catalogue entry."""
     node_id = "packages/vantage/tests/test_utc.py::test_guard"
 
     first_report = _well_formed_report("7" * 32)
@@ -467,15 +430,13 @@ def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
     assert entry.last_seen_run_id == "7" * 32
 
 
-@pytest.mark.req(id="RQ-30")
 def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
 ) -> None:
-    """D-addendum (2026-08-18): one helper normalizes every timestamp before
-    it reaches the store -- `run.started_at`/`finished_at` and a result's
-    `started_at`/`finished_at` alike, proven in one test on purpose so the
-    two are never allowed to diverge onto separate paths. An aware value
-    converts to its UTC equivalent; a naive value is interpreted as UTC."""
+    """Run and result timestamps are both normalized to UTC before they
+    reach the store, checked together so the two paths cannot diverge. An
+    aware value converts to its UTC equivalent; a naive value is taken as
+    UTC."""
     node_id = "packages/vantage/tests/test_utc.py::test_normalizes"
     report = _well_formed_report("9" * 32)
     report["run"]["started_at"] = "2026-08-18T13:00:00+02:00"  # 11:00 UTC
@@ -506,10 +467,9 @@ def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     assert result.finished_at == datetime(2026, 8, 18, 13, 0, 2, tzinfo=timezone.utc)
 
 
-# --- Phase 4: heartbeat endpoint (design.md D33, task 4.2/4.3) --------------
+# --- heartbeat endpoint -------------------------------------------------------
 
 
-@pytest.mark.req(id="RQ-44")
 def test_heartbeat_advances_last_contact_for_an_accepted_start_write(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -527,14 +487,11 @@ def test_heartbeat_advances_last_contact_for_an_accepted_start_write(
     assert store._last_contact[run_id] > before  # noqa: SLF001
 
 
-@pytest.mark.req(id="RQ-44")
 def test_heartbeat_cannot_touch_finish_fields(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """design.md D33, task 4.3: a heartbeat for a run whose finish is already
-    recorded leaves `finished_at`, `exit_status`, `interrupted` and
-    `interrupt_reason` exactly as recorded -- the body is `{}` and read by
-    nothing, so there is no field to smuggle a change through."""
+    """A heartbeat for a finished run leaves `finished_at`, `exit_status`,
+    `interrupted` and `interrupt_reason` exactly as recorded."""
     report = _well_formed_report("3" + "a" * 31)
     client.post("/api/v1/runs", json=report)
     run_id = report["run"]["id"]
@@ -552,19 +509,14 @@ def test_heartbeat_cannot_touch_finish_fields(
     assert after.interrupt_reason == before.interrupt_reason
 
 
-@pytest.mark.req(id="RQ-44")
 def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """W1: the 404 is resolved by `get_execution`, never by a zero-rowcount
-    update -- the one case that distinguishes the two implementations is a
-    *known* run whose stored `last_contact_at` is already ahead of this
-    beat, so `touch_last_contact` itself returns `False`. Every other
-    heartbeat test's incoming beat is strictly later than the stored
-    contact, so `rowcount` would also be 1 there and could not catch a
-    regression to the wrong implementation. Setting `_last_contact` directly
-    into the future, rather than issuing two real heartbeats, is what
-    guarantees the beat under test is provably earlier without a timing race.
+    """The 404 comes from `get_execution`, not from a no-op update: a known
+    run whose stored contact is already ahead of this beat makes
+    `touch_last_contact` return `False`, yet the answer is still 200.
+    `_last_contact` is set into the future directly so the beat is
+    guaranteed earlier without a timing race.
     """
     report = _well_formed_report("4" + "a" * 31)
     report["run"]["finished_at"] = None
@@ -584,7 +536,7 @@ def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
     assert store._last_contact[run_id] == far_future  # noqa: SLF001
 
 
-# --- Phase 4: `app.state.grace_period` (design.md D34, task 4.14) ----------
+# --- `app.state.grace_period` -------------------------------------------------
 
 
 def test_create_app_defaults_grace_period_to_900_seconds() -> None:
@@ -599,14 +551,12 @@ def test_create_app_exposes_the_configured_grace_period() -> None:
     assert app.state.grace_period == 123.0
 
 
-# --- Capability advertisement (design decisions D38-D40, tasks 1.1/1.2) -----
+# --- capability advertisement -------------------------------------------------
 
 
 def test_capabilities_endpoint_advertises_the_session_lifecycle(client: TestClient) -> None:
-    """D38: the server advertises exactly one capability, not a version
-    string -- `GET /api/v1/capabilities` answers `{"session_lifecycle":
-    true}`, the one explicit positive answer a client's fail-closed check
-    (D40) may treat as permission."""
+    """`GET /api/v1/capabilities` answers `{"session_lifecycle": true}` -- a
+    capability flag, not a version string."""
     response = client.get("/api/v1/capabilities")
 
     assert response.status_code == 200
@@ -614,15 +564,13 @@ def test_capabilities_endpoint_advertises_the_session_lifecycle(client: TestClie
 
 
 def test_capabilities_endpoint_is_not_mounted_unversioned(client: TestClient) -> None:
-    """Mounted under `/api/v1` and nowhere else -- the same absence rule
-    `app.py`'s own docstring already states for the run routes (RQ-41's
-    third criterion)."""
+    """Mounted under `/api/v1` and nowhere else, like the run routes."""
     response = client.get("/capabilities")
 
     assert response.status_code == 404
 
 
-# --- Phase 9: metadata section ingestion (design.md D96-D98) ---------------
+# --- metadata section ingestion -----------------------------------------------
 
 
 def _metadata_file(
@@ -646,14 +594,11 @@ def _metadata_section(*files: dict[str, Any]) -> dict[str, Any]:
     return {"declaration": "vantage-metadata.json", "files": list(files)}
 
 
-@pytest.mark.req(id="RQ-44")
 def test_a_report_whose_metadata_is_entirely_garbage_still_records_the_run(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """RQ-44: the run row is what makes an abandoned session observable at
-    all, so a malformed declared document MUST NOT block it (design.md
-    D97's governing rule). *(Scenario: A malformed document does not block
-    the run from being stored, `session-ingestion`)*."""
+    """A malformed declared document never blocks the run row from being
+    stored."""
     run_id = "6" + "0" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(
@@ -681,9 +626,9 @@ def test_a_report_whose_metadata_is_entirely_garbage_still_records_the_run(
 
 _VALUE_TOO_LARGE = "x" * (MAX_METADATA_VALUE_BYTES + 1)
 
-# design.md D97's eleven classes, one case per row: (id, file, expected
-# file row or None, expected entry rows). Class 11 (server-side shape
-# reject) expects no rows at all -- the entry is dropped in its entirety.
+# Every metadata outcome, one case each: (file, expected file row or None,
+# expected entry rows). A server-side shape reject expects no rows at all --
+# the file is dropped in its entirety.
 _TAXONOMY_CASES: dict[str, tuple[dict[str, Any], MetadataFile | None, frozenset[MetadataEntry]]] = {
     "not_found": (
         _metadata_file(status="not_found", content=None, keys=["firmware_version"]),
@@ -859,7 +804,7 @@ _TAXONOMY_PARAMS = [
     _TAXONOMY_PARAMS,
     ids=list(_TAXONOMY_CASES.keys()),
 )
-def test_metadata_taxonomy_class_produces_the_exact_status_pair(
+def test_each_metadata_outcome_records_the_exact_file_and_key_status(
     client: TestClient,
     store: InMemoryExecutionStore,
     run_id: str,
@@ -867,14 +812,8 @@ def test_metadata_taxonomy_class_produces_the_exact_status_pair(
     expected_file: MetadataFile | None,
     expected_entries: frozenset[MetadataEntry],
 ) -> None:
-    """design.md D97's eleven classes, one test per row -- proves the exact
-    `(file.status, key.status)` pair a client sees recorded, not merely that
-    ingestion did not crash. *(Scenarios: "An unsupported format is treated
-    as malformed" / "A malformed document does not block the run from being
-    stored" / "A declared key absent from a well-formed document is marked
-    absent" / "A non-scalar declared value is marked uncapturable, never
-    serialized" / "An oversized value is dropped whole, marked
-    uncapturable", `session-ingestion`)*."""
+    """Each outcome records the exact `(file.status, key.status)` pair, not
+    merely an ingestion that did not crash."""
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(file_report)
 
@@ -890,7 +829,6 @@ def test_metadata_taxonomy_class_produces_the_exact_status_pair(
 def test_a_declared_key_within_bound_is_captured_whole(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(Scenario: A value within bound is stored whole, `session-ingestion`)*."""
     run_id = "9" + "5" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(
@@ -915,8 +853,6 @@ def test_a_declared_key_within_bound_is_captured_whole(
 def test_a_report_with_no_metadata_section_still_records_its_run(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(Scenario: A report with no metadata section still records its run,
-    `session-ingestion`)*."""
     run_id = "9" + "6" * 31
     report = _well_formed_report(run_id)
     assert "metadata" not in report
@@ -932,7 +868,6 @@ def test_a_report_with_no_metadata_section_still_records_its_run(
 def test_a_yaml_declared_document_is_parsed(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(Scenario: A YAML declared document is parsed, `session-ingestion`)*."""
     run_id = "9" + "7" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(
@@ -962,11 +897,9 @@ def test_a_yaml_declared_document_is_parsed(
 def test_an_unsupported_format_is_treated_as_malformed(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(Scenario: An unsupported format is treated as malformed,
-    `session-ingestion`)*. `toml` is a valid `run_metadata_file.content_type`
-    (schema.sql's own `CHECK`) that `metadata_parse.parse` does not
-    implement -- the same "server does not parse it" outcome D97 class 7
-    covers for a genuinely broken document."""
+    """`toml` is a storable `run_metadata_file.content_type` that
+    `metadata_parse.parse` does not implement, so it is recorded as
+    `malformed`, like a broken document."""
     run_id = "9" + "8" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(
@@ -981,15 +914,13 @@ def test_an_unsupported_format_is_treated_as_malformed(
     )
 
 
-# --- Phase 9: threat matrix (design.md, task 9.7) ---------------------------
+# --- hostile client-chosen text -----------------------------------------------
 
 
 def test_a_quoting_shaped_declared_key_round_trips_byte_identically(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Threat matrix: "Client-chosen text reaching SQL" -- bound parameters
-    only, mirroring `test_routes_sections.py`'s own proof for section names.
-    A declared key containing quote characters is stored and read back
+    """A declared key containing quote characters is stored and read back
     through the port intact, never escaped or normalised."""
     run_id = "8" + "0" * 31
     key = 'He said "hi", didn\'t he?'
@@ -1013,11 +944,8 @@ def test_a_quoting_shaped_declared_key_round_trips_byte_identically(
 def test_a_crlf_shaped_metadata_key_never_appears_unescaped_in_a_rejection_body(
     client: TestClient,
 ) -> None:
-    """Threat matrix: "Client-chosen text reaching a rejection body" -- an
-    unknown field within the `metadata` section (`extra="forbid"`,
-    design.md D96) is client-chosen text of the same shape a declared key
-    could carry. `errors.py`'s pre-existing `safe_segment` allow-list, not
-    new code in this phase, is what keeps it out of the response body."""
+    """An unknown field in the `metadata` section (`extra="forbid"`) is
+    client-chosen text; `safe_segment` keeps it out of the rejection body."""
     run_id = "8" + "1" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = {

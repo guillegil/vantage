@@ -1,7 +1,6 @@
-"""Threat matrix "Network exposure": binding wider than loopback with no
-authentication in front of it (Phase 4) must warn, naming exactly what is
-missing. The default binds nothing wider and warns about nothing -- a
-warning on every normal start trains people to ignore the one that matters.
+"""Binding wider than loopback, with no authentication in front of the
+server, warns and names what is missing. The default warns about nothing --
+a warning on every normal start trains people to ignore the one that matters.
 """
 
 from __future__ import annotations

@@ -1,34 +1,20 @@
-"""The hand-written OpenAPI document, its drift check, and the generated
-documents being disabled (design.md D53, D55/Q5, D66; Phase 6).
+"""The hand-written OpenAPI document, its drift checks, and the generated
+documents being disabled.
 
-**The document is authored by hand, never generated from `app.routes`.**
-That is the entire reason this file exists: a document derived from the
-route table it is checked against could never fail its own drift check --
-it would always equal itself. `test_a_served_but_undocumented_route_is_reported`
-and `test_a_documented_but_unserved_path_is_reported` each prove their
-direction can fail, not only that it currently passes (Phases 4 and 5 both
-found tests that passed vacuously before their guard existed; this module's
-two drift tests are written specifically not to repeat that).
+**The document is authored by hand, never generated from `app.routes`.** A
+document derived from the route table it is checked against could never fail
+its own drift check. `test_a_served_but_undocumented_route_is_reported` and
+`test_a_documented_but_unserved_path_is_reported` each prove their direction
+can fail, not only that it currently passes.
 
-`GET /api/v1/openapi.yaml` is itself declared `read` in the document (task
-6.8's own requirement, `api-interface-document` -> "This document, served
-as raw bytes"), so it is exercised by `test_every_documented_path_answers_2xx`
-like every other read path.
+`GET /api/v1/openapi.yaml` is itself declared `read` in the document, so it
+is exercised by `test_every_documented_path_answers_2xx` like every other
+read path.
 
-**The `components.schemas` half of the document is checked too, and until
-verify round 2 it was not** -- the document claimed its response shapes were
-bounded by `test_routes_read.py`'s key-set assertions, but those compare a
-response body against a literal written in the test file and never open this
-document at all. Three tampers on `v1.yaml` alone -- a required `root` added
-to `RunVcs`, `presentation` dropped from `RunListItem.required`, and
-`ResultItem.outcome`'s enum replaced with a vocabulary the server never
-emits -- each left the whole suite green. The four schema tests at the end of
-this module close that: they read the declared schemas out of the parsed
-document and the field set out of `model_fields` **independently**, then
-compare. Nothing here generates one side from the other -- that is the
-derivation design.md Q5 rejects, and it would make these checks unfailable
-for the same reason a generated document could never fail the path drift
-check above.
+The schema tests at the end of this module check `components.schemas`: they
+read the declared schemas out of the parsed document and the field set out
+of `model_fields` **independently**, then compare. Generating one side from
+the other would make these checks unfailable for the same reason.
 """
 
 from __future__ import annotations
@@ -94,10 +80,9 @@ def _declared_operations(document: Mapping[str, Any]) -> set[tuple[str, str]]:
 
 
 def _report(run_id: str) -> dict[str, Any]:
-    """A minimal well-formed `SessionReport` body -- `results` is optional
-    (design.md D15) and omitted here on purpose: `list_history`/
-    `list_results` answer `200` with an empty page for a run/node id with
-    no results, so no result fixture is needed to reach 2xx."""
+    """A minimal well-formed `SessionReport` body. `results` is optional and
+    omitted: `list_history`/`list_results` answer `200` with an empty page
+    for a run/node id with no results."""
     return {
         "run": {
             "id": run_id,
@@ -120,10 +105,10 @@ def _mounted_operations(app: FastAPI) -> set[tuple[str, str]]:
     `_IncludedRouter` wrapper, so `app.routes` no longer yields flat
     `APIRoute` instances the way earlier versions did, and `.openapi()` is
     the public, version-stable way to ask "what is actually mounted."
-    **This is not the forbidden derivation** (design.md Q5): it only reads
-    the *mounted* side of the comparison, never replaces `v1.yaml`, and the
-    HTTP endpoint that would have served it is disabled (`openapi_url=None`
-    in `create_app`)."""
+    This does not generate the document from the routes: it only reads the
+    *mounted* side of the comparison, never replaces `v1.yaml`, and the HTTP
+    endpoint that would have served it is disabled (`openapi_url=None` in
+    `create_app`)."""
     schema = app.openapi()
     operations: set[tuple[str, str]] = set()
     for path, methods_at_path in schema.get("paths", {}).items():
@@ -134,13 +119,9 @@ def _mounted_operations(app: FastAPI) -> set[tuple[str, str]]:
     return operations
 
 
-# --- 6.1 ------------------------------------------------------------------
-
-
 def test_openapi_yaml_serves_the_handwritten_bytes() -> None:
-    """*(api-interface-document -> Machine-readable interface document)*.
-    `pyyaml` parses the response only here -- never at runtime (module
-    docstring, task 6.11)."""
+    """`GET /api/v1/openapi.yaml` serves `v1.yaml` byte for byte as
+    `application/yaml`. `pyyaml` parses it only in tests, never at runtime."""
     client = TestClient(create_app(InMemoryExecutionStore()))
 
     response = client.get("/api/v1/openapi.yaml")
@@ -152,11 +133,8 @@ def test_openapi_yaml_serves_the_handwritten_bytes() -> None:
     assert parsed["openapi"].startswith("3.1")
 
 
-# --- 6.2 ------------------------------------------------------------------
-
-
 def test_generated_documents_are_disabled() -> None:
-    """*(The generated interface documents are disabled)*."""
+    """FastAPI's generated `/openapi.json`, `/docs` and `/redoc` are off."""
     client = TestClient(create_app(InMemoryExecutionStore()))
 
     assert client.get("/openapi.json").status_code == 404
@@ -164,15 +142,10 @@ def test_generated_documents_are_disabled() -> None:
     assert client.get("/redoc").status_code == 404
 
 
-# --- 6.3 ------------------------------------------------------------------
-
-
 def test_a_served_but_undocumented_route_is_reported() -> None:
-    """*(A served-but-undocumented endpoint is reported; The document is
-    not derived from the route table it checks)*. **The falsifier.** Half 1
-    proves the real app is drift-free; half 2 mounts one extra route the
-    document never declares and proves the check reports it -- the check
-    must be able to fail before it can be trusted."""
+    """Half 1 proves the real app is drift-free; half 2 mounts one extra
+    route the document never declares and proves the check reports it --
+    the check must be able to fail before it can be trusted."""
     declared = _declared_operations(_parsed_document())
     real_app = create_app(InMemoryExecutionStore())
     assert _mounted_operations(real_app) - declared == set()
@@ -190,14 +163,10 @@ def test_a_served_but_undocumented_route_is_reported() -> None:
     assert ("GET", "/_undocumented-probe") in undeclared
 
 
-# --- 6.4 ------------------------------------------------------------------
-
-
 def test_a_documented_but_unserved_path_is_reported() -> None:
-    """*(the reverse direction, `declared - mounted`)*. Half 1: against the
-    real app, empty. Half 2: a document copy carrying one path the app
-    never mounts, proving this direction can fail too, not only the
-    mounted-but-undeclared direction 6.3 names."""
+    """The reverse direction, `declared - mounted`. Half 1: against the real
+    app, empty. Half 2: a document copy carrying one path the app never
+    mounts, proving this direction can fail too."""
     declared = _declared_operations(_parsed_document())
     mounted = _mounted_operations(create_app(InMemoryExecutionStore()))
 
@@ -207,12 +176,9 @@ def test_a_documented_but_unserved_path_is_reported() -> None:
     assert tainted_declared - mounted == {("GET", "/_never-mounted-probe")}
 
 
-# --- 6.5 ------------------------------------------------------------------
-
-
 def test_every_read_operation_is_get_and_every_write_operation_is_not() -> None:
-    """*(D53 consistency check; session-ingestion -> Ingestion endpoints
-    are marked as writing, not reading)*."""
+    """Every `read`-tagged operation is a GET, no `write`-tagged one is, and
+    the ingestion endpoints are tagged `write`."""
     document = _parsed_document()
     read_ops: set[tuple[str, str]] = set()
     write_ops: set[tuple[str, str]] = set()
@@ -231,15 +197,11 @@ def test_every_read_operation_is_get_and_every_write_operation_is_not() -> None:
     assert ("POST", "/runs/{run_id}/heartbeat") in write_ops
 
 
-# --- 6.6 ------------------------------------------------------------------
-
-
 def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
-    """*(Every documented path answers 2xx)*. A binding table maps every
-    `(method, path)` the document declares to a callable producing valid
-    parameters, driven against a dedicated fixture database -- separate
-    from PR7's read-only fixture (design.md D65). Includes
-    `GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml` themselves."""
+    """A binding table maps every `(method, path)` the document declares to
+    a callable producing valid parameters, driven against a dedicated
+    fixture database. Includes `GET /api/v1/capabilities` and
+    `GET /api/v1/openapi.yaml` themselves."""
     document = _parsed_document()
     declared = _declared_operations(document)
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
@@ -247,8 +209,8 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
     run = f"/api/v1/runs/{'6' * 32}"
     node_id = "tests/test_interface_document_probe.py::test_x"
     report = _report(run.rsplit("/", 1)[-1])
-    # A single passing result, present so `GET /runs/{run_id}/result` (the
-    # single-result endpoint, design.md D78) has something to bind against.
+    # A single passing result, present so `GET /runs/{run_id}/result` has
+    # something to bind against.
     report["results"] = [
         {
             "node_id": node_id,
@@ -315,7 +277,7 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
     store.close()
 
 
-# --- 6.7 (verify round 2) -------------------------------------------------
+# --- Schema checks ----------------------------------------------------------
 
 # `v1.yaml`'s schema name -> the model that produces or accepts that shape.
 # Split by direction because `required` means two different things either
@@ -385,10 +347,7 @@ def _model_allows_none(annotation: Any) -> bool:
 
 
 def test_every_declared_schema_is_bound_to_a_model() -> None:
-    """*(api-interface-document -> Machine-readable interface document;
-    design.md D56 -- one source per fact.)*
-
-    The binding table itself, in both directions. A schema added to
+    """The binding table itself, in both directions. A schema added to
     `v1.yaml` with no model behind it, or a table entry naming a schema the
     document dropped, is caught here rather than silently skipping the three
     checks below -- a comparison that quietly iterates over nothing is the
@@ -405,14 +364,13 @@ def test_every_declared_schema_is_bound_to_a_model() -> None:
 
 
 def test_declared_schema_properties_match_their_model_fields() -> None:
-    """*(D56 -- the response schemas are a second statement of
-    `service/schemas.py`'s facts, and this is the check that binds them.)*
+    """The document's schemas restate `service/schemas.py`; this binds them.
 
     Both directions, per schema: a model field the document never declares
     is an undocumented part of the contract, and a declared property with no
     model behind it is a promise the server does not keep. `RunVcs` gaining
-    a `root` property -- the exact field design.md D59 exists to keep off the
-    wire -- fails the second direction."""
+    a `root` property -- a field deliberately kept off the wire -- fails the
+    second direction."""
     schemas = _declared_schemas()
 
     for name, model in _BOUND_MODELS.items():
@@ -430,7 +388,7 @@ def test_declared_schema_properties_match_their_model_fields() -> None:
 
 
 def test_declared_required_sets_match_their_models() -> None:
-    """*(D56.)* A property the document declares optional while the model
+    """A property the document declares optional while the model
     always sends it understates the contract; one it declares required while
     the model may omit it overstates it. See `_REQUEST_SCHEMAS` for why the
     two directions of the boundary compute this differently."""
@@ -457,7 +415,7 @@ def test_declared_required_sets_match_their_models() -> None:
 
 
 def test_declared_nullability_matches_its_model_field() -> None:
-    """*(D56.)* Whether each declared property admits `null` must match
+    """Whether each declared property admits `null` must match
     whether the model's annotation admits `None`. A generated client trusts
     this to decide what it has to handle, and it is the property most likely
     to drift silently: `finished_at` losing its `"null"` member reads as a
@@ -481,12 +439,12 @@ def test_declared_nullability_matches_its_model_field() -> None:
 
 
 def test_declared_enums_match_the_vocabulary_the_server_can_emit() -> None:
-    """*(D56; `vantage.core.domain.result.OUTCOMES` and
-    `vantage.core.domain.liveness.PRESENTATIONS`.)*
+    """Checked against `vantage.core.domain.result.OUTCOMES` and
+    `vantage.core.domain.liveness.PRESENTATIONS`.
 
     Both directions again, at two levels: which properties declare a closed
     vocabulary at all, and what that vocabulary contains. Replacing
-    `ResultItem.outcome`'s enum with values the server never emits fails the
+    `ResultListItem.outcome`'s enum with values the server never emits fails the
     second; adding an enum to a property nobody vetted fails the first,
     rather than passing unchecked because no expectation was written for
     it."""

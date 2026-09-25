@@ -1,61 +1,33 @@
-"""Pydantic v2 models for the ingestion boundary (design.md D1, D5).
+"""Pydantic v2 models for the HTTP boundary.
 
-``vantage.service`` is the one package RQ-24 does not constrain, so this is
-where Pydantic v2 belongs -- at the system boundary, per CLAUDE.md's
-validation rule. The validated model is converted to the core's ``Execution``
-dataclass before the storage port is ever touched, so no Pydantic type
-crosses into ``vantage.core`` (RQ-26, RQ-30.2).
+Pydantic is confined to ``vantage.service``; ``vantage.core`` and
+``vantage.storage`` take no third-party dependency. A validated report is
+converted to the core's dataclasses before the storage port is touched, so
+no Pydantic type crosses into the core.
 
-**`extra=` is asymmetric between `RunReport` and `SessionReport`, and that
-asymmetry is deliberate -- it is the whole point of the HTTP boundary.**
-``RunReport`` (the ``run`` section) is ``extra="forbid"``. The envelope,
-``SessionReport``, is ``extra="ignore"``. That looks inconsistent; it is not.
-Across a versioned HTTP boundary the two directions of version skew have
-different costs (ADR-4, ADR-9):
+**The ``extra=`` setting differs per model on purpose**, because an unknown
+key means something different in each place:
 
-- An unknown field **inside** ``run`` means the client and server disagree
-  about what a run *is*. That is a client bug -- the plugin is either newer
-  than this server understands or malformed -- and rejecting it loudly is a
-  service to whoever wrote it. Silently accepting an unrecognised run field
-  would let a typo or a schema drift pass unnoticed forever.
-- An unknown **section** on the envelope means a newer ``pytest-vantage`` is
-  talking to an older ``vantage`` -- Milestone 2 adds ``"results"``,
-  Milestone 3 adds ``"environment"`` and ``"vcs"``, as sibling sections. That
-  is an ordinary, expected, supported state, not an error: it is what lets
-  the two distributions release independently at all (ADR-4). Ignoring it is
-  the mechanism, not a shortcut.
+- ``RunReport``, ``VcsReport`` and the two metadata models are
+  ``extra="forbid"``. An unknown field *inside* one of these sections means
+  client and server disagree about what the section is -- a bug or a typo,
+  which is rejected loudly rather than swallowed.
+- ``SessionReport``, the envelope, is ``extra="ignore"``. An unknown sibling
+  section means a newer ``pytest-vantage`` is talking to an older
+  ``vantage``. That is a supported state, and ignoring the section is what
+  lets the two distributions release independently.
+- ``ResultReport`` is ``extra="allow"``. An unknown key on one result (a
+  marker, a parameter) is enrichment on a record whose known fields still
+  validate: the report is recorded, and the tolerated key names are reported
+  back in ``Acknowledgement.ignored`` so the drift stays visible.
 
-If both were strict, every plugin upgrade would be a breaking change for
-every server that has not yet been upgraded to match. If both ignored extras,
-a typo'd or drifted run field would be silently swallowed instead of
-rejected, which is exactly what RQ-42 exists to prevent. The asymmetry is not
-an inconsistency to "fix" -- it is two different version-skew directions with
-two different acceptable costs.
-
-**A third `extra=` value, `"allow"`, appears on `ResultReport` (design.md
-D15) and is a third position, not a compromise between the other two.** An
-unknown key on one *result* -- a marker, a parameter -- is neither a schema
-disagreement about what `run` is, nor an unnamed sibling section: it is
-enrichment on a record whose known fields still fully validate. Rejecting it
-would break every plugin upgrade the same way a strict `run` would; ignoring
-it silently would hide the drift RQ-42 exists to surface. `"allow"` keeps
-both: the report still records, and the tolerated key names surface,
-deduplicated, in `Acknowledgement.ignored`.
-
-**`MetadataFileReport` and `MetadataReport` (design.md D96) carry NO length
-or pattern constraint on any field, and that is the one rule that overrides
-every other pattern in this module.** `VcsReport.commit` below uses
-``max_length=64``, and a Pydantic constraint that fails raises
-``InvalidReportError`` -- a ``422`` that rejects the WHOLE session report.
-A co-worker's declared configuration value is exactly the kind of string
-this project does not control the length or shape of, so a constraint here
-would convert a typo in someone else's file into a lost test session. Every
-bound on a metadata value is applied by the normalizer (Phase 9's
-`_to_run_metadata`), which drops the offending value rather than rejecting
-the report. `extra="forbid"` still applies to both models, matching
-`VcsReport` rather than `ResultReport`: an unknown field *inside* the
-metadata section means the two sides disagree about what a captured file
-looks like, which is a schema disagreement, not enrichment.
+**The metadata models carry no length or pattern constraint on any field.**
+A failed Pydantic constraint rejects the whole session report with a
+``422``, and a declared configuration value is a string this project does
+not control, so a constraint here would turn a typo in someone's config
+file into a lost test session. Any bound on metadata belongs in
+``routes/runs.py``'s ``_to_run_metadata``, which drops the offending value
+instead of rejecting the report.
 """
 
 from __future__ import annotations
@@ -67,24 +39,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 
-# Mirrors `vantage.core.domain.result.OUTCOMES` (design.md D15/D17/D21). The
-# plugin cannot import `vantage` (RQ-24), so the six-value vocabulary is
-# necessarily declared a second time here rather than imported -- the
-# consistency between the schema `CHECK`, `OUTCOMES` and this `Literal` is a
-# task in its own right (design.md, "Interfaces / Contracts"), not this
-# phase's (Phase 5, task 5.8).
+# Mirrors `vantage.core.domain.result.OUTCOMES`. A `Literal` must spell out
+# its values, so the vocabulary is declared again here;
+# `test_outcome_vocabulary_matches_across_schema_sql_core_and_service` keeps
+# it in step with `OUTCOMES` and the schema's `CHECK`.
 _Outcome = Literal["passed", "failed", "error", "skipped", "xfailed", "xpassed"]
 
 
 class RunReport(BaseModel):
-    """The ``run`` section of a session report (design.md D1).
+    """The ``run`` section of a session report.
 
-    ``extra="forbid"``: every field is named here, and nothing else is
-    accepted. See the module docstring for why this differs from
-    `SessionReport`. Every field is required and unaliased with no default --
-    even the client's own nulls (`finished_at`, `interrupt_reason`) must be
-    sent explicitly, so a field the client forgot to send is a rejection, not
-    a silently substituted default.
+    ``extra="forbid"`` (see the module docstring). Every field is required
+    with no default -- even the nullable ones (`finished_at`,
+    `interrupt_reason`) must be sent explicitly, so a field the client forgot
+    is a rejection, not a silently substituted default.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -98,48 +66,31 @@ class RunReport(BaseModel):
 
 
 class ResultReport(BaseModel):
-    """One test's resolved outcome inside the `results` section (design.md
-    D15, D17, D18).
+    """One test's resolved outcome inside the ``results`` section.
 
-    ``extra="allow"``: unlike `RunReport`, an unknown key on a *result* is
-    tolerated rather than rejected. See the module docstring for the
-    `RunReport`/`SessionReport` asymmetry -- this is a third, distinct
-    position for a third, distinct kind of drift: a newer plugin's enriched
-    result (an added marker, an added parameter) must still record on an
-    older server, and the tolerance must be visible rather than silent.
-    `service/routes/runs.py` collects the tolerated key **names**,
-    deduplicated, into `Acknowledgement.ignored` as `results[].<name>` --
-    never a per-index path, so one unknown key on 500 results is one entry,
-    not 500.
+    ``extra="allow"`` (see the module docstring). `service/routes/runs.py`
+    collects the tolerated key **names**, deduplicated, into
+    `Acknowledgement.ignored` as `results[].<name>` -- never a per-index
+    path, so one unknown key on 500 results is one entry, not 500.
 
-    Every known field is required with no default, matching `RunReport`'s
-    rule: even a field whose type allows `None` must be sent explicitly, so
-    a field the client forgot to send is a rejection (422), not a silently
-    substituted null. Nullability itself mirrors
-    `vantage.core.domain.result.CaseIdentity`/`Result`: `node_id`,
-    `file_path`, `function_name` and `outcome` are never null there, so they
-    are not optional here either -- a client that sends `null` for one of
-    them fails validation exactly like a client that omits it, because the
-    core dataclasses that receive the converted value do not accept `None`
-    for those fields. Every other field can be null because the
-    corresponding phase may never have run (RQ-5.2) or the identity
-    component may genuinely be absent (RQ-9.2/9.3).
+    The fields up to `worker_id` are required with no default, as on
+    `RunReport`. Nullability mirrors the core's `CaseIdentity`/`Result`:
+    `node_id`, `file_path`, `function_name` and `outcome` are never null
+    there, so `null` for one of them fails validation. The rest may be null:
+    a test phase may never have run, an identity component may be absent,
+    and `worker_id` is null outside xdist.
 
-    **The failure-evidence fields below are the one exception to "every
-    known field is required with no default."** An older plugin's report
-    predates every one of them, so each defaults to the absent shape
-    (`None`/`False`) rather than rejecting (design.md D75).
-    `routes/runs.py`'s `_to_failure_evidence`/`_to_captured_output` OR each
-    `*_truncated` flag with the server's own bound, never assign it.
+    **The failure and captured-output fields are the exception**: an older
+    plugin sends none of them, so each defaults to its absent shape
+    (`None`/`False`). `routes/runs.py`'s `_to_failure_evidence` and
+    `_to_captured_output` OR each `*_truncated` flag with the server's own
+    bound, never assign it.
 
-    `class_name` and `param_id` are plain `str | None`, never a
-    length-constrained string: `param_id=""` (RQ-9's extension scenario)
-    must arrive intact. **No `min_length=1`, no validator that coerces a
-    falsy value to `None`** -- either would silently turn the empty-string
-    case into the null case, which is exactly the distinction RQ-9 exists to
-    preserve (design.md D18, the ``""`` is not `None` hop). The same rule
-    applies to `duration` and the three phase durations: a genuine `0.0`
-    must survive as `0.0`, never `x or None`.
+    `class_name` and `param_id` are plain `str | None`: `param_id=""` (a
+    parametrised test whose id is the empty string) must arrive intact and
+    distinct from `None`. **No `min_length=1`, no validator that coerces a
+    falsy value to `None`.** The same goes for the durations: a genuine
+    `0.0` must survive as `0.0`, never `x or None`.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -180,16 +131,14 @@ class ResultReport(BaseModel):
 
 
 class VcsReport(BaseModel):
-    """The ``vcs`` section of a session report (design.md D47).
+    """The ``vcs`` section of a session report.
 
-    ``extra="forbid"``, matching `RunReport` rather than `ResultReport`: an
-    unknown field *inside* `vcs` means the two sides disagree about what a
-    VCS snapshot is, not `ResultReport`'s enrichment case. ``commit`` is
-    bounded with ``max_length=64``, never a 40-hex pattern -- a SHA-256
-    repository produces 64 hex characters. Every field is required with no
-    default, matching `RunReport`'s rule: all five nulls must be sent
-    explicitly. No ``commit_subject_truncated`` field: the server owns the
-    bound and the flag (design.md D49).
+    ``extra="forbid"`` (see the module docstring). ``commit`` is bounded with
+    ``max_length=64``, never a 40-hex pattern -- a SHA-256 repository
+    produces 64 hex characters. Every field is required with no default, so
+    all five nulls must be sent explicitly. There is no
+    ``commit_subject_truncated`` field: the server applies the subject bound
+    and sets the flag itself.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -202,14 +151,13 @@ class VcsReport(BaseModel):
 
 
 class MetadataFileReport(BaseModel):
-    """One entry of `MetadataReport.files` (design.md D96): the outcome
-    recorded for one declared file, whether or not it was captured.
+    """One entry of `MetadataReport.files`: the outcome recorded for one
+    declared file, whether or not it was captured.
 
-    ``extra="forbid"``, matching `VcsReport`. **No `max_length`, no
-    `pattern`, no constraint of any kind on `path`, `keys` or `content`** --
-    see the module docstring's D96 paragraph. `content` is `None` whenever
-    `status` is not `"captured"`, mirroring D95's "declared-but-dropped is a
-    row, not an absence" contract on the storage side.
+    ``extra="forbid"``, and **no constraint of any kind on `path`, `keys` or
+    `content`** (see the module docstring). `content` is `None` whenever
+    `status` is not `"captured"`: a declared file that was dropped is still
+    reported, not omitted.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -222,12 +170,11 @@ class MetadataFileReport(BaseModel):
 
 
 class MetadataReport(BaseModel):
-    """The ``metadata`` section of a session report (design.md D96): the
-    declaration's own name, and one `MetadataFileReport` per file it named.
+    """The ``metadata`` section of a session report: the declaration's own
+    name, and one `MetadataFileReport` per file it named.
 
-    ``extra="forbid"``, matching `VcsReport` rather than `SessionReport`'s
-    envelope tolerance -- see the module docstring. **No constraint on
-    `declaration` either.**
+    ``extra="forbid"``, and **no constraint on `declaration` either** (see
+    the module docstring).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -237,26 +184,16 @@ class MetadataReport(BaseModel):
 
 
 class SessionReport(BaseModel):
-    """The envelope submitted to `POST /api/v1/runs` (design.md D1).
+    """The envelope submitted to `POST /api/v1/runs`.
 
-    ``extra="ignore"``: see the module docstring. Milestone 2 and 3 add
-    sibling sections (``results``, ``environment``, ``vcs``) that an older
-    server must tolerate rather than reject.
+    ``extra="ignore"`` (see the module docstring): an older server tolerates
+    sections a newer plugin adds rather than rejecting the report.
 
-    ``results`` is `None` by default -- design.md D15's "optional sibling
-    section". `None` (the section is absent) and `[]` (the session collected
-    nothing) are both legal and both mean zero result rows: a reverted
-    plugin against an un-reverted server still must have its run stored.
-
-    ``vcs`` is `None` by default for the same reason -- an older plugin's
-    report carries no such key, and `extra="ignore"` on this envelope drops
-    an unrecognised key rather than rejecting the whole report (design.md
-    D47). No capability gate exists for it: a flag nothing branches on would
-    advertise a gate that does not exist.
-
-    ``metadata`` is `None` by default for the same reason again -- an older
-    plugin, or a session run without `--vantage-metadata`, carries no such
-    key (design.md D96).
+    ``results``, ``vcs`` and ``metadata`` default to `None`, because an older
+    plugin -- or, for ``metadata``, a session run without
+    `--vantage-metadata` -- sends no such key. For ``results``, `None` (the
+    section is absent) and `[]` (the session collected nothing) both mean
+    zero result rows; the run is still stored.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -271,14 +208,13 @@ class SessionReport(BaseModel):
     def _reject_duplicate_node_ids(
         cls, value: list[ResultReport] | None
     ) -> list[ResultReport] | None:
-        """D19 layer 2: a duplicate `node_id` inside one report is rejected
-        loudly and wholesale, before it ever reaches the silent replay
-        backstop (D19 layer 3). The `ValueError` message never repeats a
-        `node_id` -- not because it would reach the client (`errors.py`
-        builds every rejection body from `loc` segments only, never a
-        validator's message text), but for the same discipline `errors.py`'s
-        own docstring names: nothing client-chosen is passed through, even
-        where it currently happens not to be echoed.
+        """Reject a duplicate `node_id` inside one report, loudly and
+        wholesale. Otherwise storage's `ON CONFLICT ... DO NOTHING` result
+        insert would silently keep the first entry and drop the rest.
+
+        The message never repeats the `node_id`: nothing client-chosen is
+        passed through, even though `errors.py` builds rejection bodies from
+        `loc` segments only and would not echo it anyway.
         """
         if value is None:
             return value
@@ -291,7 +227,7 @@ class SessionReport(BaseModel):
 
 
 class Acknowledgement(BaseModel):
-    """The response body for both `201` and `200` (design.md D3)."""
+    """The response body of `POST /api/v1/runs`, for both `201` and `200`."""
 
     run_id: str
     status: str
@@ -299,12 +235,10 @@ class Acknowledgement(BaseModel):
 
 
 class HeartbeatAcknowledgement(BaseModel):
-    """The response body for `POST /runs/{run_id}/heartbeat` (design.md D33).
+    """The response body for `POST /runs/{run_id}/heartbeat`.
 
-    A distinct model from `Acknowledgement` rather than a reuse with
-    `ignored` defaulted -- the heartbeat request carries no `results`
-    section, so there is nothing that could ever populate `ignored`, and a
-    field that can never be non-empty does not belong on the response shape.
+    Separate from `Acknowledgement` because the heartbeat's request body is
+    never read, so nothing could ever populate `ignored`.
     """
 
     run_id: str
@@ -312,20 +246,13 @@ class HeartbeatAcknowledgement(BaseModel):
 
 
 class RunVcsResponse(BaseModel):
-    """The VCS section of a run response, list or detail alike (design.md
-    D59).
+    """The VCS section of a run response, list or detail alike.
 
-    **No `root` field, on purpose.** `routes/read.py` builds this model
-    field by field from either a lean `VcsProjection` (list path) or a full
-    `VcsContext` (detail path) -- both carry `commit`, `branch`,
-    `commit_subject`, `commit_subject_truncated` and `dirty` under the same
-    names, so one response model serves both callers. Neither caller ever
-    reads `root` off its source object to populate this model; the field
-    simply does not exist here to be populated. That is what keeps
-    `VcsContext.root` off the wire on the detail path, where nothing else
-    would stop it (design.md D59's own point -- the exclusion is a response-
-    model choice, not a structural one, precisely because `VcsContext` is
-    the type in hand there).
+    **No `root` field, on purpose.** `routes/read.py` builds this model field
+    by field from either a lean `VcsProjection` (list path) or a full
+    `VcsContext` (detail path). `VcsContext` carries `root`, the reporter's
+    absolute checkout path, and this model having no field for it is the only
+    thing that keeps it off the wire on the detail path.
     """
 
     commit: str | None
@@ -336,8 +263,7 @@ class RunVcsResponse(BaseModel):
 
 
 class RunListItemResponse(BaseModel):
-    """One entry of `RunListResponse` (design.md D57, D59, D62). Matches the
-    design's own wire-shape example field for field."""
+    """One entry of `RunListResponse`."""
 
     id: str
     started_at: datetime
@@ -349,20 +275,19 @@ class RunListItemResponse(BaseModel):
 
 
 class MetadataHorizonResponse(BaseModel):
-    """`RunListResponse.metadata_horizon`'s populated shape (design.md D100,
-    Q2) -- present only when a metadata filter was supplied. `predating` is
-    the count of runs recorded before `key` was ever declared, which equals
-    the total run count when `key` was never declared at all: "every run
-    predates this key; it has never been declared.\""""
+    """`RunListResponse.metadata_horizon`'s populated shape -- present only
+    when a metadata filter was supplied. `predating` is the count of runs
+    recorded before `key` was ever declared, which equals the total run
+    count when `key` was never declared at all."""
 
     key: str
     predating: int
 
 
 class RunListResponse(BaseModel):
-    """The response body for `GET /api/v1/runs` (design.md D58 -- no
-    `total`; D100 -- `metadata_horizon`, `None` when no metadata filter was
-    given: a query with no metadata filter has no horizon to report)."""
+    """The response body for `GET /api/v1/runs`. No `total`, which would cost
+    a `COUNT(*)` on every page. `metadata_horizon` is `None` when no metadata
+    filter was given: there is no horizon to report."""
 
     items: list[RunListItemResponse]
     has_more: bool
@@ -370,10 +295,9 @@ class RunListResponse(BaseModel):
 
 
 class RunDetailResponse(BaseModel):
-    """The response body for `GET /api/v1/runs/{run_id}` (design.md D57,
-    D59, D62). Carries `interrupt_reason`, which the lean list entry omits
-    -- the detail path keeps the full record reachable, matching
-    `RunDetail`'s own reason for existing."""
+    """The response body for `GET /api/v1/runs/{run_id}`. Carries
+    `interrupt_reason`, which the lean list entry omits -- the detail path
+    keeps the full record reachable."""
 
     id: str
     started_at: datetime
@@ -386,12 +310,10 @@ class RunDetailResponse(BaseModel):
 
 
 class FailureProjectionResponse(BaseModel):
-    """The lean failure projection nested on `ResultListItemResponse`
-    (design.md D76). No `traceback`, `failure_repr` or captured-output
-    field at all -- the exclusion is structural, the same defence
-    `RunVcsResponse` gives `vcs_root` (D59): a results list has nothing to
-    leak because this model never carries those fields in the first
-    place."""
+    """The lean failure projection nested on `ResultListItemResponse`. No
+    `traceback`, `failure_repr` or captured-output field at all, so a
+    results list cannot carry them -- the same structural exclusion
+    `RunVcsResponse` applies to `root`."""
 
     failure_type: str | None
     failure_message: str | None
@@ -403,10 +325,9 @@ class FailureProjectionResponse(BaseModel):
 
 
 class ResultListItemResponse(BaseModel):
-    """One entry of `ResultsResponse` (design.md D57, D76). `failure` is a
-    lean `FailureProjectionResponse`, never the full failure evidence --
-    the full record is reachable via `ResultDetailResponse`, the
-    single-result endpoint's response model. Built field by field in
+    """One entry of `ResultsResponse`. `failure` is a lean
+    `FailureProjectionResponse`, never the full failure evidence -- the full
+    record is reachable via `ResultDetailResponse`. Built field by field in
     `routes/read.py`, never `model_validate(..., from_attributes=True)`."""
 
     node_id: str
@@ -429,20 +350,19 @@ class ResultListItemResponse(BaseModel):
 
 
 class ResultsResponse(BaseModel):
-    """The response body for `GET /api/v1/runs/{run_id}/results` (design.md
-    D57, D61)."""
+    """The response body for `GET /api/v1/runs/{run_id}/results`."""
 
     items: list[ResultListItemResponse]
     has_more: bool
 
 
 class ResultDetailResponse(BaseModel):
-    """The response body for `GET /api/v1/runs/{run_id}/result` (design.md
-    D77, D78) -- the full record, every field a list response bounds or
-    excludes, unbounded by any display width. Flat, matching
-    `ResultReport`'s own wire shape for the same fields, rather than
-    nesting `failure`/`captured` sub-objects. Built field by field in
-    `routes/read.py`, never `model_validate(..., from_attributes=True)`."""
+    """The response body for `GET /api/v1/runs/{run_id}/result` -- the full
+    record, every field a list response bounds or excludes, unbounded by any
+    display width. Flat, matching `ResultReport`'s own wire shape for the
+    same fields, rather than nesting `failure`/`captured` sub-objects. Built
+    field by field in `routes/read.py`, never
+    `model_validate(..., from_attributes=True)`."""
 
     node_id: str
     file_path: str
@@ -480,10 +400,9 @@ class ResultDetailResponse(BaseModel):
 
 
 class HistoryEntryResponse(BaseModel):
-    """One entry of `HistoryResponse` (design.md D54, D57, D59, D60). `vcs`
-    is a lean `RunVcsResponse` built from `HistoryEntry.vcs` (a
-    `VcsProjection`, no `root` field -- same structural exclusion as the
-    run list, D59)."""
+    """One entry of `HistoryResponse`. `vcs` is a lean `RunVcsResponse`
+    built from `HistoryEntry.vcs`, a `VcsProjection` with no `root` field --
+    the same exclusion as the run list."""
 
     run_id: str
     started_at: datetime
@@ -494,15 +413,14 @@ class HistoryEntryResponse(BaseModel):
 
 
 class HistoryResponse(BaseModel):
-    """The response body for `GET /api/v1/tests/history` (design.md D54,
-    D57, D61)."""
+    """The response body for `GET /api/v1/tests/history`."""
 
     items: list[HistoryEntryResponse]
     has_more: bool
 
 
 class SectionValue(BaseModel):
-    """The stored `value` for one `test_sections` row (design.md D83, D87).
+    """The stored `value` for one `test_sections` row.
 
     `model_dump_json()` on write, `model_validate_json()` on read -- Pydantic
     begins and ends at this model in both directions. The section's name is
@@ -513,30 +431,29 @@ class SectionValue(BaseModel):
 
 
 class SectionUpsertRequest(BaseModel):
-    """The request body for `POST /api/v1/config/sections` (design.md D87)."""
+    """The request body for `POST /api/v1/config/sections`."""
 
     name: str
     prefix: str
 
 
 class SectionResponse(BaseModel):
-    """One section, name and its normalized prefix (design.md D87) -- the
-    response body for the upsert route, and one entry of
-    `SectionListResponse`."""
+    """One section, name and its normalized prefix -- the response body for
+    the upsert route, and one entry of `SectionListResponse`."""
 
     name: str
     prefix: str
 
 
 class SectionListResponse(BaseModel):
-    """The response body for `GET /api/v1/config/sections` (design.md D87)."""
+    """The response body for `GET /api/v1/config/sections`."""
 
     items: list[SectionResponse]
 
 
 class SectionSummaryResponse(BaseModel):
-    """One bucket's four published numbers (design.md D85) -- the wire shape
-    of `vantage.core.domain.sections.SectionSummary`. Built field by field in
+    """One bucket's four published numbers -- the wire shape of
+    `vantage.core.domain.sections.SectionSummary`. Built field by field in
     `routes/sections.py`, never `model_validate(..., from_attributes=True)`;
     `pass_percentage` is never recomputed here, only carried through from the
     pure core, which rounds it exactly once."""
@@ -549,11 +466,10 @@ class SectionSummaryResponse(BaseModel):
 
 
 class RunSectionSummaryResponse(BaseModel):
-    """The response body for `GET /api/v1/runs/{run_id}/sections`
-    (design.md D85, D87). `unassigned` is its own field, never an entry of
-    `items` -- always present, even when empty, so the sum of every item's
-    `total` plus `unassigned.total` reconciles against the run's result
-    count."""
+    """The response body for `GET /api/v1/runs/{run_id}/sections`.
+    `unassigned` is its own field, never an entry of `items` -- always
+    present, even when empty, so the sum of every item's `total` plus
+    `unassigned.total` reconciles against the run's result count."""
 
     items: list[SectionSummaryResponse]
     unassigned: SectionSummaryResponse

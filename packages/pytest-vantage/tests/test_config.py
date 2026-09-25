@@ -1,11 +1,8 @@
-"""`resolve_failure_text_capture`: the opt-in's composition rule (design.md
-D72, revised after Phase 9's RQ-25 measurement -- see spec.md's Measurements
-paragraph and `docs/open-questions.md` OQ-11). Capture is now absent unless
-requested: `--vantage-failure-text` is the only means by which an already-
-activated session gains capture, and no committed configuration file MAY be
-the means by which capture is enabled -- the same invariant RQ-2 already
-holds for recording itself, restated here as a property rather than a case
-list.
+"""`resolve_failure_text_capture`: the opt-in's composition rule. Capture is
+absent unless requested: `--vantage-failure-text` is the only means by which
+an already-activated session gains capture, and no committed configuration
+file can enable it -- the same invariant `--vantage` holds for recording
+itself.
 """
 
 from __future__ import annotations
@@ -24,9 +21,9 @@ _BOOL_COMBINATIONS = list(itertools.product([False, True], repeat=2))
 def test_resolve_failure_text_capture_is_monotone_decreasing_in_activation(
     activated: bool, cli_opt_in: bool
 ) -> None:
-    """design.md D72: for every one of the four input combinations,
-    `resolve(...) <= activated` -- the opt-in cannot turn a session on when
-    recording itself was never activated. Compared as `int` because
+    """For every input combination, `resolve(...) <= activated` -- the
+    opt-in cannot turn a session on when recording itself was never
+    activated. Compared as `int` because
     `bool <= bool` already means this in Python, but the comparison is
     written this way to make the property itself, not an implicit
     truthiness coincidence, the thing under test."""
@@ -37,11 +34,9 @@ def test_resolve_failure_text_capture_is_monotone_decreasing_in_activation(
 
 @pytest.mark.parametrize("activated", [False, True])
 def test_resolve_failure_text_capture_is_monotone_increasing_in_cli_opt_in(activated: bool) -> None:
-    """design.md D72's revised polarity: unlike the old opt-out, which was
-    monotone DECREASING in its narrowing sources, the opt-in is monotone
-    INCREASING in `cli_opt_in` -- turning it on can only ever ADD capture,
-    never remove it. `resolve(..., cli_opt_in=True) >=
-    resolve(..., cli_opt_in=False)` for every fixed `activated`."""
+    """The opt-in is monotone INCREASING in `cli_opt_in` -- turning it on can
+    only ever ADD capture, never remove it. `resolve(..., cli_opt_in=True)
+    >= resolve(..., cli_opt_in=False)` for every fixed `activated`."""
     resolved_false = resolve_failure_text_capture(activated=activated, cli_opt_in=False)
     resolved_true = resolve_failure_text_capture(activated=activated, cli_opt_in=True)
 
@@ -50,7 +45,7 @@ def test_resolve_failure_text_capture_is_monotone_increasing_in_cli_opt_in(activ
 
 def test_resolve_failure_text_capture_true_only_when_activated_and_cli_opt_in() -> None:
     """The exhaustive truth table: only `activated=True, cli_opt_in=True`
-    resolves `True` -- capture is absent by default, not merely narrowable."""
+    resolves `True` -- capture is absent by default."""
     assert resolve_failure_text_capture(activated=False, cli_opt_in=False) is False
     assert resolve_failure_text_capture(activated=False, cli_opt_in=True) is False
     assert resolve_failure_text_capture(activated=True, cli_opt_in=False) is False
@@ -58,24 +53,19 @@ def test_resolve_failure_text_capture_true_only_when_activated_and_cli_opt_in() 
 
 
 def test_no_opt_in_anywhere_leaves_an_activated_session_without_capture() -> None:
-    """The default state (design.md D72, revised for RQ-25): recording
-    activated, the opt-in not given, capture stays absent."""
+    """The default state: recording activated, the opt-in not given, capture
+    stays absent."""
     assert resolve_failure_text_capture(activated=True, cli_opt_in=False) is False
 
 
 def test_no_environment_variable_surface_exists_for_the_opt_in() -> None:
-    """design.md D72: an environment variable is invisible in the command
-    line RQ-11 records -- for an opt-in that means a run whose stored
-    evidence appears with nothing in its own history to explain why it is
-    present. No parameter for one exists on
-    `resolve_failure_text_capture`'s signature -- and no ini parameter
-    either, now that the capability spec's "no committed configuration file
-    MAY be the means by which capture is enabled" requirement has removed
-    that surface entirely, along with its `addini` registration and
-    `config.getini` read in `plugin.py` -- and `pytest_vantage.config`'s
-    source never references `os.environ` on the opt-in path (it does,
-    deliberately, for `resolve_server_address`'s `VANTAGE_SERVER` -- a
-    different surface, D6/D11, not this one)."""
+    """An environment variable is invisible in the invocation -- for an
+    opt-in that means a run whose stored evidence appears with nothing in
+    its own history to explain why. `resolve_failure_text_capture`'s
+    signature has no environment parameter and no ini parameter, and
+    `pytest_vantage.config` does not import `os` at all (the server
+    address's `VANTAGE_SERVER` is read in `plugin.py`, a different
+    surface)."""
     parameters = set(inspect.signature(resolve_failure_text_capture).parameters)
 
     assert parameters == {"activated", "cli_opt_in"}
@@ -88,22 +78,21 @@ def test_no_environment_variable_surface_exists_for_the_opt_in() -> None:
     )
 
 
-# --- `resolve_metadata_capture` (design.md D99, task 5.1) --------------------
+# --- `resolve_metadata_capture` ----------------------------------------------
 #
 # The same monotone conjunction `resolve_failure_text_capture` proved above,
-# for the metadata capture opt-in (opt-in-activation's "Metadata capture flag
-# inertness" requirement, RQ-2 extended). The signature carries no ini
-# parameter and no environment parameter, by construction -- a committed
-# configuration file can never be the means by which capture is enabled.
+# for the metadata capture opt-in. The signature carries no ini parameter and
+# no environment parameter, by construction -- a committed configuration
+# file can never enable capture.
 
 
 @pytest.mark.parametrize(("activated", "cli_opt_in"), _BOOL_COMBINATIONS)
 def test_resolve_metadata_capture_is_monotone_decreasing_in_activation(
     activated: bool, cli_opt_in: bool
 ) -> None:
-    """design.md D99: for every one of the four input combinations,
-    `resolve(...) <= activated` -- the metadata opt-in cannot turn a session
-    on when recording itself was never activated."""
+    """For every input combination, `resolve(...) <= activated` -- the
+    metadata opt-in cannot turn a session on when recording itself was never
+    activated."""
     resolved = resolve_metadata_capture(activated=activated, cli_opt_in=cli_opt_in)
 
     assert int(resolved) <= int(activated)
@@ -111,10 +100,9 @@ def test_resolve_metadata_capture_is_monotone_decreasing_in_activation(
 
 @pytest.mark.parametrize("activated", [False, True])
 def test_resolve_metadata_capture_is_monotone_increasing_in_cli_opt_in(activated: bool) -> None:
-    """design.md D99: the opt-in is monotone INCREASING in `cli_opt_in`
-    -- turning it on can only ever ADD capture, never remove it.
-    `resolve(..., cli_opt_in=True) >= resolve(..., cli_opt_in=False)` for
-    every fixed `activated`."""
+    """The opt-in is monotone INCREASING in `cli_opt_in` -- turning it on can
+    only ever ADD capture, never remove it. `resolve(..., cli_opt_in=True)
+    >= resolve(..., cli_opt_in=False)` for every fixed `activated`."""
     resolved_false = resolve_metadata_capture(activated=activated, cli_opt_in=False)
     resolved_true = resolve_metadata_capture(activated=activated, cli_opt_in=True)
 
@@ -122,9 +110,8 @@ def test_resolve_metadata_capture_is_monotone_increasing_in_cli_opt_in(activated
 
 
 def test_resolve_metadata_capture_true_only_when_activated_and_cli_opt_in() -> None:
-    """The exhaustive truth table (task 5.1): only `activated=True,
-    cli_opt_in=True` resolves `True` -- capture is absent by default, not
-    merely narrowable."""
+    """The exhaustive truth table: only `activated=True, cli_opt_in=True`
+    resolves `True` -- capture is absent by default."""
     assert resolve_metadata_capture(activated=False, cli_opt_in=False) is False
     assert resolve_metadata_capture(activated=False, cli_opt_in=True) is False
     assert resolve_metadata_capture(activated=True, cli_opt_in=False) is False
@@ -138,10 +125,9 @@ def test_no_opt_in_anywhere_leaves_an_activated_session_without_metadata_capture
 
 
 def test_no_environment_variable_surface_exists_for_the_metadata_opt_in() -> None:
-    """design.md D99: no ini parameter, no environment-variable parameter --
-    the invocation flag is the only means, by construction. Mirrors the
-    identical property already proven for `resolve_failure_text_capture`
-    above, for the metadata opt-in's own signature and source."""
+    """No ini parameter, no environment-variable parameter -- the invocation
+    flag is the only means, by construction, as for
+    `resolve_failure_text_capture` above."""
     parameters = set(inspect.signature(resolve_metadata_capture).parameters)
 
     assert parameters == {"activated", "cli_opt_in"}

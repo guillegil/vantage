@@ -1,16 +1,7 @@
-"""`pytest_vantage.metadata.capture_metadata` (design.md D93-D97) -- tasks
-7.1/7.2.
+"""`pytest_vantage.metadata.capture_metadata`.
 
-Basename note (continuing Phase 6/7a's own forward pointer): neither test
-tree carries an `__init__.py`, so pytest's classic import mode needs every
-basename unique workspace-wide. `packages/vantage/tests/test_metadata.py`
-(PR3), `test_metadata_containment.py` (PR6, `resolve_declared_path`) and
-`test_metadata_declaration.py` (PR7a, `read_declaration`) already exist --
-this file is a fourth, equally unique name, for `capture_metadata` alone.
-
-Every fixture is a real filesystem structure under `tmp_path`, matching the
-other `pytest_vantage.metadata` test files' own verification style -- never
-a mock of filesystem behaviour.
+Every fixture is a real filesystem structure under `tmp_path`, never a mock
+of filesystem behaviour.
 """
 
 from __future__ import annotations
@@ -37,7 +28,7 @@ def _declare(root: Path, files: list[dict[str, object]]) -> None:
     (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": files}))
 
 
-# --- capture_metadata: byte bound (task 7.1, design.md D94/D97) ------------
+# --- capture_metadata: byte bounds and file statuses -----------------------
 
 
 def test_a_file_at_the_byte_bound_is_kept(tmp_path: Path) -> None:
@@ -79,9 +70,8 @@ def test_files_past_the_section_budget_are_marked_over_budget_in_declaration_ord
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Room for exactly one 20-byte-encoded file; the second and third,
-    # despite being identical, drop -- because they come later, in the
-    # order the declaration names them (design.md D97 class 6), never
-    # because of any property of their own content.
+    # though identical, drop only because they come later in declaration
+    # order.
     monkeypatch.setattr(metadata, "MAX_METADATA_SECTION_BYTES", 20)
     root = tmp_path / "project"
     root.mkdir()
@@ -129,9 +119,8 @@ def test_a_non_utf8_file_is_marked_not_text_before_json_encoding(tmp_path: Path)
     reason="chmod 000 is a no-op as root; skip rather than pass vacuously",
 )
 def test_a_permission_denied_file_is_marked_unreadable(tmp_path: Path) -> None:
-    # design.md D97 class 5: the eighth plugin-side class the proposal's
-    # seven did not name -- a file the process cannot read is neither
-    # missing nor oversized nor binary.
+    # A file the process cannot read is neither missing nor oversized nor
+    # binary.
     root = tmp_path / "project"
     root.mkdir()
     restricted = root / "f.json"
@@ -168,10 +157,8 @@ def test_a_missing_declared_file_is_marked_not_found(tmp_path: Path) -> None:
 
 
 def test_a_rejected_path_that_exists_is_marked_path_rejected_not_not_found(tmp_path: Path) -> None:
-    # design.md D93/D97: an absolute path that happens to exist on disk
-    # (outside rootpath) is still `path_rejected`, never `not_found` --
-    # the two mean different things, and the plugin never opened it either
-    # way (`resolve_declared_path` already refused it).
+    # An absolute path that exists on disk (outside rootpath) is
+    # `path_rejected`, never `not_found`, and is never opened.
     root = tmp_path / "project"
     root.mkdir()
     outside = tmp_path / "outside.json"
@@ -200,9 +187,8 @@ def test_capture_metadata_returns_none_when_the_declaration_itself_is_invalid(
 
 
 def test_an_empty_declaration_captures_a_section_with_no_files(tmp_path: Path) -> None:
-    # design.md D95: a MetadataSection is always returned when the
-    # declaration itself validates, even with zero files declared -- the
-    # empty case is still a section, not None.
+    # A declaration that validates always yields a section, even with zero
+    # files declared -- never None.
     root = tmp_path / "project"
     root.mkdir()
     _declare(root, [])

@@ -1,35 +1,30 @@
-"""Manual harness for RQ-25's vcs-capture overhead measurement (design.md D52,
-task 5.1). **Not a pytest test and never collected by the suite** -- it spawns
-real `git` processes, a real HTTP server and real pytest subprocesses, and a
-ten-minute benchmark inside the 3.10-3.13 x xdist CI matrix is a check people
-learn to skip. Run it by hand::
+"""Measure what version-control capture adds to a recorded pytest session.
+
+Not collected by the test suite: it spawns real `git` processes, a real HTTP
+server and real pytest subprocesses, and takes around ten minutes -- too slow
+and too timing-sensitive for CI. Run it by hand::
 
     uv run --extra dev python scripts/measure_vcs_overhead.py
 
-Transcribe the printed medians into the "Measurements" paragraph of
-``openspec/changes/vcs-capture/specs/version-control-context/spec.md``
-(task 5.2). A future change to ``vcs.py``'s argv or invocation count MUST
-re-run this script and update that paragraph.
+Re-run it after any change to which git commands ``vcs.py`` runs, or how many.
+Every figure is a median, never a mean, because one scheduler hiccup ruins a
+mean:
 
-Design, per design.md's own text:
+- **Component 1**: the git cost alone, timing ``vcs.capture``, the plugin's
+  whole five-command git read.
+- **Component 1b**: ``git status --porcelain --untracked-files=no`` against a
+  default ``git status --porcelain``, showing what skipping the walk over
+  untracked files saves.
+- **Component 2**: whole-session wall time with recording off vs on, as
+  interleaved off/on pairs so drift hits both arms equally. ``report-only``
+  is the session delta minus the Component 1 git cost: what recording costs
+  beyond the git read, chiefly the HTTP report.
 
-- **Paired, interleaved A/B/A/B... runs, medians reported, never means** -- a
-  mean is destroyed by one scheduler hiccup; interleaving removes drift
-  between the two arms rather than one arm going first and absorbing all of
-  it.
-- **Two profiles**, both of RQ-25's own: 1,000 tests of ~10 ms (criterion 1's
-  ~10 s suite) and 1,000 tests of ~1 ms (criterion 3's ~1 s suite, where a
-  fixed per-session cost dominates).
-- **Two repositories**: this repository, and a synthetic repository with
-  >= 20,000 tracked files, generated here -- synthetic data only (CLAUDE.md).
-- **The git cost is reported separately from the report cost**: the whole
-  D44 capture is timed on its own (Component 1), and the whole-session
-  overhead with recording on vs off is timed separately (Component 2); the
-  difference between the two is what the HTTP report itself costs on top of
-  the git read.
-- **`--untracked-files=no` is reported separately from a default `git
-  status`** (Component 1b), so D44's flag choice is justified by a number
-  rather than by an argument.
+Everything runs in this repository and in a generated repository of 20,000
+tracked files. Component 2 uses two synthetic suites: 1,000 tests of ~10 ms
+(a ~10 s suite) and 1,000 tests of ~1 ms (a ~1 s suite, where a fixed
+per-session cost dominates). Read the session deltas against the overhead
+budget of 2% of suite runtime.
 """
 
 from __future__ import annotations
@@ -51,23 +46,16 @@ from pytest_vantage import vcs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-_PAIRS = 5  # five interleaved A/B pairs, per design.md's own harness description
+_PAIRS = 5  # interleaved off/on pairs per profile per repository
 _CAPTURE_REPEATS = 10
 _SYNTHETIC_TRACKED_FILES = 20_000
+_OVERHEAD_BUDGET = "2% of suite runtime"
 
-# Both of RQ-25's own profiles: (test count, per-test sleep in seconds).
+# Synthetic suites: (test count, per-test sleep in seconds).
 _PROFILES: dict[str, tuple[int, float]] = {
-    "10ms (RQ-25 criterion 1, ~10s suite)": (1000, 0.010),
-    "1ms (RQ-25 criterion 3, ~1s suite)": (1000, 0.001),
+    "10ms (~10s suite)": (1000, 0.010),
+    "1ms (~1s suite)": (1000, 0.001),
 }
-
-# The pre-measurement forecast this script's result is allowed to disagree
-# with (design.md's own text) -- printed alongside the measured numbers so
-# neither quietly replaces the other.
-_FORECAST = (
-    "~10-60 ms once per session; ~0.6% of the 10s profile "
-    "(inside the 2% RQ-25 budget), ~6% of the 1s profile"
-)
 
 
 def _git_version() -> str:
@@ -87,9 +75,8 @@ def _git_version() -> str:
 
 @contextmanager
 def _synthetic_repository(num_files: int = _SYNTHETIC_TRACKED_FILES) -> Iterator[Path]:
-    """A generated repository with `num_files` tracked files, one commit, a
-    clean tree -- synthetic data only, no content copied from anywhere
-    (CLAUDE.md)."""
+    """A generated repository with `num_files` tracked files, one commit and
+    a clean tree."""
     with tempfile.TemporaryDirectory(prefix="vantage-vcs-bench-") as tmp:
         root = Path(tmp)
         _git(root, ["init", "--quiet"])
@@ -120,8 +107,8 @@ def _git(cwd: Path, args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _time_capture(rootpath: Path, repeats: int = _CAPTURE_REPEATS) -> float:
-    """Median wall time of `vcs.capture(rootpath)` -- the whole five-invocation
-    D44 read, exactly as the plugin performs it."""
+    """Median wall time of `vcs.capture(rootpath)`: the plugin's whole
+    five-command git read, exactly as the plugin performs it."""
     samples: list[float] = []
     for _ in range(repeats):
         start = time.perf_counter()
@@ -131,7 +118,7 @@ def _time_capture(rootpath: Path, repeats: int = _CAPTURE_REPEATS) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Component 1b: D44's --untracked-files=no flag choice, justified by a number
+# Component 1b: git status with --untracked-files=no vs the default
 # ---------------------------------------------------------------------------
 
 
@@ -139,8 +126,8 @@ def _time_git_status(
     rootpath: Path, *, untracked_files_no: bool, repeats: int = _CAPTURE_REPEATS
 ) -> float:
     """Median wall time of `git status --porcelain[ --untracked-files=no]`
-    alone -- isolates exactly the cost the flag choice (D44) avoids: the
-    directory walk over untracked files that a default `git status` pays."""
+    alone, isolating the cost `--untracked-files=no` avoids: the walk over
+    untracked files that a default `git status` pays."""
     argv = ["status", "--porcelain"]
     if untracked_files_no:
         argv.append("--untracked-files=no")
@@ -284,10 +271,10 @@ def main() -> None:
     print(f"machine: {platform.platform()} / {platform.processor() or platform.machine()}")
     print(f"python: {platform.python_version()}")
     print(f"git: {_git_version()}")
-    print(f"pre-measurement forecast: {_FORECAST}")
+    print(f"overhead budget: {_OVERHEAD_BUDGET}")
     print()
 
-    print("== Component 1: git cost (vcs.capture, whole 5-invocation D44 read) ==")
+    print("== Component 1: git cost (vcs.capture, the whole 5-command read) ==")
     this_repo_git_cost = _time_capture(REPO_ROOT)
     print(
         f"this repository:                {this_repo_git_cost * 1000:.2f} ms "
@@ -302,7 +289,7 @@ def main() -> None:
         )
 
         print()
-        print("== Component 1b: D44 flag justification, --untracked-files=no vs default ==")
+        print("== Component 1b: git status, --untracked-files=no vs default ==")
         for label, root in (("this repository", REPO_ROOT), ("synthetic repo", synth_root)):
             no_untracked = _time_git_status(root, untracked_files_no=True)
             default = _time_git_status(root, untracked_files_no=False)

@@ -1,51 +1,34 @@
-"""The run list, run detail, results, and history routes (design.md D54,
-D57, D59, D61, D62; Phases 4-5).
+"""The run list, run detail, results, result detail and test history routes.
 
-**Every response model is built field by field.** `RunVcsResponse`,
-`RunListItemResponse` and `RunDetailResponse` (`service/schemas.py`) are
-never constructed with `model_validate(execution, from_attributes=True)` or
-any other whole-object mapping -- that is exactly how `VcsContext.root`
-would reach the wire, silently, the first time someone adds a field to
-`Execution` or `VcsContext` upstream. On the list path `VcsProjection` has no
-`root` field at all, so the exclusion is structural (design.md D59); on the
-detail path `VcsContext` *does* carry `root`, and this module's explicit
-`_vcs_response` helper -- reading `commit`/`branch`/`commit_subject`/
-`commit_subject_truncated`/`dirty` and nothing else -- is the only thing
-standing between it and the response body.
+**Every response model is built field by field**, never with
+`model_validate(..., from_attributes=True)` or any other whole-object
+mapping, which would silently put `VcsContext.root` (the repository's local
+path) on the wire as soon as a field is added upstream. On the list and
+history paths the source is a `VcsProjection`, which has no `root` at all; on
+the detail path `VcsContext` does carry it, and `_vcs_response` naming its
+five fields is the only thing keeping it out of the body.
 
-**`derive_presentation` gets its first caller here (design.md D62).** This
-module calls it; it does not reimplement any part of the precedence it
-encodes. `app.state.grace_period` -- a named seam since D34, wired by
-`create_app` -- finally has a reader.
+A run's presentation comes from `derive_presentation` and
+`app.state.grace_period`; nothing here reimplements its precedence.
 
-**Phase 5** adds `GET /api/v1/runs/{run_id}/results` and
-`GET /api/v1/tests/history`. History resolves a test's identity through a
-*named query parameter on an identity-free path* (``?node_id=<value>``), not
-a path segment (design.md D54) -- the parameter name is the identity
-scheme, so a later `?stable_id=` arrives as an additive sibling. `node_id`
-is bounded at `MAX_IDENTITY_CHARS`; a missing or over-long value is shaped
-by `service/errors.py`'s `InvalidIdentityError`, never a proxy `414`.
+A test's identity travels as a named query parameter (`?node_id=`), never a
+path segment: a node id contains `/`, an encoded slash in a path is decoded
+before routing and may be merged or rejected by a proxy, while a query value
+arrives intact. The parameter name also leaves room for another identity
+scheme as an additive sibling. `node_id` is bounded at
+`MAX_IDENTITY_CHARS`; a missing or over-long value is shaped by
+`InvalidIdentityError`, never a proxy `414`.
 
-**Phase 8** adds `GET /api/v1/runs/{run_id}/result?node_id=`, the
-single-result complement of `list_results`' now-lean projection (design.md
-D76-D78). `list_results` reads a page of `ResultListEntry` -- identity,
-outcome, timings and a lean `FailureProjection`, never the full
-`FailureEvidence` or captured output. The new route reads the whole stored
-`Result` via `store.get_result` and returns every field, unbounded,
-matching `node_id`'s existing query-value treatment on `/tests/history`.
+`list_results` returns a lean `ResultListEntry` per result, never the full
+failure evidence or captured output; `get_result` returns every field of one
+stored `Result`, unbounded.
 
-**Phase 10** widens `GET /api/v1/runs` with `metadata_key`/`metadata_value`
-(design.md D100) -- the product this whole change exists for: "every run
-where `firmware_version` is 2.1." Two query parameters, never one
-`key=value` string, because a value may itself contain `=` (D54/D87); both
-or neither, one without the other is `InvalidMetadataFilterError`, the read
-path's only new rejection kind. `store.list_runs` is *extended* with the
-filter, not joined by a second method, so it stays the one page over the
-one total order D61 already settled. A run recorded before the filtered key
-was ever declared has no value for it and is correctly excluded -- but
-excluding it silently would read as "did not match" when the truth is "the
-question was not being asked yet," so `metadata_horizon` reports how many
-runs predate the key (Q2), `None` when no metadata filter was given at all.
+`GET /runs` filters by `metadata_key` and `metadata_value`: two parameters
+rather than one `key=value` string because a value may itself contain `=`,
+and both or neither. A run recorded before the key was ever declared has no
+value for it and is excluded, so `metadata_horizon` reports how many runs
+predate the key -- otherwise "not asked yet" would read as "did not match".
+It is `None` when no filter was given.
 """
 
 from __future__ import annotations
@@ -86,18 +69,17 @@ router = APIRouter()
 
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 
-# Read once at import time, not per request -- the bytes never change
-# while the process runs. Comes from inside the installed distribution,
-# never `docs/` (design.md Q5), via the anchor `openapi/__init__.py` exists
-# for.
+# Read once at import time -- the bytes never change while the process runs.
+# Loaded from inside the installed distribution through the
+# `openapi/__init__.py` anchor, never from `docs/`, so it works from a wheel.
 _OPENAPI_DOCUMENT_BYTES = (
     importlib.resources.files("vantage.service.openapi").joinpath("v1.yaml").read_bytes()
 )
 
 
 def _vcs_response(vcs: VcsProjection | VcsContext | None) -> RunVcsResponse | None:
-    """Field by field, from either read type -- both carry the same five
-    names; neither is read here through `root` (design.md D59)."""
+    """Field by field, from either read type -- both carry these five
+    fields, and `root` is never read."""
     if vcs is None:
         return None
     return RunVcsResponse(
@@ -146,7 +128,7 @@ def _failure_projection_response(
     failure: FailureProjection | None,
 ) -> FailureProjectionResponse | None:
     """Field by field, from the lean `FailureProjection` a list entry
-    carries -- never the full `FailureEvidence` (design.md D76)."""
+    carries -- never the full `FailureEvidence`."""
     if failure is None:
         return None
     return FailureProjectionResponse(
@@ -161,11 +143,9 @@ def _failure_projection_response(
 
 
 def _result_item(entry: ResultListEntry) -> ResultListItemResponse:
-    """Field by field -- `entry` is the lean `ResultListEntry`
-    `list_results` returns (design.md D76, D77), never the full `Result`;
-    `failure` is `entry.failure`'s own `FailureProjection`, which has no
-    field to carry `traceback`, `failure_repr` or captured output at all
-    (task 8.1)."""
+    """Field by field from the lean `ResultListEntry`, never the full
+    `Result`; its `FailureProjection` has no field to carry `traceback`,
+    `failure_repr` or captured output at all."""
     identity = entry.identity
     return ResultListItemResponse(
         node_id=identity.node_id,
@@ -189,11 +169,10 @@ def _result_item(entry: ResultListEntry) -> ResultListItemResponse:
 
 
 def _result_detail_response(result: Result) -> ResultDetailResponse:
-    """Field by field, the full record (design.md D78) -- every field a
-    list response bounds or excludes, unbounded by any display width.
-    `result.failure` normalises to `None` when the result carries no
-    failure evidence at all (design.md D77); every failure field then
-    falls back to its absent shape (`None`/`False`) rather than being
+    """Field by field, the full record -- every field a list response
+    bounds or excludes, unbounded by any display width. `result.failure` is
+    `None` when the result carries no failure evidence; every failure field
+    then falls back to its absent shape (`None`/`False`) rather than being
     omitted -- `ResultDetailResponse` always carries every field."""
     identity = result.identity
     failure = result.failure
@@ -236,8 +215,8 @@ def _result_detail_response(result: Result) -> ResultDetailResponse:
 
 
 def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
-    """Field by field -- `entry.vcs` is a lean `VcsProjection` (D59, D60),
-    read through the same `_vcs_response` helper as the other routes."""
+    """Field by field -- `entry.vcs` is a lean `VcsProjection`, read
+    through the same `_vcs_response` helper as the other routes."""
     return HistoryEntryResponse(
         run_id=entry.run_id,
         started_at=entry.started_at,
@@ -256,18 +235,13 @@ async def list_runs(
     metadata_key: str | None = Query(default=None),
     metadata_value: str | None = Query(default=None),
 ) -> RunListResponse:
-    """`GET /api/v1/runs` (design.md D57, D61, D100). `limit`/`offset` are
-    shape-validated here (`limit <= 0` is `422`, "not a page size" -- D61);
-    the 200-item cap itself is enforced by `store.list_runs`, not re-clamped
-    here, but the default `limit` already keeps the cap holding through the
-    HTTP layer even when a caller sends none.
+    """`GET /api/v1/runs`. `limit <= 0` is a `422` -- not a page size. The
+    200-item cap is enforced by `store.list_runs`, not re-clamped here; the
+    default `limit` keeps it holding when a caller sends none.
 
-    `metadata_key`/`metadata_value` (design.md D100) are both-or-neither --
-    checked here, before either reaches the store, since it is a cross-field
-    rule FastAPI's own parameter binding cannot express for two independently
-    optional query values. `metadata_horizon` is populated only when a filter
-    was given (Q2); the module docstring's Phase 10 paragraph is this
-    route's own why."""
+    `metadata_key`/`metadata_value` are both-or-neither, checked here
+    because FastAPI's parameter binding cannot express a cross-field rule.
+    `metadata_horizon` is populated only when a filter was given."""
     if (metadata_key is None) != (metadata_value is None):
         raise InvalidMetadataFilterError(
             "metadata_value" if metadata_key is not None else "metadata_key"
@@ -294,11 +268,9 @@ async def list_runs(
 async def get_run_detail(
     request: Request, run_id: str = Path(pattern=_IDENTITY_PATTERN)
 ) -> RunDetailResponse:
-    """`GET /api/v1/runs/{run_id}` (design.md D57, D59, D62). Reuses
-    `UnknownRunError` (`service/errors.py`) rather than a fresh rejection
-    type -- "no run with that identifier has been recorded" is exactly the
-    heartbeat route's existing 404 case, and `errors.py`'s docstring already
-    asks for one shape per rejection kind, not one per route."""
+    """`GET /api/v1/runs/{run_id}`. An unknown run is the same
+    `UnknownRunError` the heartbeat route raises: one rejection shape per
+    kind, not one per route."""
     store = request.app.state.store
     detail = store.get_run_detail(run_id)
     if detail is None:
@@ -316,7 +288,7 @@ async def list_results(
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0),
 ) -> ResultsResponse:
-    """`GET /api/v1/runs/{run_id}/results` (design.md D57, D61). An unknown
+    """`GET /api/v1/runs/{run_id}/results`. An unknown
     `run_id` is `404`, consistent with `get_run_detail` -- checked via the
     cheaper `store.get_execution` rather than building a full detail."""
     store = request.app.state.store
@@ -333,13 +305,10 @@ async def get_result(
     run_id: str = Path(pattern=_IDENTITY_PATTERN),
     node_id: str = Query(..., max_length=MAX_IDENTITY_CHARS),
 ) -> ResultDetailResponse:
-    """`GET /api/v1/runs/{run_id}/result?node_id=` (design.md D54, D78) --
-    `node_id` is again a named query value on an identity-free path segment,
-    not a path segment itself, the same reasoning `GET /api/v1/tests/history`
-    already applies. An unknown `run_id` is `404` via the existing
+    """`GET /api/v1/runs/{run_id}/result?node_id=` -- `node_id` is a query
+    value for the same reason as on `/tests/history`. An unknown `run_id` is
     `UnknownRunError`; a known run with no result at that identity is a
-    distinct `404`, `UnknownResultError` -- `errors.py`'s one-shape-per-kind
-    rule."""
+    distinct `404`, `UnknownResultError`."""
     store = request.app.state.store
     if store.get_execution(run_id) is None:
         raise UnknownRunError()
@@ -356,9 +325,9 @@ async def list_history(
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0),
 ) -> HistoryResponse:
-    """`GET /api/v1/tests/history?node_id=...` (design.md D54, D57, D61) --
-    see the module docstring for why `node_id` is a query value, not a path
-    segment. An unknown `node_id` yields an empty page, not an error."""
+    """`GET /api/v1/tests/history?node_id=...` -- see the module docstring
+    for why `node_id` is a query value, not a path segment. An unknown
+    `node_id` yields an empty page, not an error."""
     store = request.app.state.store
     page = store.list_history(node_id=node_id, limit=limit, offset=offset)
     items = [_history_entry(entry) for entry in page.items]
@@ -367,8 +336,8 @@ async def list_history(
 
 @router.get("/openapi.yaml")
 async def get_openapi_document() -> Response:
-    """Raw bytes, `application/yaml`, never parsed at runtime (design.md
-    Q5). Itself a `read`-tagged, documented path (task 6.8)."""
+    """Raw bytes, `application/yaml`, never parsed at runtime. Itself a
+    `read`-tagged, documented path."""
     return Response(content=_OPENAPI_DOCUMENT_BYTES, media_type="application/yaml")
 
 

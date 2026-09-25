@@ -1,4 +1,4 @@
-"""RQ-42: malformed session report rejection.
+"""Malformed session report rejection.
 
 Runs the app factory (`vantage.service.app.create_app`) against an injected
 `InMemoryExecutionStore`, same pattern as `test_ingestion.py`.
@@ -49,8 +49,8 @@ def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
 
 
 def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
-    """One well-formed `results[]` entry (design.md D15 interface example) --
-    mirrors `test_ingestion.py`'s helper of the same name and shape."""
+    """One well-formed `results[]` entry -- mirrors `test_ingestion.py`'s
+    helper of the same name and shape."""
     entry: dict[str, Any] = {
         "node_id": node_id,
         "file_path": node_id.split("::", 1)[0],
@@ -77,7 +77,7 @@ def _bulk_results_report(
     run_id: str, count: int, *, malformed_index: int | None = None
 ) -> dict[str, Any]:
     """A well-formed report carrying `count` results, one of which is
-    deliberately malformed at `malformed_index` (task 5.1/5.5/5.6 fixture)."""
+    deliberately malformed at `malformed_index`."""
     report = _well_formed_report(run_id)
     results = []
     for index in range(count):
@@ -99,15 +99,13 @@ def client(store: InMemoryExecutionStore) -> TestClient:
     return TestClient(create_app(store))
 
 
-@pytest.mark.req(id="RQ-42")
 def test_422_response_never_echoes_input_or_pydantic_types(client: TestClient) -> None:
     """FastAPI's default handler mirrors the client's own value back in an
     ``"input"`` key, and can carry pydantic's internal error ``"type"``
-    string and a ``"url"`` pointing at versioned pydantic docs (design.md
-    D5). A report can legitimately carry a filesystem path, node id, or
-    environment string; the field that fails validation is exactly the
-    field whose value would be echoed -- that is what RQ-42.4 exists to
-    stop.
+    string and a ``"url"`` pointing at versioned pydantic docs. A report can
+    legitimately carry a filesystem path, node id, or environment string,
+    and the field that fails validation is exactly the field whose value
+    would be echoed, so none of that may reach the response.
     """
     report = _well_formed_report()
     report["run"]["started_at"] = "NOT-A-DATE"
@@ -128,7 +126,6 @@ def test_422_response_never_echoes_input_or_pydantic_types(client: TestClient) -
     assert "pydantic" not in body_text.lower()
 
 
-@pytest.mark.req(id="RQ-42")
 def test_missing_field_is_422_naming_the_field(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -144,7 +141,6 @@ def test_missing_field_is_422_naming_the_field(
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_non_json_body_is_400(client: TestClient, store: InMemoryExecutionStore) -> None:
     response = client.post(
         "/api/v1/runs",
@@ -158,7 +154,6 @@ def test_non_json_body_is_400(client: TestClient, store: InMemoryExecutionStore)
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore) -> None:
     from vantage.service.errors import MAX_REPORT_BYTES
 
@@ -176,11 +171,10 @@ def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore
 def test_a_report_exceeding_the_size_cap_with_failure_evidence_stores_nothing(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """session-ingestion → A report exceeding the size cap stores nothing
-    (task 6.13): the encoded body -- failure evidence included -- exceeds
-    `MAX_REPORT_BYTES`; the run table stays empty. Whole-report rejection,
-    unchanged by `failure-capture` -- the same `413` `_read_bounded_body`
-    already raises for any oversized field."""
+    """A report whose encoded body -- failure evidence included -- exceeds
+    `MAX_REPORT_BYTES` is rejected whole with the same `413`
+    `_read_bounded_body` raises for any oversized field; the run table stays
+    empty."""
     oversized_report = _well_formed_report()
     oversized_report["results"] = [
         _result_entry(
@@ -198,7 +192,6 @@ def test_a_report_exceeding_the_size_cap_with_failure_evidence_stores_nothing(
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
     import json
 
@@ -214,7 +207,6 @@ def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionS
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
     import json
 
@@ -227,7 +219,6 @@ def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecution
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_forbidden_extra_field_name_is_not_echoed(client: TestClient) -> None:
     """A rejected *value* is never echoed -- but for an `extra_forbidden`
     error the offending path segment is a key the CLIENT chose, and echoing
@@ -246,7 +237,6 @@ def test_forbidden_extra_field_name_is_not_echoed(client: TestClient) -> None:
         assert "\r" not in field and "\n" not in field
 
 
-@pytest.mark.req(id="RQ-42")
 def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -> None:
     """A 50 KiB key must not come back as a 50 KiB field path."""
     report = _well_formed_report()
@@ -258,10 +248,9 @@ def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -
     assert max(len(field) for field in response.json()["fields"]) < 128
 
 
-# --- Phase 4: heartbeat rejection (design.md D33, task 4.4) ----------------
+# --- Heartbeat rejection ----------------------------------------------------
 
 
-@pytest.mark.req(id="RQ-44")
 def test_heartbeat_for_unknown_run_is_404(client: TestClient) -> None:
     response = client.post(f"/api/v1/runs/{'e' * 32}/heartbeat")
 
@@ -270,11 +259,10 @@ def test_heartbeat_for_unknown_run_is_404(client: TestClient) -> None:
     assert body["error"] == "unknown_run"
 
 
-@pytest.mark.req(id="RQ-44")
 def test_heartbeat_for_malformed_run_id_is_422(client: TestClient) -> None:
-    """No new code (design.md D33): the malformed id is caught by the path
-    parameter's own pattern, and rejected through the existing
-    `register_error_handlers`/`RequestValidationError` path."""
+    """The malformed id is caught by the path parameter's own pattern and
+    rejected through the shared `register_error_handlers`/
+    `RequestValidationError` path."""
     response = client.post("/api/v1/runs/not-a-hex-id/heartbeat")
 
     assert response.status_code == 422
@@ -282,19 +270,16 @@ def test_heartbeat_for_malformed_run_id_is_422(client: TestClient) -> None:
     assert body["error"] == "invalid_report"
 
 
-# --- Phase 5: whole-report rejection, atomicity, measurement ---------------
+# --- Whole-report rejection, atomicity, measurement -------------------------
 
 
-@pytest.mark.req(id="RQ-42")
-@pytest.mark.req(id="RQ-3")
 def test_one_malformed_result_among_five_hundred_rejects_the_whole_report(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """RQ-42.1 with RQ-3.2: one malformed entry deep inside a large `results`
-    list rejects the entire report, not the 250 valid entries ahead of it.
-    Pydantic validates the whole model before this route ever converts a
-    single entry or calls `record_session` -- rejection is whole-report,
-    never partial (design.md D19's sibling guarantee)."""
+    """One malformed entry deep inside a large `results` list rejects the
+    entire report, including the 250 valid entries ahead of it. Pydantic
+    validates the whole model before the route converts a single entry or
+    calls `record_session`, so rejection is never partial."""
     report = _bulk_results_report("2" + "a" * 31, 500, malformed_index=250)
 
     response = client.post("/api/v1/runs", json=report)
@@ -304,13 +289,12 @@ def test_one_malformed_result_among_five_hundred_rejects_the_whole_report(
     assert store.count_results() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_duplicate_node_id_inside_one_report_is_422_whole_report(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """D19 layer 2: a duplicate `node_id` inside one report is rejected
-    loudly and wholesale -- the layer that catches a plugin defect before it
-    ever reaches the silent replay backstop (D19 layer 3)."""
+    """A duplicate `node_id` inside one report is rejected loudly and
+    wholesale, catching a plugin defect before storage's
+    `ON CONFLICT ... DO NOTHING` result insert would silently drop it."""
     node_id = "packages/vantage/tests/test_dup.py::test_one"
     report = _well_formed_report("3" + "b" * 31)
     report["results"] = [_result_entry(node_id), _result_entry(node_id, outcome="failed")]
@@ -322,13 +306,12 @@ def test_duplicate_node_id_inside_one_report_is_422_whole_report(
     assert store.count_results() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
     client: TestClient,
 ) -> None:
-    """Threat-derived (design.md D15/Threat Matrix): the rejection body names
-    the offending field through the existing `safe_segment` allow-list, and
-    the node id **value** is never echoed anywhere in the response."""
+    """The rejection body names the offending field through the
+    `safe_segment` allow-list, and the node id **value** -- which can reveal
+    a filesystem path -- is never echoed anywhere in the response."""
     node_id = "packages/vantage/tests/test_secret_path.py::test_should_not_leak"
     report = _well_formed_report("4" + "c" * 31)
     report["results"] = [_result_entry(node_id), _result_entry(node_id, outcome="failed")]
@@ -343,11 +326,10 @@ def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
         assert safe_segment(field) == field
 
 
-@pytest.mark.req(id="RQ-3")
 def test_five_hundred_results_fit_within_the_body_cap() -> None:
-    """D23: the cap is not raised in this change -- it is measured against.
-    Builds a 500-result report through the same wire-shaped assembly the
-    other tests in this module use and reports the real byte count."""
+    """A 500-result report fits under `MAX_REPORT_BYTES`. Builds it through
+    the same wire-shaped assembly the other tests in this module use and
+    prints the real byte count."""
     report = _bulk_results_report("5" + "d" * 31, 500)
     encoded = json.dumps(report).encode("utf-8")
 
@@ -355,12 +337,11 @@ def test_five_hundred_results_fit_within_the_body_cap() -> None:
     assert len(encoded) < MAX_REPORT_BYTES
 
 
-@pytest.mark.req(id="RQ-3")
 def test_server_peak_memory_for_one_five_hundred_result_request(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """D23: server-side peak memory for one 500-result request is measured,
-    not asserted against an invented threshold."""
+    """Server-side peak memory for one 500-result request is measured and
+    printed, not asserted against an invented threshold."""
     report = _bulk_results_report("6" + "e" * 31, 500)
 
     tracemalloc.start()
@@ -378,11 +359,11 @@ def test_server_peak_memory_for_one_five_hundred_result_request(
 class _CommitCountingConnection:
     """Wraps a real `sqlite3.Connection`, counting only `COMMIT` statements.
 
-    RQ-3.3 (D21): `record_session` must reach storage in exactly one commit
-    for the whole batch, not one per result or one per statement. Wrapping
-    the connection is the only way to observe that from outside
-    `SqliteExecutionStore` without weakening the adapter's own commit
-    discipline for the sake of a test.
+    `record_session` must reach storage in exactly one commit for the whole
+    batch, not one per result or one per statement, so a report is stored
+    completely or not at all. Wrapping the connection observes that from
+    outside `SqliteExecutionStore` without weakening the adapter's own
+    commit discipline for the sake of a test.
     """
 
     def __init__(self, real: sqlite3.Connection) -> None:
@@ -401,30 +382,13 @@ class _CommitCountingConnection:
         self._real.close()
 
 
-@pytest.mark.req(id="RQ-3")
 def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
-    """Renamed from `test_five_hundred_results_reach_storage_in_one_commit`
-    (design.md D35, task 1.6) -- the Analysis argument moved from one commit
-    per *session* to one commit per *report*, and this is the finish-write's
-    premise. The rename alone would be cosmetic: without the finish-field
-    assertions below, a `DO NOTHING` regression that dropped every finish
-    field on conflict would still satisfy the commit count and row counts.
+    """A 500-result finish report reaches storage in exactly one commit, and
+    the finish fields and every result row are actually written.
 
-    **Measurements:** the 500-result finish-write generated here measures
-    252,511 bytes in body size (via `test_five_hundred_results_fit_within_the_body_cap`);
-    server peak memory traced for one such finish-write request reaches
-    approximately 2,021,039 bytes (`test_server_peak_memory_for_one_five_hundred_result_request`).
-    These measurements are diagnostic; they inform payload size budgeting and
-    resource planning for deployments. Future changes to the result schema or
-    the batch-insert strategy MUST re-run this test via `tracemalloc` at
-    request time and justify any material increase.
-
-    **failure-capture Phase 7 (design.md D80):** `_INSERT_RESULT` widened
-    from 14 to 31 bound columns, one per result row; a handful of the 500
-    carry failure evidence and captured output. The premise this test
-    exists to guard -- one commit for the whole batch -- must still hold at
-    the wider width, and a failing result's evidence must still round-trip,
-    or the batch-insert strategy silently split under the extra columns.
+    A handful of the 500 carry failure evidence and captured output, so the
+    single commit is checked at the full width of `_INSERT_RESULT`, and a
+    failing result's evidence must round-trip.
     """
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     counting = _CommitCountingConnection(adapter._conn)
@@ -450,10 +414,9 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
 
         assert created is True
         assert counting.commit_count == 1
-        # Counting commits proves the transaction's SHAPE and nothing about
-        # its content: an adapter that committed once and wrote no rows would
-        # satisfy the count alone. RQ-3.1 is verified by Analysis resting on
-        # this test, so the test has to carry the weight.
+        # Counting commits proves the transaction's shape, not its content:
+        # an adapter that committed once and wrote no rows would satisfy the
+        # count alone.
         assert adapter.count_results() == 500
         assert adapter.count_executions() == 1
         stored = adapter.get_execution(execution.identity.value)
@@ -472,14 +435,13 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
         adapter.close()
 
 
-@pytest.mark.req(id="RQ-3")
 def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_commit(
     tmp_path: Path,
 ) -> None:
-    """design.md D25, D35, task 1.7: the same finish-write, run after a
-    prior accepted start-write for the same run id -- one commit, the same
-    500 result rows, and the finish fields actually applied through the
-    conflict (`DO UPDATE`) branch rather than the insert branch."""
+    """The same finish-write, run after a prior accepted start-write for the
+    same run id -- one commit, the same 500 result rows, and the finish
+    fields actually applied through the conflict (`DO UPDATE`) branch rather
+    than the insert branch."""
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
 
     try:
@@ -510,11 +472,10 @@ def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_comm
         adapter.close()
 
 
-@pytest.mark.req(id="RQ-3")
 def test_start_write_reaches_storage_in_one_commit(tmp_path: Path) -> None:
-    """design.md D35, task 1.8: the start-write's own commit-count premise --
-    one commit, one run row, a null `finished_at`, and zero result rows,
-    since a start report carries none."""
+    """A start-write reaches storage in one commit: one run row, a null
+    `finished_at`, and zero result rows, since a start report carries
+    none."""
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     counting = _CommitCountingConnection(adapter._conn)
     adapter._conn = counting  # type: ignore[assignment]
@@ -536,11 +497,9 @@ def test_start_write_reaches_storage_in_one_commit(tmp_path: Path) -> None:
         adapter.close()
 
 
-@pytest.mark.req(id="RQ-3")
 def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> None:
-    """design.md D25, task 1.9: the slice-1 acceptance criterion, driven
-    through the same `_CommitCountingConnection` wrapper the rest of this
-    module uses -- an explicitly reordered pair, finish then start."""
+    """A start-write arriving after the finish-write for the same run is one
+    commit and leaves the recorded finish intact."""
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
 
     try:
@@ -569,12 +528,11 @@ def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> 
         adapter.close()
 
 
-@pytest.mark.req(id="RQ-30")
 def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None:
-    """The six outcome strings live in three places (design.md, Interfaces
-    section): `schema.sql`'s CHECK, `OUTCOMES`, and the service `_Outcome`
-    Literal. Parses the CHECK clause itself instead of trusting a fourth,
-    hand-typed copy here -- the CHECK is the ground truth this test protects."""
+    """The six outcome strings live in three places: `schema.sql`'s CHECK,
+    `OUTCOMES`, and the service `_Outcome` Literal. Parses the CHECK clause
+    itself instead of trusting a fourth, hand-typed copy here -- the CHECK
+    is the ground truth this test protects."""
     schema_sql = (
         _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"
     ).read_text(encoding="utf-8")
@@ -586,27 +544,22 @@ def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None
     assert schema_outcomes == frozenset(get_args(_Outcome))
 
 
-# --- Raw-socket truncation (task 3.7) ---------------------------------------
+# --- Raw-socket truncation --------------------------------------------------
 #
 # Everything above drives `create_app` through `fastapi.testclient.TestClient`,
 # whose ASGI transport hands the whole submitted body to `request.stream()`
-# already assembled in memory (PR7's stated, honest gap). No test built on
-# `TestClient` can ever observe a socket stopping mid-transfer, so it cannot
-# prove the streaming cap in `_read_bounded_body` -- the loop that raises
-# before asking `request.stream()` for another chunk -- actually stops a
-# real, slow-feeding connection. This section runs a real `uvicorn` server on
-# a real, already-bound TCP socket and drives it byte-for-byte instead.
+# already assembled in memory, so it can never observe a socket stopping
+# mid-transfer. This section runs a real `uvicorn` server on a real,
+# already-bound TCP socket and drives it byte-for-byte instead.
 
 
 class _RawSocketServer:
     """A real `uvicorn` server bound to an ephemeral loopback port.
 
-    The listening socket is created and bound here, *before* uvicorn ever
-    sees it (`socket.bind(("127.0.0.1", 0))`, then `getsockname()` for the
-    OS-assigned port) so the actual port is known ahead of time without
-    guessing or hardcoding one -- the same reason `port=0` was requested:
-    the test must survive a machine where an arbitrary fixed port is
-    already taken.
+    The listening socket is bound here, *before* uvicorn sees it, to an
+    OS-assigned port (`bind(("127.0.0.1", 0))`, then `getsockname()`), so
+    the port is known ahead of time and the test survives a machine where
+    any fixed port is already taken.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -710,41 +663,27 @@ class _UvicornErrorCapture:
         self._logger.setLevel(self._previous_level)
 
 
-@pytest.mark.req(id="RQ-42")
-@pytest.mark.req(id="RQ-3")
 def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
-    """RQ-3 criterion 2 ("its report is truncated in transit ... the
-    database holds none of that session's results rather than a prefix of
-    them") and RQ-42's "Body truncated midway" scenario, proven against a
-    REAL socket -- see the module-level note above for why `TestClient`
-    cannot exercise this.
+    """A report truncated in transit stores nothing -- not a prefix of its
+    results. Proven against a REAL socket; see the section note above for
+    why `TestClient` cannot exercise this.
 
     A raw client connects, sends a `Content-Length` that promises far more
     bytes than it ever writes, then half-closes its own write direction
-    (`shutdown(SHUT_WR)`) without sending the rest -- exactly what a process
-    killed mid-write, or a network partition mid-transfer, looks like from
-    the server's side. Starlette's `request.stream()` detects this and
-    raises a genuine `starlette.requests.ClientDisconnect` from inside the
-    real streaming read loop in `_read_bounded_body` -- not constructed by
-    hand, not injected through a fabricated `receive()`, the actual
-    exception a real disconnect produces.
+    (`shutdown(SHUT_WR)`) -- what a process killed mid-write, or a network
+    partition mid-transfer, looks like from the server's side. Starlette's
+    `request.stream()` then raises a genuine `ClientDisconnect` from inside
+    `_read_bounded_body`'s streaming loop.
 
     **Why the assertion is "no unhandled-exception log", not "a 400
-    response body".** Once uvicorn's own transport has observed the peer
-    disconnect, its ASGI `send()` implementation silently drops every
-    further message (`h11_impl.py`: `if self.disconnected: return`) --
-    this is unconditional ASGI-server behaviour, true whether or not this
-    service catches `ClientDisconnect`, and it means no HTTP response body
-    can ever reach a client that has already gone away, by construction of
-    the protocol. What DOES differ, and is what task 3.8 changes, is
-    whether the disconnect is handled inside this service's own code
-    (silent, clean completion) or left to propagate out of the ASGI
-    application entirely, which is what makes uvicorn log an "Exception in
-    ASGI application" error with a full traceback. RQ-42's "reject and
-    store nothing" is what task 3.7/3.8 can prove end-to-end for a real
-    socket: the response-body half of RQ-42 is already covered, against
-    the same code path, by `test_non_json_body_is_400` and its siblings
-    above -- this test's job is the part only a real socket can prove.
+    response body".** Once uvicorn has observed the peer disconnect, its
+    ASGI `send()` silently drops every further message (`h11_impl.py`:
+    `if self.disconnected: return`), so no response can reach a client that
+    has gone away. What differs is whether the disconnect is handled inside
+    this service (clean completion) or propagates out of the ASGI
+    application, which makes uvicorn log "Exception in ASGI application"
+    with a traceback. The rejection body itself is covered by
+    `test_non_json_body_is_400` and its siblings above.
     """
     app = create_app(store)
     signal = _AsgiCompletionSignal(app)
@@ -788,8 +727,8 @@ def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
     # A client that has already disconnected cannot, by construction of the
     # protocol, ever observe a response body -- see the test docstring.
     assert received == b""
-    # RQ-3 criterion 2, the assertion of record: nothing is written for a
-    # truncated session, not a prefix of it.
+    # The assertion of record: nothing is written for a truncated session,
+    # not a prefix of it.
     assert store.count_executions() == 0
     assert not error_capture.records, (
         "an unhandled ClientDisconnect reached uvicorn's ASGI exception "
@@ -797,21 +736,13 @@ def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
     )
 
 
-@pytest.mark.req(id="RQ-3")
-@pytest.mark.req(id="RQ-42")
 def test_finish_report_truncated_after_an_accepted_start_write_leaves_the_start_row_intact(
     store: InMemoryExecutionStore,
 ) -> None:
-    """`run-recording`'s "Finish report truncated after an accepted
-    start-write" (RQ-3.2) and `session-ingestion`'s matching RQ-42.3
-    scenario. `test_truncated_body_raw_socket` above proves only the
-    no-prior-report case (``count_executions() == 0``); it would be wrong
-    to extend that assertion here, because the start-write's row MUST
-    survive. A start-write is accepted first through the same real app,
-    then a finish report for that same run id is truncated in transit
-    through the identical raw-socket harness -- the row it left behind must
-    still be exactly what the start-write wrote, not removed and not
-    overwritten by a partial finish.
+    """A finish report truncated in transit after an accepted start-write
+    leaves the start row exactly as the start-write wrote it -- not removed
+    and not overwritten by a partial finish. `test_truncated_body_raw_socket`
+    covers the no-prior-report case, where nothing at all may be stored.
     """
     app = create_app(store)
     run_id = "d" * 32

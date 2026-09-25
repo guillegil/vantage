@@ -1,11 +1,7 @@
-"""Section derivation and the per-run pass-percentage aggregate
-(design.md D84, D85; spec `test-sections`).
+"""Section derivation and the per-run pass-percentage aggregate.
 
 Stdlib only -- `vantage.core.domain.sections` has no I/O, so nothing here
-needs a store, a fixture, or a temporary file. No `req` marker: the three
-requirements this change genuinely touches (RQ-24, RQ-26, RQ-29) are
-verified elsewhere; each test below names its capability and scenario in
-its own docstring instead.
+needs a store, a fixture, or a temporary file.
 """
 
 from __future__ import annotations
@@ -21,12 +17,12 @@ from vantage.core.domain.sections import (
 )
 
 # ---------------------------------------------------------------------------
-# normalize_prefix (spec test-sections: coercion, sibling non-bleed)
+# normalize_prefix: coercion, sibling non-bleed
 # ---------------------------------------------------------------------------
 
 
 def test_normalize_prefix_coerces_a_missing_trailing_slash() -> None:
-    """Scenario: A missing trailing slash is coerced on write."""
+    """A missing trailing slash is coerced on write."""
     assert normalize_prefix("tests/SectA") == "tests/SectA/"
 
 
@@ -42,7 +38,7 @@ def test_normalize_prefix_strips_surrounding_whitespace_before_coercing() -> Non
 
 
 def test_a_coerced_prefix_does_not_bleed_into_a_similarly_named_sibling() -> None:
-    """Scenario: A prefix does not bleed into a similarly-named sibling.
+    """A prefix does not bleed into a similarly-named sibling.
 
     The coercion is the whole point: without it, `tests/SectA` (no trailing
     slash) would match `tests/SectAlpha/test_x.py` as a plain string prefix.
@@ -53,12 +49,12 @@ def test_a_coerced_prefix_does_not_bleed_into_a_similarly_named_sibling() -> Non
 
 
 # ---------------------------------------------------------------------------
-# derive_section (spec test-sections: longest-prefix-wins)
+# derive_section: longest prefix wins
 # ---------------------------------------------------------------------------
 
 
 def test_derive_section_the_longest_matching_prefix_wins() -> None:
-    """Scenario: The longest matching prefix wins over a shorter one."""
+    """The longest matching prefix wins over a shorter one."""
     sections = [
         SectionDefinition(name="Tests", prefix="tests/"),
         SectionDefinition(name="SectA", prefix="tests/SectA/"),
@@ -75,9 +71,9 @@ def test_derive_section_no_match_derives_as_unassigned() -> None:
 
 
 def test_derive_section_an_equal_length_tie_is_broken_alphabetically_by_name() -> None:
-    """Design.md D84: among equal-length matching prefixes, the
-    alphabetically first name wins -- the only way a tie can occur is two
-    sections sharing an identical prefix."""
+    """Among equal-length matching prefixes, the alphabetically first name
+    wins -- the only way a tie can occur is two sections sharing an
+    identical prefix."""
     sections = [
         SectionDefinition(name="Zeta", prefix="tests/dup/"),
         SectionDefinition(name="Alpha", prefix="tests/dup/"),
@@ -93,13 +89,12 @@ def test_derive_section_matching_is_case_sensitive() -> None:
 
 
 # ---------------------------------------------------------------------------
-# summarize_sections (spec test-sections: pass percentage, ordering,
-# unassigned bucket)
+# summarize_sections: pass percentage, ordering, unassigned bucket
 # ---------------------------------------------------------------------------
 
 
-def test_summarize_sections_the_worked_example_yields_94_4() -> None:
-    """Scenario: The worked example yields 94.4%.
+def test_summarize_sections_mixed_outcomes_yield_94_4() -> None:
+    """xfailed counts as passing and skipped is excluded from the denominator.
 
     80 passed, 5 xfailed, 2 xpassed, 3 failed, 10 skipped -> passing=85,
     measured=90, pass_percentage=94.4 (85/90).
@@ -118,12 +113,12 @@ def test_summarize_sections_the_worked_example_yields_94_4() -> None:
     assert summary.items == (
         SectionSummary(name="Billing", total=100, measured=90, passing=85, pass_percentage=94.4),
     )
-    # `total - measured` is exactly the skipped count (design.md D85).
+    # `total - measured` is exactly the skipped count.
     assert summary.items[0].total - summary.items[0].measured == 10
 
 
 def test_summarize_sections_measured_zero_yields_none_never_zero_or_hundred() -> None:
-    """Scenario: An empty bucket reports null."""
+    """An empty bucket reports null."""
     sections = [SectionDefinition(name="Billing", prefix="tests/billing/")]
 
     summary = summarize_sections([], sections)
@@ -137,7 +132,7 @@ def test_summarize_sections_measured_zero_yields_none_never_zero_or_hundred() ->
 
 
 def test_summarize_sections_items_are_alphabetical_and_unassigned_is_excluded() -> None:
-    """Scenario: Sections list alphabetically."""
+    """Sections list alphabetically."""
     sections = [
         SectionDefinition(name="Zeta", prefix="tests/zeta/"),
         SectionDefinition(name="Alpha", prefix="tests/alpha/"),
@@ -156,7 +151,7 @@ def test_summarize_sections_items_are_alphabetical_and_unassigned_is_excluded() 
 
 
 def test_summarize_sections_unassigned_is_present_even_when_empty() -> None:
-    """Scenario: An empty unassigned bucket still appears."""
+    """An empty unassigned bucket still appears."""
     sections = [SectionDefinition(name="Billing", prefix="tests/billing/")]
     case_outcomes = [("tests/billing/test_x.py", "passed")]
 
@@ -167,7 +162,7 @@ def test_summarize_sections_unassigned_is_present_even_when_empty() -> None:
 
 
 def test_summarize_sections_totals_plus_unassigned_equal_the_run_total() -> None:
-    """Scenario: Section totals plus unassigned equal the run total."""
+    """Section totals plus unassigned equal the run total."""
     sections = [SectionDefinition(name="Billing", prefix="tests/billing/")]
     case_outcomes = [
         ("tests/billing/test_x.py", "passed"),

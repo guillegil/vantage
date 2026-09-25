@@ -1,5 +1,6 @@
-"""`VcsReport`'s wire shape (design.md D47): `extra="forbid"`, and a
-`commit` field that accepts a SHA-256 (64 hex chars), never a 40-hex
+"""Validation of a session report's `vcs`, `metadata` and result sections.
+
+`VcsReport.commit` accepts a SHA-256 (64 hex chars), never only a 40-hex
 pattern -- git is migrating away from SHA-1.
 """
 
@@ -60,9 +61,8 @@ def test_vcs_report_accepts_all_five_fields_null() -> None:
 
 def test_vcs_report_rejects_an_unknown_field_inside_the_section() -> None:
     """`extra="forbid"`, matching `RunReport` -- an unknown field inside
-    `vcs` means the two sides disagree about what a VCS snapshot is
-    (design.md D47), unlike `ResultReport`'s deliberately different
-    `extra="allow"`."""
+    `vcs` means the two sides disagree about what a VCS snapshot is, unlike
+    `ResultReport`'s deliberately different `extra="allow"`."""
     with pytest.raises(ValidationError, match="extra"):
         VcsReport.model_validate(_well_formed_vcs(tag="v1.2.3"))
 
@@ -77,7 +77,7 @@ def test_vcs_report_rejects_a_missing_required_field() -> None:
 
 def test_session_report_vcs_defaults_to_none_when_the_section_is_absent() -> None:
     """An older plugin's report shape -- no `vcs` key at all -- still
-    validates; `SessionReport.vcs` defaults to `None` (design.md D47)."""
+    validates; `SessionReport.vcs` defaults to `None`."""
     report = SessionReport.model_validate(
         {
             "run": {
@@ -126,15 +126,11 @@ def _well_formed_metadata_file(**overrides: object) -> dict[str, object]:
 
 
 def test_metadata_file_report_accepts_a_declared_value_of_arbitrary_length_and_content() -> None:
-    """The D96 trap, made a falsifier before it can be committed by
-    accident: `VcsReport.commit` uses `max_length=64`, and a Pydantic
-    constraint that fails raises `InvalidReportError` -- a `422` that
-    rejects the WHOLE session report. No constraint of any kind -- no
-    `max_length`, no `pattern` -- may appear on any field in the metadata
-    section; every bound is applied by the normalizer (Phase 9), which
-    drops rather than rejects (design.md D96). A value bigger and stranger
-    than any real declared file could plausibly hold must still validate
-    without raising."""
+    """No `max_length`, `pattern` or other constraint may appear on a
+    metadata field: a failed constraint is a `422` that rejects the WHOLE
+    session report. Bounds belong to the normalizer, which drops rather than
+    rejects. A value bigger and stranger than any real declared file could
+    hold must still validate."""
     huge_content = "\N{SNOWMAN}" * 100_000 + "\x00" * 1_000 + "a" * 500_000
 
     report = MetadataFileReport.model_validate(
@@ -151,9 +147,8 @@ def test_metadata_file_report_accepts_a_declared_value_of_arbitrary_length_and_c
 
 
 def test_metadata_file_report_accepts_a_null_content_for_a_non_captured_status() -> None:
-    """`content` is `None` whenever `status` is not `"captured"` -- the same
-    "declared-but-dropped is a row, not an absence" contract D95 states for
-    the storage side, kept on the wire too (design.md D96)."""
+    """`content` is `None` whenever `status` is not `"captured"`: a declared
+    file that was dropped is still reported, not omitted."""
     report = MetadataFileReport.model_validate(
         _well_formed_metadata_file(status="too_large", content=None)
     )
@@ -163,7 +158,7 @@ def test_metadata_file_report_accepts_a_null_content_for_a_non_captured_status()
 
 
 def test_metadata_file_report_rejects_an_unknown_field() -> None:
-    """`extra="forbid"`, matching `VcsReport` (design.md D96)."""
+    """`extra="forbid"`, matching `VcsReport`."""
     with pytest.raises(ValidationError, match="extra"):
         MetadataFileReport.model_validate(_well_formed_metadata_file(size=8192))
 
@@ -183,14 +178,14 @@ def test_metadata_report_accepts_a_well_formed_section() -> None:
 
 
 def test_metadata_report_accepts_an_arbitrary_length_declaration_name() -> None:
-    """No constraint of any kind on `declaration` either (design.md D96)."""
+    """No constraint of any kind on `declaration` either."""
     report = MetadataReport.model_validate({"declaration": "d" * 10_000, "files": []})
 
     assert report.declaration == "d" * 10_000
 
 
 def test_metadata_report_rejects_an_unknown_field() -> None:
-    """`extra="forbid"`, matching `VcsReport` (design.md D96)."""
+    """`extra="forbid"`, matching `VcsReport`."""
     with pytest.raises(ValidationError, match="extra"):
         MetadataReport.model_validate(
             {"declaration": "vantage-metadata.json", "files": [], "extra_field": 1}
@@ -199,7 +194,7 @@ def test_metadata_report_rejects_an_unknown_field() -> None:
 
 def test_session_report_metadata_defaults_to_none_when_the_section_is_absent() -> None:
     """An older plugin's report shape -- no `metadata` key at all -- still
-    validates; `SessionReport.metadata` defaults to `None` (design.md D96)."""
+    validates; `SessionReport.metadata` defaults to `None`."""
     report = SessionReport.model_validate(
         {
             "run": {
@@ -239,8 +234,8 @@ def test_session_report_carries_a_well_formed_metadata_section() -> None:
 
 
 def _minimal_result_entry(**overrides: object) -> dict[str, object]:
-    """The pre-`failure-capture` wire shape: no failure-evidence keys at
-    all, the exact shape an older plugin still sends (design.md D75)."""
+    """A result entry with no failure or captured-output keys at all, the
+    exact shape an older plugin still sends."""
     payload: dict[str, object] = {
         "node_id": "packages/vantage/tests/test_x.py::test_case",
         "file_path": "packages/vantage/tests/test_x.py",
@@ -264,10 +259,9 @@ def _minimal_result_entry(**overrides: object) -> dict[str, object]:
 
 
 def test_result_report_failure_evidence_fields_all_default_to_absent() -> None:
-    """design.md D75: every new failure-evidence field on `ResultReport` is
-    optional and defaults to the absent shape, so an older plugin's report
-    -- carrying none of these keys -- still validates. *(session-ingestion →
-    Optional failure-evidence fields)*"""
+    """Every failure and captured-output field on `ResultReport` is optional
+    and defaults to its absent shape, so an older plugin's report --
+    carrying none of these keys -- still validates."""
     report = ResultReport.model_validate(_minimal_result_entry())
 
     assert report.failure_type is None

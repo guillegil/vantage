@@ -1,13 +1,9 @@
 """Shared AST import walker for Vantage's static import boundaries.
 
-Used by ``vantage``'s core-isolation guard (``test_architecture.py``, RQ-26:
-stdlib only) and, from PR10 onward, ``pytest-vantage``'s zero-dependency
-guard (RQ-24: stdlib or pytest). It lives here rather than inside either
-package's ``src/`` tree because it must never ship in a wheel, and a copy
-inside ``vantage.core`` would still have to import ``ast`` from a test-only
-module colocated with production code -- one shared home is simpler and is
-what ADR-4 already accepts for the cross-boundary tests (design.md, D10).
-Reached through the root ``pythonpath = ["packages/vantage/tests"]``.
+Used by ``vantage``'s core-isolation guard (``test_architecture.py``: stdlib
+only) and ``pytest-vantage``'s zero-dependency guard (stdlib or pytest). It
+lives outside either package's ``src/`` tree because it must never ship in a
+wheel. Reached through the root ``pythonpath = ["packages/vantage/tests"]``.
 """
 
 from __future__ import annotations
@@ -62,7 +58,7 @@ def _resolve_relative(containing_package: str, level: int, module: str | None) -
     ``level=1`` (``from . import x``) targets the containing package itself;
     each further dot climbs one package upward. ``level > 0`` alone is NOT
     sufficient permission to allow the import -- the resolved target still
-    has to land inside the allowed internal prefix (design.md, D10).
+    has to land inside the allowed internal prefix.
     """
     parts = containing_package.split(".") if containing_package else []
     keep = max(len(parts) - (level - 1), 0)

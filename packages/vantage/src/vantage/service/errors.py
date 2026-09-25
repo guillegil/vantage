@@ -1,13 +1,13 @@
-"""Single place that shapes every rejection body (design.md D5).
+"""Single place that shapes every rejection body.
 
-**Why one function, not four ad hoc responses.** FastAPI's default handler
-for `RequestValidationError` mirrors the client's own submitted value back
-in an ``"input"`` key, includes pydantic's internal error ``"type"`` string,
-and can carry a ``"url"`` pointing at versioned pydantic documentation --
-three leaks in one body (RQ-42.4). A test report can legitimately carry a
-filesystem path, a node id, or an environment-derived string; the field that
-fails validation is exactly the field whose value would be echoed back to an
-unauthenticated caller.
+**Why one function, not ad hoc responses.** FastAPI's default handler for
+`RequestValidationError` mirrors the client's own submitted value back in an
+``"input"`` key, includes pydantic's internal error ``"type"`` string, and
+can carry a ``"url"`` pointing at versioned pydantic documentation -- three
+leaks in one body. A test report can legitimately carry a filesystem path, a
+node id, or an environment-derived string; the field that fails validation
+is exactly the field whose value would be echoed back to an unauthenticated
+caller.
 
 **An allow-list beats a deny-list here.** Stripping known-dangerous keys out
 of pydantic's error dicts requires naming every dangerous key correctly, and
@@ -27,8 +27,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-# Threat matrix "Unbounded request body": the cap the read path enforces
-# before the body is fully buffered (service/runs.py).
+# The request body cap, enforced while streaming, before the body is fully
+# buffered (`service/routes/runs.py`).
 MAX_REPORT_BYTES = 1024 * 1024  # 1 MiB
 
 
@@ -50,15 +50,12 @@ def safe_segment(part: object) -> str:
     back in the response, and carries CR/LF into any log line that records
     the rejection -- forged log entries from an unauthenticated caller.
 
-    So this is an allow-list too, for the same reason the module docstring
-    gives: a deny-list of dangerous characters has to guess right every
-    time, and it only has to be wrong once.
+    So this is an allow-list too: a deny-list of dangerous characters has
+    to guess right every time, and it only has to be wrong once.
 
-    Public (not module-private) because `service/routes/runs.py` reuses it
-    for `Acknowledgement.ignored` (design.md D15 / Threat Matrix): an unknown
-    key on a tolerated `ResultReport` is exactly the same "client-chosen,
-    not a schema name" case this function exists for, just on the accept
-    path instead of the reject path.
+    Public because `service/routes/runs.py` reuses it for
+    `Acknowledgement.ignored`: an unknown key on a tolerated `ResultReport`
+    is the same client-chosen text, echoed on the accept path instead.
     """
     text = str(part)
     return text if _SAFE_SEGMENT.match(text) else _UNNAMEABLE_SEGMENT
@@ -99,7 +96,7 @@ class RejectionError(Exception):
 
 
 class InvalidReportError(RejectionError):
-    """Valid JSON, but the `run` section fails validation (RQ-42.1)."""
+    """Valid JSON, but the report fails schema validation."""
 
     status_code = 422
     error = "invalid_report"
@@ -113,7 +110,7 @@ class InvalidReportError(RejectionError):
 
 
 class InvalidJsonError(RejectionError):
-    """Complete bytes, but not parseable JSON (RQ-42.2)."""
+    """Complete bytes, but not parseable JSON."""
 
     status_code = 400
     error = "invalid_json"
@@ -123,18 +120,12 @@ class InvalidJsonError(RejectionError):
 
 
 class IncompleteBodyError(RejectionError):
-    """The client disconnected before sending the whole body (RQ-3.2,
-    RQ-42's "Body truncated midway" scenario).
+    """The client disconnected before sending the whole body.
 
-    Raised in `service/routes/runs.py`'s `_read_bounded_body` when
-    `request.stream()` raises `starlette.requests.ClientDisconnect` --
-    itself a real signal from a real disconnected socket, not something
-    this service invents. A client that has already gone away can never
-    observe this response (design.md D12's own note on the point); the
-    value of turning the disconnect into a `RejectionError` instead of
-    letting it propagate unhandled is that it completes cleanly through
-    this module's one exception-handling path, rather than reaching
-    uvicorn's own ASGI exception wrapper as an unhandled error.
+    Raised by `service/routes/runs.py`'s `_read_bounded_body` when
+    `request.stream()` raises `ClientDisconnect`. The client is gone and
+    never sees this response; converting the disconnect keeps it on the one
+    rejection path instead of surfacing as an unhandled ASGI error.
     """
 
     status_code = 400
@@ -145,7 +136,7 @@ class IncompleteBodyError(RejectionError):
 
 
 class PayloadTooLargeError(RejectionError):
-    """The body exceeds `MAX_REPORT_BYTES` (threat matrix, unbounded body)."""
+    """The body exceeds `MAX_REPORT_BYTES`."""
 
     status_code = 413
     error = "payload_too_large"
@@ -155,7 +146,7 @@ class PayloadTooLargeError(RejectionError):
 
 
 class UnsupportedMediaTypeError(RejectionError):
-    """Wrong or absent `Content-Type` (RQ-42, checked before the body is read)."""
+    """Wrong or absent `Content-Type`, checked before the body is read."""
 
     status_code = 415
     error = "unsupported_media_type"
@@ -165,15 +156,12 @@ class UnsupportedMediaTypeError(RejectionError):
 
 
 class InvalidIdentityError(RejectionError):
-    """A `node_id` query value is missing or exceeds `MAX_IDENTITY_CHARS`
-    (design.md D54, `routes/read.py`'s `GET /api/v1/tests/history`).
+    """A `node_id` query value is missing or exceeds `MAX_IDENTITY_CHARS`.
 
-    A distinct rejection kind from `InvalidReportError` -- routed here by
-    `_handle_request_validation_error` only when every failing field is
-    `node_id`, so an unrelated failure (e.g. a malformed `limit`) still
-    gets the generic shape. `fields` is built through
-    `_fields_from_errors`/`safe_segment`, same as `InvalidReportError`, so
-    the identity value itself is never echoed."""
+    Chosen by `_handle_request_validation_error` only when every failing
+    field is `node_id`, so an unrelated failure (e.g. a malformed `limit`)
+    still gets the generic shape. The identity value itself is never
+    echoed."""
 
     status_code = 422
     error = "invalid_identity"
@@ -188,13 +176,11 @@ class InvalidIdentityError(RejectionError):
 
 class InvalidMetadataFilterError(RejectionError):
     """`metadata_key` and `metadata_value` were not both supplied on
-    `GET /api/v1/runs` (design.md D100).
+    `GET /api/v1/runs`.
 
-    Two query parameters, never one `key=value` string -- a value may itself
-    contain `=`, and D54/D87 already decided a compound whose parts are not
-    separable cannot ride in one segment. Both or neither: `fields` names
-    whichever of the pair the caller omitted, the one new rejection kind the
-    read path adds."""
+    They are two parameters rather than one `key=value` string because a
+    value may itself contain `=`. `fields` names whichever of the pair the
+    caller omitted."""
 
     status_code = 422
     error = "invalid_metadata_filter"
@@ -207,7 +193,7 @@ class InvalidMetadataFilterError(RejectionError):
 
 
 class UnknownRunError(RejectionError):
-    """No run matches the id used in a heartbeat (design.md D33).
+    """No run matches the id used in a heartbeat.
 
     Accepting a heartbeat for an id the server never saw would either
     manufacture liveness for a run that does not exist or require inventing
@@ -224,12 +210,11 @@ class UnknownRunError(RejectionError):
 
 class UnknownResultError(RejectionError):
     """A run is known, but no result matches the `node_id` used against the
-    single-result endpoint (design.md D78).
+    single-result endpoint.
 
-    A distinct kind from `UnknownRunError`: "no run with that id" and "that
-    run exists but has no result at that identity" are two different facts,
-    and `errors.py`'s own docstring asks for one shape per rejection kind,
-    not one reused across two different reasons.
+    Distinct from `UnknownRunError`: "no such run" and "the run exists but
+    has no result at that identity" are different facts the client needs to
+    tell apart.
     """
 
     status_code = 404
@@ -241,13 +226,11 @@ class UnknownResultError(RejectionError):
 
 class InvalidSectionNameError(RejectionError):
     """A section name is empty after `strip()`, or exceeds
-    `SECTION_NAME_MAX_CHARS` (design.md D89).
+    `SECTION_NAME_MAX_CHARS`.
 
-    The message and `fields` are both fixed strings -- the submitted name is
-    never interpolated into either, which is what keeps a hostile name (a
-    CR/LF, a `</script>`) from ever riding along in the rejection body
-    (design.md, Threat Matrix -- "Client-chosen text reaching a rejection
-    body")."""
+    The message and `fields` are fixed strings; the submitted name is never
+    interpolated, so a hostile name (a CR/LF, a `</script>`) cannot ride
+    along in the rejection body."""
 
     status_code = 422
     error = "invalid_section_name"
@@ -260,9 +243,9 @@ class InvalidSectionNameError(RejectionError):
 
 
 class ReservedSectionNameError(RejectionError):
-    """A section name equals `unassigned`, matched case-insensitively
-    (design.md D89) -- a distinct kind from `InvalidSectionNameError`
-    because the client fixes them differently."""
+    """A section name equals `unassigned`, matched case-insensitively -- a
+    distinct kind from `InvalidSectionNameError` because the client fixes
+    them differently."""
 
     status_code = 422
     error = "reserved_section_name"
@@ -273,7 +256,7 @@ class ReservedSectionNameError(RejectionError):
 
 class InvalidSectionPrefixError(RejectionError):
     """A section prefix is empty after `strip()`, or exceeds
-    `SECTION_PREFIX_MAX_CHARS` (design.md D89). Same no-echo discipline as
+    `SECTION_PREFIX_MAX_CHARS`. Same no-echo discipline as
     `InvalidSectionNameError`."""
 
     status_code = 422
@@ -288,8 +271,7 @@ class InvalidSectionPrefixError(RejectionError):
 
 
 class UnknownSectionError(RejectionError):
-    """`DELETE /api/v1/config/sections` for a name that is not stored
-    (design.md D89)."""
+    """`DELETE /api/v1/config/sections` for a name that is not stored."""
 
     status_code = 404
     error = "unknown_section"
@@ -299,8 +281,8 @@ class UnknownSectionError(RejectionError):
 
 
 class TooManySectionsError(RejectionError):
-    """A *new* section name would exceed `MAX_SECTIONS` (design.md D89) --
-    renaming or updating an existing name is never refused by this check."""
+    """A *new* section name would exceed `MAX_SECTIONS` -- renaming or
+    updating an existing name is never refused by this check."""
 
     status_code = 422
     error = "too_many_sections"
@@ -310,8 +292,8 @@ class TooManySectionsError(RejectionError):
 
 
 class UnreadableSettingError(RejectionError):
-    """A stored `value` fails its namespace's own Pydantic model (design.md
-    D83) -- a named `500`, not a traceback. `key` is routed through
+    """A stored `value` fails its namespace's own Pydantic model -- a named
+    `500`, not a traceback. `key` is routed through
     `safe_segment` before it ever reaches the body: a hand-edited database
     row is not guaranteed to hold a name this API would have accepted."""
 
@@ -343,10 +325,9 @@ def register_error_handlers(app: FastAPI) -> None:
     through automatic parameter binding -- neither handler ever forwards a
     pydantic error dict as-is.
 
-    `RequestValidationError` is further split in two: a failure confined to
-    the `node_id` query parameter (`GET /api/v1/tests/history`, design.md
-    D54) is shaped as `InvalidIdentityError`; every other automatic-binding
-    failure keeps the pre-existing `InvalidReportError` shape.
+    A `RequestValidationError` confined to the `node_id` query parameter
+    (`GET /api/v1/tests/history`) is shaped as `InvalidIdentityError`; every
+    other automatic-binding failure gets the `InvalidReportError` shape.
     """
 
     @app.exception_handler(RejectionError)

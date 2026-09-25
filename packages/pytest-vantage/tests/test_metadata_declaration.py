@@ -1,17 +1,8 @@
-"""`pytest_vantage.metadata.read_declaration` (design.md D92, D94) -- tasks
-6.3/6.4, deferred from PR6 and landed here.
+"""`pytest_vantage.metadata.read_declaration`, and the bounds it mirrors
+from the server.
 
-Basename note (PR6's own forward pointer, `tasks.md` Phase 6): neither test
-tree carries an `__init__.py`, so pytest's classic import mode needs every
-basename unique workspace-wide. `packages/vantage/tests/test_metadata.py`
-(PR3, vocabulary) and `packages/pytest-vantage/tests/test_metadata_containment.py`
-(PR6, `resolve_declared_path`) already exist -- this file is the second,
-equally unique name Phase 6's note asked for. `capture_metadata` (tasks
-7.1/7.2) is a later slice, in its own file, for the same reason.
-
-Every fixture is a real filesystem structure under `tmp_path`, matching
-`test_metadata_containment.py` and `test_vcs.py`'s own verification style --
-never a mock of filesystem behaviour.
+Every fixture is a real filesystem structure under `tmp_path`, never a mock
+of filesystem behaviour.
 """
 
 from __future__ import annotations
@@ -40,34 +31,26 @@ def _metadata_warnings(recwarn: pytest.WarningsRecorder) -> list[warnings.Warnin
     return [w for w in recwarn.list if issubclass(w.category, VantageWarning)]
 
 
-# --- mirrored constant (design.md D94) --------------------------------------
+# --- mirrored constants -----------------------------------------------------
 
 
 def test_the_mirrored_entry_bound_matches_the_server() -> None:
-    """design.md D94: `metadata.MAX_METADATA_ENTRIES` mirrors
-    `vantage.core.domain.metadata.MAX_METADATA_ENTRIES` across the RQ-24
-    boundary this plugin cannot import across directly -- the same shape
-    `pytest_vantage.budget._REPORT_BYTES_CAP` already uses for its own
-    server mirror (`test_report_budget.py::test_the_mirrored_cap_matches_
-    the_server`). A divergence here would let the plugin admit a
-    declaration the server's own bound would later reject wholesale, which
-    is a correctness bug, not a cosmetic one -- pinned by a test-only
-    cross-package import, never trusted to stay in sync by convention.
+    """`metadata.MAX_METADATA_ENTRIES` mirrors the server's
+    `vantage.core.domain.metadata.MAX_METADATA_ENTRIES`, which the plugin
+    cannot import; this test is what keeps the two in step.
     """
     assert metadata.MAX_METADATA_ENTRIES == _SERVER_MAX_METADATA_ENTRIES
 
 
 def test_the_mirrored_key_char_bound_matches_the_server() -> None:
-    """sdd-verify WARNING-1: `metadata.MAX_DECLARED_KEY_CHARS` mirrors
-    `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS` across the same
-    RQ-24 boundary `MAX_METADATA_ENTRIES` above already mirrors, pinned the
-    same way -- a test-only cross-package import, never trusted to stay in
-    sync by convention alone.
+    """`metadata.MAX_DECLARED_KEY_CHARS` mirrors the server's
+    `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS`, kept in step the
+    same way.
     """
     assert metadata.MAX_DECLARED_KEY_CHARS == _SERVER_MAX_METADATA_KEY_CHARS
 
 
-# --- read_declaration: rejection conditions (task 6.3, design.md D92) -------
+# --- read_declaration: rejection conditions ---------------------------------
 
 
 def test_an_absent_declaration_captures_nothing_and_warns_once(
@@ -187,8 +170,8 @@ def test_an_unknown_format_captures_nothing_and_warns_once(
 def test_a_duplicate_stored_key_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
-    # design.md D92: the key space is flat and globally unique per run --
-    # detected purely from the declaration, before any file is opened.
+    # The key space is flat and unique per run -- detected from the
+    # declaration alone, before any file is opened.
     root = tmp_path / "project"
     root.mkdir()
     files = [
@@ -221,10 +204,8 @@ def test_a_path_longer_than_the_bound_captures_nothing_and_warns_once(
 def test_a_path_containing_a_nul_byte_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
-    # sdd-verify CRITICAL-1: rejected loudly at the declaration boundary,
-    # before `resolve_declared_path` ever sees it -- see that module's
-    # own `test_a_path_containing_a_nul_byte_is_rejected_not_crashed` for
-    # the crash this prevents downstream.
+    # Refused loudly here, before `resolve_declared_path` ever sees it --
+    # `Path.resolve()` raises `ValueError` on a NUL byte.
     root = tmp_path / "project"
     root.mkdir()
     entry = {"path": "config\x00.json", "format": "json", "keys": ["k"]}
@@ -239,9 +220,7 @@ def test_a_path_containing_a_nul_byte_captures_nothing_and_warns_once(
 def test_a_key_longer_than_the_bound_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
-    # sdd-verify WARNING-1: `MAX_DECLARED_KEY_CHARS` gates real behaviour --
-    # the whole declaration is refused, exactly like `MAX_DECLARED_PATH_CHARS`
-    # beside it, with no new status class and no schema change.
+    # The whole declaration is refused, exactly like an over-long path.
     root = tmp_path / "project"
     root.mkdir()
     long_key = "k" * (metadata.MAX_DECLARED_KEY_CHARS + 1)
@@ -269,7 +248,7 @@ def test_more_than_the_total_key_bound_captures_nothing_and_warns_once(
     assert len(_metadata_warnings(recwarn)) == 1
 
 
-# --- read_declaration: acceptance (task 6.3/6.4) ----------------------------
+# --- read_declaration: valid declarations -----------------------------------
 
 
 def test_a_well_formed_declaration_is_read_with_no_warning(

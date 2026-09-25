@@ -1,9 +1,8 @@
-"""`Identity` validation and `Execution`'s frozen, nullable shape (design.md, Interfaces).
+"""`Identity` validation and `Execution`'s frozen, nullable shape.
 
-`VcsContext.merged_over` (design.md D48) is the in-memory mirror of the
-storage adapters' per-column `COALESCE`: null -> value only, never value ->
-null. It is proven here, independently of either storage adapter, before
-Phase 4 wires it into `memory.py`'s conflict branch.
+`VcsContext.merged_over` is the in-memory mirror of the SQLite adapter's
+per-column `COALESCE`: null -> value only, never value -> null. It is proven
+here independently of either storage adapter.
 """
 
 from __future__ import annotations
@@ -97,7 +96,7 @@ def test_vcs_context_merged_over_none_previous_returns_self_unchanged() -> None:
 def test_vcs_context_merged_over_a_partial_incoming_snapshot_keeps_prior_fields() -> None:
     """A detached HEAD / no-commits report: some fields null, others not.
     The previous, fuller snapshot must fill exactly the null fields -- never
-    the other way around (design.md D48's own "must not clobber" wording).
+    the other way around.
     """
     previous = VcsContext(
         commit="a" * 40,
@@ -130,9 +129,9 @@ def test_vcs_context_merged_over_a_partial_incoming_snapshot_keeps_prior_fields(
 
 
 def test_vcs_context_merged_over_truncated_flag_travels_with_commit_subject() -> None:
-    """The `CASE` in D48's SQL keys `vcs_commit_subject_truncated` to
-    whether `excluded.vcs_commit_subject IS NOT NULL` -- the flag follows
-    the subject it describes, not the other fields' own coalesce.
+    """The flag follows the subject it describes, not the other fields' own
+    coalesce -- the SQLite adapter's `CASE` keys it to whether
+    `excluded.vcs_commit_subject IS NOT NULL`.
     """
     previous = VcsContext(
         commit="a" * 40,
@@ -175,9 +174,8 @@ def test_vcs_context_merged_over_truncated_flag_travels_with_commit_subject() ->
 
 
 def test_execution_vcs_defaults_to_none_for_every_existing_construction_site() -> None:
-    """`Execution.vcs` is appended with a default so every pre-existing
-    construction site -- three test doubles broke this way in Phase 2 --
-    keeps working unmodified (design.md D48, tasks.md 3.6)."""
+    """`Execution.vcs` is optional: a construction site that does not
+    supply it gets `None`."""
     execution = Execution(
         identity=Identity("a" * 32),
         started_at=datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc),
