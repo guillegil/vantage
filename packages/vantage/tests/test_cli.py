@@ -32,9 +32,8 @@ def served(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Stands in for `uvicorn.run` and records the app `main` handed it."""
     served: dict[str, Any] = {}
 
-    def _run(app: object, **kwargs: object) -> None:
+    def _run(app: object, **_kwargs: object) -> None:
         served["app"] = app
-        served.update(kwargs)
 
     monkeypatch.setattr("vantage.service.cli.uvicorn.run", _run)
     return served
