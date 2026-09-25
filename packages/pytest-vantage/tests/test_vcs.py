@@ -144,6 +144,33 @@ def test_detached_head_records_commit_null_branch(tmp_path: Path) -> None:
     assert snapshot.branch is None
 
 
+def test_a_tag_named_like_the_branch_leaves_the_branch_name_intact(tmp_path: Path) -> None:
+    # `symbolic-ref --short` keeps a `heads/` prefix whenever another ref
+    # shares the branch's name, which would split one branch in two.
+    repo = _repo_with_one_commit(tmp_path / "tagged")
+    _git("checkout", "-q", "-b", "release/2.0", cwd=repo)
+    _git("tag", "release/2.0", cwd=repo)
+
+    assert vcs.capture(repo).branch == "release/2.0"
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_an_entry_named_head_in_rootpath_keeps_the_commit_subject(
+    tmp_path: Path, kind: str
+) -> None:
+    # Without `--`, git refuses a HEAD that is both a revision and a path.
+    repo = _repo_with_one_commit(tmp_path / "head-entry")
+    if kind == "file":
+        (repo / "HEAD").write_text("not a revision\n")
+    else:
+        (repo / "HEAD").mkdir()
+
+    snapshot = vcs.capture(repo)
+
+    assert snapshot.commit == _independent_head(repo)
+    assert snapshot.commit_subject == "initial commit"
+
+
 def test_no_commits_yet_stores_null_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _init_repo(tmp_path / "empty-repo")
     recorder = _CallRecorder()

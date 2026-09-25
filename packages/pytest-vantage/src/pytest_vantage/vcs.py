@@ -74,6 +74,8 @@ _REPOSITORY_SELECTING_ENV = (
     "GIT_CEILING_DIRECTORIES",
 )
 
+_BRANCH_REF_PREFIX = "refs/heads/"
+
 _TIMEOUT_WARNING = "could not read the git repository (timed out)"
 _CORRUPT_WARNING = "could not read the git repository"
 
@@ -201,11 +203,26 @@ def capture(rootpath: Path) -> VcsSnapshot:
     root = gate.stdout.strip()
 
     commit = _field(invoke(["git", "rev-parse", "--verify", "--quiet", "HEAD"]))
-    branch = _field(invoke(["git", "symbolic-ref", "--quiet", "--short", "HEAD"]))
+    # The full ref, stripped here: `--short` keeps a `heads/` prefix whenever
+    # a tag or another ref shares the branch's name.
+    head_ref = _field(invoke(["git", "symbolic-ref", "--quiet", "HEAD"]))
+    branch: str | None = None
+    if head_ref is not None and head_ref.startswith(_BRANCH_REF_PREFIX):
+        branch = head_ref[len(_BRANCH_REF_PREFIX) :]
 
     commit_subject: str | None = None
     if commit is not None:
-        subject_argv = ["git", "show", "--no-patch", "--no-show-signature", "--format=%s", "HEAD"]
+        # `--` so that a file or directory named HEAD in rootpath cannot make
+        # the revision ambiguous, which git refuses.
+        subject_argv = [
+            "git",
+            "show",
+            "--no-patch",
+            "--no-show-signature",
+            "--format=%s",
+            "HEAD",
+            "--",
+        ]
         commit_subject = _bounded_subject(_field(invoke(subject_argv)))
 
     dirty_field = _field(invoke(["git", "status", "--porcelain", "--untracked-files=no"]))
