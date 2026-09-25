@@ -437,6 +437,69 @@ def test_metadata_capture_requested_short_circuits_when_not_activated() -> None:
     assert _metadata_capture_requested(_UnactivatedConfig()) is False  # type: ignore[arg-type]
 
 
+# --- Invocations that run no tests -----------------------------------------------
+
+_NO_TEST_MODES = [
+    "--collect-only",
+    "--setup-only",
+    "--setup-plan",
+    "--fixtures",
+    "--fixtures-per-test",
+    "--cache-show",
+    "--markers",
+]
+
+
+def _refuse_and_record_connections(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    attempts: list[object] = []
+
+    def _refuse(address: tuple[str, int], *args: object, **kwargs: object) -> socket.socket:
+        attempts.append(address)
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr(socket, "create_connection", _refuse)
+    return attempts
+
+
+@pytest.mark.parametrize("mode", _NO_TEST_MODES)
+def test_an_invocation_that_runs_no_tests_is_not_recorded(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    recwarn: pytest.WarningsRecorder,
+    mode: str,
+) -> None:
+    """Collection, fixture setup alone and the listing modes run nothing,
+    so recording them would store a clean-looking exit-0 run with no
+    results -- or, under ``--setup-only``, a run that never finishes. They
+    get no preflight, no recorder and no warning, even with ``--vantage``."""
+    pytester.makepyfile(test_sample=_SAMPLE_TEST)
+    attempts = _refuse_and_record_connections(monkeypatch)
+
+    result = pytester.runpytest("--vantage", "--vantage-server=http://127.0.0.1:1", mode)
+
+    assert result.ret == pytest.ExitCode.OK
+    assert attempts == []
+    assert _vantage_warnings(recwarn) == []
+
+
+def test_an_invocation_that_runs_tests_does_reach_for_the_server(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    """The control for the test above: the same harness without a listing
+    mode attempts the preflight and warns that nothing listens."""
+    pytester.makepyfile(test_sample=_SAMPLE_TEST)
+    attempts = _refuse_and_record_connections(monkeypatch)
+
+    result = pytester.runpytest("--vantage", "--vantage-server=http://127.0.0.1:1")
+
+    result.assert_outcomes(passed=1)
+    assert attempts == [("127.0.0.1", 1)]
+    (warned,) = _vantage_warnings(recwarn)
+    assert "cannot reach" in warned
+
+
 def _patch_path_open_recorder(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     """Wraps the real `Path.open` to record every path it is called on
     while still letting it execute for real -- the same non-fabricating

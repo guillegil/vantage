@@ -40,6 +40,21 @@ _OPT_IN_FLAGS = {
     "vantage_metadata": "--vantage-metadata",
 }
 
+# Invocations that execute no test. Recording one would store a run that
+# looks like a clean exit-0 session with nothing in it (or, under
+# --setup-only, one that never finishes), so none is recorded. `cacheshow`
+# does not exist under `-p no:cacheprovider`, hence the default on lookup.
+_NO_TEST_OPTIONS = (
+    "collectonly",
+    "setuponly",
+    "setupplan",
+    "showfixtures",
+    "show_fixtures_per_test",
+    "cacheshow",
+    "markers",
+    "help",
+)
+
 # pytest's native TOML table hands `getini` a number for `vantage_timeout =
 # 5` and refuses one registered as a string. The float type exists from
 # pytest 8.4; older versions read every ini value as text, which
@@ -218,6 +233,10 @@ def _warn_about_untyped_flags(config: pytest.Config) -> None:
         )
 
 
+def _session_runs_no_tests(config: pytest.Config) -> bool:
+    return any(config.getoption(name, default=False) for name in _NO_TEST_OPTIONS)
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """The always-imported hook: decides what, if anything, to register.
 
@@ -229,7 +248,8 @@ def pytest_configure(config: pytest.Config) -> None:
        address, reads a timeout, probes the server or constructs a
        `Recorder`: a `Recorder` per worker would record one session as
        several runs.
-    3. **Controller branch.** An opt-in flag that was not typed is reported
+    3. **Controller branch.** An invocation that runs no test is never
+       recorded. Otherwise an opt-in flag that was not typed is reported
        once, and absent a typed ``--vantage`` nothing further happens: no
        plugin is registered, no socket is opened.
     4. The address and timeout are resolved and validated. An invalid value
@@ -257,6 +277,8 @@ def pytest_configure(config: pytest.Config) -> None:
     if hasattr(config, "workerinput"):
         if _failure_text_capture_requested(config):
             config.pluginmanager.register(EvidenceCollector(config))
+        return
+    if _session_runs_no_tests(config):
         return
     _warn_about_untyped_flags(config)
     if not _activation_requested(config):
