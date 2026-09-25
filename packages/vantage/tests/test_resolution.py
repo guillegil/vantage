@@ -62,6 +62,41 @@ def test_default_database_falls_back_to_home_when_xdg_data_home_unset() -> None:
     assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
 
 
+@pytest.mark.parametrize(
+    ("cli_database", "env_database"),
+    [("", None), (None, ""), ("", "")],
+    ids=["empty-flag", "empty-env", "both-empty"],
+)
+def test_an_empty_database_setting_counts_as_unset(
+    cli_database: str | None, env_database: str | None
+) -> None:
+    """`--database "$VAR"` or `VANTAGE_DATABASE=` with nothing behind it
+    means "not configured". Taken literally it is `Path("")`, the current
+    directory, and startup then acts on that directory as if it were the
+    database's.
+    """
+    config = _resolve(cli_database=cli_database, env_database=env_database)
+
+    assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
+
+
+def test_an_empty_database_flag_falls_through_to_the_environment() -> None:
+    config = _resolve(cli_database="", env_database="/env/vantage.db")
+
+    assert config.database_path == Path("/env/vantage.db")
+
+
+@pytest.mark.parametrize("xdg_data_home", ["relative/data", "./data", "data", "~/data"])
+def test_default_database_ignores_a_relative_xdg_data_home(xdg_data_home: str) -> None:
+    """The XDG Base Directory spec says a relative value is invalid and must
+    be ignored. Used as-is it would put the database wherever the server
+    happened to be started, splitting history across directories.
+    """
+    config = _resolve(home=Path("/home/nobody"), xdg_data_home=xdg_data_home)
+
+    assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
+
+
 def test_default_host_and_port() -> None:
     config = _resolve()
 

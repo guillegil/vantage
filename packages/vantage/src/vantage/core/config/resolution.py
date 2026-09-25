@@ -50,10 +50,11 @@ def resolve_server_config(
 
     Database precedence: ``--database`` > ``VANTAGE_DATABASE`` >
     ``$XDG_DATA_HOME/vantage/vantage.db``, default
-    ``~/.local/share/vantage/vantage.db``. The plugin's activation switch is
-    flag-only so shared configuration can never silently turn recording on;
-    the environment is fine here because this server is started deliberately
-    by whoever runs it.
+    ``~/.local/share/vantage/vantage.db``. An empty value counts as unset,
+    and a relative ``XDG_DATA_HOME`` is ignored. The plugin's activation
+    switch is flag-only so shared configuration can never silently turn
+    recording on; the environment is fine here because this server is
+    started deliberately by whoever runs it.
 
     Host, port and the grace period each take only a CLI value or a fixed
     default; none has an environment variable.
@@ -95,11 +96,16 @@ def _resolve_database_path(
     home: Path,
     xdg_data_home: str | None,
 ) -> Path:
-    if cli_database is not None:
+    # An empty value is unset, not `Path("")`: that is the current directory,
+    # and `--database "$VAR"` with the variable unset does not mean "here".
+    if cli_database:
         return Path(cli_database)
-    if env_database is not None:
+    if env_database:
         return Path(env_database)
-    data_home = Path(xdg_data_home) if xdg_data_home else home / ".local" / "share"
+    # The XDG Base Directory spec says a relative XDG_DATA_HOME is invalid and
+    # must be ignored; used as-is it would move the database with the cwd.
+    xdg = Path(xdg_data_home) if xdg_data_home else None
+    data_home = xdg if xdg is not None and xdg.is_absolute() else home / ".local" / "share"
     return data_home / "vantage" / "vantage.db"
 
 
