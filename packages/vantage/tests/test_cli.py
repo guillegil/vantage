@@ -14,6 +14,7 @@ import contextlib
 import logging
 import os
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -167,7 +168,7 @@ def test_main_carries_the_resolved_grace_period_into_the_app(
     """
     cli.main(["--database", str(tmp_path / "v.db"), "--grace-period", "60"])
 
-    assert served["app"].state.grace_period == 60.0
+    assert served["app"].state.grace_period == timedelta(seconds=60)
 
 
 @pytest.mark.parametrize("stops_with", [None, SystemExit(3)], ids=["returns", "exits"])

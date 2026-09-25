@@ -25,7 +25,7 @@ _DEFAULT_GRACE_BEATS = 30
 _DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_BEATS * _BEAT_INTERVAL_HINT_SECONDS  # 900.0
 
 # Longer than any live session goes quiet, and far inside what `timedelta`
-# can hold -- the read routes build one from the grace period on every request.
+# can hold -- `create_app` builds one from the grace period.
 _MAX_GRACE_PERIOD_SECONDS = 365 * 24 * 60 * 60.0
 
 
@@ -107,9 +107,10 @@ def _resolve_grace_period(cli_grace_period: float | None) -> float:
         return _DEFAULT_GRACE_PERIOD_SECONDS
     # `argparse type=float` accepts 0, -1, nan, inf and 1e14. The first two
     # make every unfinished run abandoned on sight, including sessions
-    # heartbeating normally; the others cannot become the `timedelta` every
-    # run list and run detail builds. Either way the server would run and be
-    # useless, so it refuses to start. The chained comparison is false for nan.
+    # heartbeating normally; the others cannot become a `timedelta` at all.
+    # `create_app` refuses both, but only after the database is open, so the
+    # refusal comes here first, as one line. The chained comparison is false
+    # for nan.
     if not 0 < cli_grace_period <= _MAX_GRACE_PERIOD_SECONDS:
         raise ServerConfigError(
             f"--grace-period must be more than 0 and at most {_MAX_GRACE_PERIOD_SECONDS:.0f} "

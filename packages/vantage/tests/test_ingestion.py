@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -654,13 +654,22 @@ def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
 def test_create_app_defaults_grace_period_to_900_seconds() -> None:
     app = create_app(InMemoryExecutionStore())
 
-    assert app.state.grace_period == 900.0
+    assert app.state.grace_period == timedelta(seconds=900)
 
 
 def test_create_app_exposes_the_configured_grace_period() -> None:
     app = create_app(InMemoryExecutionStore(), grace_period_seconds=123.0)
 
-    assert app.state.grace_period == 123.0
+    assert app.state.grace_period == timedelta(seconds=123)
+
+
+@pytest.mark.parametrize("seconds", [0.0, -1.0, float("nan"), float("inf"), 1e14])
+def test_create_app_refuses_a_grace_period_it_cannot_apply(seconds: float) -> None:
+    """Refused when the app is built, not on every read of a run: nan, inf
+    and 1e14 cannot become a `timedelta`, and a grace period that is not
+    positive would present every unfinished run as abandoned."""
+    with pytest.raises((ValueError, OverflowError)):
+        create_app(InMemoryExecutionStore(), grace_period_seconds=seconds)
 
 
 # --- capability advertisement -------------------------------------------------

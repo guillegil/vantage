@@ -19,6 +19,8 @@ serves a hand-written document instead.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import FastAPI
 
 from vantage.core.config.resolution import DEFAULT_GRACE_PERIOD_SECONDS
@@ -35,13 +37,20 @@ def create_app(
 ) -> FastAPI:
     """Build the ASGI app, wired to `store` for every write.
 
-    `grace_period_seconds` is stored as `app.state.grace_period`, which the
-    read routes use to decide when a run without contact is abandoned. The
-    default comes from `resolution.py` so the two can never drift apart.
+    `grace_period_seconds` becomes `app.state.grace_period`, a `timedelta`
+    built once here, which the read routes use to decide when a run without
+    contact is abandoned. A value no `timedelta` can hold (nan, inf, one
+    too large) raises here rather than on every read, and so does one that
+    is not positive, which would present every unfinished run as abandoned
+    the moment it is read. The default comes from `resolution.py` so the
+    two can never drift apart.
     """
+    grace_period = timedelta(seconds=grace_period_seconds)
+    if grace_period <= timedelta(0):
+        raise ValueError(f"grace_period_seconds must be positive, got {grace_period_seconds!r}")
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
     app.state.store = store
-    app.state.grace_period = grace_period_seconds
+    app.state.grace_period = grace_period
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(read_router, prefix="/api/v1")
     app.include_router(capabilities_router, prefix="/api/v1")

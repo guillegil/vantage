@@ -162,10 +162,9 @@ def test_a_nonsensical_grace_period_is_refused_at_resolution(value: float) -> No
 
     0 and -1 make every unfinished run derive as abandoned the instant it is
     read -- including sessions heartbeating normally. nan, inf and 1e14
-    cannot become the `timedelta` the read routes build on every request, so
-    every run list and run detail would fail; the cap sits at one year, far
-    below where that happens. The server must refuse to start rather than
-    run and answer wrong.
+    cannot become the `timedelta` `create_app` builds; the cap sits at one
+    year, far below where that happens. The server must refuse before it
+    opens the database, rather than fail with a traceback after it.
     """
     with pytest.raises(ServerConfigError, match="--grace-period"):
         _resolve(cli_grace_period=value)

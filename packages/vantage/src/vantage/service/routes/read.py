@@ -259,7 +259,7 @@ async def list_runs(
     else:
         page = store.list_runs(limit=limit, offset=offset)
     now = datetime.now(timezone.utc)
-    grace = timedelta(seconds=request.app.state.grace_period)
+    grace: timedelta = request.app.state.grace_period
     items = [_run_list_item(entry, now=now, grace=grace) for entry in page.items]
     return RunListResponse(items=items, has_more=page.has_more, metadata_horizon=horizon)
 
@@ -277,7 +277,7 @@ async def get_run_detail(
         raise UnknownRunError()
 
     now = datetime.now(timezone.utc)
-    grace = timedelta(seconds=request.app.state.grace_period)
+    grace: timedelta = request.app.state.grace_period
     return _run_detail_response(detail, now=now, grace=grace)
 
 
