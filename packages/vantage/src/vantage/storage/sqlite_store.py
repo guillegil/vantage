@@ -31,10 +31,12 @@ no-op.
 
 `last_contact_at` is set by the creating report only -- a finished or
 interrupted run is done, not stale -- and advanced by `touch_last_contact`'s
-monotonic `last_contact_at < ?` update. That comparison is on TEXT, so every
-value written to the column goes through `_fixed_width_isoformat`.
-`test_case.last_seen_at`'s `MAX` and the `started_at` ordering compare plain
-`.isoformat()` text and rely on the service normalising timestamps to UTC.
+monotonic `last_contact_at < ?` update.
+
+Timestamps are compared as TEXT -- that update, the catalogue's `MAX`, every
+`ORDER BY started_at` -- so every one is written through `isoformat_utc`:
+fixed-width UTC, whose text order is chronological order whatever offset
+the caller's `datetime` carried.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import TypeVar, cast
 
@@ -71,7 +73,7 @@ from vantage.core.ports.storage import (
     RunMetadata,
     UserSetting,
 )
-from vantage.storage.connection import open_database
+from vantage.storage.connection import isoformat_utc, open_database
 
 T = TypeVar("T")
 
@@ -367,19 +369,8 @@ _SELECT_RUN_CASE_OUTCOMES = """
 """
 
 
-def _fixed_width_isoformat(moment: datetime) -> str:
-    """Fixed-width ISO-8601 UTC text: `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`.
-
-    The same format as `pytest_vantage.recorder.isoformat_utc`. Converts to
-    UTC first rather than trusting the caller: `strftime` alone would stamp a
-    `+02:00` value with `+00:00`, storing it two hours off and breaking the
-    text comparison against UTC rows (the in-memory adapter compares real
-    `datetime` objects and would disagree).
-
-    Used for `last_contact_at`, the column compared as text (`< ?`), and for
-    `user_setting.updated_at`; other timestamp columns use `.isoformat()`.
-    """
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
+def _opt_isoformat_utc(moment: datetime | None) -> str | None:
+    return None if moment is None else isoformat_utc(moment)
 
 
 def _vcs_columns(vcs: VcsContext | None) -> tuple[object, ...]:
@@ -583,7 +574,7 @@ def _row_to_catalogue_entry(row: tuple[object, ...]) -> CatalogueEntry:
 def _catalogue_rows(
     execution: Execution, results: Sequence[Result]
 ) -> list[tuple[str, str, str | None, str, str | None, str, str, str]]:
-    started_at = execution.started_at.isoformat()
+    started_at = isoformat_utc(execution.started_at)
     run_id = execution.identity.value
     # Keyed by node_id so a report carrying the same node id twice (the
     # service rejects that) still yields one upsert row rather than a batch
@@ -666,8 +657,8 @@ def _result_rows(
             result.identity.node_id,
             result.outcome,
             result.duration,
-            result.started_at.isoformat() if result.started_at is not None else None,
-            result.finished_at.isoformat() if result.finished_at is not None else None,
+            _opt_isoformat_utc(result.started_at),
+            _opt_isoformat_utc(result.finished_at),
             result.setup_outcome,
             result.call_outcome,
             result.teardown_outcome,
@@ -803,10 +794,10 @@ class SqliteExecutionStore:
                 _UPSERT_RUN,
                 (
                     run_id,
-                    received_at.isoformat(),
-                    _fixed_width_isoformat(received_at),
-                    execution.started_at.isoformat(),
-                    execution.finished_at.isoformat() if execution.finished_at else None,
+                    isoformat_utc(received_at),
+                    isoformat_utc(received_at),
+                    isoformat_utc(execution.started_at),
+                    _opt_isoformat_utc(execution.finished_at),
                     execution.exit_status,
                     1 if execution.interrupted else 0,
                     execution.interrupt_reason,
@@ -832,7 +823,7 @@ class SqliteExecutionStore:
 
     def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
         with self._lock:
-            formatted = _fixed_width_isoformat(contacted_at)
+            formatted = isoformat_utc(contacted_at)
             cursor = self._conn.execute(_TOUCH_LAST_CONTACT, (formatted, execution_id, formatted))
             return cursor.rowcount == 1
 
@@ -918,7 +909,7 @@ class SqliteExecutionStore:
     def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
         # Probe first, as `record_session` does: `rowcount` cannot
         # distinguish insert from update under `DO UPDATE`.
-        formatted = _fixed_width_isoformat(updated_at)
+        formatted = isoformat_utc(updated_at)
         with self._write_transaction() as conn:
             created = conn.execute(_PROBE_SETTING_EXISTS, (namespace, key)).fetchone() is None
             conn.execute(_UPSERT_SETTING, (namespace, key, value, formatted))

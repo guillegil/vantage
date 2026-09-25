@@ -686,6 +686,33 @@ class ExecutionStoreContract:
 
     # -- list_runs / get_run_detail --
 
+    def test_timestamps_in_another_offset_order_by_the_instant_they_name(
+        self, store: ExecutionStore
+    ) -> None:
+        """The port takes any aware `datetime`. 11:30+02:00 is 09:30 UTC --
+        earlier than 10:00 UTC, though its ISO text sorts later -- so the
+        10:00 run is the newer one everywhere order matters."""
+        node_id = "t.py::test_x"
+        newer = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+        older = datetime(2026, 9, 1, 11, 30, 0, tzinfo=timezone(timedelta(hours=2)))
+        store.record_session(
+            _execution("a" * 32, started=newer), results=(_result(node_id),), received_at=newer
+        )
+        store.record_session(
+            _execution("b" * 32, started=older), results=(_result(node_id),), received_at=newer
+        )
+
+        runs = store.list_runs(limit=10, offset=0).items
+        history = store.list_history(node_id=node_id, limit=10, offset=0).items
+        entry = store.get_catalogue_entry(node_id)
+
+        assert [run.execution.identity.value for run in runs] == ["a" * 32, "b" * 32]
+        assert [item.run_id for item in history] == ["a" * 32, "b" * 32]
+        assert runs[1].execution.started_at == older
+        assert entry is not None
+        assert entry.last_seen_at == newer
+        assert entry.last_seen_run_id == "a" * 32
+
     def test_list_runs_orders_newest_first_with_total_tiebreak(self, store: ExecutionStore) -> None:
         """Two runs sharing one `started_at`; `id DESC` breaks the tie so the
         order is total, not merely partial -- a page boundary can never fall

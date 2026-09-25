@@ -42,6 +42,19 @@ _SCHEMA_VERSION = 5
 _STAMP_SCHEMA_VERSION = "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)"
 
 
+def isoformat_utc(moment: datetime) -> str:
+    """The text every timestamp is stored as: fixed-width ISO-8601 UTC,
+    `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`, the format the plugin sends.
+
+    Converted to UTC first, whatever offset the caller's value carries, and
+    always with six fractional digits -- plain `isoformat()` drops them when
+    they are zero -- so every value has one width and text order is
+    chronological order. Not `strftime`, whose `%Y` does not pad a year
+    below 1000 on every platform.
+    """
+    return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
 class SchemaVersionError(RuntimeError):
     """`meta.schema_version` does not match what this build requires.
 
@@ -197,7 +210,7 @@ def _stamp_creation_metadata(conn: sqlite3.Connection) -> None:
     try:
         conn.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', ?)",
-            (datetime.now(timezone.utc).isoformat(),),
+            (isoformat_utc(datetime.now(timezone.utc)),),
         )
         conn.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('created_by', ?)",

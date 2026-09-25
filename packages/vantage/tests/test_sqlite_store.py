@@ -3,6 +3,7 @@ SQLite-specific checks that read the database directly."""
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
@@ -21,7 +22,12 @@ from vantage.storage.sqlite_store import (
     _LIST_SUBJECT_PREFIX_BYTES,
     SqliteExecutionStore,
 )
-from vantage_port_contract import ExecutionStoreContract, _execution, _start_only_execution
+from vantage_port_contract import (
+    ExecutionStoreContract,
+    _execution,
+    _result,
+    _start_only_execution,
+)
 
 
 class TestSqliteExecutionStore(ExecutionStoreContract):
@@ -303,3 +309,51 @@ def test_the_filtered_page_and_its_horizon_are_read_from_one_snapshot(tmp_path: 
         store._conn.set_trace_callback(None)  # noqa: SLF001
         other_process.close()
         store.close()
+
+
+_FIXED_WIDTH_UTC = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00")
+
+
+def test_every_stored_timestamp_is_fixed_width_utc_text(tmp_path: Path) -> None:
+    """Timestamps are compared as text (`MAX`, `ORDER BY`, `<`), which is
+    chronological only when every value has one offset and one width.
+    `isoformat()` drops the fraction when it is zero and keeps the caller's
+    offset, so neither may reach a column."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    whole_second = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone(timedelta(hours=2)))
+    try:
+        store.record_session(
+            _execution("a" * 32, started=whole_second),
+            results=(_result("t.py::test_x"),),
+            received_at=whole_second,
+        )
+        store.upsert_setting("test_sections", "Billing", value="{}", updated_at=whole_second)
+        conn = store._conn  # noqa: SLF001
+        stored = [
+            *conn.execute(
+                "SELECT received_at, last_contact_at, started_at, finished_at FROM run"
+            ).fetchone(),
+            *conn.execute("SELECT started_at, finished_at FROM result").fetchone(),
+            *conn.execute("SELECT first_seen_at, last_seen_at FROM test_case").fetchone(),
+            *conn.execute("SELECT updated_at FROM user_setting").fetchone(),
+            *conn.execute("SELECT value FROM meta WHERE key = 'created_at'").fetchone(),
+        ]
+    finally:
+        store.close()
+
+    assert [value for value in stored if not _FIXED_WIDTH_UTC.fullmatch(value)] == []
+
+
+def test_a_timestamp_from_an_early_year_is_stored_zero_padded(tmp_path: Path) -> None:
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    started = datetime(100, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
+    try:
+        store.record_session(_execution("a" * 32, started=started), results=(), received_at=started)
+        raw = store._conn.execute("SELECT started_at FROM run").fetchone()  # noqa: SLF001
+        found = store.get_execution("a" * 32)
+    finally:
+        store.close()
+
+    assert raw == ("0100-01-01T09:00:00.000000+00:00",)
+    assert found is not None
+    assert found.started_at == started

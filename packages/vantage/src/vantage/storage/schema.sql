@@ -9,9 +9,10 @@
 -- stamp is absent or differs from the version the build expects. A table or
 -- column is added when something writes it, never ahead of that.
 --
--- Conventions: timestamps are ISO-8601 UTC TEXT; booleans are INTEGER 0/1.
--- A column whose content is unbounded by nature carries a sibling
--- `<name>_truncated` INTEGER NOT NULL DEFAULT 0 flag.
+-- Conventions: timestamps are fixed-width ISO-8601 UTC TEXT, so text order
+-- is chronological order; booleans are INTEGER 0/1. A column whose content
+-- is unbounded by nature carries a sibling `<name>_truncated` INTEGER NOT
+-- NULL DEFAULT 0 flag.
 --
 -- Foreign keys are declared here but only enforced when a connection turns
 -- on `PRAGMA foreign_keys=ON` (vantage/storage/connection.py, every
