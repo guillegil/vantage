@@ -6,6 +6,7 @@ needs a store, a fixture, or a temporary file.
 
 from __future__ import annotations
 
+import pytest
 from vantage.core.domain.sections import (
     UNASSIGNED,
     RunSectionSummary,
@@ -115,6 +116,48 @@ def test_summarize_sections_mixed_outcomes_yield_94_4() -> None:
     )
     # `total - measured` is exactly the skipped count.
     assert summary.items[0].total - summary.items[0].measured == 10
+
+
+def _single_bucket(passed: int, failed: int) -> SectionSummary:
+    sections = [SectionDefinition(name="Billing", prefix="tests/billing/")]
+    case_outcomes = [("tests/billing/test_x.py", "passed")] * passed + [
+        ("tests/billing/test_x.py", "failed")
+    ] * failed
+    return summarize_sections(case_outcomes, sections).items[0]
+
+
+@pytest.mark.parametrize(
+    ("passed", "failed", "expected"),
+    [
+        (1999, 1, 99.9),
+        (19999, 1, 99.9),
+        (1, 2000, 0.1),
+        (1, 19999, 0.1),
+        (2000, 0, 100.0),
+        (0, 2000, 0.0),
+    ],
+)
+def test_pass_percentage_reads_100_or_0_only_when_exactly_true(
+    passed: int, failed: int, expected: float
+) -> None:
+    """One failure among 2000 rounds to 100.0 and one pass among 2001 to
+    0.0 -- the values a fully green or fully red bucket reports. Only a
+    bucket that really is all-passing or none-passing reads as either."""
+    assert _single_bucket(passed, failed).pass_percentage == expected
+
+
+def test_pass_percentage_satisfies_the_published_client_check() -> None:
+    """The check `summarize_sections` documents holds for every bucket of
+    up to 100 measured results -- the exact float equality
+    `passing / measured == pass_percentage / 100` would not, since the
+    percentage is rounded (85/90 publishes 94.4)."""
+    for measured in range(1, 101):
+        for passing in range(measured + 1):
+            percentage = _single_bucket(passing, measured - passing).pass_percentage
+            assert percentage is not None
+            assert abs(100 * passing / measured - percentage) < 0.1
+            assert (percentage == 100.0) == (passing == measured)
+            assert (percentage == 0.0) == (passing == 0)
 
 
 def test_summarize_sections_measured_zero_yields_none_never_zero_or_hundred() -> None:

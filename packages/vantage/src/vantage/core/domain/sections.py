@@ -78,7 +78,8 @@ class SectionSummary:
     denominator, so `total - measured` is exactly the skipped count.
     `passing` is the numerator. `pass_percentage` is `None`, never `0.0` or
     `100.0`, when `measured == 0` -- an empty bucket and a fully-skipped
-    bucket report the identical wire value.
+    bucket report the identical wire value. Otherwise it reads `100.0` only
+    when every measured result passed and `0.0` only when none did.
     """
 
     name: str
@@ -98,6 +99,20 @@ class RunSectionSummary:
     unassigned: SectionSummary
 
 
+def _pass_percentage(passing: int, measured: int) -> float | None:
+    if not measured:
+        return None
+    percentage = round(100 * passing / measured, 1)
+    # One failure among 2000 rounds to 100.0, and one pass among 2001 to
+    # 0.0 -- what a fully green or fully red bucket reports. Pin a ratio
+    # that only rounds to an end one step inside it, so both ends stay exact.
+    if percentage == 100.0 and passing < measured:
+        return 99.9
+    if percentage == 0.0 and passing > 0:
+        return 0.1
+    return percentage
+
+
 def _summarize_bucket(name: str, outcomes: Sequence[str]) -> SectionSummary:
     total = len(outcomes)
     passed = outcomes.count("passed")
@@ -107,7 +122,7 @@ def _summarize_bucket(name: str, outcomes: Sequence[str]) -> SectionSummary:
     xpassed = outcomes.count("xpassed")
     passing = passed + xfailed
     measured = passed + failed + error + xfailed + xpassed
-    pass_percentage = round(100 * passing / measured, 1) if measured else None
+    pass_percentage = _pass_percentage(passing, measured)
     return SectionSummary(
         name=name,
         total=total,
@@ -126,9 +141,10 @@ def summarize_sections(
 
     Published identities a client can check without trusting the server:
     `sum(item.total for item in items) + unassigned.total` equals the run's
-    result count, and `item.passing / item.measured ==
-    item.pass_percentage / 100` for every bucket with `measured > 0`.
-    Rounding happens once, here.
+    result count, and `abs(100 * item.passing / item.measured -
+    item.pass_percentage) < 0.1` for every bucket with `measured > 0`.
+    Rounding happens once, here, to one decimal; `100.0` still means every
+    measured result passed and `0.0` that none did.
     """
     buckets: dict[str, list[str]] = {section.name: [] for section in sections}
     buckets[UNASSIGNED] = []
