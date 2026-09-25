@@ -14,6 +14,7 @@ socket opened at all. That is what proves inertness rather than politeness.
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from pytest_vantage import vcs
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.plugin import _failure_text_capture_requested, _metadata_capture_requested
 from pytest_vantage.recorder import Recorder
+from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _SAMPLE_TEST = "def test_it():\n    assert True\n"
 _METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
@@ -87,40 +89,6 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
     assert _tree_snapshot(bare_root) == _tree_snapshot(control_root)
 
 
-def test_failure_text_opt_in_ini_alone_cannot_enable_capture(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A committed configuration file cannot enable failure-text capture.
-
-    The same differential as above: with no invocation flag on either run,
-    a committed `vantage_failure_text = true` ini value changes nothing --
-    the project tree, excluding the ini file itself, must be byte-identical
-    with and without it.
-
-    `vantage_failure_text` is not a registered option, so pytest warns
-    `Unknown config option` on the run that carries the ini value. That
-    warning is asserted *present*: it is honest feedback that the knob does
-    not exist, and it proves the ini value is inert rather than silently
-    consulted.
-    """
-    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
-
-    with_ini_root = tmp_path_factory.mktemp("vantage-failtext-with-ini")
-    without_ini_root = tmp_path_factory.mktemp("vantage-failtext-without-ini")
-    (with_ini_root / "test_sample.py").write_text(_SAMPLE_TEST)
-    (without_ini_root / "test_sample.py").write_text(_SAMPLE_TEST)
-    (with_ini_root / "pytest.ini").write_text("[pytest]\nvantage_failure_text = true\n")
-
-    with_ini = _run_pytest(with_ini_root)
-    without_ini = _run_pytest(without_ini_root)
-
-    assert with_ini.returncode == 0, with_ini.stdout + with_ini.stderr
-    assert without_ini.returncode == 0, without_ini.stdout + without_ini.stderr
-    assert "Unknown config option: vantage_failure_text" in with_ini.stdout + with_ini.stderr
-    with_snapshot = {k: v for k, v in _tree_snapshot(with_ini_root).items() if k != "pytest.ini"}
-    assert with_snapshot == _tree_snapshot(without_ini_root)
-
-
 def test_no_connection_is_attempted_with_no_recording_option(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -138,6 +106,87 @@ def test_no_connection_is_attempted_with_no_recording_option(
     # `warnings=0` explicitly, not omitted: `assert_outcomes` leaves any
     # count it is not given UNCHECKED, and an inert plugin emits no warning.
     result.assert_outcomes(passed=1, warnings=0)
+
+
+_LEAKY_FAILING_TEST = """
+def test_login():
+    password = "hunter2"
+    print("logging in with", password)
+    assert password == "not-the-password"
+"""
+
+
+def _make_capturable_project(pytester: pytest.Pytester) -> None:
+    """A failing test whose failure text carries a secret, and a metadata
+    declaration naming a file that carries another: everything the capture
+    flags would ship if they were ever enabled by accident."""
+    pytester.makepyfile(test_login=_LEAKY_FAILING_TEST)
+    (pytester.path / "settings.json").write_text(json.dumps({"db_password": "s3cr3t-db"}))
+    (pytester.path / _METADATA_DECLARATION_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "files": [{"path": "settings.json", "format": "json", "keys": ["db_password"]}],
+            }
+        )
+    )
+
+
+# --- The capture opt-ins have no ini or environment equivalent -----------------
+
+_CAPTURE_SOURCES = {
+    "vantage_failure_text ini value": ("ini", "vantage_failure_text"),
+    "vantage_metadata ini value": ("ini", "vantage_metadata"),
+    "VANTAGE_FAILURE_TEXT": ("env", "VANTAGE_FAILURE_TEXT"),
+    "VANTAGE_METADATA": ("env", "VANTAGE_METADATA"),
+    "typed flags (control)": ("typed", ""),
+}
+
+
+@pytest.mark.parametrize(
+    ("kind", "name"), list(_CAPTURE_SOURCES.values()), ids=list(_CAPTURE_SOURCES)
+)
+def test_capture_is_enabled_only_by_its_typed_flag(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+    kind: str,
+    name: str,
+) -> None:
+    """An activated session with a committed ini value or an exported
+    environment variable asking for capture stores the outcome and nothing
+    else: no failure text, no captured output, no metadata. The typed-flag
+    row is the control proving the same project would capture all three.
+
+    Neither ini key is registered, so pytest warns ``Unknown config
+    option``: honest feedback that the knob does not exist.
+    """
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    _make_capturable_project(pytester)
+    args = ["--vantage", f"--vantage-server={vantage_server.address}"]
+    if kind == "ini":
+        pytester.makeini(f"[pytest]\n{name} = true\n")
+    elif kind == "env":
+        monkeypatch.setenv(name, "1")
+    else:
+        args += ["--vantage-failure-text", "--vantage-metadata"]
+
+    result = pytester.runpytest(*args)
+
+    result.assert_outcomes(failed=1)
+    (stored,) = vantage_server.results()
+    metadata_rows = vantage_server.store._metadata_entries
+    if kind == "typed":
+        assert stored.failure is not None
+        assert "hunter2" in (stored.failure.traceback or "")
+        assert "hunter2" in (stored.captured.stdout or "")
+        assert metadata_rows
+        return
+    assert stored.failure is None
+    assert stored.captured.stdout is None
+    assert not metadata_rows
+    if kind == "ini":
+        assert f"Unknown config option: {name}" in result.stdout.str() + result.stderr.str()
 
 
 class _IniOnlyConfig:
@@ -176,65 +225,6 @@ def test_a_committed_ini_cannot_be_the_means_by_which_capture_is_enabled() -> No
     )
 
 
-def test_the_shipped_help_text_advertises_no_ini_equivalent(tmp_path: Path) -> None:
-    """`_IniOnlyConfig` above proves the *behaviour*; this proves the
-    *promise*. `pytest --help` is what a user reads before deciding how to
-    enable capture, so it must actively deny an ini equivalent: offering
-    one would invite someone to commit a file that then silently does
-    nothing.
-    """
-    result = _run_pytest(tmp_path, "--help")
-    assert result.returncode == 0, result.stderr
-
-    rendered = " ".join(result.stdout.split())
-    assert "--vantage-failure-text" in rendered, (
-        "the opt-in flag must appear in --help; without it this assertion proves nothing"
-    )
-    assert "or the ini equivalent is given" not in rendered, (
-        "--help must not offer an ini equivalent as a means of enabling capture"
-    )
-    assert "there is no ini equivalent" in rendered, (
-        "--help must actively deny an ini equivalent rather than merely omit it: "
-        "silence invites someone to commit a file that would then do nothing"
-    )
-
-
-# --- Metadata capture flag inertness -----------------------------------------
-#
-# `--vantage-metadata` is its own invocation flag, gated identically to
-# `--vantage` and `--vantage-failure-text`: no ini equivalent, the shipped
-# `--help` actively denies one, the declaration is opened only after both
-# gates pass, and the whole surface stays byte-inert with the flag absent
-# even when a `vantage-metadata.json` sits in the project root.
-
-
-def test_project_tree_is_byte_identical_with_a_metadata_declaration_present_but_the_flag_absent(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The same differential as `test_project_tree_is_byte_identical_with_plugin_absent`,
-    with a `vantage-metadata.json` in both project roots. Its mere presence
-    must not change a single byte the bare run produces relative to the
-    `-p no:vantage` control -- the flag, not the file, enables metadata
-    capture.
-    """
-    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
-
-    bare_root = tmp_path_factory.mktemp("vantage-metadata-bare")
-    control_root = tmp_path_factory.mktemp("vantage-metadata-control")
-    declaration = '{"version": 1, "files": []}\n'
-    (bare_root / "test_sample.py").write_text(_SAMPLE_TEST)
-    (control_root / "test_sample.py").write_text(_SAMPLE_TEST)
-    (bare_root / _METADATA_DECLARATION_FILENAME).write_text(declaration)
-    (control_root / _METADATA_DECLARATION_FILENAME).write_text(declaration)
-
-    bare = _run_pytest(bare_root)
-    control = _run_pytest(control_root, "-p", "no:vantage")
-
-    assert bare.returncode == 0, bare.stdout + bare.stderr
-    assert control.returncode == 0, control.stdout + control.stderr
-    assert _tree_snapshot(bare_root) == _tree_snapshot(control_root)
-
-
 def test_no_connection_is_attempted_with_a_metadata_declaration_present_but_no_flags(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -249,26 +239,6 @@ def test_no_connection_is_attempted_with_a_metadata_declaration_present_but_no_f
     result = pytester.runpytest()
 
     result.assert_outcomes(passed=1, warnings=0)
-
-
-def test_the_shipped_help_text_advertises_no_ini_equivalent_for_metadata(tmp_path: Path) -> None:
-    """The shipped `--help` denies an ini equivalent for `--vantage-metadata`,
-    exactly as it does for `--vantage-failure-text`.
-    """
-    result = _run_pytest(tmp_path, "--help")
-    assert result.returncode == 0, result.stderr
-
-    rendered = " ".join(result.stdout.split())
-    assert "--vantage-metadata" in rendered, (
-        "the metadata flag must appear in --help; without it this assertion proves nothing"
-    )
-    assert "or the ini equivalent is given" not in rendered, (
-        "--help must not offer an ini equivalent as a means of enabling metadata capture"
-    )
-    assert "there is no ini equivalent" in rendered, (
-        "--help must actively deny an ini equivalent rather than merely omit it: "
-        "silence invites someone to commit a file that would then do nothing"
-    )
 
 
 class _UnactivatedConfig:

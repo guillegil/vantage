@@ -94,7 +94,8 @@ class _ControllerConfigDouble:
 
 def test_worker_registers_exactly_one_evidencecollector_when_activated() -> None:
     """A worker's `pytest_configure` must register exactly one
-    `EvidenceCollector`, and nothing else, when activated."""
+    `EvidenceCollector`, and nothing else -- in particular no `Recorder` --
+    when activated."""
     from pytest_vantage.evidence import EvidenceCollector
 
     config = _WorkerConfigDouble()
@@ -103,18 +104,6 @@ def test_worker_registers_exactly_one_evidencecollector_when_activated() -> None
     assert len(config.pluginmanager.registered) == 1
     (registered,) = config.pluginmanager.registered
     assert isinstance(registered, EvidenceCollector)
-
-
-def test_worker_never_registers_a_recorder_even_when_activated() -> None:
-    """A worker may register an `EvidenceCollector`, but it must never
-    construct a `Recorder` -- no worker opens a socket or reports, so one
-    session is never recorded as several runs."""
-    from pytest_vantage.recorder import Recorder
-
-    config = _WorkerConfigDouble()
-    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
-
-    assert not any(isinstance(plugin, Recorder) for plugin in config.pluginmanager.registered)
 
 
 def test_no_worker_input_still_runs_the_activation_check() -> None:
