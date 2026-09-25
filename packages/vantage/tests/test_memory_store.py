@@ -6,13 +6,16 @@ from collections.abc import Iterator
 
 import pytest
 from memory_store import InMemoryExecutionStore
-from vantage.core.ports.storage import ExecutionStore
-from vantage_port_contract import ExecutionStoreContract
+from vantage_port_contract import ExecutionStoreContract, StoredMetadata
 
 
 class TestInMemoryExecutionStore(ExecutionStoreContract):
     @pytest.fixture
-    def store(self) -> Iterator[ExecutionStore]:
+    def store(self) -> Iterator[InMemoryExecutionStore]:
         adapter = InMemoryExecutionStore()
         yield adapter
         adapter.close()
+
+    @pytest.fixture
+    def stored_metadata(self, store: InMemoryExecutionStore) -> StoredMetadata:
+        return store.metadata

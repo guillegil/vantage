@@ -3,6 +3,7 @@ SQLite-specific checks that read the database directly."""
 
 from __future__ import annotations
 
+import functools
 import re
 import sqlite3
 from collections.abc import Iterator, Sequence
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from sqlite_rows import read_metadata
 from vantage.core.ports.storage import (
     ExecutionStore,
     MetadataEntry,
@@ -25,6 +27,7 @@ from vantage.storage.sqlite_store import (
 )
 from vantage_port_contract import (
     ExecutionStoreContract,
+    StoredMetadata,
     _captured,
     _execution,
     _failure,
@@ -37,10 +40,18 @@ _Row = TypeVar("_Row", MetadataFile, MetadataEntry)
 
 class TestSqliteExecutionStore(ExecutionStoreContract):
     @pytest.fixture
-    def store(self, tmp_path: Path) -> Iterator[ExecutionStore]:
-        adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    def database(self, tmp_path: Path) -> Path:
+        return tmp_path / "store" / "vantage.db"
+
+    @pytest.fixture
+    def store(self, database: Path) -> Iterator[ExecutionStore]:
+        adapter = SqliteExecutionStore(database)
         yield adapter
         adapter.close()
+
+    @pytest.fixture
+    def stored_metadata(self, database: Path) -> StoredMetadata:
+        return functools.partial(read_metadata, database)
 
 
 def test_finish_write_leaves_received_at_started_at_and_last_contact_at_untouched(

@@ -374,6 +374,23 @@ class InMemoryExecutionStore:
         )
 
     @_locked
+    def metadata(self, run_id: str) -> RunMetadata:
+        """The metadata files and entries stored for `run_id`, for a test to
+        inspect: the port never returns them."""
+        return RunMetadata(
+            files=tuple(
+                metadata_file
+                for (stored_run_id, _source_file), metadata_file in self._metadata_files.items()
+                if stored_run_id == run_id
+            ),
+            entries=tuple(
+                entry
+                for (stored_run_id, _key), entry in self._metadata_entries.items()
+                if stored_run_id == run_id
+            ),
+        )
+
+    @_locked
     def close(self) -> None:
         self._executions.clear()
         self._catalogue.clear()

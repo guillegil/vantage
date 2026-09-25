@@ -3,16 +3,17 @@
 Never collected directly by pytest -- it is not named ``test_*`` -- and kept
 beside the tests rather than in the package, because ``vantage.core`` must not
 import pytest. Each adapter's ``test_*_store.py`` subclasses
-``ExecutionStoreContract``, provides a ``store`` fixture, and inherits every
-test unchanged, so both adapters are held to the same behaviour.
+``ExecutionStoreContract``, provides ``store`` and ``stored_metadata``
+fixtures, and inherits every test unchanged, so both adapters are held to the
+same behaviour.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from memory_store import InMemoryExecutionStore
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
@@ -30,7 +31,6 @@ from vantage.core.ports.storage import (
     RunMetadata,
     UserSetting,
 )
-from vantage.storage.sqlite_store import SqliteExecutionStore
 
 
 def _execution(
@@ -188,53 +188,23 @@ def _captured(
     )
 
 
-def _stored_metadata_files(store: ExecutionStore, run_id: str) -> frozenset[MetadataFile]:
-    """Adapter-agnostic introspection of `run_metadata_file` rows. No port
-    method reads these rows back, so this reads each adapter's own storage
-    directly."""
-    if isinstance(store, SqliteExecutionStore):
-        rows = store._conn.execute(  # noqa: SLF001
-            "SELECT source_file, content_type, status FROM run_metadata_file WHERE run_id = ?",
-            (run_id,),
-        ).fetchall()
-        return frozenset(
-            MetadataFile(source_file=row[0], content_type=row[1], status=row[2]) for row in rows
-        )
-    if isinstance(store, InMemoryExecutionStore):
-        return frozenset(
-            metadata_file
-            for (stored_run_id, _source_file), metadata_file in store._metadata_files.items()  # noqa: SLF001
-            if stored_run_id == run_id
-        )
-    raise NotImplementedError(f"no metadata introspection for {type(store)!r}")
-
-
-def _stored_metadata_entries(store: ExecutionStore, run_id: str) -> frozenset[MetadataEntry]:
-    """The `run_metadata` sibling of `_stored_metadata_files`."""
-    if isinstance(store, SqliteExecutionStore):
-        rows = store._conn.execute(  # noqa: SLF001
-            "SELECT key, value, source_file, status FROM run_metadata WHERE run_id = ?",
-            (run_id,),
-        ).fetchall()
-        return frozenset(
-            MetadataEntry(key=row[0], value=row[1], source_file=row[2], status=row[3])
-            for row in rows
-        )
-    if isinstance(store, InMemoryExecutionStore):
-        return frozenset(
-            entry
-            for (stored_run_id, _key), entry in store._metadata_entries.items()  # noqa: SLF001
-            if stored_run_id == run_id
-        )
-    raise NotImplementedError(f"no metadata introspection for {type(store)!r}")
+StoredMetadata = Callable[[str], RunMetadata]
+"""Reads back the metadata files and entries an adapter stored for one run
+id. The port never returns them, so each adapter's test module reads its own
+storage."""
 
 
 class ExecutionStoreContract:
-    """Inherit this and override the `store` fixture with a fresh adapter instance."""
+    """Inherit this and override the `store` fixture with a fresh adapter
+    instance, and `stored_metadata` with a reader of that instance's storage."""
 
     @pytest.fixture
     def store(self) -> ExecutionStore:
         raise NotImplementedError("subclasses must override the `store` fixture")
+
+    @pytest.fixture
+    def stored_metadata(self) -> StoredMetadata:
+        raise NotImplementedError("subclasses must override the `stored_metadata` fixture")
 
     def test_first_write_creates_a_row(self, store: ExecutionStore) -> None:
         execution = _execution("a" * 32)
@@ -1423,7 +1393,9 @@ class ExecutionStoreContract:
 
         assert sorted(outcomes) == sorted([("t.py", "passed"), ("t.py", "failed")])
 
-    def test_recording_metadata_persists_both_tables(self, store: ExecutionStore) -> None:
+    def test_recording_metadata_persists_both_tables(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
         """A metadata-carrying report writes one `run_metadata_file` row and
         one `run_metadata` row."""
         execution = _execution("1" * 32)
@@ -1447,13 +1419,12 @@ class ExecutionStoreContract:
             execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
         )
 
-        assert _stored_metadata_files(store, execution.identity.value) == frozenset(metadata.files)
-        assert _stored_metadata_entries(store, execution.identity.value) == frozenset(
-            metadata.entries
-        )
+        stored = stored_metadata(execution.identity.value)
+        assert set(stored.files) == set(metadata.files)
+        assert set(stored.entries) == set(metadata.entries)
 
     def test_a_declared_but_dropped_file_and_key_still_record_a_row(
-        self, store: ExecutionStore
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:
         """Absence is a row, not a missing row -- a file dropped for being too
         large and its key's `source_unavailable` entry both persist, with the
@@ -1479,14 +1450,13 @@ class ExecutionStoreContract:
             execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
         )
 
-        files = _stored_metadata_files(store, execution.identity.value)
-        entries = _stored_metadata_entries(store, execution.identity.value)
-        assert files == frozenset(metadata.files)
-        assert entries == frozenset(metadata.entries)
-        assert next(iter(entries)).value is None
+        stored = stored_metadata(execution.identity.value)
+        assert set(stored.files) == set(metadata.files)
+        assert set(stored.entries) == set(metadata.entries)
+        assert stored.entries[0].value is None
 
     def test_replaying_metadata_with_a_different_value_does_not_backfill(
-        self, store: ExecutionStore
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:
         """A stored value never changes after ingestion: a second
         `record_session` call for the same run and key with a different value
@@ -1508,12 +1478,12 @@ class ExecutionStoreContract:
             execution, results=(), received_at=datetime.now(timezone.utc), metadata=second
         )
 
-        stored = _stored_metadata_entries(store, execution.identity.value)
-        assert stored == frozenset(first.entries)
-        assert stored != frozenset(second.entries)
+        stored = set(stored_metadata(execution.identity.value).entries)
+        assert stored == set(first.entries)
+        assert stored != set(second.entries)
 
     def test_a_finish_only_session_records_the_same_rows_a_start_finish_pair_would(
-        self, store: ExecutionStore
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:
         """Metadata is frozen once and sent unchanged on both writes. A
         start-write followed by a finish-write, both carrying the identical
@@ -1541,17 +1511,13 @@ class ExecutionStoreContract:
             finish_only, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
         )
 
-        assert _stored_metadata_files(store, pair_identity) == _stored_metadata_files(
-            store, finish_only_identity
-        )
-        assert _stored_metadata_entries(store, pair_identity) == _stored_metadata_entries(
-            store, finish_only_identity
-        )
-        assert _stored_metadata_files(store, pair_identity) == frozenset(metadata.files)
-        assert _stored_metadata_entries(store, pair_identity) == frozenset(metadata.entries)
+        pair = stored_metadata(pair_identity)
+        single = stored_metadata(finish_only_identity)
+        assert set(pair.files) == set(single.files) == set(metadata.files)
+        assert set(pair.entries) == set(single.entries) == set(metadata.entries)
 
     def test_a_session_with_no_metadata_argument_persists_no_metadata_rows(
-        self, store: ExecutionStore
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:
         """A caller that never passes `metadata=` (the empty default,
         `EMPTY_RUN_METADATA`) writes zero rows to either table."""
@@ -1559,8 +1525,7 @@ class ExecutionStoreContract:
 
         store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
 
-        assert _stored_metadata_files(store, execution.identity.value) == frozenset()
-        assert _stored_metadata_entries(store, execution.identity.value) == frozenset()
+        assert stored_metadata(execution.identity.value) == RunMetadata()
 
     # -- list_runs_with_metadata_horizon --
 

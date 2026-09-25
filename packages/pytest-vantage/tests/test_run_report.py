@@ -713,6 +713,13 @@ def test_sigkilled_session_leaves_a_start_time_null_end_time_and_no_interrupt_re
 # --- Activity-driven heartbeats --------------------------------------------
 
 
+def _last_contact_at(server: VantageTestServer, run_id: str) -> datetime:
+    detail = server.store.get_run_detail(run_id)
+    assert detail is not None
+    assert detail.last_contact_at is not None
+    return detail.last_contact_at
+
+
 def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_contact(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
@@ -737,11 +744,9 @@ def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_cont
 
     def _spy_touch_last_contact(execution_id: str, contacted_at: datetime) -> bool:
         if execution_id not in baseline_by_run:
-            # Before this run's first heartbeat, `_last_contact` holds
+            # Before this run's first heartbeat, the stored contact is
             # exactly what the start-write set.
-            baseline_by_run[execution_id] = vantage_server.store._last_contact[  # noqa: SLF001
-                execution_id
-            ]
+            baseline_by_run[execution_id] = _last_contact_at(vantage_server, execution_id)
         return real_touch_last_contact(execution_id, contacted_at)
 
     monkeypatch.setattr(vantage_server.store, "touch_last_contact", _spy_touch_last_contact)
@@ -758,8 +763,7 @@ def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_cont
         "no heartbeat ever reached the server's touch_last_contact -- "
         "the plugin -> HTTP -> route -> store chain never completed"
     )
-    last_contact_at = vantage_server.store._last_contact[run_id]  # noqa: SLF001
-    assert last_contact_at > baseline_by_run[run_id]
+    assert _last_contact_at(vantage_server, run_id) > baseline_by_run[run_id]
 
 
 def test_a_fast_suite_emits_no_heartbeat(

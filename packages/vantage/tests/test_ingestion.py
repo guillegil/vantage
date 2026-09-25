@@ -6,6 +6,7 @@ the few that depend on how SQLite stores timestamps use the real adapter.
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -15,15 +16,16 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
+from sqlite_rows import read_metadata
 from vantage.core.domain.metadata import (
     MAX_METADATA_ENTRIES,
     MAX_METADATA_KEY_CHARS,
     MAX_METADATA_VALUE_BYTES,
 )
-from vantage.core.ports.storage import MetadataEntry, MetadataFile
+from vantage.core.ports.storage import ExecutionStore, MetadataEntry, MetadataFile, RunMetadata
 from vantage.service.app import create_app
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _stored_metadata_entries, _stored_metadata_files
+from vantage_port_contract import StoredMetadata
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -474,7 +476,7 @@ def _surrogate_report(field: str) -> dict[str, Any]:
     return report
 
 
-def _stored_surrogate_field(store: Any, field: str) -> object:
+def _stored_surrogate_field(store: Any, stored_metadata: StoredMetadata, field: str) -> object:
     run_id = "5" + "e" * 31
     execution = store.get_execution(run_id)
     [result] = store.get_results(run_id)
@@ -485,9 +487,9 @@ def _stored_surrogate_field(store: Any, field: str) -> object:
     if field.startswith("vcs."):
         return getattr(execution.vcs, field.removeprefix("vcs."))
     if field == "metadata.path":
-        return {file.source_file for file in _stored_metadata_files(store, run_id)}
+        return {file.source_file for file in stored_metadata(run_id).files}
     if field == "metadata.key":
-        return {entry.key for entry in _stored_metadata_entries(store, run_id)}
+        return {entry.key for entry in stored_metadata(run_id).entries}
     if field == "worker_id":
         return result.worker_id
     if field == "captured_stdout":
@@ -511,18 +513,33 @@ _SURROGATE_CASES: dict[str, object] = {
 
 
 @pytest.fixture(params=["memory", "sqlite"])
-def any_store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Any]:
+def any_adapter(
+    request: pytest.FixtureRequest, tmp_path: Path
+) -> Iterator[tuple[ExecutionStore, StoredMetadata]]:
+    """Each adapter, with a reader of the metadata rows it stores."""
     if request.param == "memory":
-        yield InMemoryExecutionStore()
+        memory = InMemoryExecutionStore()
+        yield memory, memory.metadata
         return
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    yield adapter
+    database = tmp_path / "store" / "vantage.db"
+    adapter = SqliteExecutionStore(database)
+    yield adapter, functools.partial(read_metadata, database)
     adapter.close()
+
+
+@pytest.fixture
+def any_store(any_adapter: tuple[ExecutionStore, StoredMetadata]) -> ExecutionStore:
+    return any_adapter[0]
+
+
+@pytest.fixture
+def any_stored_metadata(any_adapter: tuple[ExecutionStore, StoredMetadata]) -> StoredMetadata:
+    return any_adapter[1]
 
 
 @pytest.mark.parametrize(("field", "expected"), _SURROGATE_CASES.items(), ids=_SURROGATE_CASES)
 def test_a_lone_surrogate_in_any_string_is_stored_as_the_replacement_character(
-    any_store: Any, field: str, expected: object
+    any_store: Any, any_stored_metadata: StoredMetadata, field: str, expected: object
 ) -> None:
     """A lone surrogate cannot be encoded as UTF-8, so the server replaces it
     with U+FFFD before validation instead of failing the whole session at
@@ -536,7 +553,7 @@ def test_a_lone_surrogate_in_any_string_is_stored_as_the_replacement_character(
     )
 
     assert response.status_code == 201
-    assert _stored_surrogate_field(any_store, field) == expected
+    assert _stored_surrogate_field(any_store, any_stored_metadata, field) == expected
 
 
 def test_a_lone_surrogate_in_a_key_is_replaced_too(
@@ -560,6 +577,13 @@ def test_a_lone_surrogate_in_a_key_is_replaced_too(
 # --- heartbeat endpoint -------------------------------------------------------
 
 
+def _last_contact_at(store: ExecutionStore, run_id: str) -> datetime:
+    detail = store.get_run_detail(run_id)
+    assert detail is not None
+    assert detail.last_contact_at is not None
+    return detail.last_contact_at
+
+
 def test_heartbeat_advances_last_contact_for_an_accepted_start_write(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -568,13 +592,13 @@ def test_heartbeat_advances_last_contact_for_an_accepted_start_write(
     report["run"]["exit_status"] = None
     client.post("/api/v1/runs", json=report)
     run_id = report["run"]["id"]
-    before = store._last_contact[run_id]  # noqa: SLF001
+    before = _last_contact_at(store, run_id)
 
     response = client.post(f"/api/v1/runs/{run_id}/heartbeat")
 
     assert response.status_code == 200
     assert response.json() == {"run_id": run_id, "status": "acknowledged"}
-    assert store._last_contact[run_id] > before  # noqa: SLF001
+    assert _last_contact_at(store, run_id) > before
 
 
 def test_heartbeat_cannot_touch_finish_fields(
@@ -604,9 +628,9 @@ def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
 ) -> None:
     """The 404 comes from `get_execution`, not from a no-op update: a known
     run whose stored contact is already ahead of this beat makes
-    `touch_last_contact` return `False`, yet the answer is still 200.
-    `_last_contact` is set into the future directly so the beat is
-    guaranteed earlier without a timing race.
+    `touch_last_contact` return `False`, yet the answer is still 200. The
+    stored contact is first moved into the future through the port, so the
+    beat is guaranteed earlier without a timing race.
     """
     report = _well_formed_report("4" + "a" * 31)
     report["run"]["finished_at"] = None
@@ -614,7 +638,7 @@ def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
     client.post("/api/v1/runs", json=report)
     run_id = report["run"]["id"]
     far_future = datetime(2099, 1, 1, tzinfo=timezone.utc)
-    store._last_contact[run_id] = far_future  # noqa: SLF001
+    assert store.touch_last_contact(run_id, far_future) is True
 
     response = client.post(f"/api/v1/runs/{run_id}/heartbeat")
 
@@ -623,7 +647,7 @@ def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
     # The monotonic guard rejected the earlier beat: the stored contact is
     # unchanged, yet the response is still 200 -- a rowcount-based 404 would
     # have answered 404 here.
-    assert store._last_contact[run_id] == far_future  # noqa: SLF001
+    assert _last_contact_at(store, run_id) == far_future
 
 
 # --- capability advertisement -------------------------------------------------
@@ -886,10 +910,10 @@ def test_each_metadata_outcome_records_the_exact_file_and_key_status(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_files(store, run_id) == (
+    assert set(store.metadata(run_id).files) == (
         frozenset({expected_file}) if expected_file is not None else frozenset()
     )
-    assert _stored_metadata_entries(store, run_id) == expected_entries
+    assert set(store.metadata(run_id).entries) == expected_entries
 
 
 def test_a_declared_key_within_bound_is_captured_whole(
@@ -904,7 +928,7 @@ def test_a_declared_key_within_bound_is_captured_whole(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_entries(store, run_id) == frozenset(
+    assert set(store.metadata(run_id).entries) == frozenset(
         {
             MetadataEntry(
                 key="firmware_version",
@@ -927,8 +951,7 @@ def test_a_report_with_no_metadata_section_still_records_its_run(
 
     assert response.status_code == 201
     assert store.get_execution(run_id) is not None
-    assert _stored_metadata_files(store, run_id) == frozenset()
-    assert _stored_metadata_entries(store, run_id) == frozenset()
+    assert store.metadata(run_id) == RunMetadata()
 
 
 def test_a_yaml_declared_document_is_parsed(
@@ -948,7 +971,7 @@ def test_a_yaml_declared_document_is_parsed(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_entries(store, run_id) == frozenset(
+    assert set(store.metadata(run_id).entries) == frozenset(
         {
             MetadataEntry(
                 key="firmware_version",
@@ -981,10 +1004,10 @@ def test_a_file_in_a_format_the_server_cannot_parse_is_dropped_with_its_keys(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_files(store, run_id) == frozenset(
+    assert set(store.metadata(run_id).files) == frozenset(
         {MetadataFile(source_file="config/firmware.json", content_type="json", status="captured")}
     )
-    assert {entry.key for entry in _stored_metadata_entries(store, run_id)} == {"board"}
+    assert {entry.key for entry in store.metadata(run_id).entries} == {"board"}
 
 
 _UNUSABLE_DOCUMENTS = {
@@ -997,7 +1020,7 @@ _UNUSABLE_DOCUMENTS = {
     ("content_type", "content"), _UNUSABLE_DOCUMENTS.values(), ids=_UNUSABLE_DOCUMENTS.keys()
 )
 def test_a_declared_document_the_server_cannot_store_still_records_the_run(
-    any_store: Any, content_type: str, content: str
+    any_store: Any, any_stored_metadata: StoredMetadata, content_type: str, content: str
 ) -> None:
     """The metadata section travels with the start report and the finish
     report alike, so a document that crashed the parser would lose every
@@ -1011,17 +1034,15 @@ def test_a_declared_document_the_server_cannot_store_still_records_the_run(
     response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_files(any_store, run_id) == frozenset(
-        {
-            MetadataFile(
-                source_file="config/firmware.json", content_type=content_type, status="malformed"
-            )
-        }
+    assert any_stored_metadata(run_id).files == (
+        MetadataFile(
+            source_file="config/firmware.json", content_type=content_type, status="malformed"
+        ),
     )
 
 
 def test_a_near_cap_yaml_document_is_stored_too_large_rather_than_parsed(
-    any_store: Any,
+    any_store: Any, any_stored_metadata: StoredMetadata
 ) -> None:
     """Composing YAML costs seconds of CPU per megabyte, taken from every
     other request; a document only a non-plugin client could send is
@@ -1036,12 +1057,14 @@ def test_a_near_cap_yaml_document_is_stored_too_large_rather_than_parsed(
     response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_files(any_store, run_id) == frozenset(
-        {MetadataFile(source_file="config/big.yaml", content_type="yaml", status="too_large")}
+    assert any_stored_metadata(run_id).files == (
+        MetadataFile(source_file="config/big.yaml", content_type="yaml", status="too_large"),
     )
 
 
-def test_the_server_stores_at_most_the_metadata_entry_bound(any_store: Any) -> None:
+def test_the_server_stores_at_most_the_metadata_entry_bound(
+    any_store: Any, any_stored_metadata: StoredMetadata
+) -> None:
     """The plugin refuses a declaration over the entry and key bounds, but
     any HTTP client can report here; the excess is dropped, never the
     session."""
@@ -1059,9 +1082,9 @@ def test_the_server_stores_at_most_the_metadata_entry_bound(any_store: Any) -> N
     response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    stored = _stored_metadata_entries(any_store, run_id)
+    stored = any_stored_metadata(run_id).entries
     assert {entry.key for entry in stored} == set(keys[:MAX_METADATA_ENTRIES])
-    assert len(_stored_metadata_files(any_store, run_id)) == 3
+    assert len(any_stored_metadata(run_id).files) == 3
 
 
 def test_a_json_declared_number_is_stored_as_the_text_the_file_holds(
@@ -1078,7 +1101,7 @@ def test_a_json_declared_number_is_stored_as_the_text_the_file_holds(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    [entry] = _stored_metadata_entries(store, run_id)
+    [entry] = store.metadata(run_id).entries
     assert entry.value == "2.10"
 
 
@@ -1097,7 +1120,7 @@ def test_a_json_integer_past_the_digit_limit_still_records_the_run(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    [entry] = _stored_metadata_entries(store, run_id)
+    [entry] = store.metadata(run_id).entries
     assert (entry.value, entry.status) == (None, "value_too_large")
 
 
@@ -1119,7 +1142,7 @@ def test_a_quoting_shaped_declared_key_round_trips_byte_identically(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_entries(store, run_id) == frozenset(
+    assert set(store.metadata(run_id).entries) == frozenset(
         {
             MetadataEntry(
                 key=key, value="value", source_file="config/firmware.json", status="captured"
