@@ -29,6 +29,11 @@ from vantage.core.domain.result import CatalogueEntry, Result
 from vantage.service.app import create_app
 from vantage.storage.memory import InMemoryExecutionStore
 
+# Both bound the wait on the server thread: a thread that dies or hangs must
+# fail the test that needed it, never hang the whole suite.
+_STARTUP_TIMEOUT_SECONDS = 5.0
+_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
 
 class VantageTestServer:
     """A real `vantage` server (uvicorn + `create_app`), bound to an
@@ -64,14 +69,25 @@ class VantageTestServer:
 
     def start(self) -> None:
         self._thread.start()
+        deadline = time.monotonic() + _STARTUP_TIMEOUT_SECONDS
         while not self._server.started:
+            if not self._thread.is_alive() or time.monotonic() > deadline:
+                self.stop()
+                raise RuntimeError("the vantage test server did not start")
             time.sleep(0.001)
 
     def stop(self) -> None:
         self._server.should_exit = True
         # A failing assertion above must not leave a listener behind to
         # poison a later test -- join with a bound, not forever.
-        self._thread.join(timeout=5)
+        self._thread.join(timeout=_SHUTDOWN_TIMEOUT_SECONDS)
+        if self._thread.is_alive():
+            raise RuntimeError("the vantage test server did not stop")
+        # Only once the thread has exited: closing a loop that is still
+        # running raises. Left open, it warns as unclosed in whichever test
+        # happens to trigger garbage collection.
+        self._loop.close()
+        self._sock.close()
 
     def executions(self) -> list[Execution]:
         """Every execution the server has stored so far, in no particular
