@@ -1,4 +1,4 @@
-"""Where the plugin is allowed to send a report, and what it may capture.
+"""Where the plugin is allowed to send a report, and how long a report may take.
 
 The address the plugin POSTs to can arrive from ``--vantage-server``, the
 ``vantage_server`` ini value or the ``VANTAGE_SERVER`` environment variable
@@ -6,11 +6,22 @@ The address the plugin POSTs to can arrive from ``--vantage-server``, the
 example by CI. An allow-list of exactly two schemes, ``http`` and
 ``https``, is the whole defence: anything else is refused before
 ``urllib``'s ``file:``/``ftp:`` handlers are ever reached.
+
+`resolve_settings` is the one place a configured value is checked. Every
+problem -- a bad scheme, no host, an unusable port, a timeout that is not a
+finite positive number of seconds -- is a `VantageConfigError` naming the
+option it came from, so nothing malformed ever reaches the socket layer.
 """
 
 from __future__ import annotations
 
+import math
+import os
+from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse
+
+import pytest
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
@@ -29,22 +40,50 @@ class VantageConfigError(ValueError):
     """A configured value cannot be used -- the session should not proceed."""
 
 
-def resolve_and_validate_address(address: str) -> str:
-    """Return ``address`` unchanged if its scheme is ``http`` or ``https``.
+@dataclass(frozen=True)
+class ReportSettings:
+    """A validated destination and time bound for this session's reports."""
 
-    Raises ``VantageConfigError`` naming the offending scheme otherwise.
+    address: str
+    timeout: float
+
+
+def resolve_and_validate_address(address: str, *, option: str = "vantage server address") -> str:
+    """Return ``address`` unchanged if it is an ``http`` or ``https`` URL
+    naming a host and, if it gives one, a port from 1 to 65535.
+
+    Raises ``VantageConfigError`` naming ``option`` and the address otherwise.
     ``urlparse`` does not raise on a bare host with no scheme at all (e.g.
     ``"localhost:8765"`` parses to scheme ``"localhost"``, path ``"8765"``)
     -- it having parsed is not the same as it being valid, and the
     allow-list rejects that case the same way it rejects ``ftp://``: by
     scheme, not by success of the parse.
+
+    The host is checked the way the socket layer will encode it, as IDNA,
+    so an empty or over-long label is a configuration error here rather
+    than an unexpected exception from the preflight's connect.
     """
-    scheme = urlparse(address).scheme
-    if scheme not in _ALLOWED_SCHEMES:
+    try:
+        parsed = urlparse(address)
+        port = parsed.port
+    except ValueError as exc:
+        raise VantageConfigError(f"{option} {address!r} is not a valid URL: {exc}") from None
+    if parsed.scheme not in _ALLOWED_SCHEMES:
         raise VantageConfigError(
-            f"vantage server address {address!r} must use http:// or https:// "
-            f"(got scheme {scheme!r})"
+            f"{option} {address!r} must use http:// or https:// (got scheme {parsed.scheme!r})"
         )
+    if not parsed.hostname:
+        raise VantageConfigError(
+            f"{option} {address!r} must name a host, as in http://127.0.0.1:8765"
+        )
+    if port == 0:
+        raise VantageConfigError(f"{option} {address!r} must use a port from 1 to 65535")
+    try:
+        parsed.hostname.encode("idna")
+    except UnicodeError:
+        raise VantageConfigError(
+            f"{option} {address!r} has an invalid host name {parsed.hostname!r}"
+        ) from None
     return address
 
 
@@ -58,24 +97,78 @@ def resolve_server_address(*, cli_url: str | None, env_url: str | None, ini_url:
     outranks a value committed to `pyproject.toml` or `pytest.ini`, which
     everyone who checks the project out shares.
 
-    Validates the resolved address's scheme before returning it -- every
-    caller gets a validated address, never a raw configured string.
+    Validates the address that wins, naming its source, before returning
+    it -- every caller gets a validated address, never a raw configured
+    string.
     """
-    address = cli_url or env_url or ini_url or _DEFAULT_ADDRESS
-    return resolve_and_validate_address(address)
+    sources = (
+        ("--vantage-server", cli_url),
+        ("VANTAGE_SERVER", env_url),
+        ("vantage_server ini value", ini_url),
+    )
+    for option, url in sources:
+        if url:
+            return resolve_and_validate_address(url, option=option)
+    return _DEFAULT_ADDRESS
 
 
-def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | None) -> float:
+def _positive_seconds(raw: str | float, option: str) -> float:
+    """A zero timeout makes the connect non-blocking, a negative one makes
+    the socket layer raise, and NaN or infinity get past the preflight's
+    ``min(2.0, t)`` only to fail the finish report -- none is usable."""
+    try:
+        seconds = float(raw)
+    except ValueError:
+        raise VantageConfigError(f"{option} must be a number of seconds (got {raw!r})") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise VantageConfigError(
+            f"{option} must be a finite number of seconds above zero (got {raw!r})"
+        )
+    return seconds
+
+
+def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | float | None) -> float:
     """The bound on the reporting request: `--vantage-timeout` > the
     `vantage_timeout` ini value > the default (`10.0` seconds). No
     environment variable is defined for the timeout -- only the address has
     one.
+
+    The ini value is text in an ini file and a number in pytest's native
+    TOML table; both are accepted.
     """
     if cli_timeout is not None:
-        return cli_timeout
+        return _positive_seconds(cli_timeout, "--vantage-timeout")
     if ini_timeout is not None:
-        return float(ini_timeout)
+        return _positive_seconds(ini_timeout, "vantage_timeout ini value")
     return _DEFAULT_REPORT_TIMEOUT
+
+
+def _read_ini(config: pytest.Config, name: str) -> Any:
+    """pytest converts an ini value to its registered type while reading it
+    and raises on a mismatch (``vantage_timeout = ten``, or a quoted number
+    in the native TOML table); that is a configuration error like any
+    other."""
+    try:
+        return config.getini(name)
+    except (TypeError, ValueError) as exc:
+        raise VantageConfigError(f"invalid {name} ini value: {exc}") from None
+
+
+def resolve_settings(config: pytest.Config) -> ReportSettings:
+    """Read and validate where to report and how long a report may take.
+
+    Only the source that wins is read, so a broken committed ini value
+    cannot stop a session that overrides it on the command line.
+    """
+    cli_url = config.getoption("vantage_server")
+    env_url = os.environ.get("VANTAGE_SERVER")
+    ini_url = None if cli_url or env_url else _read_ini(config, "vantage_server")
+    cli_timeout = config.getoption("vantage_timeout")
+    ini_timeout = None if cli_timeout is not None else _read_ini(config, "vantage_timeout")
+    return ReportSettings(
+        address=resolve_server_address(cli_url=cli_url, env_url=env_url, ini_url=ini_url),
+        timeout=resolve_report_timeout(cli_timeout=cli_timeout, ini_timeout=ini_timeout),
+    )
 
 
 def resolve_failure_text_capture(*, activated: bool, cli_opt_in: bool) -> bool:
@@ -114,6 +207,7 @@ def resolve_liveness_timeout(report_timeout: float) -> float:
 
 
 __all__ = [
+    "ReportSettings",
     "VantageConfigError",
     "resolve_and_validate_address",
     "resolve_failure_text_capture",
@@ -121,4 +215,5 @@ __all__ = [
     "resolve_metadata_capture",
     "resolve_report_timeout",
     "resolve_server_address",
+    "resolve_settings",
 ]

@@ -15,19 +15,19 @@ conflict with nothing in the environment it lands in.
 
 from __future__ import annotations
 
-import os
 import socket
+from typing import Literal
 from urllib.parse import urlparse
 
 import pytest
 
 from pytest_vantage.boundary import _warn
 from pytest_vantage.config import (
+    VantageConfigError,
     resolve_failure_text_capture,
     resolve_liveness_timeout,
     resolve_metadata_capture,
-    resolve_report_timeout,
-    resolve_server_address,
+    resolve_settings,
 )
 from pytest_vantage.evidence import EvidenceCollector
 from pytest_vantage.recorder import Recorder
@@ -38,6 +38,12 @@ from pytest_vantage.transport import fetch_capabilities
 _MAX_CONNECT_TIMEOUT = 2.0
 _DEFAULT_HTTP_PORT = 80
 _DEFAULT_HTTPS_PORT = 443
+
+# pytest's native TOML table hands `getini` a number for `vantage_timeout =
+# 5` and refuses one registered as a string. The float type exists from
+# pytest 8.4; older versions read every ini value as text, which
+# `resolve_report_timeout` accepts too.
+_TIMEOUT_INI_TYPE: Literal["float"] | None = "float" if pytest.version_tuple[:2] >= (8, 4) else None
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -101,6 +107,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini(
         "vantage_timeout",
         help="Same as --vantage-timeout. Configures WHERE/HOW; never activates recording.",
+        type=_TIMEOUT_INI_TYPE,
         default=None,
     )
 
@@ -112,14 +119,17 @@ def _preflight_reachable(address: str, timeout: float) -> bool:
 
     `ConnectionRefusedError` (nothing listening) and `socket.gaierror` (the
     host does not resolve) are both `OSError` subclasses, and the caller's
-    response is the same either way.
+    response is the same either way. `ValueError` covers what validation
+    already refuses -- a bad port, a host the socket layer cannot encode --
+    should anything slip past it: the answer is still "cannot reach", never
+    an exception out of `pytest_configure`.
     """
-    parsed = urlparse(address)
-    default_port = _DEFAULT_HTTPS_PORT if parsed.scheme == "https" else _DEFAULT_HTTP_PORT
-    port = parsed.port or default_port
     try:
+        parsed = urlparse(address)
+        default_port = _DEFAULT_HTTPS_PORT if parsed.scheme == "https" else _DEFAULT_HTTP_PORT
+        port = parsed.port or default_port
         socket.create_connection((parsed.hostname, port), timeout=timeout).close()
-    except OSError:
+    except (OSError, ValueError):
         return False
     return True
 
@@ -186,14 +196,17 @@ def pytest_configure(config: pytest.Config) -> None:
        several runs.
     3. **Controller branch.** Absent ``--vantage``, nothing further happens:
        no plugin is registered, no socket is opened.
-    4. If failure text was requested, the controller registers
+    4. The address and timeout are resolved and validated. An invalid value
+       stops the session with a usage error naming the option -- reporting
+       somewhere other than intended is worse than not starting.
+    5. If failure text was requested, the controller registers
        `EvidenceCollector` too -- a session with no xdist workers still
        needs evidence collected -- before anything that could fail or block.
-    5. A bare TCP preflight (``_preflight_reachable``) checks that something
+    6. A bare TCP preflight (``_preflight_reachable``) checks that something
        is listening at the resolved address. If not (connection refused,
        host unresolvable), it warns once, naming the address, and returns
        without a `Recorder`; the suite still runs to completion.
-    6. A capability probe (``transport.fetch_capabilities``) asks whether
+    7. A capability probe (``transport.fetch_capabilities``) asks whether
        the server advertises ``session_lifecycle``, bounded by the liveness
        timeout so a hanging server cannot put the full report timeout in
        front of every session. Anything but an explicit yes, including the
@@ -211,28 +224,25 @@ def pytest_configure(config: pytest.Config) -> None:
         return
     if not _activation_requested(config):
         return
+    try:
+        settings = resolve_settings(config)
+    except VantageConfigError as exc:
+        raise pytest.UsageError(str(exc)) from None
     if _failure_text_capture_requested(config):
         config.pluginmanager.register(EvidenceCollector(config))
-    address = resolve_server_address(
-        cli_url=config.getoption("vantage_server"),
-        env_url=os.environ.get("VANTAGE_SERVER"),
-        ini_url=config.getini("vantage_server"),
-    )
-    timeout = resolve_report_timeout(
-        cli_timeout=config.getoption("vantage_timeout"),
-        ini_timeout=config.getini("vantage_timeout"),
-    )
-    connect_timeout = min(_MAX_CONNECT_TIMEOUT, timeout)
-    if not _preflight_reachable(address, connect_timeout):
-        _warn(config, f"vantage: cannot reach {address}, this session will not be recorded")
+    connect_timeout = min(_MAX_CONNECT_TIMEOUT, settings.timeout)
+    if not _preflight_reachable(settings.address, connect_timeout):
+        _warn(
+            config, f"vantage: cannot reach {settings.address}, this session will not be recorded"
+        )
         return
-    liveness_timeout = resolve_liveness_timeout(timeout)
-    lifecycle_available = fetch_capabilities(address, timeout=liveness_timeout)
+    liveness_timeout = resolve_liveness_timeout(settings.timeout)
+    lifecycle_available = fetch_capabilities(settings.address, timeout=liveness_timeout)
     config.pluginmanager.register(
         Recorder(
             config,
-            address,
-            timeout,
+            settings.address,
+            settings.timeout,
             lifecycle_available=lifecycle_available,
             metadata_requested=_metadata_capture_requested(config),
         )
