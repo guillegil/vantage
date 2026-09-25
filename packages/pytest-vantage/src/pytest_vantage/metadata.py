@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import stat
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePath
 
@@ -65,13 +66,18 @@ over-long path."""
 
 MAX_DECLARED_FILE_BYTES = 8 * 1024
 """Largest declared file captured, in raw bytes. A larger file is dropped
-whole as `too_large`, never truncated."""
+whole as `too_large`, never truncated -- and so is a file within it whose
+encoded content could not fit the section even with no other file
+captured (a control character costs six bytes on the wire)."""
 
 MAX_METADATA_SECTION_BYTES = 32 * 1024
-"""Budget for all captured content: 1/32 of the server's 1 MiB report cap.
-Spent on JSON-encoded bytes via `budget._encoded_cost` (see there for why
-`ensure_ascii` stays default), so it holds fewer than four files of
-`MAX_DECLARED_FILE_BYTES` raw bytes each."""
+"""Budget for the whole wire `metadata` section: 1/32 of the server's 1 MiB
+report cap. Spent on JSON-encoded bytes via `budget._encoded_cost` (see
+there for why `ensure_ascii` stays default). Every declared file's entry --
+its path, keys and status -- is charged first, because each reaches the
+wire whatever happens to the file; content is charged from what is left,
+so the section holds fewer than four files of `MAX_DECLARED_FILE_BYTES`
+raw bytes each."""
 
 _ADMISSIBLE_FORMATS = frozenset({"json", "yaml"})
 """`format` is required and explicit, never inferred from the file
@@ -107,6 +113,45 @@ class MetadataSection:
 
     declaration: str
     files: tuple[CapturedFile, ...]
+
+
+_FILE_STATUSES = (
+    "captured",
+    "not_found",
+    "path_rejected",
+    "unreadable",
+    "too_large",
+    "not_text",
+    "over_budget",
+)
+"""Every status `capture_metadata` can give a declared file."""
+
+
+def _fixed_section_cost(declared_files: Iterable[DeclaredFile]) -> int:
+    """What the wire section costs before any content: its envelope, and one
+    entry per declared file with no content and the longest status it could
+    end with, so the charge never depends on how the reads turn out.
+
+    Mirrors the shape `Recorder._metadata_section` serialises;
+    `test_metadata_capture.py` measures that serialisation against the
+    budget.
+    """
+    longest_status = max(_FILE_STATUSES, key=len)
+    envelope = _encoded_cost({"declaration": DECLARATION_FILENAME, "files": []})
+    entries = sum(
+        _encoded_cost(
+            {
+                "path": declared.path,
+                "format": declared.format,
+                "status": longest_status,
+                "keys": list(declared.keys),
+                "content": None,
+            }
+        )
+        + len(", ")  # the separator between entries
+        for declared in declared_files
+    )
+    return envelope + entries
 
 
 def _reject(config: pytest.Config, message: str) -> None:
@@ -288,6 +333,16 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
             )
             return None
         declared.append(DeclaredFile(path=path, format=fmt, keys=tuple(keys)))
+    # Within every per-item bound, 16 paths and 200 keys can still reach
+    # hundreds of kilobytes on the wire, where each entry goes whatever
+    # happens to its file.
+    if _fixed_section_cost(declared) > MAX_METADATA_SECTION_BYTES:
+        _reject(
+            config,
+            f"{DECLARATION_FILENAME}'s declared paths and keys exceed the "
+            f"{MAX_METADATA_SECTION_BYTES}-byte metadata budget, metadata will not be captured",
+        )
+        return None
     return tuple(declared)
 
 
@@ -338,34 +393,26 @@ def capture_metadata(config: pytest.Config, rootpath: Path) -> MetadataSection |
     has already warned). Otherwise always a `MetadataSection` with one entry
     per declared file, even when every file was dropped.
 
-    The section budget is spent in declaration order: once a file's encoded
-    cost does not fit the remainder, it and every later file are marked
-    `over_budget`, the later ones without being opened.
+    Every entry is charged to `MAX_METADATA_SECTION_BYTES` up front, and
+    content from what is left, in declaration order. A file whose content
+    does not fit the remainder is `over_budget` on its own: every file is
+    read, and a later one that still fits is captured. A file whose content
+    could not fit even with no other file captured is `too_large`.
     """
     declared_files = read_declaration(config, rootpath)
     if declared_files is None:
         return None
-    remaining_budget = MAX_METADATA_SECTION_BYTES
-    budget_exhausted = False
+    content_budget = MAX_METADATA_SECTION_BYTES - _fixed_section_cost(declared_files)
+    remaining_budget = content_budget
     captured: list[CapturedFile] = []
     for declared in declared_files:
-        if budget_exhausted:
-            captured.append(
-                CapturedFile(
-                    path=declared.path,
-                    format=declared.format,
-                    status="over_budget",
-                    keys=declared.keys,
-                    content=None,
-                )
-            )
-            continue
         status, content = _read_declared_file(rootpath, declared.path)
         if status == "captured" and content is not None:
             cost = _encoded_cost(content)
-            if cost > remaining_budget:
+            if cost > content_budget:
+                status, content = "too_large", None
+            elif cost > remaining_budget:
                 status, content = "over_budget", None
-                budget_exhausted = True
             else:
                 remaining_budget -= cost
         captured.append(

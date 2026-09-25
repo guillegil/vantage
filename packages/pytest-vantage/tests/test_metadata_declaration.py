@@ -391,6 +391,37 @@ def test_a_key_longer_than_the_bound_captures_nothing_and_warns_once(
     assert len(_metadata_warnings(recwarn)) == 1
 
 
+@pytest.mark.parametrize("char", ["k", "\u4e2d", "\U0001f600"], ids=["ascii", "cjk", "non_bmp"])
+def test_paths_and_keys_beyond_the_section_budget_capture_nothing_and_warn_once(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, char: str
+) -> None:
+    # Every entry reaches the wire whatever happens to its file, so a
+    # declaration within every per-item bound can still outgrow the section.
+    root = tmp_path / "project"
+    root.mkdir()
+    keys = [
+        f"{i:03d}{char * (metadata.MAX_DECLARED_KEY_CHARS - 3)}"
+        for i in range(metadata.MAX_METADATA_ENTRIES)
+    ]
+    files = [
+        {
+            "path": f"{i:02d}{char * (metadata.MAX_DECLARED_PATH_CHARS - 7)}.json",
+            "format": "json",
+            "keys": keys[i :: metadata.MAX_DECLARED_FILES],
+        }
+        for i in range(metadata.MAX_DECLARED_FILES)
+    ]
+    document = json.dumps({"version": 1, "files": files}, ensure_ascii=False)
+    (root / metadata.DECLARATION_FILENAME).write_text(document, encoding="utf-8")
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "budget" in str(warned[0].message)
+
+
 def test_more_than_the_total_key_bound_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder, monkeypatch: pytest.MonkeyPatch
 ) -> None:

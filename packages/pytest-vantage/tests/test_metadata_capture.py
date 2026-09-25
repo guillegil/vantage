@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import pytest
 from pytest_vantage import metadata
 from pytest_vantage.boundary import VantageWarning
+from pytest_vantage.budget import _encoded_cost
+from pytest_vantage.recorder import Recorder
 
 
 def _config() -> pytest.Config:
@@ -66,25 +68,22 @@ def test_a_file_one_byte_over_the_bound_is_dropped_whole_and_marked_too_large(
     )
 
 
-def test_files_past_the_section_budget_are_marked_over_budget_in_declaration_order(
+def test_a_file_past_the_remaining_budget_is_skipped_on_its_own(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Room for exactly one 20-byte-encoded file; the second and third,
-    # though identical, drop only because they come later in declaration
-    # order.
-    monkeypatch.setattr(metadata, "MAX_METADATA_SECTION_BYTES", 20)
+    # Room for every entry plus 30 bytes of content: a.json (20 encoded
+    # bytes) fits, b.json (20) no longer does, and c.json (4), later in
+    # declaration order, still does.
     root = tmp_path / "project"
     root.mkdir()
-    content = "x" * 18  # 20 encoded bytes: 18 chars + 2 quotes
-    for name in ("a.json", "b.json", "c.json"):
+    contents = {"a.json": "x" * 18, "b.json": "y" * 18, "c.json": "zz"}
+    for name, content in contents.items():
         (root / name).write_text(content)
-    _declare(
-        root,
-        [
-            {"path": "a.json", "format": "json", "keys": ["ka"]},
-            {"path": "b.json", "format": "json", "keys": ["kb"]},
-            {"path": "c.json", "format": "json", "keys": ["kc"]},
-        ],
+    _declare(root, [{"path": name, "format": "json", "keys": [name[0]]} for name in contents])
+    declared = metadata.read_declaration(_config(), root)
+    assert declared is not None
+    monkeypatch.setattr(
+        metadata, "MAX_METADATA_SECTION_BYTES", metadata._fixed_section_cost(declared) + 30
     )
 
     section = metadata.capture_metadata(_config(), root)
@@ -92,10 +91,71 @@ def test_files_past_the_section_budget_are_marked_over_budget_in_declaration_ord
     assert section is not None
     statuses = [(f.path, f.status, f.content) for f in section.files]
     assert statuses == [
-        ("a.json", "captured", content),
+        ("a.json", "captured", contents["a.json"]),
         ("b.json", "over_budget", None),
-        ("c.json", "over_budget", None),
+        ("c.json", "captured", contents["c.json"]),
     ]
+
+
+def test_a_file_whose_encoded_content_alone_exceeds_the_section_is_too_large(
+    tmp_path: Path,
+) -> None:
+    # Within the raw cap, but a control character costs six bytes on the
+    # wire, so no capture order could make it fit. It is a property of the
+    # file, not the budget running out, and the next file is still read.
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "noise.yaml").write_text("\x01" * metadata.MAX_DECLARED_FILE_BYTES)
+    (root / "small.json").write_text('{"board": "rev-b"}')
+    _declare(
+        root,
+        [
+            {"path": "noise.yaml", "format": "yaml", "keys": ["n"]},
+            {"path": "small.json", "format": "json", "keys": ["board"]},
+        ],
+    )
+
+    section = metadata.capture_metadata(_config(), root)
+
+    assert section is not None
+    assert section.files == (
+        metadata.CapturedFile(
+            path="noise.yaml", format="yaml", status="too_large", keys=("n",), content=None
+        ),
+        metadata.CapturedFile(
+            path="small.json",
+            format="json",
+            status="captured",
+            keys=("board",),
+            content='{"board": "rev-b"}',
+        ),
+    )
+
+
+@pytest.mark.parametrize("char", ["k", "\u4e2d", "\U0001f600"], ids=["ascii", "cjk", "non_bmp"])
+def test_an_accepted_section_stays_within_its_budget_on_the_wire(tmp_path: Path, char: str) -> None:
+    # Paths, keys and content together, measured as the recorder serialises
+    # the section. Sizes are in wire bytes, so every character set fills the
+    # budget alike: one byte, six as `\uXXXX`, twelve as a surrogate pair.
+    wire_bytes_per_char = _encoded_cost(char) - len('""')
+    root = tmp_path / "project"
+    root.mkdir()
+    files: list[dict[str, object]] = []
+    for i in range(metadata.MAX_DECLARED_FILES):
+        name = f"f{i:02d}.json"
+        document = {"value": char * (500 * (i + 1) // wire_bytes_per_char)}
+        (root / name).write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+        key = f"{i:02d}{char * (600 // wire_bytes_per_char)}"
+        files.append({"path": name, "format": "json", "keys": [key]})
+    _declare(root, files)
+
+    section = metadata.capture_metadata(_config(), root)
+
+    assert section is not None
+    # The budget was actually reached, not merely never approached.
+    assert {"captured", "over_budget"} <= {f.status for f in section.files}
+    wire = Recorder._metadata_section(SimpleNamespace(_metadata=section))  # type: ignore[arg-type]
+    assert _encoded_cost(wire) <= metadata.MAX_METADATA_SECTION_BYTES
 
 
 def test_a_non_utf8_file_is_marked_not_text_before_json_encoding(tmp_path: Path) -> None:
