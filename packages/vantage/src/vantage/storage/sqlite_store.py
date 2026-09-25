@@ -13,13 +13,15 @@ right after `BEGIN IMMEDIATE`. The transaction already holds the `RESERVED`
 lock and `self._lock`, so no other write can land between probe and upsert.
 
 Concurrency needs two layers. `self._lock` is held across every statement
-and transaction, reads included: every thread shares one connection, and a
-read issued while another thread is inside a write transaction would run
-inside it and see rows that are not committed yet, or never will be. WAL mode
-and the connection's busy timeout cover a second process on the same file,
-which no in-process lock can reach. Multi-statement writes start with `BEGIN
+and transaction, reads included, and across `close`: every thread shares one
+connection, and a read issued while another thread is inside a write
+transaction would run inside it and see rows that are not committed yet, or
+never will be. WAL mode and the connection's busy timeout cover another
+connection on the same file -- a second server process -- which no
+in-process lock can reach. Multi-statement writes start with `BEGIN
 IMMEDIATE` because a deferred transaction that upgrades to a write
-mid-statement is the classic two-writer deadlock.
+mid-statement is the classic two-writer deadlock; it also makes a
+check-then-write such as `upsert_setting`'s key bound atomic against both.
 
 A session's run, catalogue, result and metadata rows are written in one
 transaction, without `RETURNING`: it needs SQLite >= 3.35, newer than some
@@ -65,6 +67,7 @@ from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
     HistoryEntry,
+    NamespaceFullError,
     Page,
     ResultListEntry,
     RunDetail,
@@ -353,6 +356,8 @@ _LIST_SETTINGS = """
 """
 
 _PROBE_SETTING_EXISTS = "SELECT 1 FROM user_setting WHERE namespace = ? AND key = ?"
+
+_COUNT_SETTINGS = "SELECT COUNT(*) FROM user_setting WHERE namespace = ?"
 
 _UPSERT_SETTING = """
     INSERT INTO user_setting (namespace, key, value, updated_at)
@@ -720,12 +725,12 @@ def _page(
 class SqliteExecutionStore:
     """Implements `vantage.core.ports.storage.ExecutionStore` against SQLite.
 
-    One connection per process, shared across threads
+    One connection per store, shared across threads
     (`check_same_thread=False`) and opened via `open_database`, which sets
-    file permissions and WAL. Every read and every write transaction holds
-    `self._lock` to serialise this process's threads; `BEGIN IMMEDIATE` and
-    the busy timeout handle a second process sharing the file. Neither
-    substitutes for the other.
+    file permissions and WAL. Every read, every write transaction and
+    `close` hold `self._lock` to serialise the threads sharing it;
+    `BEGIN IMMEDIATE` and the busy timeout handle another connection on the
+    same file. Neither substitutes for the other.
     """
 
     def __init__(self, path: Path) -> None:
@@ -909,12 +914,26 @@ class SqliteExecutionStore:
         rows = self._fetchall(_LIST_SETTINGS, (namespace,))
         return tuple(_row_to_user_setting(row) for row in rows)
 
-    def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
+    def upsert_setting(
+        self,
+        namespace: str,
+        key: str,
+        *,
+        value: str,
+        updated_at: datetime,
+        max_keys: int | None = None,
+    ) -> bool:
         # Probe first, as `record_session` does: `rowcount` cannot
-        # distinguish insert from update under `DO UPDATE`.
+        # distinguish insert from update under `DO UPDATE`. The count shares
+        # the write transaction, so no other writer can add a key between it
+        # and the insert; raising rolls the transaction back.
         formatted = isoformat_utc(updated_at)
         with self._write_transaction() as conn:
             created = conn.execute(_PROBE_SETTING_EXISTS, (namespace, key)).fetchone() is None
+            if created and max_keys is not None:
+                (held,) = conn.execute(_COUNT_SETTINGS, (namespace,)).fetchone()
+                if held >= max_keys:
+                    raise NamespaceFullError(f"{namespace!r} already holds {held} keys")
             conn.execute(_UPSERT_SETTING, (namespace, key, value, formatted))
         return created
 
@@ -928,4 +947,8 @@ class SqliteExecutionStore:
         return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
 
     def close(self) -> None:
-        self._conn.close()
+        # Under the lock, so a statement another thread has in flight
+        # finishes first; every later call then fails on the closed
+        # connection.
+        with self._lock:
+            self._conn.close()

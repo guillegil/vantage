@@ -228,8 +228,16 @@ EMPTY_RUN_METADATA = RunMetadata()
 reports."""
 
 
+class NamespaceFullError(Exception):
+    """`upsert_setting` refused a new key: its namespace already holds the
+    `max_keys` it was given."""
+
+
 class ExecutionStore(Protocol):
-    """Persists `Execution` rows. Implementations live in `vantage.storage`."""
+    """Persists `Execution` rows. Implementations live in `vantage.storage`.
+
+    The service calls one store from several worker threads at once, so an
+    implementation must be safe to share between them."""
 
     def record_session(
         self,
@@ -346,10 +354,23 @@ class ExecutionStore(Protocol):
         the same order `summarize_sections` presents its section list in."""
         ...
 
-    def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
+    def upsert_setting(
+        self,
+        namespace: str,
+        key: str,
+        *,
+        value: str,
+        updated_at: datetime,
+        max_keys: int | None = None,
+    ) -> bool:
         """Create or replace one `(namespace, key)` pair. Returns True only
         on a true first insert, mirroring `record_session`'s `created`
-        boolean -- the route needs `201` versus `200`."""
+        boolean -- the route needs `201` versus `200`.
+
+        With `max_keys`, a new key is refused with `NamespaceFullError`, and
+        nothing written, when `namespace` already holds that many; replacing
+        an existing key never is. The count and the write are one step, so
+        concurrent callers cannot pass the bound together."""
         ...
 
     def delete_setting(self, namespace: str, key: str) -> bool:

@@ -25,6 +25,7 @@ from vantage.core.ports.storage import (
     ExecutionStore,
     MetadataEntry,
     MetadataFile,
+    NamespaceFullError,
     RunMetadata,
     UserSetting,
 )
@@ -1359,6 +1360,46 @@ class ExecutionStoreContract:
 
         assert len(settings) == 1
         assert settings[0].value == "a"
+
+    def test_upsert_setting_refuses_a_new_key_at_max_keys_and_writes_nothing(
+        self, store: ExecutionStore
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+        store.upsert_setting("test_sections", "Checkout", value="b", updated_at=now)
+
+        with pytest.raises(NamespaceFullError):
+            store.upsert_setting("test_sections", "Accounts", value="c", updated_at=now, max_keys=2)
+
+        assert [setting.key for setting in store.list_settings("test_sections")] == [
+            "Billing",
+            "Checkout",
+        ]
+
+    def test_upsert_setting_replaces_an_existing_key_at_max_keys(
+        self, store: ExecutionStore
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+
+        created = store.upsert_setting(
+            "test_sections", "Billing", value="b", updated_at=now, max_keys=1
+        )
+
+        assert created is False
+        assert [setting.value for setting in store.list_settings("test_sections")] == ["b"]
+
+    def test_max_keys_counts_only_the_keys_of_its_own_namespace(
+        self, store: ExecutionStore
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("other_namespace", "Billing", value="a", updated_at=now)
+
+        created = store.upsert_setting(
+            "test_sections", "Billing", value="b", updated_at=now, max_keys=1
+        )
+
+        assert created is True
 
     def test_get_run_case_outcomes_is_empty_for_a_run_with_no_results(
         self, store: ExecutionStore

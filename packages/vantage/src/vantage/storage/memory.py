@@ -13,13 +13,21 @@ the SQLite adapter compares fixed-width UTC text; the two orders agree.
 ``last_contact_at`` field; that column is a storage concern. It is set on
 the insert branch of ``record_session`` and advanced only by
 ``touch_last_contact``, monotonically.
+
+The routes call a store from FastAPI's threadpool, so every public method
+holds one lock, as every SQLite adapter call holds its own: a call sees and
+leaves the dicts whole, and a check-then-write such as ``upsert_setting``'s
+key bound is one step.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import functools
+import threading
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime
+from typing import Concatenate, ParamSpec, TypeVar
 
 from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
@@ -29,6 +37,7 @@ from vantage.core.ports.storage import (
     HistoryEntry,
     MetadataEntry,
     MetadataFile,
+    NamespaceFullError,
     Page,
     ResultListEntry,
     RunDetail,
@@ -52,10 +61,30 @@ def _normalized_result(result: Result) -> Result:
     return result
 
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _locked(
+    method: Callable[Concatenate[InMemoryExecutionStore, _P], _R],
+) -> Callable[Concatenate[InMemoryExecutionStore, _P], _R]:
+    """Run `method` holding the store's lock."""
+
+    @functools.wraps(method)
+    def locked(store: InMemoryExecutionStore, /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with store._lock:
+            return method(store, *args, **kwargs)
+
+    return locked
+
+
 class InMemoryExecutionStore:
     """Implements `vantage.core.ports.storage.ExecutionStore` with dicts."""
 
     def __init__(self) -> None:
+        # Re-entrant: `list_runs_with_metadata_horizon` reads through
+        # `list_runs`, and both hold it.
+        self._lock = threading.RLock()
         self._executions: dict[str, Execution] = {}
         self._catalogue: dict[str, CatalogueEntry] = {}
         self._results: dict[tuple[str, str], Result] = {}
@@ -64,6 +93,7 @@ class InMemoryExecutionStore:
         self._metadata_files: dict[tuple[str, str], MetadataFile] = {}
         self._metadata_entries: dict[tuple[str, str], MetadataEntry] = {}
 
+    @_locked
     def record_session(
         self,
         execution: Execution,
@@ -137,9 +167,11 @@ class InMemoryExecutionStore:
             last_seen_run_id=execution.identity.value if advances else existing.last_seen_run_id,
         )
 
+    @_locked
     def get_execution(self, execution_id: str) -> Execution | None:
         return self._executions.get(execution_id)
 
+    @_locked
     def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
         if execution_id not in self._executions:
             return False
@@ -149,20 +181,25 @@ class InMemoryExecutionStore:
         self._last_contact[execution_id] = contacted_at
         return True
 
+    @_locked
     def count_executions(self) -> int:
         return len(self._executions)
 
+    @_locked
     def get_results(self, execution_id: str) -> Sequence[Result]:
         return [
             result for (run_id, _node_id), result in self._results.items() if run_id == execution_id
         ]
 
+    @_locked
     def count_results(self) -> int:
         return len(self._results)
 
+    @_locked
     def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         return self._catalogue.get(node_id)
 
+    @_locked
     def list_runs(
         self,
         *,
@@ -205,11 +242,12 @@ class InMemoryExecutionStore:
         )
         return Page(items=items, has_more=has_more)
 
+    @_locked
     def list_runs_with_metadata_horizon(
         self, *, key: str, value: str, limit: int, offset: int
     ) -> tuple[Page[RunListEntry], int]:
-        # Nothing can change the dicts between the two reads, so they already
-        # describe one state.
+        # Both reads happen under one hold of the lock, so they describe one
+        # state.
         page = self.list_runs(limit=limit, offset=offset, metadata_key=key, metadata_value=value)
         # A row for `key` of any status counts towards `first_seen`,
         # mirroring the SQLite adapter's `run_metadata` join, which does not
@@ -227,6 +265,7 @@ class InMemoryExecutionStore:
         )
         return page, predating
 
+    @_locked
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         execution = self._executions.get(execution_id)
         if execution is None:
@@ -236,6 +275,7 @@ class InMemoryExecutionStore:
             last_contact_at=self._last_contact.get(execution_id),
         )
 
+    @_locked
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         # The paginated, lean sibling of `get_results`, with the same
         # clamp/`has_more` mechanism as `list_runs`. Dict insertion order
@@ -249,9 +289,11 @@ class InMemoryExecutionStore:
         items = tuple(ResultListEntry.from_result(result) for result in window[:page_limit])
         return Page(items=items, has_more=has_more)
 
+    @_locked
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
         return self._results.get((execution_id, node_id))
 
+    @_locked
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
         # Mirrors `list_runs`' total order -- `(started_at, run_id)`
         # descending -- over every execution that has a result for this
@@ -280,6 +322,7 @@ class InMemoryExecutionStore:
         )
         return Page(items=items, has_more=has_more)
 
+    @_locked
     def list_settings(self, namespace: str) -> Sequence[UserSetting]:
         # `sorted()` on `key` mirrors the SQLite adapter's `ORDER BY key`.
         matching = [
@@ -289,14 +332,30 @@ class InMemoryExecutionStore:
         ]
         return tuple(sorted(matching, key=lambda setting: setting.key))
 
-    def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
+    @_locked
+    def upsert_setting(
+        self,
+        namespace: str,
+        key: str,
+        *,
+        value: str,
+        updated_at: datetime,
+        max_keys: int | None = None,
+    ) -> bool:
         identity = (namespace, key)
         created = identity not in self._settings
+        if created and max_keys is not None:
+            held = sum(
+                1 for setting_namespace, _key in self._settings if setting_namespace == namespace
+            )
+            if held >= max_keys:
+                raise NamespaceFullError(f"{namespace!r} already holds {held} keys")
         self._settings[identity] = UserSetting(
             namespace=namespace, key=key, value=value, updated_at=updated_at
         )
         return created
 
+    @_locked
     def delete_setting(self, namespace: str, key: str) -> bool:
         identity = (namespace, key)
         if identity not in self._settings:
@@ -304,6 +363,7 @@ class InMemoryExecutionStore:
         del self._settings[identity]
         return True
 
+    @_locked
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
         return tuple(
             (result.identity.file_path, result.outcome)
@@ -311,6 +371,7 @@ class InMemoryExecutionStore:
             if run_id == execution_id
         )
 
+    @_locked
     def close(self) -> None:
         self._executions.clear()
         self._catalogue.clear()
