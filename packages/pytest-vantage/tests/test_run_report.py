@@ -4,7 +4,7 @@ The end-to-end tests use a real `vantage` server (the `vantage_server`
 fixture in `vantage_test_server.py`) and a real subprocess pytest
 invocation, never a mock of either side of the HTTP boundary. The file also
 covers the start-write, `Recorder` registration, VCS and metadata wiring,
-heartbeats, the report budget and timestamp formatting.
+heartbeats, how the session ended and timestamp formatting.
 """
 
 from __future__ import annotations

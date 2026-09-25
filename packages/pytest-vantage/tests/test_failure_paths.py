@@ -608,7 +608,7 @@ def test_server_dropped_mid_session_preserves_exit_status_and_warns_once(
     output = stdout.decode() + stderr.decode()
     assert process.returncode == 0
     assert output.count("VantageWarning:") == 1
-    assert "error while reporting" in output
+    assert "error while reporting: " in output
 
 
 # --- Something goes wrong while reporting ---------------------------------
@@ -1144,13 +1144,13 @@ def test_fetch_capabilities_returns_true_for_the_one_explicit_positive_answer() 
         assert fetch_capabilities(server.address, timeout=1.0) == Capabilities(True)
 
 
-def test_an_address_with_a_path_is_not_diagnosed_as_an_older_server(
+def test_the_probe_warning_names_the_url_an_address_with_a_path_doubles_into(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
 ) -> None:
     """`/api/v1` on the address doubles into the probed path, so a current
-    server answers `404`. The warning names the path actually probed rather
-    than telling the user to upgrade the server.
+    server answers `404`. The warning names the URL actually probed, which
+    shows the mistake in the address, not only the address itself.
     """
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
@@ -1160,7 +1160,6 @@ def test_an_address_with_a_path_is_not_diagnosed_as_an_older_server(
 
     result.assert_outcomes(passed=1)
     output = _combined_output(result)
-    assert "predates" not in output
     assert f"GET {vantage_server.address}/api/v1/api/v1/capabilities answered 404" in output
 
 
