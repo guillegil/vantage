@@ -140,3 +140,79 @@ def test_python_3_9_step_passes_only_on_a_requires_python_refusal(
     )
 
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+# `iptables -L <chain>` lists the chain with the packet count in
+# $FAKE_<chain>, and fails as for a missing chain when that is unset. Every
+# other call succeeds.
+_FAKE_NETFILTER = """\
+if [ "$1" = -L ]; then
+  count="FAKE_$2"
+  if [ -z "${!count+set}" ]; then echo "No chain/target/match by that name." >&2; exit 1; fi
+  echo "Chain $2 (1 references)"
+  echo "    pkts      bytes target     prot opt in     out     source    destination"
+  echo "       ${!count}        0 REJECT     all  --  *      *       ::/0      ::/0"
+fi
+"""
+# The connection attempts run as `sudo -u <user> -g nonet`; here they are not
+# made at all and fail as a rejected connection would. Every other command
+# runs as it is.
+_FAKE_SUDO = """\
+if [ "$1" = -u ]; then exit 1; fi
+exec "$@"
+"""
+_NETWORKING_FAKES = {"sudo": _FAKE_SUDO, "iptables": _FAKE_NETFILTER, "ip6tables": _FAKE_NETFILTER}
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("counters", "passes"),
+    [
+        pytest.param({"VANTAGE_NONET": 0, "VANTAGE_NONET6": 0}, True, id="none"),
+        pytest.param({"VANTAGE_NONET": 1, "VANTAGE_NONET6": 0}, False, id="ipv4-attempt"),
+        pytest.param({"VANTAGE_NONET": 0, "VANTAGE_NONET6": 2}, False, id="ipv6-attempt"),
+        pytest.param({"VANTAGE_NONET6": 0}, False, id="ipv4-counter-unreadable"),
+        pytest.param({"VANTAGE_NONET": 0}, False, id="ipv6-counter-unreadable"),
+    ],
+)
+def test_networking_job_fails_on_any_counted_attempt(
+    tmp_path: Path, counters: dict[str, int], passes: bool
+) -> None:
+    script = _step_script(
+        "networking-disabled", "Assert the suite attempted no outbound connection"
+    )
+
+    result = _run_step(
+        script,
+        tmp_path,
+        _NETWORKING_FAKES,
+        {f"FAKE_{chain}": str(count) for chain, count in counters.items()},
+    )
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("counters", "passes"),
+    [
+        pytest.param({"VANTAGE_NONET": 1, "VANTAGE_NONET6": 2}, True, id="both-count"),
+        pytest.param({"VANTAGE_NONET": 0, "VANTAGE_NONET6": 2}, False, id="ipv4-never-counts"),
+        pytest.param({"VANTAGE_NONET": 1, "VANTAGE_NONET6": 0}, False, id="ipv6-never-counts"),
+    ],
+)
+def test_networking_control_proves_every_counter_it_asserts_on(
+    tmp_path: Path, counters: dict[str, int], passes: bool
+) -> None:
+    # A counter that never counts also reads zero, so the control must fail
+    # unless every counter the final assertion reads has counted an attempt.
+    script = _step_script("networking-disabled", "Prove the rules count a real attempt")
+
+    result = _run_step(
+        script,
+        tmp_path,
+        _NETWORKING_FAKES,
+        {f"FAKE_{chain}": str(count) for chain, count in counters.items()},
+    )
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr

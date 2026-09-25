@@ -91,7 +91,8 @@ jobs:
 
   # Proves the suite never contacts anything but localhost. The whole suite,
   # real subprocess and socket tests included, runs with every non-loopback
-  # outbound connection rejected, and IPv4 TCP attempts are counted.
+  # outbound connection rejected, and TCP attempts over IPv4 and IPv6 are
+  # counted.
   networking-disabled:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -115,37 +116,57 @@ jobs:
       - name: Create the blocked group and its rules
         run: |
           sudo groupadd -f nonet
-          # The TCP rule has its own chain so its packet counter can be read
-          # unambiguously; that counter shows the suite attempted nothing,
-          # not merely that it survived.
+          # Each family's TCP rule has its own chain so its packet counter
+          # can be read unambiguously; the counters show the suite attempted
+          # nothing, not merely that it survived.
           sudo iptables -N VANTAGE_NONET
           sudo iptables -A VANTAGE_NONET -j REJECT
           sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -p tcp -j VANTAGE_NONET
+          sudo ip6tables -N VANTAGE_NONET6
+          sudo ip6tables -A VANTAGE_NONET6 -j REJECT
+          sudo ip6tables -A OUTPUT -m owner --gid-owner nonet ! -o lo -p tcp -j VANTAGE_NONET6
           # Non-TCP traffic is blocked but not counted: the suite resolves a
           # deliberately unresolvable host, and counting that DNS (UDP)
           # lookup would fail the assertion below for an unrelated reason.
           sudo iptables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT
-          # IPv6 is blocked too, but not counted: the assertion below reads
-          # the IPv4 TCP chain only.
           sudo ip6tables -A OUTPUT -m owner --gid-owner nonet ! -o lo -j REJECT
+          # With no IPv6 route, as on GitHub's hosted runners, the kernel
+          # fails an IPv6 connect() before any rule sees it, so nothing would
+          # be counted. A default route into a dummy interface lets the
+          # attempt reach the rules above; anything else sent there is
+          # refused at once, as it was without a route.
+          if [ -z "$(ip -6 route show default)" ]; then
+            sudo ip link add vantage6 type dummy
+            sudo sysctl -qw net.ipv6.conf.vantage6.disable_ipv6=0
+            sudo ip link set vantage6 up
+            sudo ip -6 route add default dev vantage6
+            sudo ip6tables -A OUTPUT -o vantage6 -p tcp -j REJECT --reject-with tcp-reset
+            sudo ip6tables -A OUTPUT -o vantage6 -j REJECT
+          fi
           # The runner's stock sudoers rule allows passwordless sudo as
           # another user but not as another group, so `sudo -g` would prompt.
           echo "$(id -un) ALL=(ALL:ALL) NOPASSWD:ALL" \
             | sudo tee /etc/sudoers.d/99-vantage-nonet >/dev/null
 
       # Positive control, run first: a counter that never worked also reads
-      # zero, so the rule must be shown to count a real attempt.
-      - name: Prove the rule counts a real attempt
+      # zero, so each rule must be shown to count a real attempt.
+      - name: Prove the rules count a real attempt
         run: |
           sudo iptables -Z VANTAGE_NONET
-          # 203.0.113.1 is TEST-NET-3 (RFC 5737): reserved, never routable,
-          # so this reaches nothing even if the rule were absent.
-          sudo -u "$(id -un)" -g nonet timeout 5 \
-            bash -c 'exec 3<>/dev/tcp/203.0.113.1/80' || true
-          armed="$(sudo iptables -L VANTAGE_NONET -v -n -x | awk '/REJECT/ {print $1; exit}')"
-          echo "packets the control attempt got rejected: ${armed:-0}"
-          if [ "${armed:-0}" -lt 1 ]; then
-            echo "the rule never matched, so a zero below would prove nothing" >&2
+          sudo ip6tables -Z VANTAGE_NONET6
+          # 203.0.113.1 (RFC 5737) and 2001:db8::1 (RFC 3849) are reserved
+          # for documentation and never routed, so these reach nothing even
+          # if a rule were absent.
+          for address in 203.0.113.1 2001:db8::1; do
+            sudo -u "$(id -un)" -g nonet timeout 5 \
+              bash -c "exec 3<>/dev/tcp/$address/80" || true
+          done
+          count() { sudo "$1" -L "$2" -v -n -x | awk '/REJECT/ {print $1; exit}'; }
+          v4="$(count iptables VANTAGE_NONET)"
+          v6="$(count ip6tables VANTAGE_NONET6)"
+          echo "packets the control attempts got rejected: IPv4 ${v4:-0}, IPv6 ${v6:-0}"
+          if [ "${v4:-0}" -lt 1 ] || [ "${v6:-0}" -lt 1 ]; then
+            echo "a rule never matched, so a zero below would prove nothing" >&2
             exit 1
           fi
 
@@ -158,26 +179,30 @@ jobs:
       - name: Run the suite with outbound networking blocked
         run: >
           sudo iptables -Z VANTAGE_NONET &&
+          sudo ip6tables -Z VANTAGE_NONET6 &&
           sudo -u "$(id -un)" -g nonet
           --preserve-env=HOME,UV_CACHE_DIR
           "$(command -v uv)" run --no-sync pytest
 
       # A passing suite only shows it survived: the plugin deliberately
       # swallows a rejected connection, so no test fails because of one. Only
-      # the rule's counter shows that no connection was attempted.
+      # the rules' counters show that no connection was attempted.
       - name: Assert the suite attempted no outbound connection
         run: |
           # `pipefail`, and an empty read is a failure rather than zero, so a
-          # failed `iptables -L` cannot be mistaken for a clean result.
+          # failed listing cannot be mistaken for a clean result.
           set -o pipefail
-          attempted="$(sudo iptables -L VANTAGE_NONET -v -n -x | awk '/REJECT/ {print $1; exit}')"
-          if [ -z "$attempted" ]; then
-            echo "could not read the rule counter; absence of evidence is not evidence" >&2
+          count() { sudo "$1" -L "$2" -v -n -x | awk '/REJECT/ {print $1; exit}'; }
+          v4="$(count iptables VANTAGE_NONET)"
+          v6="$(count ip6tables VANTAGE_NONET6)"
+          if [ -z "$v4" ] || [ -z "$v6" ]; then
+            echo "could not read a rule counter; absence of evidence is not evidence" >&2
             exit 1
           fi
-          echo "non-loopback TCP connections the suite attempted: $attempted"
-          if [ "$attempted" -ne 0 ]; then
+          echo "non-loopback TCP connections the suite attempted: IPv4 $v4, IPv6 $v6"
+          if [ "$v4" -ne 0 ] || [ "$v6" -ne 0 ]; then
             sudo iptables -L VANTAGE_NONET -v -n -x
+            sudo ip6tables -L VANTAGE_NONET6 -v -n -x
             echo "expected none; nothing beyond the local server may be contacted" >&2
             exit 1
           fi
