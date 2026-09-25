@@ -10,11 +10,12 @@ cost the session its results, and the finish-write inserts a complete row on
 its own when no start row exists.
 
 `pytest_runtest_logreport` accumulates every phase report, then calls
-`_maybe_beat()`. The beat is a separately `liveness_isolated` helper rather
-than a decorator on the hook: a beat raising inside the `fault_isolated` hook
-body would latch `_disabled` and stop result accumulation with it. The
-start-write and the beats share `_liveness_disabled`, so the whole liveness
-path warns at most once.
+`_maybe_beat()`. It is wrapped in `accumulation_isolated`, never
+`fault_isolated`: a report the plugin cannot record costs that report alone,
+never the finish-write. The beat is a separately `liveness_isolated` helper
+rather than a decorator on the hook, so a failing beat latches only the
+liveness path. The start-write and the beats share `_liveness_disabled`, so
+the whole liveness path warns at most once.
 
 Every other hook is wrapped in `fault_isolated`: an error anywhere in the
 reporting path becomes one warning and never changes the suite's exit status.
@@ -32,7 +33,12 @@ from pathlib import Path
 import pytest
 
 from pytest_vantage import metadata, vcs
-from pytest_vantage.boundary import _warn, fault_isolated, liveness_isolated
+from pytest_vantage.boundary import (
+    _warn,
+    accumulation_isolated,
+    fault_isolated,
+    liveness_isolated,
+)
 from pytest_vantage.budget import spend_failure_text_budget
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.config import resolve_liveness_timeout
@@ -91,7 +97,9 @@ class Recorder:
     - `_disabled` is the `fault_isolated` latch: once set, every reporting
       hook on this instance is a silent no-op. `_liveness_disabled` is the
       independent `liveness_isolated` latch for the start-write and the
-      beats. Neither decorator reads or sets the other's flag.
+      beats. `_accumulation_warned` only records that
+      `accumulation_isolated` has warned; it never stops accumulation. No
+      decorator reads or sets another's flag.
     - `_started_at` is captured once, so the start report and the finish
       report carry the identical value.
     - `_liveness_timeout` bounds the small start-write and heartbeat
@@ -139,6 +147,7 @@ class Recorder:
         self._started_at = datetime.now(timezone.utc)
         self._disabled = False
         self._liveness_disabled = False
+        self._accumulation_warned = False
         self._results: dict[str, _Pending] = {}
         self._last_beat_at = time.monotonic()
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
@@ -220,11 +229,11 @@ class Recorder:
         """
         return f"vantage: recording run {self._run_id} to {self._address}"
 
-    @fault_isolated
+    @accumulation_isolated
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
         """The one hook xdist forwards to the controller. Accumulates first,
         always, then offers a beat opportunity through `_maybe_beat`, which
-        is isolated separately so a beat failure cannot latch `_disabled`.
+        is isolated separately so a beat failure latches only liveness.
         """
         accumulate(self._results, report)
         self._maybe_beat()

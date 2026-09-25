@@ -25,7 +25,13 @@ from collections.abc import Callable, Iterator
 
 import pytest
 from pytest_vantage import vcs
-from pytest_vantage.boundary import VantageWarning, _warn, fault_isolated, liveness_isolated
+from pytest_vantage.boundary import (
+    VantageWarning,
+    _warn,
+    accumulation_isolated,
+    fault_isolated,
+    liveness_isolated,
+)
 from pytest_vantage.plugin import _preflight_reachable
 from pytest_vantage.transport import Capabilities, fetch_capabilities, send
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
@@ -363,6 +369,38 @@ def test_liveness_isolated_and_fault_isolated_flags_never_read_or_set_each_other
     assert instance.calls == 2  # the second call did not reach the body -- latched on its own flag
     assert instance._disabled is True
     assert instance._liveness_disabled is True  # unchanged, still latched from earlier
+
+
+class _AccumulationInstrumented:
+    def __init__(self, config: object) -> None:
+        self._config = config
+        self._disabled = False
+        self._accumulation_warned = False
+        self.calls = 0
+
+    @accumulation_isolated
+    def accumulate_raises(self) -> None:
+        self.calls += 1
+        raise RuntimeError("odd report")
+
+
+def test_accumulation_isolated_warns_once_but_never_stops_running_the_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings_seen: list[str] = []
+    monkeypatch.setattr(
+        "pytest_vantage.boundary._warn",
+        lambda config, message: warnings_seen.append(message),
+    )
+    instance = _AccumulationInstrumented(config=None)
+
+    instance.accumulate_raises()
+    instance.accumulate_raises()
+
+    assert instance.calls == 2
+    assert len(warnings_seen) == 1
+    assert "error while recording a test report" in warnings_seen[0]
+    assert instance._disabled is False
 
 
 # --- Unit: `_warn`'s fallback chain ------------------------------------------
@@ -1347,18 +1385,70 @@ def test_hung_git_does_not_delay_session(
     }
 
 
-def test_every_recorder_hook_is_fault_isolated() -> None:
+def test_every_recorder_hook_is_under_the_isolation_meant_for_it() -> None:
     """Every `pytest_*` hook on `Recorder` is wrapped by an isolation
-    decorator. The hooks are enumerated, so one added later without a
-    decorator fails here rather than leaving the suite green.
-
-    Both decorators apply `functools.wraps`, so an undecorated hook is
-    exactly one that lacks `__wrapped__`.
+    decorator, and by the right one: only the hooks that talk to the server
+    about the report share `_disabled`, so neither liveness nor an odd test
+    report can switch the finish-write off. The hooks are enumerated, so one
+    added later without a decorator, or under the wrong one, fails here.
     """
     from pytest_vantage.recorder import Recorder
 
-    hooks = [name for name in dir(Recorder) if name.startswith("pytest_")]
+    isolation = {
+        name: getattr(getattr(Recorder, name), "isolation_flag", None)
+        for name in dir(Recorder)
+        if name.startswith("pytest_")
+    }
 
-    assert hooks, "no pytest_* hooks found on Recorder -- the check would pass vacuously"
-    undecorated = [name for name in hooks if not hasattr(getattr(Recorder, name), "__wrapped__")]
-    assert undecorated == [], f"Recorder hooks missing @fault_isolated: {undecorated}"
+    assert isolation == {
+        "pytest_report_header": "_disabled",
+        "pytest_runtest_logreport": "_accumulation_warned",
+        "pytest_sessionfinish": "_disabled",
+        "pytest_sessionstart": "_liveness_disabled",
+    }
+    assert getattr(Recorder._maybe_beat, "isolation_flag", None) == "_liveness_disabled"
+
+
+def test_an_unrecordable_test_report_never_disables_the_finish_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A report the plugin cannot record -- here one with no node id at
+    all -- warns once and costs that report alone: later reports are still
+    recorded, and the finish-write still goes out with them.
+    """
+    from pytest_vantage.recorder import Recorder
+
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send", lambda address, report, *, timeout: sent.append(report)
+    )
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+
+    class _ConfigDouble:
+        rootpath = "unused"
+
+    class _Report:
+        def __init__(self, when: str, outcome: str = "passed") -> None:
+            self.nodeid = "test_sample.py::test_it"
+            self.when = when
+            self.outcome = outcome
+            self.duration = 0.0
+
+    recorder = Recorder(
+        _ConfigDouble(),  # type: ignore[arg-type]
+        "http://127.0.0.1:1",
+        1.0,
+        lifecycle_available=True,
+    )
+
+    with pytest.warns(VantageWarning, match="error while recording a test report") as warned:
+        recorder.pytest_runtest_logreport(object())  # type: ignore[arg-type]
+        recorder.pytest_runtest_logreport(object())  # type: ignore[arg-type]
+    for when in ("setup", "call", "teardown"):
+        recorder.pytest_runtest_logreport(_Report(when))  # type: ignore[arg-type]
+    recorder.pytest_sessionfinish(exitstatus=0)
+
+    assert len(warned) == 1
+    assert recorder._disabled is False
+    assert len(sent) == 1
+    assert [entry["node_id"] for entry in sent[0]["results"]] == ["test_sample.py::test_it"]  # type: ignore[attr-defined]
