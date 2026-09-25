@@ -396,7 +396,7 @@ async def _read_bounded_body(request: Request) -> bytes:
 
 
 def _without_lone_surrogates(text: str) -> str:
-    return text if text.isascii() else _LONE_SURROGATE.sub("�", text)
+    return text if text.isascii() else _LONE_SURROGATE.sub("\ufffd", text)
 
 
 def _decode_body(body: bytes) -> Any:

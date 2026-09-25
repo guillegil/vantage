@@ -116,7 +116,7 @@ def _parse_json(content: str) -> dict[str, str | None] | None:
     interpreter's digit limit from raising.
     """
     parsed = json.loads(
-        content.removeprefix("﻿"), parse_int=str, parse_float=str, parse_constant=str
+        content.removeprefix("\ufeff"), parse_int=str, parse_float=str, parse_constant=str
     )
     if not isinstance(parsed, dict):
         return None

@@ -320,10 +320,10 @@ def test_yaml_quoted_merge_key_is_an_ordinary_key() -> None:
 def test_a_leading_byte_order_mark_is_ignored(content_type: str) -> None:
     """Editors on Windows save UTF-8 with a BOM, and the plugin ships the
     decoded text as it is. YAML skips it; JSON must too."""
-    result = parse('﻿{"firmware_version": "2.1"}', content_type, ["firmware_version"])
+    result = parse('\ufeff{"firmware_version": "2.1"}', content_type, ["firmware_version"])
 
     assert result == {"firmware_version": KeyResult(status="captured", value="2.1")}
 
 
 def test_a_byte_order_mark_after_the_start_is_still_malformed() -> None:
-    assert parse(' ﻿{"firmware_version": "2.1"}', "json", ["firmware_version"]) is None
+    assert parse(' \ufeff{"firmware_version": "2.1"}', "json", ["firmware_version"]) is None

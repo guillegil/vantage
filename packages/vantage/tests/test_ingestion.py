@@ -471,7 +471,7 @@ def test_integers_at_the_signed_64_bit_bounds_are_stored(
 # file names, and `json.dumps` escapes the resulting lone surrogate into valid
 # JSON, so a real plugin sends these.
 _LONE = "caf\udce9"
-_REPLACED = "caf�"
+_REPLACED = "caf\ufffd"
 _NODE_ID = f"tests/{_LONE}/test_a.py::test_one"
 
 
