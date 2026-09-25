@@ -27,7 +27,7 @@ import pytest
 from pytest_vantage import vcs
 from pytest_vantage.boundary import VantageWarning, _warn, fault_isolated, liveness_isolated
 from pytest_vantage.plugin import _preflight_reachable
-from pytest_vantage.transport import fetch_capabilities, send
+from pytest_vantage.transport import Capabilities, fetch_capabilities, send
 from vantage_test_server import VantageTestServer, vantage_server  # noqa: F401 -- fixture
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
@@ -1018,50 +1018,73 @@ def _respond_capability_404(conn: socket.socket) -> None:
     )
 
 
-_FAIL_CLOSED_CASES: list[tuple[str, Callable[[socket.socket], None]]] = [
-    ("malformed-json", _respond_capability_with(b"{not-json")),
-    ("wrong-json-type", _respond_capability_with(b'["session_lifecycle", true]')),
-    ("explicit-false", _respond_capability_with(b'{"session_lifecycle": false}')),
-    ("empty-body", _respond_capability_with(b"")),
-    ("http-500", _respond_with_bare_500),
-    ("hangs-past-liveness-timeout", _accept_and_hang),
-    ("drips-past-liveness-timeout", _drip_response(interval=0.1, byte_count=40)),
+_NOT_ADVERTISED = "does not advertise the session lifecycle"
+_PROBE_FAILED = "the capability probe to"
+
+# Each case is a way a naive capability check could quietly fail open, with
+# the diagnosis it must produce: a negative answer from the server, or a
+# probe that got no usable answer at all.
+_FAIL_CLOSED_CASES: list[tuple[str, Callable[[socket.socket], None], str]] = [
+    ("route-missing", _respond_capability_404, _NOT_ADVERTISED),
+    ("explicit-false", _respond_capability_with(b'{"session_lifecycle": false}'), _NOT_ADVERTISED),
+    ("key-missing", _respond_capability_with(b"{}"), _NOT_ADVERTISED),
+    ("malformed-json", _respond_capability_with(b"{not-json"), _PROBE_FAILED),
+    ("wrong-json-type", _respond_capability_with(b'["session_lifecycle", true]'), _PROBE_FAILED),
+    ("empty-body", _respond_capability_with(b""), _PROBE_FAILED),
+    ("http-500", _respond_with_bare_500, _PROBE_FAILED),
+    ("hangs-past-liveness-timeout", _accept_and_hang, _PROBE_FAILED),
+    ("drips-past-liveness-timeout", _drip_response(interval=0.1, byte_count=40), _PROBE_FAILED),
 ]
 
 
 @pytest.mark.parametrize(
-    ("case_id", "handle_connection"),
+    ("case_id", "handle_connection", "diagnosis"),
     _FAIL_CLOSED_CASES,
     ids=[case[0] for case in _FAIL_CLOSED_CASES],
 )
 def test_fetch_capabilities_fails_closed_on_every_non_positive_answer(
-    case_id: str, handle_connection: Callable[[socket.socket], None]
+    case_id: str, handle_connection: Callable[[socket.socket], None], diagnosis: str
 ) -> None:
     """Only an explicit `{"session_lifecycle": true}` may enable the
-    lifecycle. Each case is a way a naive capability check could quietly
-    fail open -- a malformed body, JSON of the wrong shape, an explicit
-    `false`, an empty response, a `500`, and a connection that hangs past
-    the timeout -- and every one must answer `False`, never raise.
+    lifecycle; every other answer turns it off without raising. The reason
+    tells a server that said no apart from a probe that failed -- telling
+    the user to upgrade a server that is merely unreachable or misaddressed
+    sends them the wrong way -- and names the probed URL.
     """
-
     with _StubServer(handle_connection) as server:
-        assert fetch_capabilities(server.address, timeout=0.3) is False
+        capabilities = fetch_capabilities(server.address, timeout=0.3)
+
+    assert not capabilities
+    assert capabilities.problem is not None
+    assert diagnosis in capabilities.problem
+    assert f"{server.address}/api/v1/capabilities" in capabilities.problem
 
 
 def test_fetch_capabilities_returns_true_for_the_one_explicit_positive_answer() -> None:
     """The fail-closed cases above prove every negative answer degrades;
     this proves the positive answer is not also accidentally degraded."""
-
     with _StubServer(_respond_capability_with(b'{"session_lifecycle": true}')) as server:
-        assert fetch_capabilities(server.address, timeout=1.0) is True
+        assert fetch_capabilities(server.address, timeout=1.0) == Capabilities(True)
 
 
-def test_fetch_capabilities_returns_false_when_the_route_is_missing() -> None:
-    """An older server's `404` degrades exactly like every fail-closed case
-    above."""
+def test_an_address_with_a_path_is_not_diagnosed_as_an_older_server(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,  # noqa: F811 -- fixture param shadows the import by name, on purpose
+) -> None:
+    """`/api/v1` on the address doubles into the probed path, so a current
+    server answers `404`. The warning names the path actually probed rather
+    than telling the user to upgrade the server.
+    """
+    pytester.makepyfile(test_sample=_PASSING_TEST)
 
-    with _StubServer(_respond_capability_404) as server:
-        assert fetch_capabilities(server.address, timeout=1.0) is False
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}/api/v1"
+    )
+
+    result.assert_outcomes(passed=1)
+    output = _combined_output(result)
+    assert "predates" not in output
+    assert f"GET {vantage_server.address}/api/v1/api/v1/capabilities answered 404" in output
 
 
 def _capturing_handler(
@@ -1138,7 +1161,10 @@ def test_capability_probe_404_warns_once_and_still_records_the_result(
         assert result.ret == 0
         output = _combined_output(result)
         assert output.count("VantageWarning:") == 1
-        assert f"{server.address} predates the session lifecycle" in output
+        assert (
+            f"{server.address} does not advertise the session lifecycle "
+            f"(GET {server.address}/api/v1/capabilities answered 404)"
+        ) in output
 
     payload = json.loads(requests_seen[2][1])
     assert len(payload["results"]) == 1
@@ -1215,7 +1241,7 @@ def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
         lifecycle_available=False,
     )
 
-    with pytest.warns(VantageWarning, match="predates the session lifecycle"):
+    with pytest.warns(VantageWarning, match="does not advertise the session lifecycle"):
         recorder.pytest_sessionstart()
     recorder._maybe_beat()
 

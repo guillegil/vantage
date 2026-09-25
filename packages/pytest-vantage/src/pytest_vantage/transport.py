@@ -31,7 +31,9 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import TypeVar
+from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 _INGESTION_PATH = "/api/v1/runs"
@@ -161,31 +163,70 @@ def send_heartbeat(address: str, run_id: str, *, timeout: float) -> None:
     _exchange(http_request, timeout)
 
 
-def fetch_capabilities(address: str, *, timeout: float) -> bool:
-    """GET ``{address}/api/v1/capabilities`` and answer whether the server
+@dataclass(frozen=True)
+class Capabilities:
+    """What the capability probe learned.
+
+    Truthy exactly when the server advertises the session lifecycle.
+    Otherwise ``problem`` says why not, because the user's next step
+    differs: a server that answered no needs upgrading, while a probe that
+    got no usable answer points at the address, the network or the server's
+    health.
+    """
+
+    session_lifecycle: bool
+    problem: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.session_lifecycle
+
+
+def fetch_capabilities(address: str, *, timeout: float) -> Capabilities:
+    """GET ``{address}/api/v1/capabilities`` and report whether the server
     advertises the ``session_lifecycle`` capability.
 
-    Returns ``True`` for exactly one shape: a 2xx response whose JSON body
-    is a mapping carrying ``"session_lifecycle": true``. Every other outcome
-    is ``False`` -- the `404` from an older server that has no such route, a
-    connection failure, a timeout, any other non-2xx status (a 3xx
-    included), a body that is not valid JSON, or JSON of the wrong shape
-    (not a mapping, or ``session_lifecycle`` missing or anything but the
-    JSON boolean ``true``).
+    The lifecycle is on for exactly one shape: a 2xx response whose JSON
+    body is a mapping carrying ``"session_lifecycle": true``. Everything
+    else turns it off, with a ``problem`` that tells two cases apart:
+
+    - a negative answer: the ``404`` of a server without the route, or a
+      mapping whose ``session_lifecycle`` is missing or anything but the
+      JSON boolean ``true``;
+    - a failed probe: no connection, a timeout, any other non-2xx status
+      (a 3xx included), a body that is not JSON, or JSON that is not a
+      mapping.
+
+    Both name the probed URL, so an address carrying a path, which doubles
+    into ``.../api/v1/api/v1/capabilities``, is visible in the warning.
 
     Unlike `send` and `send_heartbeat`, this never raises: it fails closed
     itself, so no overlooked exception path in a caller can accidentally
     turn the lifecycle on.
     """
     url = address.rstrip("/") + _CAPABILITIES_PATH
+    not_advertised = f"{address} does not advertise the session lifecycle (GET {url}"
     try:
         http_request = urllib_request.Request(url, method="GET")  # noqa: S310
         payload = json.loads(_exchange(http_request, timeout))
-    except Exception:
-        return False
+    except urllib_error.HTTPError as exc:
+        if exc.code == 404:
+            return Capabilities(False, f"{not_advertised} answered 404)")
+        return Capabilities(False, f"the capability probe to {url} failed ({exc})")
+    except Exception as exc:
+        return Capabilities(False, f"the capability probe to {url} failed ({exc})")
     if not isinstance(payload, dict):
-        return False
-    return payload.get("session_lifecycle") is True
+        return Capabilities(
+            False, f"the capability probe to {url} failed (the answer is not a JSON object)"
+        )
+    if payload.get("session_lifecycle") is not True:
+        return Capabilities(False, f"{not_advertised} answered without it)")
+    return Capabilities(True)
 
 
-__all__ = ["MAX_RESPONSE_BYTES", "fetch_capabilities", "send", "send_heartbeat"]
+__all__ = [
+    "MAX_RESPONSE_BYTES",
+    "Capabilities",
+    "fetch_capabilities",
+    "send",
+    "send_heartbeat",
+]

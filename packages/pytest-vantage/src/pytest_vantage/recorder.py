@@ -36,7 +36,7 @@ from pytest_vantage.boundary import _warn, fault_isolated, liveness_isolated
 from pytest_vantage.budget import spend_failure_text_budget
 from pytest_vantage.capture import _Pending, accumulate, assemble_results
 from pytest_vantage.config import resolve_liveness_timeout
-from pytest_vantage.transport import send, send_heartbeat
+from pytest_vantage.transport import Capabilities, send, send_heartbeat
 
 # Used only if something escapes `vcs.capture`, which handles its own failures
 # and never raises. Same wording `vcs.py` uses when it cannot read the
@@ -103,7 +103,8 @@ class Recorder:
     - `_lifecycle_available` is what the plugin's capability probe found.
       When `False`, the server cannot accept a start-write or heartbeat, so
       neither is sent; `pytest_sessionfinish` records exactly as it would
-      otherwise.
+      otherwise. `_lifecycle_problem` is the probe's reason, for the one
+      warning that says so.
     - `_vcs` and `_metadata` are captured once here and never re-read, so
       both reports describe the same repository state and the same metadata.
       Each capture warns at most once and never raises, which is what makes
@@ -120,14 +121,20 @@ class Recorder:
         address: str,
         timeout: float,
         *,
-        lifecycle_available: bool = False,
+        lifecycle_available: bool | Capabilities = False,
         metadata_requested: bool = False,
     ) -> None:
         self._config = config
         self._address = address
         self._timeout = timeout
         self._liveness_timeout = resolve_liveness_timeout(timeout)
-        self._lifecycle_available = lifecycle_available
+        # The probe's `Capabilities` carries why the lifecycle is off; a plain
+        # bool, from a caller with no probe, reads as a negative answer.
+        self._lifecycle_available = bool(lifecycle_available)
+        problem = (
+            lifecycle_available.problem if isinstance(lifecycle_available, Capabilities) else None
+        )
+        self._lifecycle_problem = problem or f"{address} does not advertise the session lifecycle"
         self._run_id = uuid.uuid4().hex
         self._started_at = datetime.now(timezone.utc)
         self._disabled = False
@@ -178,14 +185,14 @@ class Recorder:
         test runs: `finished_at: null`, `exit_status: null`, no `results`.
 
         When `_lifecycle_available` is `False`, sends nothing: warns once,
-        naming the address, and latches `_liveness_disabled` directly so every
-        later `_maybe_beat` is a silent no-op without a second warning.
+        with the probe's reason, and latches `_liveness_disabled` directly so
+        every later `_maybe_beat` is a silent no-op without a second warning.
         """
         if not self._lifecycle_available:
             self._liveness_disabled = True
             _warn(
                 self._config,
-                f"vantage: {self._address} predates the session lifecycle, "
+                f"vantage: {self._lifecycle_problem}, "
                 "this session's start and heartbeats will not be recorded",
             )
             return
