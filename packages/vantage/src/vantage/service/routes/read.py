@@ -69,6 +69,10 @@ router = APIRouter()
 
 _IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
 
+# SQLite binds an integer as signed 64-bit and raises past it, so a larger
+# offset is refused here as a shaped 422 rather than failing in the query.
+_MAX_OFFSET = 2**63 - 1
+
 # Read once at import time -- the bytes never change while the process runs.
 # Loaded from inside the installed distribution through the
 # `openapi/__init__.py` anchor, never from `docs/`, so it works from a wheel.
@@ -231,7 +235,7 @@ def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
 async def list_runs(
     request: Request,
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
     metadata_key: str | None = Query(default=None),
     metadata_value: str | None = Query(default=None),
 ) -> RunListResponse:
@@ -286,7 +290,7 @@ async def list_results(
     request: Request,
     run_id: str = Path(pattern=_IDENTITY_PATTERN),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
 ) -> ResultsResponse:
     """`GET /api/v1/runs/{run_id}/results`. An unknown
     `run_id` is `404`, consistent with `get_run_detail` -- checked via the
@@ -323,7 +327,7 @@ async def list_history(
     request: Request,
     node_id: str = Query(...),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
-    offset: int = Query(default=0, ge=0),
+    offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
 ) -> HistoryResponse:
     """`GET /api/v1/tests/history?node_id=...` -- see the module docstring
     for why `node_id` is a query value, not a path segment. An unknown

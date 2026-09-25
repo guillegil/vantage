@@ -406,6 +406,42 @@ def test_run_list_clamps_an_over_cap_limit_rather_than_rejecting_it(
     assert body["has_more"] is True
 
 
+@pytest.mark.parametrize(
+    ("path", "params"),
+    [
+        ("/api/v1/runs", {}),
+        ("/api/v1/runs", {"metadata_key": "k", "metadata_value": "v"}),
+        ("/api/v1/runs/{run_id}/results", {}),
+        ("/api/v1/tests/history", {"node_id": "t.py::test_x"}),
+    ],
+    ids=["runs", "runs-filtered", "results", "history"],
+)
+def test_an_offset_beyond_int64_is_422_and_the_int64_maximum_is_an_empty_page(
+    client: TestClient, store: ExecutionStore, path: str, params: dict[str, str]
+) -> None:
+    """SQLite binds an integer as signed 64-bit, so a larger offset would
+    fail inside the query as a bare `500` on one adapter and succeed on the
+    other. It is a shaped `422` on both; the largest bindable offset is a
+    valid, empty page."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(80)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[_result("t.py::test_x")],
+        received_at=now - timedelta(hours=1),
+    )
+    url = path.format(run_id=run_id)
+
+    beyond = client.get(url, params={**params, "offset": 2**63})
+    at_max = client.get(url, params={**params, "offset": 2**63 - 1})
+
+    assert beyond.status_code == 422
+    assert beyond.json()["fields"] == ["query.offset"]
+    assert at_max.status_code == 200
+    assert at_max.json()["items"] == []
+    assert at_max.json()["has_more"] is False
+
+
 def test_run_detail_returns_full_untruncated_subject(
     client: TestClient, store: ExecutionStore
 ) -> None:
