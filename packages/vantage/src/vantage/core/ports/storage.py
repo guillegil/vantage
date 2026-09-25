@@ -4,12 +4,17 @@ and the types it reads and writes."""
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.execution import Execution
-from vantage.core.domain.projection import FailureProjection, VcsProjection
+from vantage.core.domain.projection import (
+    FailureProjection,
+    VcsProjection,
+    project_failure,
+    project_vcs,
+)
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 
 MAX_PAGE_ITEMS = 200
@@ -53,6 +58,18 @@ class RunListEntry:
     last_contact_at: datetime | None
     vcs: VcsProjection | None
 
+    @classmethod
+    def from_execution(
+        cls, execution: Execution, *, last_contact_at: datetime | None
+    ) -> RunListEntry:
+        """The list entry for a stored run, its VCS context moved into the
+        lean projection."""
+        return cls(
+            execution=replace(execution, vcs=None),
+            last_contact_at=last_contact_at,
+            vcs=project_vcs(execution.vcs),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class RunDetail:
@@ -80,6 +97,26 @@ class HistoryEntry:
     duration: float | None
     vcs: VcsProjection | None
 
+    @classmethod
+    def from_execution(
+        cls,
+        execution: Execution,
+        *,
+        last_contact_at: datetime | None,
+        outcome: str,
+        duration: float | None,
+    ) -> HistoryEntry:
+        """The history entry for one test's result in a stored run."""
+        return cls(
+            run_id=execution.identity.value,
+            started_at=execution.started_at,
+            finished_at=execution.finished_at,
+            last_contact_at=last_contact_at,
+            outcome=outcome,
+            duration=duration,
+            vcs=project_vcs(execution.vcs),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ResultListEntry:
@@ -103,6 +140,26 @@ class ResultListEntry:
     teardown_duration: float | None
     worker_id: str | None
     failure: FailureProjection | None
+
+    @classmethod
+    def from_result(cls, result: Result) -> ResultListEntry:
+        """The list entry for a stored result: everything but the heavy
+        evidence, with the failure evidence projected."""
+        return cls(
+            identity=result.identity,
+            outcome=result.outcome,
+            duration=result.duration,
+            started_at=result.started_at,
+            finished_at=result.finished_at,
+            setup_outcome=result.setup_outcome,
+            call_outcome=result.call_outcome,
+            teardown_outcome=result.teardown_outcome,
+            setup_duration=result.setup_duration,
+            call_duration=result.call_duration,
+            teardown_duration=result.teardown_duration,
+            worker_id=result.worker_id,
+            failure=project_failure(result.failure),
+        )
 
 
 @dataclass(frozen=True, slots=True)

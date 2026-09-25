@@ -41,6 +41,19 @@ class VcsContext:
     dirty: bool | None
     root: str | None
 
+    def is_empty(self) -> bool:
+        """True when no value is known: the context of a run recorded
+        outside a repository, which every layer stores and returns as
+        `None` rather than as this object. The truncation flag does not
+        count -- it only describes a subject, and there is none."""
+        return (
+            self.commit is None
+            and self.branch is None
+            and self.commit_subject is None
+            and self.dirty is None
+            and self.root is None
+        )
+
     def merged_over(self, previous: VcsContext | None) -> VcsContext:
         """Per-FIELD coalesce: null -> value only, never value -> null.
 

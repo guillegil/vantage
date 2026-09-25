@@ -152,7 +152,7 @@ def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
     try:
         plan_rows = store._conn.execute(  # noqa: SLF001
             f"EXPLAIN QUERY PLAN {_LIST_RUNS_BY_METADATA}",
-            (200, 200, "firmware_version", "2.1", 21, 0),
+            (121, "firmware_version", "2.1", 21, 0),
         ).fetchall()
         plan_text = "\n".join(str(row[-1]) for row in plan_rows)
 

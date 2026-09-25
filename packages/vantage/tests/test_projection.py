@@ -135,3 +135,77 @@ def test_failure_projection_excludes_the_heavy_fields_structurally() -> None:
 def test_project_failure_of_none_is_none() -> None:
     """A result with no failure evidence projects to no failure projection."""
     assert project_failure(None) is None
+
+
+# --- when a projection is None ----------------------------------------------
+
+
+def test_an_empty_vcs_context_projects_to_none() -> None:
+    """Every value field null is a run outside a repository, whatever the
+    truncation flag says -- the flag only describes a subject."""
+    empty = VcsContext(
+        commit=None,
+        branch=None,
+        commit_subject=None,
+        commit_subject_truncated=True,
+        dirty=None,
+        root=None,
+    )
+
+    assert empty.is_empty()
+    assert project_vcs(empty) is None
+
+
+def test_a_vcs_context_known_only_by_its_root_projects_to_an_empty_projection() -> None:
+    """`root` is not projected, but it is what says the run was inside a
+    repository, so the projection exists with every field null."""
+    root_only = VcsContext(
+        commit=None,
+        branch=None,
+        commit_subject=None,
+        commit_subject_truncated=False,
+        dirty=None,
+        root="/repo",
+    )
+
+    assert not root_only.is_empty()
+    assert project_vcs(root_only) == VcsProjection(
+        commit=None, branch=None, commit_subject=None, commit_subject_truncated=False, dirty=None
+    )
+
+
+def test_empty_failure_evidence_projects_to_none() -> None:
+    empty = _failure(
+        failure_type=None,
+        failure_message=None,
+        failure_path=None,
+        failure_lineno=None,
+        failure_repr=None,
+        traceback=None,
+    )
+
+    assert empty.is_empty()
+    assert project_failure(empty) is None
+
+
+def test_evidence_outside_the_lean_fields_projects_to_an_empty_projection() -> None:
+    """A traceback alone is evidence, so the list entry has a failure object
+    -- empty, but present -- and a client knows the detail has more."""
+    traceback_only = _failure(
+        failure_type=None,
+        failure_message=None,
+        failure_path=None,
+        failure_lineno=None,
+        failure_repr=None,
+    )
+
+    assert not traceback_only.is_empty()
+    assert project_failure(traceback_only) == FailureProjection(
+        failure_type=None,
+        failure_message=None,
+        failure_message_truncated=False,
+        failure_path=None,
+        failure_lineno=None,
+        skip_reason=None,
+        xfail_reason=None,
+    )

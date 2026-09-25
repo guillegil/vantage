@@ -1,5 +1,11 @@
 """List-display projections of `VcsContext` and `FailureEvidence`.
 
+`project_vcs` and `project_failure` are the one statement of the list rule
+both storage adapters apply: a list entry carries a projection exactly when
+the full record carries the value it projects, bounded to the display width.
+An adapter that bounds text in SQL still hands the bounded value to these
+functions rather than restating the rule.
+
 `VcsProjection` has no `root` field. That exclusion is structural, not a
 runtime check: a list or history response built from this type has nothing
 to leak, because the type never carries `vcs_root` in the first place --
@@ -45,15 +51,17 @@ class VcsProjection:
 
 
 def project_vcs(vcs: VcsContext | None) -> VcsProjection | None:
-    """Reference implementation of the rule the SQLite adapter states in SQL.
+    """The list projection of a run's VCS context.
 
-    Returns `None` for `None` -- a non-repository execution has a null VCS
-    context, not an omitted list entry. The all-null normalisation is
-    inherited from wherever the caller's `VcsContext` came from
-    (`_row_to_vcs_context`, for the SQLite adapter); this function restates
-    none of it.
+    `None` exactly when the context is `None` or empty -- a non-repository
+    run lists with a null VCS context, not an omitted entry. A context known
+    only by its `root` still projects, with every field null: the run was
+    inside a repository, as its detail says.
+
+    `commit_subject` only needs its first `LIST_COMMIT_SUBJECT_CHARS + 1`
+    characters: one past the display width is enough to know it was longer.
     """
-    if vcs is None:
+    if vcs is None or vcs.is_empty():
         return None
 
     subject = vcs.commit_subject
@@ -91,13 +99,17 @@ class FailureProjection:
 
 
 def project_failure(failure: FailureEvidence | None) -> FailureProjection | None:
-    """Reference implementation of the rule the SQLite adapter states in SQL,
-    mirroring `project_vcs`'s shape exactly.
+    """The list projection of a result's failure evidence, by the same rule
+    as `project_vcs`.
 
-    Returns `None` for `None` -- a result with no failure evidence projects
-    to no failure projection, never an empty one.
+    `None` exactly when the evidence is `None` or empty. Evidence whose only
+    content lies outside the lean fields -- a traceback alone -- projects
+    with every field null, so the list still shows that the detail has
+    evidence. Only the emptiness of `failure_repr` and `traceback` matters
+    here, and `failure_message` only needs its first
+    `LIST_FAILURE_MESSAGE_CHARS + 1` characters.
     """
-    if failure is None:
+    if failure is None or failure.is_empty():
         return None
 
     message = failure.failure_message

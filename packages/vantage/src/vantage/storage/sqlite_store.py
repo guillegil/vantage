@@ -52,8 +52,6 @@ from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
-    FailureProjection,
-    VcsProjection,
 )
 from vantage.core.domain.result import (
     CapturedOutput,
@@ -136,22 +134,22 @@ _EXECUTION_COLUMNS = """
     run.vcs_commit_subject_truncated, run.vcs_dirty, run.vcs_root
 """
 
-# `_EXECUTION_COLUMNS` for a list: the commit subject is bounded to
-# `LIST_COMMIT_SUBJECT_CHARS` in SQL, so a 64 KiB subject is never loaded
-# only to be sliced. `vcs_root` feeds only the all-null check; it never
-# reaches `VcsProjection`. The `COALESCE` matters: `length(NULL) > ?` is
-# NULL, and a null subject must yield a `0` flag, not NULL. Binds the
-# display width twice.
+# `_EXECUTION_COLUMNS` for a list: only a prefix of the commit subject is
+# loaded, so a 64 KiB subject is never read only to be sliced. The row still
+# decodes as an `Execution`, and `project_vcs` applies the list rule to it.
+# Binds `_LIST_SUBJECT_PREFIX`.
 _LIST_EXECUTION_COLUMNS = """
     run.id, run.started_at, run.finished_at, run.exit_status, run.interrupted,
     run.interrupt_reason,
-    run.vcs_commit, run.vcs_branch,
-    substr(run.vcs_commit_subject, 1, ?),
-    CASE WHEN run.vcs_commit_subject_truncated = 1
-           OR COALESCE(length(run.vcs_commit_subject) > ?, 0) = 1
-         THEN 1 ELSE 0 END,
-    run.vcs_dirty, run.vcs_root
+    run.vcs_commit, run.vcs_branch, substr(run.vcs_commit_subject, 1, ?),
+    run.vcs_commit_subject_truncated, run.vcs_dirty, run.vcs_root
 """
+
+# How much of a bounded list column to load: one character past the display
+# width, which is what `project_vcs` and `project_failure` need to tell a
+# longer value from one that fits.
+_LIST_SUBJECT_PREFIX = LIST_COMMIT_SUBJECT_CHARS + 1
+_LIST_MESSAGE_PREFIX = LIST_FAILURE_MESSAGE_CHARS + 1
 
 # `get_execution` and `get_run_detail` share one statement; `last_contact_at`
 # comes last so the first twelve values decode as an `Execution`.
@@ -294,17 +292,20 @@ _SELECT_RESULTS_FOR_RUN = f"{_SELECT_FULL_RESULT} WHERE r.run_id = ? ORDER BY r.
 _SELECT_RESULT = f"{_SELECT_FULL_RESULT} WHERE r.run_id = ? AND r.node_id = ?"
 
 # `list_results`' SELECT -- the paginated, lean sibling of
-# `_SELECT_RESULTS_FOR_RUN`. `failure_message` is bounded in SQL the way
-# `_LIST_EXECUTION_COLUMNS` bounds the commit subject, and no `failure_repr`,
-# `traceback` or captured-output column is selected at all.
+# `_SELECT_RESULTS_FOR_RUN`, in `_FAILURE_COLUMNS`' shape so the row decodes
+# as a `Result` for `project_failure`. `failure_message` is a prefix, as in
+# `_LIST_EXECUTION_COLUMNS`. `failure_repr` and `traceback` are never loaded:
+# `substr(x, 1, 0)` is '' for a stored value and NULL for none, which is all
+# the emptiness rule needs of them. No captured-output column is selected.
+# Binds `_LIST_MESSAGE_PREFIX`.
 _LIST_RESULTS = f"""
     SELECT {_RESULT_COLUMNS},
-           r.failure_type,
-           substr(r.failure_message, 1, ?),
-           CASE WHEN r.failure_message_truncated = 1
-                  OR COALESCE(length(r.failure_message) > ?, 0) = 1
-                THEN 1 ELSE 0 END,
-           r.failure_path, r.failure_lineno, r.skip_reason, r.xfail_reason
+           r.failure_type, substr(r.failure_message, 1, ?), r.failure_message_truncated,
+           r.failure_path, r.failure_lineno,
+           substr(r.failure_repr, 1, 0), r.failure_repr_truncated,
+           substr(r.traceback, 1, 0), r.traceback_truncated,
+           r.skip_reason, r.skip_reason_truncated,
+           r.xfail_reason, r.xfail_reason_truncated
     FROM result r
     JOIN test_case tc ON tc.id = r.test_case_id
     WHERE r.run_id = ?
@@ -315,7 +316,7 @@ _LIST_RESULTS = f"""
 # `list_history`' SELECT: `node_id` resolves through the unique
 # `idx_test_case_node_id` to one `test_case.id`, then
 # `idx_result_test_case_id` finds that test's results, then `run` is read by
-# primary key. Same execution projection and total order as `_LIST_RUNS`.
+# primary key. Same execution columns and total order as `_LIST_RUNS`.
 _LIST_HISTORY = f"""
     SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration
     FROM test_case tc
@@ -417,19 +418,10 @@ def _decode_identity(row: Sequence[object]) -> CaseIdentity:
 
 
 def _decode_vcs(row: Sequence[object]) -> VcsContext | None:
-    """`None` when all five value columns are null -- the truncation flag is
-    ignored, as in the service's `_to_vcs_context` -- so a run recorded
-    outside a repository never reads back as a `VcsContext` full of nulls."""
+    """The six `vcs_*` columns; `None` for a run recorded outside a
+    repository, by `VcsContext.is_empty`."""
     commit, branch, commit_subject, commit_subject_truncated, dirty, root = row
-    if (
-        commit is None
-        and branch is None
-        and commit_subject is None
-        and dirty is None
-        and root is None
-    ):
-        return None
-    return VcsContext(
+    vcs = VcsContext(
         commit=cast("str | None", commit),
         branch=cast("str | None", branch),
         commit_subject=cast("str | None", commit_subject),
@@ -437,10 +429,11 @@ def _decode_vcs(row: Sequence[object]) -> VcsContext | None:
         dirty=None if dirty is None else bool(dirty),
         root=cast("str | None", root),
     )
+    return None if vcs.is_empty() else vcs
 
 
 def _decode_execution(row: Sequence[object]) -> Execution:
-    """The twelve `_EXECUTION_COLUMNS`."""
+    """The twelve `_EXECUTION_COLUMNS` or `_LIST_EXECUTION_COLUMNS`."""
     identity_value, started_at, finished_at, exit_status, interrupted, interrupt_reason = row[:6]
     return Execution(
         identity=Identity(cast(str, identity_value)),
@@ -453,59 +446,25 @@ def _decode_execution(row: Sequence[object]) -> Execution:
     )
 
 
-def _decode_vcs_projection(row: Sequence[object]) -> VcsProjection | None:
-    """The same all-null rule as `_decode_vcs`, over the six list columns of
-    `_LIST_EXECUTION_COLUMNS`. `root` takes part in the check although
-    `VcsProjection` has no `root` field, so a run whose only known field is
-    `root` is not misread as having no VCS data."""
-    commit, branch, commit_subject, commit_subject_truncated, dirty, root = row
-    if (
-        commit is None
-        and branch is None
-        and commit_subject is None
-        and dirty is None
-        and root is None
-    ):
-        return None
-    return VcsProjection(
-        commit=cast("str | None", commit),
-        branch=cast("str | None", branch),
-        commit_subject=cast("str | None", commit_subject),
-        commit_subject_truncated=bool(commit_subject_truncated),
-        dirty=None if dirty is None else bool(dirty),
+def _row_to_run_list_entry(row: tuple[object, ...]) -> RunListEntry:
+    return RunListEntry.from_execution(
+        _decode_execution(row[:12]), last_contact_at=_opt_datetime(row[12])
     )
 
 
-def _decode_list_execution(row: Sequence[object]) -> tuple[Execution, VcsProjection | None]:
-    """The twelve `_LIST_EXECUTION_COLUMNS`: the execution without its VCS
-    context, and that context's lean projection beside it."""
-    execution = _decode_execution((*row[:6], None, None, None, 0, None, None))
-    return execution, _decode_vcs_projection(row[6:12])
-
-
-def _row_to_run_list_entry(row: tuple[object, ...]) -> RunListEntry:
-    execution, vcs = _decode_list_execution(row[:12])
-    return RunListEntry(execution=execution, last_contact_at=_opt_datetime(row[12]), vcs=vcs)
-
-
 def _row_to_history_entry(row: tuple[object, ...]) -> HistoryEntry:
-    execution, vcs = _decode_list_execution(row[:12])
     last_contact_at, outcome, duration = row[12:]
-    return HistoryEntry(
-        run_id=execution.identity.value,
-        started_at=execution.started_at,
-        finished_at=execution.finished_at,
+    return HistoryEntry.from_execution(
+        _decode_execution(row[:12]),
         last_contact_at=_opt_datetime(last_contact_at),
         outcome=cast(str, outcome),
         duration=cast("float | None", duration),
-        vcs=vcs,
     )
 
 
 def _decode_failure(row: Sequence[object]) -> FailureEvidence | None:
-    """`None` when all thirteen failure columns are null or false, so a
-    result without failure evidence never reads back as a `FailureEvidence`
-    full of nulls."""
+    """The thirteen `_FAILURE_COLUMNS`; `None` for a result without
+    evidence, by `FailureEvidence.is_empty`."""
     (
         failure_type,
         failure_message,
@@ -521,23 +480,7 @@ def _decode_failure(row: Sequence[object]) -> FailureEvidence | None:
         xfail_reason,
         xfail_reason_truncated,
     ) = row
-    if (
-        failure_type is None
-        and failure_message is None
-        and not failure_message_truncated
-        and failure_path is None
-        and failure_lineno is None
-        and failure_repr is None
-        and not failure_repr_truncated
-        and traceback is None
-        and not traceback_truncated
-        and skip_reason is None
-        and not skip_reason_truncated
-        and xfail_reason is None
-        and not xfail_reason_truncated
-    ):
-        return None
-    return FailureEvidence(
+    failure = FailureEvidence(
         failure_type=cast("str | None", failure_type),
         failure_message=cast("str | None", failure_message),
         failure_message_truncated=bool(failure_message_truncated),
@@ -552,6 +495,7 @@ def _decode_failure(row: Sequence[object]) -> FailureEvidence | None:
         xfail_reason=cast("str | None", xfail_reason),
         xfail_reason_truncated=bool(xfail_reason_truncated),
     )
+    return None if failure.is_empty() else failure
 
 
 def _decode_captured(row: Sequence[object]) -> CapturedOutput:
@@ -563,39 +507,6 @@ def _decode_captured(row: Sequence[object]) -> CapturedOutput:
         stdout_truncated=bool(stdout_truncated),
         stderr=cast("str | None", stderr),
         stderr_truncated=bool(stderr_truncated),
-    )
-
-
-def _decode_failure_projection(row: Sequence[object]) -> FailureProjection | None:
-    """The same all-null-or-false rule as `_decode_failure`, over only the
-    seven lean columns `_LIST_RESULTS` selects."""
-    (
-        failure_type,
-        failure_message,
-        failure_message_truncated,
-        failure_path,
-        failure_lineno,
-        skip_reason,
-        xfail_reason,
-    ) = row
-    if (
-        failure_type is None
-        and failure_message is None
-        and not failure_message_truncated
-        and failure_path is None
-        and failure_lineno is None
-        and skip_reason is None
-        and xfail_reason is None
-    ):
-        return None
-    return FailureProjection(
-        failure_type=cast("str | None", failure_type),
-        failure_message=cast("str | None", failure_message),
-        failure_message_truncated=bool(failure_message_truncated),
-        failure_path=cast("str | None", failure_path),
-        failure_lineno=cast("int | None", failure_lineno),
-        skip_reason=cast("str | None", skip_reason),
-        xfail_reason=cast("str | None", xfail_reason),
     )
 
 
@@ -642,22 +553,7 @@ def _row_to_result(row: tuple[object, ...]) -> Result:
 
 def _row_to_result_list_entry(row: tuple[object, ...]) -> ResultListEntry:
     """A `_LIST_RESULTS` row."""
-    result = _decode_result(row[:16], failure=None)
-    return ResultListEntry(
-        identity=result.identity,
-        outcome=result.outcome,
-        duration=result.duration,
-        started_at=result.started_at,
-        finished_at=result.finished_at,
-        setup_outcome=result.setup_outcome,
-        call_outcome=result.call_outcome,
-        teardown_outcome=result.teardown_outcome,
-        setup_duration=result.setup_duration,
-        call_duration=result.call_duration,
-        teardown_duration=result.teardown_duration,
-        worker_id=result.worker_id,
-        failure=_decode_failure_projection(row[16:23]),
-    )
+    return ResultListEntry.from_result(_decode_result(row[:16], _decode_failure(row[16:29])))
 
 
 def _row_to_catalogue_entry(row: tuple[object, ...]) -> CatalogueEntry:
@@ -949,14 +845,13 @@ class SqliteExecutionStore:
         metadata_value: str | None = None,
     ) -> Page[RunListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        width = (LIST_COMMIT_SUBJECT_CHARS, LIST_COMMIT_SUBJECT_CHARS)
         if metadata_key is not None and metadata_value is not None:
             rows = self._fetchall(
                 _LIST_RUNS_BY_METADATA,
-                (*width, metadata_key, metadata_value, page_limit + 1, offset),
+                (_LIST_SUBJECT_PREFIX, metadata_key, metadata_value, page_limit + 1, offset),
             )
         else:
-            rows = self._fetchall(_LIST_RUNS, (*width, page_limit + 1, offset))
+            rows = self._fetchall(_LIST_RUNS, (_LIST_SUBJECT_PREFIX, page_limit + 1, offset))
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def count_runs_predating_metadata_key(self, key: str) -> int:
@@ -966,10 +861,9 @@ class SqliteExecutionStore:
         self, *, key: str, value: str, limit: int, offset: int
     ) -> tuple[Page[RunListEntry], int]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        width = (LIST_COMMIT_SUBJECT_CHARS, LIST_COMMIT_SUBJECT_CHARS)
         with self._read_snapshot() as conn:
             rows = conn.execute(
-                _LIST_RUNS_BY_METADATA, (*width, key, value, page_limit + 1, offset)
+                _LIST_RUNS_BY_METADATA, (_LIST_SUBJECT_PREFIX, key, value, page_limit + 1, offset)
             ).fetchall()
             (predating,) = conn.execute(_COUNT_RUNS_PREDATING_KEY, (key,)).fetchone()
         return _page(rows, page_limit, _row_to_run_list_entry), int(predating)
@@ -986,13 +880,7 @@ class SqliteExecutionStore:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         rows = self._fetchall(
             _LIST_RESULTS,
-            (
-                LIST_FAILURE_MESSAGE_CHARS,
-                LIST_FAILURE_MESSAGE_CHARS,
-                execution_id,
-                page_limit + 1,
-                offset,
-            ),
+            (_LIST_MESSAGE_PREFIX, execution_id, page_limit + 1, offset),
         )
         return _page(rows, page_limit, _row_to_result_list_entry)
 
@@ -1004,13 +892,7 @@ class SqliteExecutionStore:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         rows = self._fetchall(
             _LIST_HISTORY,
-            (
-                LIST_COMMIT_SUBJECT_CHARS,
-                LIST_COMMIT_SUBJECT_CHARS,
-                node_id,
-                page_limit + 1,
-                offset,
-            ),
+            (_LIST_SUBJECT_PREFIX, node_id, page_limit + 1, offset),
         )
         return _page(rows, page_limit, _row_to_history_entry)
 

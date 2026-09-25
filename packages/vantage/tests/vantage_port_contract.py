@@ -13,7 +13,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
-from vantage.core.domain.projection import LIST_FAILURE_MESSAGE_CHARS, project_failure
+from vantage.core.domain.projection import (
+    LIST_FAILURE_MESSAGE_CHARS,
+    project_failure,
+    project_vcs,
+)
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
@@ -1003,6 +1007,98 @@ class ExecutionStoreContract:
         assert entry.failure is not None
         assert entry.failure.failure_message == long_message[:LIST_FAILURE_MESSAGE_CHARS]
         assert entry.failure.failure_message_truncated is True
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            _failure(
+                failure_type=None, failure_message=None, failure_path=None, failure_lineno=None
+            ),
+            _failure(
+                failure_type=None,
+                failure_message=None,
+                failure_path=None,
+                failure_lineno=None,
+                failure_repr=None,
+                traceback=None,
+                skip_reason_truncated=True,
+            ),
+        ],
+        ids=["repr-and-traceback-only", "dropped-skip-reason-only"],
+    )
+    def test_a_list_entry_carries_failure_data_exactly_when_the_full_record_does(
+        self, store: ExecutionStore, failure: FailureEvidence
+    ) -> None:
+        """Evidence whose only content is outside the lean projection still
+        lists as a failure object, so a client can tell from the list that
+        the detail has something to show."""
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        (entry,) = store.list_results(execution.identity.value, limit=10, offset=0).items
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+
+        assert entry.failure is not None
+        assert entry.failure == project_failure(failure)
+        assert found is not None
+        assert found.failure == failure
+
+    def test_all_null_failure_evidence_reads_back_as_none_everywhere(
+        self, store: ExecutionStore
+    ) -> None:
+        """Evidence with every field null or false is no evidence: every read
+        path returns `failure is None`, however the caller spelled it."""
+        empty = _failure(
+            failure_type=None,
+            failure_message=None,
+            failure_path=None,
+            failure_lineno=None,
+            failure_repr=None,
+            traceback=None,
+        )
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x", failure=empty),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+        (listed,) = store.get_results(execution.identity.value)
+        (entry,) = store.list_results(execution.identity.value, limit=10, offset=0).items
+
+        assert found is not None
+        assert found.failure is None
+        assert listed.failure is None
+        assert entry.failure is None
+
+    def test_a_run_whose_only_vcs_field_is_its_root_lists_with_an_empty_projection(
+        self, store: ExecutionStore
+    ) -> None:
+        """A repository whose every git read but the root failed is still a
+        repository: the list says so with an all-null projection rather than
+        the `None` of a run recorded outside one, as the detail does."""
+        root_only = _vcs(commit=None, branch=None, commit_subject=None, dirty=None)
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        store.record_session(
+            _execution("a" * 32, started=started, vcs=root_only),
+            results=(_result("t.py::test_x"),),
+            received_at=started,
+        )
+
+        (run_entry,) = store.list_runs(limit=10, offset=0).items
+        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+        detail = store.get_run_detail("a" * 32)
+
+        assert detail is not None
+        assert detail.execution.vcs == root_only
+        assert run_entry.vcs == project_vcs(root_only)
+        assert run_entry.vcs is not None
+        assert history_entry.vcs == run_entry.vcs
 
     def test_get_result_returns_the_full_record_hit(self, store: ExecutionStore) -> None:
         """`get_result` returns the whole stored `Result`, `failure` and

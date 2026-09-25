@@ -64,6 +64,27 @@ class FailureEvidence:
     xfail_reason: str | None
     xfail_reason_truncated: bool
 
+    def is_empty(self) -> bool:
+        """True when every field is null or false: no evidence, which every
+        layer stores and returns as `Result.failure is None`. A truncation
+        flag alone counts as evidence -- it records that a field existed and
+        was dropped."""
+        return (
+            self.failure_type is None
+            and self.failure_message is None
+            and not self.failure_message_truncated
+            and self.failure_path is None
+            and self.failure_lineno is None
+            and self.failure_repr is None
+            and not self.failure_repr_truncated
+            and self.traceback is None
+            and not self.traceback_truncated
+            and self.skip_reason is None
+            and not self.skip_reason_truncated
+            and self.xfail_reason is None
+            and not self.xfail_reason_truncated
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class CapturedOutput:

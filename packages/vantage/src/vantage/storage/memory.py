@@ -21,7 +21,6 @@ from dataclasses import replace
 from datetime import datetime
 
 from vantage.core.domain.execution import Execution, VcsContext
-from vantage.core.domain.projection import project_failure, project_vcs
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
@@ -37,22 +36,19 @@ from vantage.core.ports.storage import (
     UserSetting,
 )
 
+# Empty VCS context and empty failure evidence become `None` here, on write,
+# because this adapter stores the objects themselves; the SQLite adapter
+# applies the same `is_empty` rule when it decodes a row.
+
 
 def _normalized_vcs(vcs: VcsContext | None) -> VcsContext | None:
-    """An all-null `VcsContext` becomes `None` -- the rule the SQLite
-    adapter's `_row_to_execution` applies on read, applied here on write
-    because this adapter stores the object itself."""
-    if vcs is None:
-        return None
-    if (
-        vcs.commit is None
-        and vcs.branch is None
-        and vcs.commit_subject is None
-        and vcs.dirty is None
-        and vcs.root is None
-    ):
-        return None
-    return vcs
+    return None if vcs is None or vcs.is_empty() else vcs
+
+
+def _normalized_result(result: Result) -> Result:
+    if result.failure is not None and result.failure.is_empty():
+        return replace(result, failure=None)
+    return result
 
 
 class InMemoryExecutionStore:
@@ -106,7 +102,7 @@ class InMemoryExecutionStore:
             self._upsert_catalogue_entry(execution, result.identity)
             key = (identity, result.identity.node_id)
             if key not in self._results:
-                self._results[key] = result
+                self._results[key] = _normalized_result(result)
 
         # `setdefault` mirrors the SQLite adapter's `INSERT OR IGNORE`: a
         # metadata file/entry is written once and never updated.
@@ -200,10 +196,8 @@ class InMemoryExecutionStore:
         window = ordered[offset : offset + page_limit + 1]
         has_more = len(window) > page_limit
         items = tuple(
-            RunListEntry(
-                execution=replace(execution, vcs=None),
-                last_contact_at=self._last_contact.get(execution.identity.value),
-                vcs=project_vcs(execution.vcs),
+            RunListEntry.from_execution(
+                execution, last_contact_at=self._last_contact.get(execution.identity.value)
             )
             for execution in window[:page_limit]
         )
@@ -247,32 +241,14 @@ class InMemoryExecutionStore:
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         # The paginated, lean sibling of `get_results`, with the same
         # clamp/`has_more` mechanism as `list_runs`. Dict insertion order
-        # mirrors the SQLite adapter's `ORDER BY r.id`, and `project_failure`
-        # is the reference the SQLite adapter's SQL must agree with.
+        # mirrors the SQLite adapter's `ORDER BY r.id`.
         page_limit = min(limit, MAX_PAGE_ITEMS)
         matching = [
             result for (run_id, _node_id), result in self._results.items() if run_id == execution_id
         ]
         window = matching[offset : offset + page_limit + 1]
         has_more = len(window) > page_limit
-        items = tuple(
-            ResultListEntry(
-                identity=result.identity,
-                outcome=result.outcome,
-                duration=result.duration,
-                started_at=result.started_at,
-                finished_at=result.finished_at,
-                setup_outcome=result.setup_outcome,
-                call_outcome=result.call_outcome,
-                teardown_outcome=result.teardown_outcome,
-                setup_duration=result.setup_duration,
-                call_duration=result.call_duration,
-                teardown_duration=result.teardown_duration,
-                worker_id=result.worker_id,
-                failure=project_failure(result.failure),
-            )
-            for result in window[:page_limit]
-        )
+        items = tuple(ResultListEntry.from_result(result) for result in window[:page_limit])
         return Page(items=items, has_more=has_more)
 
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
@@ -296,14 +272,11 @@ class InMemoryExecutionStore:
         window = ordered[offset : offset + page_limit + 1]
         has_more = len(window) > page_limit
         items = tuple(
-            HistoryEntry(
-                run_id=run_id,
-                started_at=self._executions[run_id].started_at,
-                finished_at=self._executions[run_id].finished_at,
+            HistoryEntry.from_execution(
+                self._executions[run_id],
                 last_contact_at=self._last_contact.get(run_id),
                 outcome=result.outcome,
                 duration=result.duration,
-                vcs=project_vcs(self._executions[run_id].vcs),
             )
             for run_id, result in window[:page_limit]
         )
