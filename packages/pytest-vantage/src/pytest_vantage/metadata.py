@@ -30,7 +30,7 @@ import json
 import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PureWindowsPath
 
 import pytest
 
@@ -297,6 +297,18 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
                 config,
                 f"{DECLARATION_FILENAME} declares a path containing a NUL character, "
                 "metadata will not be captured",
+            )
+            return None
+        if "\\" in path or PureWindowsPath(path).drive:
+            # The server cannot tell which platform declared a path, so it
+            # drops any path read differently on Windows: a backslash is a
+            # separator there and a name character here, and `C:` or
+            # `//host/share` names a drive. Refused here, loudly, rather
+            # than recorded and then silently dropped with its keys.
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares the path {path!r} with a backslash or a "
+                "Windows drive, metadata will not be captured",
             )
             return None
         # The server keeps one file entry per path, so a repeat would lose

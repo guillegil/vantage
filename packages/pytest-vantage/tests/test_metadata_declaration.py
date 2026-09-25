@@ -433,6 +433,38 @@ def test_a_path_containing_a_nul_byte_captures_nothing_and_warns_once(
     assert len(_metadata_warnings(recwarn)) == 1
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "config\\app.json",
+        "\\\\server\\share\\app.json",
+        "C:/config/app.json",
+        "C:app.json",
+        "//server/share/app.json",
+    ],
+    ids=["backslash", "unc-backslashes", "drive-absolute", "drive-relative", "unc-slashes"],
+)
+def test_a_windows_shaped_path_captures_nothing_and_warns_naming_it(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, path: str
+) -> None:
+    """The server drops a path that reads differently on Windows, keys and
+    all, so the plugin refuses the declaration instead of sending an entry
+    that would vanish. `C:/config/app.json` would even resolve here, to a
+    directory named `C:`, and be captured for nothing.
+    """
+    root = tmp_path / "project"
+    (root / "C:" / "config").mkdir(parents=True)
+    (root / "C:" / "config" / "app.json").write_text("{}")
+    entry = {"path": path, "format": "json", "keys": ["k"]}
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": [entry]}))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    (warned,) = _metadata_warnings(recwarn)
+    assert repr(path) in str(warned.message)
+
+
 def test_a_key_longer_than_the_bound_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
