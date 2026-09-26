@@ -798,6 +798,33 @@ def test_a_queued_run_the_server_rejects_is_dropped_with_a_warning_naming_it(
     assert {"b" * 32} < {execution.identity.value for execution in vantage_server.executions()}
 
 
+def test_a_queued_run_that_cannot_be_read_back_is_dropped_with_a_warning_naming_it(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer
+) -> None:
+    database = _stand_in(pytester)
+    _queue_directly(database, vantage_server.address, "a" * 32)
+    _queue_directly(database, vantage_server.address, "b" * 32)
+    conn = sqlite3.connect(outbox_path(database))
+    with conn:
+        conn.execute("UPDATE entry SET reports = '[{' WHERE run_id = ?", ("a" * 32,))
+    conn.close()
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", "--vantage-mode=server+backup", f"--vantage-server={vantage_server.address}"
+    )
+
+    assert result.ret == 0
+    output = _output(result)
+    assert output.count("VantageWarning:") == 1, output
+    assert (
+        f"vantage: queued run {'a' * 32} could not be read back from {outbox_path(database)}; "
+        "it was dropped" in output
+    )
+    result.stdout.fnmatch_lines([f"vantage: sent 1 queued run to {vantage_server.address} *"])
+    assert _queued(database) == []
+
+
 def test_runs_queued_for_another_server_are_left_alone(
     pytester: pytest.Pytester, vantage_server: VantageTestServer
 ) -> None:

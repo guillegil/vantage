@@ -219,10 +219,10 @@ report timeout, and prints one line with the test summary:
 when the server is unreachable again, answers a 408 or 429, or the time is
 spent, and says why. A run the server answers with a 5xx stays queued and
 the next is sent; one it refuses with any other 4xx can never succeed, and
-is dropped with a warning naming its run id. Each run is only ever sent to the address it was queued for,
-compared exactly as written, so `http://ci-vantage:8765` and
-`http://ci-vantage:8765/` are two different servers to the queue.
-`vantage push` sends the queue on demand.
+is dropped with a warning naming its run id. Each run is only ever sent to
+the address it was queued for, compared exactly as written, so
+`http://ci-vantage:8765` and `http://ci-vantage:8765/` are two different
+servers to the queue. `vantage push` sends the queue on demand.
 
 Under pytest-xdist only the controller stores or queues a run.
 
@@ -239,6 +239,9 @@ created 0600, in a directory created 0700 if missing.
 - Several sessions, and `vantage push`, may send from it at once. Each run
   is claimed before it is sent, so two senders do not both send it; a run
   sent twice would still be stored once.
+- A run whose reports no longer read back from the file, because the file
+  was damaged, is dropped with a warning naming it rather than left to hold
+  up the runs behind it.
 - Deleting the file drops every queued run; the local database keeps its
   copies.
 

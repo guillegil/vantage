@@ -345,7 +345,8 @@ order as JSON text, when it was queued, attempts and the last error.
   sessions, or a session and `vantage push` -- take different runs, and a
   claim left by a killed sender lapses; one interrupted with Ctrl-C gives
   its run back at once. An acknowledged run is deleted; one refused with a
-  4xx other than 408 or 429 is deleted and named in the summary; a 5xx
+  4xx other than 408 or 429 is deleted and named in the summary, and so is
+  one whose reports no longer decode as a list of objects; a 5xx
   releases it with its attempt counted and moves on, since it may be that
   run's own problem; no answer, a 408 or 429, a redirect or a stranger's
   answer releases it and stops, and so does a spent budget, without counting

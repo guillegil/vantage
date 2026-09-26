@@ -35,6 +35,7 @@ class _SendSummary:
     dropped: tuple[str, ...]
     waiting: int
     stopped: str | None
+    unreadable: tuple[str, ...] = ()
 
 
 @dataclass
@@ -44,6 +45,7 @@ class _Queue:
     entries: dict[str, list[str]] = field(default_factory=dict)
     unreachable: set[str] = field(default_factory=set)
     refused: set[str] = field(default_factory=set)
+    damaged: set[str] = field(default_factory=set)
     failing: dict[str, BaseException] = field(default_factory=dict)
     fails_to_open: Exception | None = None
     databases: list[Path] = field(default_factory=list)
@@ -84,10 +86,11 @@ class _Queue:
             runs = queue.entries.setdefault(server, [])
             if server in queue.unreachable:
                 return _SendSummary(server, 0, (), len(runs), f"{server} is unreachable")
-            sent = [run for run in runs if run not in queue.refused]
+            sent = [run for run in runs if run not in queue.refused | queue.damaged]
             dropped = tuple(run for run in runs if run in queue.refused)
+            unreadable = tuple(run for run in runs if run in queue.damaged)
             runs.clear()
-            return _SendSummary(server, len(sent), dropped, 0, None)
+            return _SendSummary(server, len(sent), dropped, 0, None, unreadable)
 
         module = types.ModuleType(_OUTBOX_MODULE)
         module.Outbox = Outbox  # type: ignore[attr-defined]
@@ -222,6 +225,22 @@ def test_runs_the_server_refused_are_named_and_not_waiting(
     assert code == 0
     assert lines == [
         "vantage: sent 1 queued run to http://alpha:8765, dropped 2 it refused (r1, r3) (0 waiting)"
+    ]
+
+
+def test_runs_that_could_not_be_read_back_are_named_and_not_waiting(
+    queue: _Queue, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _queued(queue, _default_database(tmp_path), alpha=["r1", "r2", "r3"])
+    queue.refused.add("r1")
+    queue.damaged.add("r2")
+
+    code, lines, _err = _push(capsys)
+
+    assert code == 0
+    assert lines == [
+        "vantage: sent 1 queued run to http://alpha:8765, dropped 1 it refused (r1), "
+        "dropped 1 that could not be read back (r2) (0 waiting)"
     ]
 
 

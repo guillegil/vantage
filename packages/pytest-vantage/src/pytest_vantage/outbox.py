@@ -134,13 +134,17 @@ class SendSummary:
     """Entries still queued for `server`."""
     stopped: str | None
     """Why sending stopped before the queue was done, or `None`."""
+    unreadable: tuple[str, ...] = ()
+    """Run ids of the entries whose reports could not be read back from the
+    file, now deleted."""
 
 
 @dataclass(frozen=True)
 class _Claimed:
     id: int
     run_id: str
-    reports: list[Any]
+    reports: list[dict[str, Any]] | None
+    """`None` when what the file holds is not a list of reports."""
 
 
 class Outbox:
@@ -305,7 +309,7 @@ class Outbox:
                 "UPDATE entry SET claimed_until = ? WHERE id = ?", (now + held_for, entry_id)
             )
             (text,) = conn.execute("SELECT reports FROM entry WHERE id = ?", (entry_id,)).fetchone()
-        return _Claimed(entry_id, run_id, json.loads(text))
+        return _Claimed(entry_id, run_id, _reports(text))
 
     def _delete(self, entry_id: int) -> None:
         with self._errors("write to"):
@@ -326,6 +330,18 @@ class Outbox:
                 )
 
 
+def _reports(text: object) -> list[dict[str, Any]] | None:
+    """An entry's reports as `enqueue` wrote them, or `None` when the file
+    no longer holds a JSON list of objects there."""
+    try:
+        reports = json.loads(text) if isinstance(text, (str, bytes)) else None
+    except (ValueError, RecursionError):
+        return None
+    if isinstance(reports, list) and all(isinstance(report, dict) for report in reports):
+        return reports
+    return None
+
+
 class _OutOfTimeError(Exception):
     pass
 
@@ -336,15 +352,17 @@ def send_queued(outbox: Outbox, server: str, *, timeout: float, budget: float) -
 
     An acknowledged run is deleted. One the server rejects with a 4xx other
     than 408 or 429 could never succeed, and is deleted too, its run id in
-    `dropped`. A 5xx leaves the run queued and goes on to the next, since it
-    may be that run's own problem. Anything else leaves the run queued and
-    stops: an unreachable server, a 408 or 429 asking for it again later,
-    or an answer that is not a vantage server's.
+    `dropped`; so is one whose reports no longer read back from the file,
+    in `unreadable`. A 5xx leaves the run queued and goes on to the next,
+    since it may be that run's own problem. Anything else leaves the run
+    queued and stops: an unreachable server, a 408 or 429 asking for it
+    again later, or an answer that is not a vantage server's.
     """
     deadline = time.monotonic() + budget
     ran_out = f"the {budget:g}s allowed for sending ran out"
     sent = 0
     dropped: list[str] = []
+    unreadable: list[str] = []
     stopped: str | None = None
     after = 0
     while stopped is None:
@@ -352,6 +370,12 @@ def send_queued(outbox: Outbox, server: str, *, timeout: float, budget: float) -
         if claimed is None:
             break
         after = claimed.id
+        if claimed.reports is None:
+            # Damaged in the file: it could never be sent, and left in place
+            # it would stop every sender at the head of the queue.
+            outbox._delete(claimed.id)
+            unreadable.append(claimed.run_id)
+            continue
         try:
             for report in claimed.reports:
                 remaining = deadline - time.monotonic()
@@ -388,7 +412,9 @@ def send_queued(outbox: Outbox, server: str, *, timeout: float, budget: float) -
         else:
             outbox._delete(claimed.id)
             sent += 1
-    return SendSummary(server, sent, tuple(dropped), outbox.waiting(server), stopped)
+    return SendSummary(
+        server, sent, tuple(dropped), outbox.waiting(server), stopped, tuple(unreadable)
+    )
 
 
 __all__ = [

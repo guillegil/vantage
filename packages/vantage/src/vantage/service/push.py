@@ -105,6 +105,10 @@ def _summary_line(summary: SendSummary) -> str:
     line = f"sent {summary.sent} queued {runs} to {summary.server}"
     if summary.dropped:
         line += f", dropped {len(summary.dropped)} it refused ({', '.join(summary.dropped)})"
+    # Absent from a pytest-vantage older than this vantage.
+    unreadable: tuple[str, ...] = getattr(summary, "unreadable", ())
+    if unreadable:
+        line += f", dropped {len(unreadable)} that could not be read back ({', '.join(unreadable)})"
     if summary.stopped is not None:
         line += f", then stopped: {summary.stopped}"
     return f"vantage: {line} ({summary.waiting} waiting)"

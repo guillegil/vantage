@@ -742,6 +742,11 @@ class Recorder:
                 f"vantage: {address} rejected queued run {run_id}, which can never be sent; "
                 f"it was dropped from {path}",
             )
+        for run_id in summary.unreadable:
+            warn(
+                self._config,
+                f"vantage: queued run {run_id} could not be read back from {path}; it was dropped",
+            )
         noun = "run" if summary.sent == 1 else "runs"
         line = (
             f"vantage: sent {summary.sent} queued {noun} to {address} ({summary.waiting} waiting)"

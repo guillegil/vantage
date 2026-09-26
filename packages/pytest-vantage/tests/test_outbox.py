@@ -317,6 +317,33 @@ def _refuse_run(
     monkeypatch.setattr(server.store, "record_session", _record_session)
 
 
+@pytest.mark.parametrize(
+    "stored_text",
+    ['[{"run": {"id"', '{"run": {}}', '[{"run": {}}, "not a report"]'],
+    ids=["not-json", "not-a-list", "not-reports"],
+)
+def test_a_run_whose_reports_cannot_be_read_back_is_dropped_and_the_rest_sent(
+    box: Outbox, vantage_server: VantageTestServer, stored_text: str
+) -> None:
+    """A damaged entry could never be sent; left in place it would stop
+    every later sender at the head of the queue."""
+    damaged, accepted = _run_reports(), _run_reports()
+    box.enqueue(vantage_server.address, _run_id(damaged), damaged)
+    box.enqueue(vantage_server.address, _run_id(accepted), accepted)
+    with sqlite3.connect(box.path) as conn:
+        conn.execute(
+            "UPDATE entry SET reports = ? WHERE run_id = ?", (stored_text, _run_id(damaged))
+        )
+    conn.close()
+
+    summary = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0)
+
+    assert summary.unreadable == (_run_id(damaged),)
+    assert (summary.sent, summary.dropped, summary.waiting, summary.stopped) == (1, (), 0, None)
+    assert set(_stored(vantage_server)) == {_run_id(accepted)}
+    assert box.waiting() == 0
+
+
 def test_a_run_the_server_rejects_with_a_4xx_is_dropped_and_the_rest_sent(
     box: Outbox, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
