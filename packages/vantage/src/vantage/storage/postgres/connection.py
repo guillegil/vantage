@@ -75,9 +75,12 @@ class PostgresOpenError(ConnectionError):
 def connection_kwargs(url: str) -> dict[str, Any]:
     """What every connection is opened with besides `url`: autocommit, so
     a statement outside `transaction()` is a transaction of its own and a
-    connection goes back to the pool idle, and a connect timeout unless
-    the connection string or PGCONNECT_TIMEOUT already sets one."""
-    kwargs: dict[str, Any] = {"autocommit": True}
+    connection goes back to the pool idle; UTF-8 on the wire whatever
+    PGCLIENTENCODING or the connection string ask for, since any other
+    client encoding fails every report holding a character it lacks; and a
+    connect timeout unless the connection string or PGCONNECT_TIMEOUT
+    already sets one."""
+    kwargs: dict[str, Any] = {"autocommit": True, "client_encoding": "UTF8"}
     try:
         configured = "connect_timeout" in conninfo_to_dict(url)
     except psycopg.Error:

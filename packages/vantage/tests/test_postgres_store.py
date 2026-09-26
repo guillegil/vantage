@@ -1,7 +1,7 @@
 """The shared `ExecutionStoreContract` run against `PostgresExecutionStore`,
 plus what only PostgreSQL can get wrong: the schema and its version, text
-it cannot hold or index, time zones, collation, and messages that must
-never carry the password.
+it cannot hold or index, encodings, time zones, collation, and messages
+that must never carry the password.
 
 Every test needs the server `VANTAGE_TEST_POSTGRES_URL` names and is
 skipped without it.
@@ -187,6 +187,28 @@ def test_a_database_not_encoded_in_utf8_is_refused(
         PostgresExecutionStore(url)
 
     assert _query(url, "SELECT to_regnamespace('vantage')") == [(None,)]
+
+
+def test_text_any_client_encoding_lacks_is_stored_whatever_the_environment_asks_for(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """libpq takes its client encoding from PGCLIENTENCODING, and one that
+    lacks a character of a report would fail that report, long after the
+    server started."""
+    monkeypatch.setenv("PGCLIENTENCODING", "LATIN1")
+    node_id = "tests/test_名前.py::test_x[日本]"
+    store = PostgresExecutionStore(postgres_url)
+    try:
+        store.record_session(
+            _execution(_RUN), results=(_result(node_id),), received_at=datetime.now(timezone.utc)
+        )
+
+        stored = store.get_result(_RUN, node_id=node_id)
+    finally:
+        store.close()
+
+    assert stored is not None
+    assert stored.identity.node_id == node_id
 
 
 def test_close_returns_every_connection(postgres_url: str, postgres_admin_url: str) -> None:
