@@ -1,9 +1,10 @@
 """Several `PostgresExecutionStore`s on one database -- each with a pool of
 its own, as separate server processes have -- writing at once from threads:
 every run, result, catalogue row and metadata row lands exactly once, the
-section bound holds across them, and nothing deadlocks or fails. And
-several stores opening one empty database at the same moment: exactly one
-creates the schema, and every one of them works.
+section bound holds across them, and nothing deadlocks or fails. A read
+that must see one state sees it, whatever another store commits meanwhile.
+And several stores opening one empty database at the same moment: exactly
+one creates the schema, and every one of them works.
 
 Every thread is a daemon and is joined with a timeout, as in
 `test_concurrency.py`: a deadlock must fail the test, not hang the suite.
@@ -208,6 +209,49 @@ def test_section_posts_racing_for_the_last_slot_across_stores_never_pass_the_bou
     assert errors == []
     assert sorted(outcomes) == ["created"] + ["full"] * 15
     assert len(stores[1].list_settings(TEST_SECTIONS_NAMESPACE)) == MAX_SECTIONS
+
+
+def test_the_filtered_page_and_its_horizon_are_read_from_one_snapshot(
+    stores: list[PostgresExecutionStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another server commits a keyed run while this one is between the
+    page and the horizon. Both must describe the state the page was read
+    from: no match, and every run predating the key nothing carried yet --
+    never the page from before the commit and the count from after it."""
+    reader, other_server = stores[0], stores[1]
+    keyed = RunMetadata(
+        files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+        entries=(MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured"),),
+    )
+    for index in range(3):
+        other_server.record_session(
+            _execution(f"{index:032x}", started=_BASE + timedelta(minutes=index)),
+            results=(),
+            received_at=_BASE,
+        )
+    count = store_module._count_runs_predating
+    fired: list[str] = []
+
+    def _commit_a_keyed_run_first(conn: postgres_connection.PgConnection, key: str) -> int:
+        if not fired:
+            fired.append(key)
+            other_server.record_session(
+                _execution("f" * 32, started=_BASE - timedelta(hours=1)),
+                results=(),
+                received_at=_BASE,
+                metadata=keyed,
+            )
+        return count(conn, key)
+
+    monkeypatch.setattr(store_module, "_count_runs_predating", _commit_a_keyed_run_first)
+
+    page, predating = reader.list_runs_with_metadata_horizon(
+        filters=[("fw", "2.1")], limit=10, offset=0
+    )
+
+    assert fired == ["fw"]
+    assert (page.items, predating) == ((), (3,))
+    assert reader.count_executions() == 4
 
 
 def test_stores_opening_one_empty_database_at_once_create_the_schema_once(

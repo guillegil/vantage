@@ -1,7 +1,7 @@
 """The shared `ExecutionStoreContract` run against `PostgresExecutionStore`,
 plus what only PostgreSQL can get wrong: the schema and its version, text
-it cannot hold or index, encodings, time zones, collation, and messages
-that must never carry the password.
+it cannot hold or index, encodings, time zones, collation, transactions
+the server aborts, and messages that must never carry the password.
 
 Every test needs the server `VANTAGE_TEST_POSTGRES_URL` names and is
 skipped without it.
@@ -27,7 +27,8 @@ from vantage.core.ports.storage import (
 )
 from vantage.storage.postgres import PostgresExecutionStore, PostgresOpenError
 from vantage.storage.postgres import connection as postgres_connection
-from vantage.storage.postgres.connection import scrubbed
+from vantage.storage.postgres import store as postgres_store_module
+from vantage.storage.postgres.connection import PgConnection, scrubbed
 from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 from vantage_port_contract import (
     ExecutionStoreContract,
@@ -235,6 +236,62 @@ def test_close_returns_every_connection(postgres_url: str, postgres_admin_url: s
     while _query(postgres_admin_url, connected) != [(0,)] and time.monotonic() < deadline:
         time.sleep(0.05)
     assert _query(postgres_admin_url, connected) == [(0,)]
+
+
+# -- transactions the server aborts --
+
+# Raises the error the server reports for `sqlstate`, from inside a
+# transaction as a real conflict would.
+_RAISE = "DO $$ BEGIN RAISE EXCEPTION 'provoked' USING ERRCODE = '{}'; END $$"
+
+
+@pytest.mark.parametrize("sqlstate", ["40001", "40P01"], ids=["serialization", "deadlock"])
+def test_a_transaction_aborted_for_a_conflict_is_run_again_from_the_start(
+    postgres_store: PostgresExecutionStore, postgres_url: str, sqlstate: str
+) -> None:
+    """Each failed attempt is rolled back, or the next one's insert of
+    the same key would fail on the first's."""
+    attempts: list[None] = []
+
+    def work(conn: PgConnection) -> int:
+        attempts.append(None)
+        conn.execute("INSERT INTO vantage.meta (key, value) VALUES ('probe', 'x')")
+        if len(attempts) < 3:
+            conn.execute(_RAISE.format(sqlstate))
+        return len(attempts)
+
+    assert postgres_store._transaction(work) == 3
+    assert _query(postgres_url, "SELECT value FROM vantage.meta WHERE key = 'probe'") == [("x",)]
+
+
+def test_a_conflict_that_keeps_recurring_propagates_after_a_bounded_number_of_attempts(
+    postgres_store: PostgresExecutionStore,
+) -> None:
+    attempts: list[None] = []
+
+    def work(conn: PgConnection) -> None:
+        attempts.append(None)
+        conn.execute(_RAISE.format("40P01"))
+
+    with pytest.raises(psycopg.errors.DeadlockDetected):
+        postgres_store._transaction(work)
+
+    assert len(attempts) == postgres_store_module._MAX_ATTEMPTS
+
+
+def test_any_other_error_propagates_from_the_first_attempt(
+    postgres_store: PostgresExecutionStore,
+) -> None:
+    attempts: list[None] = []
+
+    def work(conn: PgConnection) -> None:
+        attempts.append(None)
+        conn.execute(_RAISE.format("23505"))
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        postgres_store._transaction(work)
+
+    assert len(attempts) == 1
 
 
 # -- messages never hold the password --
