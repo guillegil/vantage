@@ -1,14 +1,18 @@
 """The shared `ExecutionStoreContract` run against `PostgresExecutionStore`,
-plus what only PostgreSQL can get wrong: the schema and its version, text
-it cannot hold or index, encodings, time zones, collation, transactions
-the server aborts, and messages that must never carry the password.
+plus what only PostgreSQL can get wrong: the schema, its version and its
+parity with the SQLite one, text it cannot hold or index, encodings, time
+zones, collation, transactions the server aborts, and messages that must
+never carry the password.
 
-Every test needs the server `VANTAGE_TEST_POSTGRES_URL` names and is
-skipped without it.
+Every test that needs the server `VANTAGE_TEST_POSTGRES_URL` names is
+skipped without it; only the comparison of the two schema files runs
+anyway.
 """
 
 from __future__ import annotations
 
+import importlib.resources
+import re
 import socket
 import time
 from collections.abc import Callable, Iterator
@@ -25,6 +29,7 @@ from vantage.core.ports.storage import (
     MetadataFile,
     RunMetadata,
 )
+from vantage.storage.connection import open_database
 from vantage.storage.postgres import PostgresExecutionStore, PostgresOpenError
 from vantage.storage.postgres import connection as postgres_connection
 from vantage.storage.postgres import store as postgres_store_module
@@ -187,6 +192,70 @@ def test_the_tables_and_the_version_stamp_commit_together(
         PostgresExecutionStore(postgres_url)
 
     assert _query(postgres_url, "SELECT to_regnamespace('vantage')") == [(None,)]
+
+
+def _sqlite_columns(path: Path) -> dict[str, list[tuple[str, bool]]]:
+    """Each table of a fresh SQLite database: its columns in order, and
+    whether each is NOT NULL -- a primary key's always is, which SQLite
+    alone does not enforce on a TEXT key."""
+    conn = open_database(path)
+    try:
+        tables = [
+            str(name)
+            for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master"
+                " WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+            )
+        ]
+        return {
+            table: [
+                (str(name), bool(notnull or pk))
+                for _cid, name, _type, notnull, _default, pk in conn.execute(
+                    f"PRAGMA table_info({table})"
+                )
+            ]
+            for table in tables
+        }
+    finally:
+        conn.close()
+
+
+def test_the_tables_and_columns_are_those_of_the_sqlite_schema(
+    postgres_store: PostgresExecutionStore, postgres_url: str, tmp_path: Path
+) -> None:
+    """One schema version stands for both schemas, so a column added to
+    one and not the other would be a database this build stamps and then
+    cannot use."""
+    columns: dict[str, list[tuple[str, bool]]] = {}
+    for table, column, nullable in _query(
+        postgres_url,
+        "SELECT table_name, column_name, is_nullable FROM information_schema.columns"
+        " WHERE table_schema = 'vantage' ORDER BY table_name, ordinal_position",
+    ):
+        columns.setdefault(str(table), []).append((str(column), nullable == "NO"))
+
+    assert columns == _sqlite_columns(tmp_path / "vantage.db")
+
+
+_CHECK_IN = re.compile(r"CHECK \((\w+) IN \(([^)]*)\)\)")
+
+
+def _vocabularies(package: str) -> list[tuple[str, tuple[str, ...]]]:
+    """Every `CHECK (<column> IN (...))` in `package`'s `schema.sql`, but
+    the SQLite one on `declared`, a flag PostgreSQL stores as a boolean."""
+    schema = importlib.resources.files(package).joinpath("schema.sql").read_text("utf-8")
+    return sorted(
+        (column, tuple(sorted(value.strip().strip("'") for value in values.split(","))))
+        for column, values in _CHECK_IN.findall(schema)
+        if column != "declared"
+    )
+
+
+def test_the_check_constraints_accept_what_the_sqlite_schemas_accept() -> None:
+    postgres = _vocabularies("vantage.storage.postgres")
+
+    assert len(postgres) == 5
+    assert postgres == _vocabularies("vantage.storage")
 
 
 def test_a_database_not_encoded_in_utf8_is_refused(
