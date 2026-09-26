@@ -314,6 +314,20 @@ def test_the_local_database_is_the_command_line_then_the_ini_value_then_the_defa
     assert resolve_local_database(neither, default=default) == Path("/default/vantage.db")
 
 
+def test_an_override_with_no_ini_file_is_taken_from_where_pytest_was_started(
+    pytester: pytest.Pytester,
+) -> None:
+    """As pytest takes its own path options: with no ini file to be relative
+    to, a value given with `-o` is relative to where pytest was started, not
+    to the rootdir."""
+    (pytester.path / "sub").mkdir()
+    config = pytester.parseconfig("--rootdir=sub", "-o", "vantage_local_database=runs.db")
+
+    assert config.inipath is None
+    assert config.rootpath == pytester.path / "sub"
+    assert resolve_local_database(config, default=Path) == pytester.path / "runs.db"
+
+
 def test_a_home_relative_local_database_is_expanded(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:

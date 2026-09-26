@@ -274,8 +274,9 @@ def resolve_local_database(config: pytest.Config, *, default: Callable[[], Path]
         )
     ini_value = _read_ini(config, "vantage_local_database")
     if ini_value is not None and ini_value != "":
+        # With no ini file the value came from `-o`, typed like an option.
         inipath = getattr(config, "inipath", None)
-        base = Path(inipath).parent if inipath else Path(str(config.rootpath))
+        base = Path(inipath).parent if inipath else Path(config.invocation_params.dir)
         return _local_database_value(ini_value, "vantage_local_database ini value", base)
     return default()
 
