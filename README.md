@@ -516,6 +516,10 @@ VANTAGE_DATABASE=postgresql://vantage@db.example/vantage vantage
   concurrent write to the same run or setting would change, so every run,
   result and metadata value is stored exactly once, and a bound such as the
   number of sections holds across all the servers.
+- A server rides out a database restart or failover: while the database is
+  gone a request waits up to 30 seconds for it and then fails with a 500,
+  and the server reconnects by itself, serving again as soon as the
+  database is back.
 - There are no migrations here either. A `vantage` schema made by a build
   with a different schema version, or one holding tables but no version, is
   refused with one line and left as it is.
