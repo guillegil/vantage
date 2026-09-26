@@ -629,3 +629,27 @@ def test_every_timestamp_reads_back_in_utc_whatever_the_sessions_time_zone(
     ]
     assert all(moment is not None and moment.tzinfo is timezone.utc for moment in moments)
     assert detail.execution.started_at == started
+
+
+def test_durations_read_back_exactly_whatever_the_databases_float_output(
+    postgres_url: str,
+) -> None:
+    """With `extra_float_digits` at 0, as PostgreSQL before 12 had it and a
+    database may still set it, a double is sent back as text cut to 15
+    significant digits, and a duration would no longer read back as the
+    same number the other adapters return."""
+    database = urlsplit(postgres_url).path.lstrip("/")
+    _query(postgres_url, f'ALTER DATABASE "{database}" SET extra_float_digits = 0')
+    duration = 1.0009781090193428
+    store = PostgresExecutionStore(postgres_url)
+    try:
+        store.record_session(
+            _execution(_RUN),
+            results=(_result("t.py::test_x", duration=duration, call_duration=duration),),
+            received_at=datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc),
+        )
+
+        (result,) = store.get_results(_RUN)
+        assert (result.duration, result.call_duration) == (duration, duration)
+    finally:
+        store.close()

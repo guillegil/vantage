@@ -58,7 +58,14 @@ _POOL_WAIT_SECONDS = 30.0
 #   before the lock that statement waited for, so it would count settings,
 #   or look for the schema stamp, as they were before whoever held the lock
 #   committed.
-_SESSION_SETUP = "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED"
+# - Every digit of a double: at `extra_float_digits` 0 a duration is sent
+#   back cut to 15 significant digits, a different number from the one
+#   stored. Any value above 0 gives the shortest exact text from
+#   PostgreSQL 12 on; 3 also gives an exact one before that.
+_SESSION_SETUP = (
+    "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED;"
+    " SET extra_float_digits = 3"
+)
 
 # Advisory lock keys are shared by everything that uses the database; a
 # first key of vantage's own ("vsch") keeps this lock from meeting another

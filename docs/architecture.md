@@ -467,8 +467,10 @@ foreign keys are the same.
 - **Parity with SQLite is the contract.** The port contract runs against
   this adapter too, so what differs underneath must not show: text is
   ordered and compared with `COLLATE "C"`, code point order as in SQLite;
-  timestamps come back aware and are normalised to UTC; paging and
-  `has_more` are computed the same way.
+  timestamps come back aware and are normalised to UTC; every connection
+  asks for doubles with all their digits (`extra_float_digits`), which a
+  database set to 0 would cut to 15; paging and `has_more` are computed
+  the same way.
 - **U+0000 never reaches it** from the service (see *Request handling and
   concurrency*). The adapter still replaces it with U+FFFD in anything it
   writes, and treats a lookup value holding it as matching nothing, so a
