@@ -17,8 +17,12 @@ its own when no start row exists.
 never the finish-write. The beat is a separately `liveness_isolated` helper
 rather than a decorator on the hook, so a failing beat latches only the
 liveness path. The start-write and the beats share `_liveness_disabled`, so
-the whole liveness path warns at most once. `pytest_keyboard_interrupt` only
-records what stopped the session, and shares `accumulation_isolated`.
+the whole liveness path warns at most once. `pytest_keyboard_interrupt` and
+xdist's `pytest_testnodedown` only record what stopped the session, and
+share `accumulation_isolated`.
+
+`WorkerInterruptRelay` is the one piece that runs on an xdist worker: it
+tells the controller that the worker was interrupted, and why.
 
 Every other hook is wrapped in `fault_isolated`: an error anywhere in the
 reporting path becomes one warning and never changes the suite's exit status.
@@ -102,6 +106,43 @@ _INTERNAL_ERROR_EXIT_STATUS = 3
 # from crowding the results out of the report.
 _MAX_INTERRUPT_REASON_CHARS = 1024
 
+# The `workeroutput` key an interrupted xdist worker hands its controller the
+# reason under ("" when there is none).
+_WORKER_INTERRUPT_KEY = "vantage_interrupt_reason"
+
+
+def _interrupted_by_a_person(stop: BaseException) -> bool:
+    """Ctrl-C (a bare `KeyboardInterrupt`) or `pytest.exit()`, never one of
+    the `KeyboardInterrupt` subclasses pytest and xdist raise to stop a
+    session on purpose."""
+    return type(stop) is KeyboardInterrupt or isinstance(stop, pytest.exit.Exception)
+
+
+def _bounded_reason(text: str) -> str:
+    return text[:_MAX_INTERRUPT_REASON_CHARS]
+
+
+class WorkerInterruptRelay:
+    """Registered on every xdist worker of a recorded session.
+
+    Ctrl-C or `pytest.exit()` on a worker ends that worker's session, and
+    the controller then stops the whole session with xdist's own
+    `KeyboardInterrupt` subclass, the one it raises for `-x` too. Only the
+    worker knows it was interrupted, and why, so it says so in
+    `workeroutput`, which xdist hands the controller as the worker's session
+    finishes (`Recorder.pytest_testnodedown`). pytest calls this hook before
+    `pytest_sessionfinish`, so the reason is always in time.
+    """
+
+    def __init__(self, config: pytest.Config) -> None:
+        self._config = config
+
+    def pytest_keyboard_interrupt(self, excinfo: pytest.ExceptionInfo[BaseException]) -> None:
+        stop = excinfo.value
+        workeroutput = getattr(self._config, "workeroutput", None)
+        if _interrupted_by_a_person(stop) and isinstance(workeroutput, dict):
+            workeroutput[_WORKER_INTERRUPT_KEY] = _bounded_reason(str(stop))
+
 
 class Recorder:
     """Registered by `plugin.py::pytest_configure` once activation and the
@@ -109,7 +150,8 @@ class Recorder:
 
     - `_results` accumulates every phase report; it is resolved into
       `results[]` entries only in `pytest_sessionfinish`. `_stop` is the
-      exception that ended the session early, if pytest reported one.
+      exception that ended the session early, if pytest reported one, and
+      `_worker_interruption` the reason an interrupted xdist worker gave.
     - `_disabled` is the `fault_isolated` latch: once set, every reporting
       hook on this instance is a silent no-op. `_liveness_disabled` is the
       independent `liveness_isolated` latch for the start-write and the
@@ -167,6 +209,7 @@ class Recorder:
         self._accumulation_warned = False
         self._results: dict[str, PendingResult] = {}
         self._stop: BaseException | None = None
+        self._worker_interruption: str | None = None
         self._last_beat_at = time.monotonic()
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
@@ -299,30 +342,54 @@ class Recorder:
         """
         self._stop = excinfo.value
 
-    def _how_it_ended(self, exit_status: int) -> tuple[datetime | None, bool, str | None]:
+    @pytest.hookimpl(optionalhook=True)
+    @accumulation_isolated
+    def pytest_testnodedown(self, node: object, error: object) -> None:
+        """xdist's hook for a worker whose session has ended: keeps the
+        reason an interrupted worker gave (`WorkerInterruptRelay`). Optional,
+        so the plugin registers without xdist installed."""
+        workeroutput = getattr(node, "workeroutput", None)
+        if isinstance(workeroutput, dict) and _WORKER_INTERRUPT_KEY in workeroutput:
+            self._worker_interruption = _bounded_reason(str(workeroutput[_WORKER_INTERRUPT_KEY]))
+
+    def _how_it_ended(
+        self, exit_status: int, early_stop: object = None
+    ) -> tuple[datetime | None, bool, str | None]:
         """`(finished_at, interrupted, interrupt_reason)` for the finish report.
 
         - A bare `KeyboardInterrupt` (Ctrl-C) or `pytest.exit()` interrupted
-          the session: no finish time, `interrupted` true.
+          the session: no finish time, `interrupted` true. So did either on
+          an xdist worker, which xdist turns into its own stop.
         - pytest's internal error: no finish time, not interrupted.
         - Anything else ran to an orderly end and gets its finish time,
           including pytest's own stops with exit status 2.
 
         The reason is the stop's message, when there is one: pytest's
         `1 error during collection`, or the text given to `pytest.exit()`.
+        `-x` and `--maxfail` stop through pytest's failure path instead of
+        an interrupt, so their reason is `early_stop`, the session's own
+        `shouldfail` or `shouldstop`.
         """
         stop = self._stop
-        reason = None if stop is None else (str(stop)[:_MAX_INTERRUPT_REASON_CHARS] or None)
-        if type(stop) is KeyboardInterrupt or isinstance(stop, pytest.exit.Exception):
-            return None, True, reason
+        if stop is not None and _interrupted_by_a_person(stop):
+            return None, True, _bounded_reason(str(stop)) or None
+        if stop is not None and self._worker_interruption is not None:
+            return None, True, self._worker_interruption or None
         if exit_status == _INTERNAL_ERROR_EXIT_STATUS:
             return None, False, None
+        if stop is not None:
+            reason = _bounded_reason(str(stop)) or None
+        elif isinstance(early_stop, str):
+            reason = _bounded_reason(early_stop) or None
+        else:
+            reason = None
         return datetime.now(timezone.utc), False, reason
 
     @fault_isolated
-    def pytest_sessionfinish(self, exitstatus: int) -> None:
+    def pytest_sessionfinish(self, session: pytest.Session, exitstatus: int) -> None:
         exit_status = int(exitstatus)
-        finished_at, interrupted, interrupt_reason = self._how_it_ended(exit_status)
+        early_stop = session.shouldfail or session.shouldstop
+        finished_at, interrupted, interrupt_reason = self._how_it_ended(exit_status, early_stop)
 
         results = assemble_results(self._results)
         if results.dropped:
@@ -364,4 +431,4 @@ class Recorder:
         send(self._address, report, timeout=self._timeout)
 
 
-__all__ = ["Recorder"]
+__all__ = ["Recorder", "WorkerInterruptRelay"]

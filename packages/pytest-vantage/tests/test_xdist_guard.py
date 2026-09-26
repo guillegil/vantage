@@ -7,9 +7,11 @@ discriminator is whether the config object carries a ``workerinput``
 attribute.
 
 A worker is the only process with `item`/`excinfo`, so `EvidenceCollector`
-runs there, and the worker branch reads exactly three options:
-``vantage`` and ``vantage_failure_text`` to decide whether to register it,
-and ``capture``, read once by `EvidenceCollector.__init__`. xdist hands each
+runs there, and the only one that knows whether Ctrl-C or ``pytest.exit()``
+interrupted it, so `WorkerInterruptRelay` does too. The worker branch reads
+exactly three options: ``vantage`` and ``vantage_failure_text`` to decide
+what to register, and ``capture``, read once by
+`EvidenceCollector.__init__`. xdist hands each
 worker the controller's typed arguments, so the worker applies the same
 "typed on the command line" rule and agrees with its controller. Beyond that
 a worker never resolves a server address, reads a timeout, preflights a
@@ -31,6 +33,7 @@ import pytest
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.evidence import EvidenceCollector
 from pytest_vantage.plugin import pytest_configure
+from pytest_vantage.recorder import WorkerInterruptRelay
 
 
 class _RegisterCallDouble:
@@ -86,16 +89,27 @@ class _WorkerConfigDouble:
         )
 
 
-def test_worker_registers_exactly_one_evidencecollector_when_activated() -> None:
-    """A worker's `pytest_configure` must register exactly one
-    `EvidenceCollector`, and nothing else -- in particular no `Recorder` --
-    when activated."""
-    config = _WorkerConfigDouble(typed=("--vantage", "--vantage-failure-text", "-n", "2"))
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        (("--vantage", "-n", "2"), [WorkerInterruptRelay]),
+        (
+            ("--vantage", "--vantage-failure-text", "-n", "2"),
+            [WorkerInterruptRelay, EvidenceCollector],
+        ),
+    ],
+    ids=["recording", "recording-with-failure-text"],
+)
+def test_a_recording_worker_registers_its_relay_and_collector_and_no_recorder(
+    typed: tuple[str, ...], expected: list[type]
+) -> None:
+    """A worker's `pytest_configure` registers `WorkerInterruptRelay` when
+    recording, `EvidenceCollector` when failure text was asked for too, and
+    nothing else -- in particular no `Recorder`."""
+    config = _WorkerConfigDouble(typed=typed)
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
-    assert len(config.pluginmanager.registered) == 1
-    (registered,) = config.pluginmanager.registered
-    assert isinstance(registered, EvidenceCollector)
+    assert [type(plugin) for plugin in config.pluginmanager.registered] == expected
 
 
 def test_worker_registers_nothing_when_the_flags_came_from_addopts() -> None:

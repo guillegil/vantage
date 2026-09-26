@@ -928,7 +928,10 @@ def test_recorder_sends_the_assembled_results_in_the_one_session_post(
     ):
         recorder.pytest_runtest_logreport(report_)
 
-    recorder.pytest_sessionfinish(exitstatus=1)
+    recorder.pytest_sessionfinish(
+        session=SimpleNamespace(shouldfail=False, shouldstop=False),  # type: ignore[arg-type]
+        exitstatus=1,
+    )
 
     assert len(sent) == 1
     (report,) = sent

@@ -16,11 +16,12 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pytest_vantage import transport, vcs
 from pytest_vantage.boundary import VantageWarning
-from pytest_vantage.recorder import Recorder
+from pytest_vantage.recorder import _WORKER_INTERRUPT_KEY, Recorder, WorkerInterruptRelay
 from vantage_test_server import (
     VantageTestServer,
     wait_for_execution,
@@ -517,6 +518,41 @@ def test_exit_status_two_is_recorded_by_what_stopped_the_session(
     assert execution.interrupt_reason == reason
 
 
+_SECOND_OF_FOUR_FAILS = "\n\n\n".join(
+    [
+        "def test_a():\n    assert True",
+        "def test_b():\n    assert False",
+        "def test_c():\n    assert True",
+        "def test_d():\n    assert True\n",
+    ]
+)
+
+
+@pytest.mark.parametrize("option", ["-x", "--maxfail=1"])
+def test_a_maxfail_stop_records_the_reason_pytest_gave(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    option: str,
+) -> None:
+    """`-x` stops pytest through its own failure path, not an interrupt, so
+    no stop reaches `pytest_keyboard_interrupt`. The reason pytest printed
+    is still recorded, as it is under xdist, so a run cut short by `-x`
+    reads differently from a complete run of the tests it got through.
+    """
+    pytester.makepyfile(test_sample=_SECOND_OF_FOUR_FAILS)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", option
+    )
+
+    result.assert_outcomes(passed=1, failed=1)
+    assert result.ret == pytest.ExitCode.TESTS_FAILED
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert execution.interrupted is False
+    assert execution.interrupt_reason == "stopping after 1 failures"
+
+
 def _raised(exception: BaseException) -> pytest.ExceptionInfo[BaseException]:
     try:
         raise exception
@@ -524,58 +560,156 @@ def _raised(exception: BaseException) -> pytest.ExceptionInfo[BaseException]:
         return pytest.ExceptionInfo.from_current()
 
 
+class _XdistInterrupted(KeyboardInterrupt):
+    """Stands in for the `KeyboardInterrupt` subclass xdist stops a session
+    with, for `-x` and for a worker that was interrupted alike."""
+
+
+_A_SESSION_RUN_TO_ITS_END = SimpleNamespace(shouldfail=False, shouldstop=False)
+
+
 @pytest.mark.parametrize(
-    ("exit_status", "stop", "finished", "interrupted", "reason"),
+    ("exit_status", "stop", "session", "worker_reason", "finished", "interrupted", "reason"),
     [
-        pytest.param(0, None, True, False, None, id="passed"),
-        pytest.param(1, None, True, False, None, id="failed"),
+        pytest.param(0, None, None, None, True, False, None, id="passed"),
+        pytest.param(1, None, None, None, True, False, None, id="failed"),
+        pytest.param(
+            1,
+            None,
+            SimpleNamespace(shouldfail="stopping after 1 failures", shouldstop=False),
+            None,
+            True,
+            False,
+            "stopping after 1 failures",
+            id="maxfail",
+        ),
         pytest.param(
             2,
             pytest.Session.Interrupted("1 error during collection"),
+            None,
+            None,
             True,
             False,
             "1 error during collection",
             id="collection-errors",
         ),
-        pytest.param(2, KeyboardInterrupt(), False, True, None, id="ctrl-c"),
+        pytest.param(2, KeyboardInterrupt(), None, None, False, True, None, id="ctrl-c"),
         pytest.param(
-            2, pytest.exit.Exception("stop here"), False, True, "stop here", id="pytest-exit"
+            2,
+            pytest.exit.Exception("stop here"),
+            None,
+            None,
+            False,
+            True,
+            "stop here",
+            id="pytest-exit",
         ),
         pytest.param(
             0,
             pytest.exit.Exception("done early", returncode=0),
+            None,
+            None,
             False,
             True,
             "done early",
             id="pytest-exit-with-a-return-code",
         ),
-        pytest.param(3, None, False, False, None, id="internal-error"),
+        pytest.param(
+            2,
+            pytest.exit.Exception("x" * 5000),
+            None,
+            None,
+            False,
+            True,
+            "x" * 1024,
+            id="a-long-reason-is-cut",
+        ),
+        pytest.param(
+            2,
+            _XdistInterrupted("stopping after 1 failures"),
+            None,
+            None,
+            True,
+            False,
+            "stopping after 1 failures",
+            id="xdist-maxfail",
+        ),
+        pytest.param(
+            2,
+            _XdistInterrupted("<WorkerController gw1> received keyboard-interrupt"),
+            None,
+            "bye now",
+            False,
+            True,
+            "bye now",
+            id="pytest-exit-on-an-xdist-worker",
+        ),
+        pytest.param(
+            2,
+            _XdistInterrupted("<WorkerController gw1> received keyboard-interrupt"),
+            None,
+            "y" * 5000,
+            False,
+            True,
+            "y" * 1024,
+            id="a-long-worker-reason-is-cut",
+        ),
+        pytest.param(3, None, None, None, False, False, None, id="internal-error"),
     ],
 )
 def test_the_finish_report_records_how_the_session_ended(
     monkeypatch: pytest.MonkeyPatch,
     exit_status: int,
     stop: BaseException | None,
+    session: SimpleNamespace | None,
+    worker_reason: str | None,
     finished: bool,
     interrupted: bool,
     reason: str | None,
 ) -> None:
-    """Only a real interruption -- Ctrl-C or `pytest.exit()` -- is recorded
-    as interrupted with no finish time. pytest's internal error has no
-    orderly finish either, but nothing interrupted it. Every other ending
-    has a finish time, whatever its exit status.
+    """Only a real interruption -- Ctrl-C or `pytest.exit()`, in the session
+    or on one of its xdist workers -- is recorded as interrupted with no
+    finish time. pytest's internal error has no orderly finish either, but
+    nothing interrupted it. Every other ending has a finish time, whatever
+    its exit status. A reason is arbitrary text, so it is cut to 1024
+    characters before it can crowd the results out of the report.
     """
     recorder, sent = _offline_recorder(monkeypatch)
+    if worker_reason is not None:
+        worker = SimpleNamespace(
+            workeroutput={"exitstatus": 2, _WORKER_INTERRUPT_KEY: worker_reason}
+        )
+        recorder.pytest_testnodedown(node=worker, error=None)
     if stop is not None:
         recorder.pytest_keyboard_interrupt(excinfo=_raised(stop))
 
-    recorder.pytest_sessionfinish(exitstatus=exit_status)
+    recorder.pytest_sessionfinish(
+        session=session or _A_SESSION_RUN_TO_ITS_END,  # type: ignore[arg-type]
+        exitstatus=exit_status,
+    )
 
     run = sent[-1]["run"]
     assert run["exit_status"] == exit_status  # type: ignore[index]
     assert (run["finished_at"] is not None) is finished  # type: ignore[index]
     assert run["interrupted"] is interrupted  # type: ignore[index]
     assert run["interrupt_reason"] == reason  # type: ignore[index]
+
+
+def test_a_worker_interrupted_on_purpose_hands_its_reason_to_the_controller() -> None:
+    """On a worker, Ctrl-C and `pytest.exit()` leave their reason in
+    `workeroutput`, which xdist hands the controller; pytest's own stops,
+    which xdist handles itself, leave nothing."""
+    for stop, expected in [
+        (pytest.exit.Exception("bye now"), {_WORKER_INTERRUPT_KEY: "bye now"}),
+        (KeyboardInterrupt(), {_WORKER_INTERRUPT_KEY: ""}),
+        (pytest.Session.Interrupted("1 error during collection"), {}),
+    ]:
+        config = SimpleNamespace(workeroutput={})
+        relay = WorkerInterruptRelay(config)  # type: ignore[arg-type]
+
+        relay.pytest_keyboard_interrupt(excinfo=_raised(stop))
+
+        assert config.workeroutput == expected
 
 
 def test_sigint_leaves_start_time_and_null_end_time(
@@ -808,3 +942,31 @@ def test_an_xdist_maxfail_stop_is_recorded_as_finished(
     (execution,) = vantage_server.executions()
     assert execution.finished_at is not None
     assert execution.interrupted is False
+    assert execution.interrupt_reason == "stopping after 1 failures"
+
+
+def test_a_pytest_exit_on_an_xdist_worker_is_recorded_as_an_interruption(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+) -> None:
+    """`pytest.exit()` in a test run by a worker ends that worker's session
+    interrupted, and xdist stops the whole session with its own
+    `KeyboardInterrupt` subclass, as it does for `-x`. It is still the
+    user's interruption, recorded with the user's reason, exactly as without
+    xdist.
+    """
+    pytest.importorskip("xdist")
+    pytester.makepyfile(
+        test_sample="import pytest\n\n\ndef test_a():\n    pass\n\n\n"
+        "def test_b():\n    pytest.exit('bye now')\n"
+    )
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "-n", "2"
+    )
+
+    assert result.ret == pytest.ExitCode.INTERRUPTED
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is None
+    assert execution.interrupted is True
+    assert execution.interrupt_reason == "bye now"

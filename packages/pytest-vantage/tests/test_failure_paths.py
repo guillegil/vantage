@@ -23,6 +23,7 @@ import urllib.error
 import urllib.request
 import warnings
 from collections.abc import Callable, Iterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -46,6 +47,7 @@ from vantage.service.errors import RejectionError
 from vantage_test_server import VantageTestServer, wait_for_file
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
+_A_SESSION_RUN_TO_ITS_END = SimpleNamespace(shouldfail=False, shouldstop=False)
 
 
 def _combined_output(result: pytest.RunResult) -> str:
@@ -1488,6 +1490,7 @@ def test_every_recorder_hook_is_under_the_isolation_meant_for_it() -> None:
         "pytest_runtest_logreport": "_accumulation_warned",
         "pytest_sessionfinish": "_disabled",
         "pytest_sessionstart": "_liveness_disabled",
+        "pytest_testnodedown": "_accumulation_warned",
     }
     assert getattr(Recorder._maybe_beat, "isolation_flag", None) == "_liveness_disabled"
 
@@ -1527,7 +1530,7 @@ def test_an_unrecordable_test_report_never_disables_the_finish_write(
         recorder.pytest_runtest_logreport(object())  # type: ignore[arg-type]
     for when in ("setup", "call", "teardown"):
         recorder.pytest_runtest_logreport(_Report(when))  # type: ignore[arg-type]
-    recorder.pytest_sessionfinish(exitstatus=0)
+    recorder.pytest_sessionfinish(session=_A_SESSION_RUN_TO_ITS_END, exitstatus=0)  # type: ignore[arg-type]
 
     assert len(warned) == 1
     assert recorder._disabled is False
@@ -1573,7 +1576,7 @@ def test_a_result_that_cannot_be_built_warns_once_and_costs_only_itself(
         recorder.pytest_runtest_logreport(_report("test_sample.py::test_it", when))
 
     with pytest.warns(VantageWarning) as warned:
-        recorder.pytest_sessionfinish(exitstatus=0)
+        recorder.pytest_sessionfinish(session=_A_SESSION_RUN_TO_ITS_END, exitstatus=0)  # type: ignore[arg-type]
 
     assert [str(w.message) for w in warned] == ["vantage: 1 test result(s) could not be recorded"]
     assert recorder._disabled is False

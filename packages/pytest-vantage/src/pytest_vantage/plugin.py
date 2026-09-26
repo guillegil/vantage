@@ -252,10 +252,12 @@ def pytest_configure(config: pytest.Config) -> None:
        of its own, so the FIRST statement branches on ``workerinput``.
     2. **Worker branch.** ``pytest_runtest_makereport`` fires only in the
        process that ran the test, so a worker registers `EvidenceCollector`
-       if failure text was requested, and returns. It never resolves an
-       address, reads a timeout, probes the server or constructs a
-       `Recorder`: a `Recorder` per worker would record one session as
-       several runs.
+       if failure text was requested, and returns. If recording was
+       requested it also registers `WorkerInterruptRelay`, since only the
+       worker knows whether Ctrl-C or ``pytest.exit()`` interrupted it. It
+       never resolves an address, reads a timeout, probes the server or
+       constructs a `Recorder`: a `Recorder` per worker would record one
+       session as several runs.
     3. **Controller branch.** An invocation that runs no test is never
        recorded. Otherwise an opt-in flag that was not typed is reported
        once, and absent a typed ``--vantage`` nothing further happens: no
@@ -288,6 +290,10 @@ def pytest_configure(config: pytest.Config) -> None:
     every ``Recorder`` hook, not by this function.
     """
     if hasattr(config, "workerinput"):
+        if _activation_requested(config):
+            from pytest_vantage.recorder import WorkerInterruptRelay
+
+            config.pluginmanager.register(WorkerInterruptRelay(config))
         if _failure_text_capture_requested(config):
             from pytest_vantage.evidence import EvidenceCollector
 
