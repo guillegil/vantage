@@ -337,26 +337,42 @@ def test_a_home_relative_local_database_is_expanded(
     assert resolve_local_database(config, default=Path) == pytester.path / "home" / "runs.db"
 
 
-_INVALID_LOCAL_DATABASES = {
-    "postgresql url typed": ("", ["--vantage-local-database=postgresql://u:s3cret@db/v"]),
-    "postgres url in the ini file": ("vantage_local_database = POSTGRES://u:s3cret@db/v", []),
-    "a directory": ("", ["--vantage-local-database=."]),
-    "an unknown mode": ("vantage_mode = everywhere", []),
+_INVALID_SETTINGS = {
+    "postgresql url typed": (
+        "vantage_mode = local",
+        ["--vantage-local-database=postgresql://u:s3cret@db/v"],
+        "ERROR: --vantage-local-database must be a SQLite file path, not a PostgreSQL URL*",
+    ),
+    "postgres url in the ini file": (
+        "vantage_mode = local\nvantage_local_database = POSTGRES://u:s3cret@db/v",
+        [],
+        "ERROR: vantage_local_database ini value must be a SQLite file path*",
+    ),
+    "a directory": (
+        "vantage_mode = local",
+        ["--vantage-local-database=."],
+        "ERROR: --vantage-local-database * is a directory, not a database file",
+    ),
+    "an unknown mode": (
+        "vantage_mode = everywhere",
+        [],
+        "ERROR: vantage_mode ini value must be one of server, local, *",
+    ),
 }
 
 
 @pytest.mark.parametrize(
-    ("ini_line", "args"),
-    list(_INVALID_LOCAL_DATABASES.values()),
-    ids=list(_INVALID_LOCAL_DATABASES),
+    ("ini_lines", "args", "error"),
+    list(_INVALID_SETTINGS.values()),
+    ids=list(_INVALID_SETTINGS),
 )
-def test_an_invalid_mode_or_local_database_is_a_usage_error(
-    pytester: pytest.Pytester, ini_line: str, args: list[str]
+def test_an_invalid_mode_or_local_database_is_a_usage_error_naming_it(
+    pytester: pytest.Pytester, ini_lines: str, args: list[str], error: str
 ) -> None:
     """Local storage is SQLite only. A URL is never repeated back, since it
     may carry a password."""
     _stand_in(pytester)
-    pytester.makeini(f"[pytest]\nvantage_mode = local\n{ini_line}\n")
+    pytester.makeini(f"[pytest]\n{ini_lines}\n")
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
     result = pytester.runpytest_subprocess("--vantage", *args)
@@ -365,7 +381,7 @@ def test_an_invalid_mode_or_local_database_is_a_usage_error(
     assert result.ret == pytest.ExitCode.USAGE_ERROR, output
     assert "INTERNALERROR" not in output
     assert "s3cret" not in output
-    assert any(line.startswith("ERROR: ") for line in result.stderr.lines), output
+    result.stderr.fnmatch_lines([error])
 
 
 @pytest.mark.parametrize("mode", ["local", "server+backup", "server+local"])
