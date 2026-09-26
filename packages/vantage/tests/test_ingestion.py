@@ -1204,6 +1204,35 @@ def test_a_sessions_own_values_are_stored_beside_its_files_keys_across_both_repo
     }
 
 
+def test_a_reported_session_value_reads_back_through_the_run_metadata_route(
+    any_store: Any,
+) -> None:
+    run_id = "6" + "8" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = {
+        "declaration": None,
+        "values": [{"key": "fpga.firmware", "value": "1.1.0", "status": "captured"}],
+    }
+    client = TestClient(create_app(any_store))
+
+    assert client.post("/api/v1/runs", json=report).status_code == 201
+    response = client.get(f"/api/v1/runs/{run_id}/metadata")
+
+    assert response.json() == {
+        "items": [
+            {
+                "key": "fpga.firmware",
+                "name": None,
+                "value": "1.1.0",
+                "status": "captured",
+                "source": "session",
+                "source_file": None,
+                "declared": False,
+            }
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     ("metadata", "field"),
     [

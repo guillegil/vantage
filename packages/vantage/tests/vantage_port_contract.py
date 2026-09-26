@@ -191,8 +191,8 @@ def _captured(
 
 StoredMetadata = Callable[[str], RunMetadata]
 """Reads back the metadata files and entries an adapter stored for one run
-id. The port never returns them, so each adapter's test module reads its own
-storage."""
+id. The port never returns the files, so each adapter's test module reads its
+own storage for both."""
 
 
 class ExecutionStoreContract:
@@ -1823,3 +1823,89 @@ class ExecutionStoreContract:
         assert [entry.execution.identity.value for entry in page.items] == ["c" * 32]
         assert page.has_more is True
         assert predating == 2
+
+    # -- get_run_metadata --
+
+    def test_get_run_metadata_is_none_for_an_unknown_run(self, store: ExecutionStore) -> None:
+        assert store.get_run_metadata("0" * 32) is None
+
+    def test_get_run_metadata_is_empty_for_a_run_that_reported_none(
+        self, store: ExecutionStore
+    ) -> None:
+        execution = _execution("5" * 32)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        stored = store.get_run_metadata(execution.identity.value)
+
+        assert stored is not None
+        assert list(stored) == []
+
+    def test_get_run_metadata_returns_the_runs_rows_whole_in_code_point_order(
+        self, store: ExecutionStore
+    ) -> None:
+        """Every field of every row of that run and no other, whichever
+        source it came from, ordered by key the same way on either adapter:
+        by code point, so capitals before lower case and ASCII before
+        anything else."""
+        execution = _execution("6" * 32)
+        other = _execution("7" * 32)
+        entries = (
+            MetadataEntry(
+                key="zeta",
+                value="z",
+                source_file=None,
+                status="captured",
+                source="session",
+                declared=False,
+            ),
+            MetadataEntry(
+                key="fw",
+                value="2.1",
+                source_file="m.json",
+                status="captured",
+                name="Firmware version",
+            ),
+            MetadataEntry(
+                key="é",
+                value=None,
+                source_file=None,
+                status="absent",
+                source="session",
+                name="Accented",
+                declared=True,
+            ),
+            MetadataEntry(key="Zeta", value=None, source_file="m.json", status="not_scalar"),
+            MetadataEntry(
+                key="\U0001f600",
+                value=None,
+                source_file=None,
+                status="value_too_large",
+                source="session",
+                declared=False,
+            ),
+            MetadataEntry(key="a.b", value="1", source_file="m.json", status="captured"),
+        )
+        files = (MetadataFile(source_file="m.json", content_type="json", status="captured"),)
+        store.record_session(
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(files=files, entries=entries),
+        )
+        store.record_session(
+            other,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(
+                files=files,
+                entries=(
+                    MetadataEntry(key="b", value="2", source_file="m.json", status="captured"),
+                ),
+            ),
+        )
+
+        stored = store.get_run_metadata(execution.identity.value)
+
+        assert stored is not None
+        assert [entry.key for entry in stored] == ["Zeta", "a.b", "fw", "zeta", "é", "\U0001f600"]
+        assert list(stored) == sorted(entries, key=lambda entry: entry.key)

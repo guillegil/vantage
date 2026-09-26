@@ -1,4 +1,5 @@
-"""The run list, run detail, results, result detail and test history routes.
+"""The run list, run detail, run metadata, results, result detail and test
+history routes.
 
 **Every response model is built field by field**, never with
 `model_validate(..., from_attributes=True)` or any other whole-object
@@ -53,6 +54,7 @@ from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
     ExecutionStore,
     HistoryEntry,
+    MetadataEntry,
     ResultListEntry,
     RunDetail,
     RunListEntry,
@@ -64,12 +66,14 @@ from vantage.service.schemas import (
     HistoryEntryResponse,
     HistoryResponse,
     MetadataHorizonResponse,
+    MetadataItemResponse,
     ResultDetailResponse,
     ResultListItemResponse,
     ResultsResponse,
     RunDetailResponse,
     RunListItemResponse,
     RunListResponse,
+    RunMetadataResponse,
     RunVcsResponse,
 )
 
@@ -131,6 +135,18 @@ def _run_detail_response(
             execution, last_contact_at=detail.last_contact_at, now=now, grace=grace
         ),
         vcs=_vcs_response(execution.vcs),
+    )
+
+
+def _metadata_item(entry: MetadataEntry) -> MetadataItemResponse:
+    return MetadataItemResponse(
+        key=entry.key,
+        name=entry.name,
+        value=entry.value,
+        status=entry.status,
+        source=entry.source,
+        source_file=entry.source_file,
+        declared=entry.declared,
     )
 
 
@@ -284,6 +300,21 @@ def get_run_detail(
         raise UnknownRunError()
 
     return _run_detail_response(detail, now=datetime.now(timezone.utc), grace=grace)
+
+
+@router.get("/runs/{run_id}/metadata")
+def get_run_metadata(
+    run_id: str = Path(pattern=IDENTITY_PATTERN),
+    store: ExecutionStore = Depends(get_store),
+) -> RunMetadataResponse:
+    """`GET /api/v1/runs/{run_id}/metadata` -- every key the run reported,
+    ordered by key, from whichever source. Not paged, since a run holds at
+    most `MAX_METADATA_ENTRIES` keys. An unknown run is `UnknownRunError`,
+    as on `get_run_detail`; one that reported no metadata has no items."""
+    entries = store.get_run_metadata(run_id)
+    if entries is None:
+        raise UnknownRunError()
+    return RunMetadataResponse(items=[_metadata_item(entry) for entry in entries])
 
 
 @router.get("/runs/{run_id}/results")

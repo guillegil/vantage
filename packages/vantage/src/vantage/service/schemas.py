@@ -389,6 +389,29 @@ class RunDetailResponse(BaseModel):
     vcs: RunVcsResponse | None
 
 
+class MetadataItemResponse(BaseModel):
+    """One entry of `RunMetadataResponse`: one key a run reported. `source`
+    is `file` or `session`, and `source_file` names the declared file of a
+    `file` key and is `None` for a `session` one. `value` is `None` unless
+    `status` is `captured`. Built field by field in `routes/read.py`."""
+
+    key: str
+    name: str | None
+    value: str | None
+    status: str
+    source: str
+    source_file: str | None
+    declared: bool
+
+
+class RunMetadataResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/metadata`: every
+    key the run reported, ordered by key. Not paged -- a run holds at most
+    `MAX_METADATA_ENTRIES` keys."""
+
+    items: list[MetadataItemResponse]
+
+
 class FailureProjectionResponse(BaseModel):
     """The lean failure projection nested on `ResultListItemResponse`. No
     `traceback`, `failure_repr` or captured-output field at all, so a

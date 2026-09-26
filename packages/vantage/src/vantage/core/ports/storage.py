@@ -360,6 +360,14 @@ class ExecutionStore(Protocol):
         complement of `list_runs`' bounded projection."""
         ...
 
+    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+        """Return every metadata row stored for one run, ordered by `key`
+        (code point order), or None if `execution_id` is unknown. A known
+        run with no metadata has an empty sequence. Not paginated:
+        `MAX_METADATA_ENTRIES` bounds a run's rows. The existence check and
+        the rows are read from one snapshot."""
+        ...
+
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         """Return a page of one run's results -- the paginated sibling of
         `get_results`, with the same clamp and `has_more` mechanism as

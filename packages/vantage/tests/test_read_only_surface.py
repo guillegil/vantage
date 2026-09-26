@@ -33,6 +33,7 @@ from typing import Any
 
 import yaml
 from fastapi.testclient import TestClient
+from vantage.core.ports.storage import MetadataEntry, MetadataFile, RunMetadata
 from vantage.service.app import create_app
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _execution, _result, _vcs
@@ -117,13 +118,29 @@ def _run_read_only_proof(
 
 
 def _seed_database(db_path: Path) -> None:
-    """One run, one result, via `record_session`, from a writer closed
-    before the store under test opens."""
+    """One run, one result and its metadata, via `record_session`, from a
+    writer closed before the store under test opens."""
     writer = SqliteExecutionStore(db_path)
     writer.record_session(
         _execution(_RUN_ID, started=_SEEDED_AT, vcs=_vcs()),
         results=(_result(_NODE_ID),),
         received_at=_SEEDED_AT,
+        metadata=RunMetadata(
+            files=(MetadataFile(source_file="fw.json", content_type="json", status="captured"),),
+            entries=(
+                MetadataEntry(
+                    key="firmware_version", value="2.1", source_file="fw.json", status="captured"
+                ),
+                MetadataEntry(
+                    key="bench",
+                    value="lab-3",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    declared=False,
+                ),
+            ),
+        ),
     )
     writer.close()
 
@@ -155,6 +172,10 @@ def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...
         ("GET", "/runs/{run_id}"): (
             lambda: client.get(run),
             lambda: client.get(unknown_run),  # 404 (UnknownRunError)
+        ),
+        ("GET", "/runs/{run_id}/metadata"): (
+            lambda: client.get(f"{run}/metadata"),
+            lambda: client.get(f"{unknown_run}/metadata"),  # 404 (UnknownRunError)
         ),
         ("GET", "/runs/{run_id}/results"): (
             lambda: client.get(f"{run}/results"),

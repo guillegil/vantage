@@ -67,6 +67,7 @@ from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
     HistoryEntry,
+    MetadataEntry,
     NamespaceFullError,
     Page,
     ResultListEntry,
@@ -283,6 +284,15 @@ _INSERT_METADATA_ENTRY = """
     INSERT INTO run_metadata (run_id, key, name, value, status, source, source_file, declared)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_id, key) DO NOTHING
+"""
+
+# `_row_to_metadata_entry`'s seven columns. `ORDER BY key` walks the primary
+# key's index for the run, so no sort is needed; `BINARY` compares UTF-8
+# bytes, whose order is code point order.
+_SELECT_RUN_METADATA = """
+    SELECT key, name, value, status, source, source_file, declared
+    FROM run_metadata WHERE run_id = ?
+    ORDER BY key
 """
 
 # `_decode_identity`'s five columns and the eleven outcome and timing
@@ -588,6 +598,20 @@ def _row_to_result(row: tuple[object, ...]) -> Result:
 def _row_to_result_list_entry(row: tuple[object, ...]) -> ResultListEntry:
     """A `_LIST_RESULTS` row."""
     return ResultListEntry.from_result(_decode_result(row[:16], _decode_failure(row[16:29])))
+
+
+def _row_to_metadata_entry(row: tuple[object, ...]) -> MetadataEntry:
+    """A `_SELECT_RUN_METADATA` row."""
+    key, name, value, status, source, source_file, declared = row
+    return MetadataEntry(
+        key=cast(str, key),
+        name=cast("str | None", name),
+        value=cast("str | None", value),
+        status=cast(str, status),
+        source=cast(str, source),
+        source_file=cast("str | None", source_file),
+        declared=bool(declared),
+    )
 
 
 def _row_to_catalogue_entry(row: tuple[object, ...]) -> CatalogueEntry:
@@ -901,6 +925,13 @@ class SqliteExecutionStore:
         return RunDetail(
             execution=_decode_execution(row[:12]), last_contact_at=_opt_datetime(row[12])
         )
+
+    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+        with self._read_snapshot() as conn:
+            if conn.execute(_PROBE_RUN_EXISTS, (execution_id,)).fetchone() is None:
+                return None
+            rows = conn.execute(_SELECT_RUN_METADATA, (execution_id,)).fetchall()
+        return tuple(_row_to_metadata_entry(row) for row in rows)
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)

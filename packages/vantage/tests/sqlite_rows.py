@@ -1,5 +1,5 @@
-"""Rows a `SqliteExecutionStore` holds that no port method returns, read
-with plain SQL.
+"""A run's metadata rows as a `SqliteExecutionStore` holds them, read with
+plain SQL: no port method returns its file rows.
 
 Each read opens a connection of its own on the database file, as another
 process would, so it sees only what the store has committed and never

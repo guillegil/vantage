@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from pydantic import BaseModel
 from vantage.core.domain.liveness import PRESENTATIONS
+from vantage.core.domain.metadata import KEY_STATUSES, METADATA_SOURCES
 from vantage.core.domain.result import OUTCOMES
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
@@ -44,6 +45,7 @@ from vantage.service.schemas import (
     HistoryResponse,
     MetadataFileReport,
     MetadataHorizonResponse,
+    MetadataItemResponse,
     MetadataKeyReport,
     MetadataReport,
     MetadataValueReport,
@@ -55,6 +57,7 @@ from vantage.service.schemas import (
     RunDetailResponse,
     RunListItemResponse,
     RunListResponse,
+    RunMetadataResponse,
     RunReport,
     RunSectionSummaryResponse,
     RunVcsResponse,
@@ -250,6 +253,7 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
         (("POST", "/runs/{run_id}/heartbeat"), lambda: client.post(f"{run}/heartbeat")),
         (("GET", "/runs"), lambda: client.get("/api/v1/runs")),
         (("GET", "/runs/{run_id}"), lambda: client.get(run)),
+        (("GET", "/runs/{run_id}/metadata"), lambda: client.get(f"{run}/metadata")),
         (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{run}/results")),
         (
             ("GET", "/runs/{run_id}/result"),
@@ -320,6 +324,8 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
         (("GET", "/runs"), lambda: client.get("/api/v1/runs", params={"metadata_key": "k"})),
         (("GET", "/runs/{run_id}"), lambda: client.get(known_shape)),
         (("GET", "/runs/{run_id}"), lambda: client.get(malformed)),
+        (("GET", "/runs/{run_id}/metadata"), lambda: client.get(f"{known_shape}/metadata")),
+        (("GET", "/runs/{run_id}/metadata"), lambda: client.get(f"{malformed}/metadata")),
         (("POST", "/runs/{run_id}/heartbeat"), lambda: client.post(f"{known_shape}/heartbeat")),
         (("POST", "/runs/{run_id}/heartbeat"), lambda: client.post(f"{malformed}/heartbeat")),
         (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{known_shape}/results")),
@@ -510,6 +516,8 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "RunListResponse": RunListResponse,
     "MetadataHorizon": MetadataHorizonResponse,
     "RunDetailResponse": RunDetailResponse,
+    "MetadataItem": MetadataItemResponse,
+    "RunMetadataResponse": RunMetadataResponse,
     "FailureProjection": FailureProjectionResponse,
     "ResultListItem": ResultListItemResponse,
     "ResultsResponse": ResultsResponse,
@@ -541,6 +549,8 @@ _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
     ("ResultListItem", "outcome"): OUTCOMES,
     ("ResultDetailResponse", "outcome"): OUTCOMES,
     ("HistoryEntry", "outcome"): OUTCOMES,
+    ("MetadataItem", "status"): KEY_STATUSES,
+    ("MetadataItem", "source"): METADATA_SOURCES,
 }
 
 # `extra=` on a model, to the `additionalProperties` its schema must declare.
@@ -659,8 +669,9 @@ def test_declared_nullability_matches_its_model_field() -> None:
 
 
 def test_declared_enums_match_the_vocabulary_the_server_can_emit() -> None:
-    """Checked against `vantage.core.domain.result.OUTCOMES` and
-    `vantage.core.domain.liveness.PRESENTATIONS`.
+    """Checked against `vantage.core.domain.result.OUTCOMES`,
+    `vantage.core.domain.liveness.PRESENTATIONS` and the metadata
+    vocabularies in `vantage.core.domain.metadata`.
 
     Both directions again, at two levels: which properties declare a closed
     vocabulary at all, and what that vocabulary contains. Replacing

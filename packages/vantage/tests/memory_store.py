@@ -313,6 +313,23 @@ class InMemoryExecutionStore:
         )
 
     @_locked
+    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+        # `sorted()` compares code points, the order the SQLite adapter's
+        # `ORDER BY key` gets from comparing UTF-8 bytes.
+        if execution_id not in self._executions:
+            return None
+        return tuple(
+            sorted(
+                (
+                    entry
+                    for (run_id, _key), entry in self._metadata_entries.items()
+                    if run_id == execution_id
+                ),
+                key=lambda entry: entry.key,
+            )
+        )
+
+    @_locked
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         # The paginated, lean sibling of `get_results`, with the same
         # clamp/`has_more` mechanism as `list_runs`. Dict insertion order
@@ -408,7 +425,7 @@ class InMemoryExecutionStore:
     @_locked
     def metadata(self, run_id: str) -> RunMetadata:
         """The metadata files and entries stored for `run_id`, for a test to
-        inspect: the port never returns them."""
+        inspect: the port never returns the files."""
         return RunMetadata(
             files=tuple(
                 metadata_file

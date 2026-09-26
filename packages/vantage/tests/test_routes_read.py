@@ -585,6 +585,122 @@ def test_run_detail_unknown_id_is_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_run_metadata_returns_every_key_ordered_by_key_with_every_field(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """File and session keys alike, each field carried by value, and the
+    keys of another run left out."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(150)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+        metadata=RunMetadata(
+            files=(MetadataFile(source_file="fw.yaml", content_type="yaml", status="captured"),),
+            entries=(
+                MetadataEntry(
+                    key="fpga.firmware",
+                    value="1.1.0",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    name="FPGA firmware version",
+                    declared=True,
+                ),
+                MetadataEntry(
+                    key="firmware_version",
+                    value="2.1",
+                    source_file="fw.yaml",
+                    status="captured",
+                    name="Firmware version",
+                ),
+                MetadataEntry(
+                    key="bench",
+                    value=None,
+                    source_file=None,
+                    status="value_too_large",
+                    source="session",
+                    declared=False,
+                ),
+            ),
+        ),
+    )
+    store.record_session(
+        _execution(_run_id(151), started_at=now - timedelta(hours=2), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=2),
+        metadata=_captured_metadata("other_run_key", "x"),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/metadata")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "key": "bench",
+                "name": None,
+                "value": None,
+                "status": "value_too_large",
+                "source": "session",
+                "source_file": None,
+                "declared": False,
+            },
+            {
+                "key": "firmware_version",
+                "name": "Firmware version",
+                "value": "2.1",
+                "status": "captured",
+                "source": "file",
+                "source_file": "fw.yaml",
+                "declared": True,
+            },
+            {
+                "key": "fpga.firmware",
+                "name": "FPGA firmware version",
+                "value": "1.1.0",
+                "status": "captured",
+                "source": "session",
+                "source_file": None,
+                "declared": True,
+            },
+        ]
+    }
+
+
+def test_run_metadata_of_a_run_that_reported_none_has_no_items(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(152)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/metadata")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_run_metadata_of_an_unknown_run_is_404_unknown_run(client: TestClient) -> None:
+    response = client.get(f"/api/v1/runs/{_run_id(999)}/metadata")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_run"
+
+
+def test_run_metadata_of_a_malformed_run_id_is_422(client: TestClient) -> None:
+    response = client.get("/api/v1/runs/NOT-AN-ID/metadata")
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_parameter"
+    assert response.json()["fields"] == ["path.run_id"]
+
+
 def test_abandoned_run_reads_back_as_abandoned(store: ExecutionStore) -> None:
     """A run past its grace period reads back as abandoned. No clock
     control: `last_contact_at` is stamped old relative to a `now` this test
