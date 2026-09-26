@@ -12,7 +12,7 @@ import contextlib
 import sqlite3
 import sys
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
@@ -30,6 +30,9 @@ from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
 from vantage.storage import sqlite_store
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _result, _start_only_execution
+
+# `any_store`, for each adapter in turn.
+pytest_plugins = ["store_fixtures"]
 
 _JOIN_TIMEOUT_SECONDS = 10
 
@@ -364,17 +367,6 @@ def test_a_slow_store_write_holds_up_no_other_request() -> None:
 
     assert not writer.is_alive()
     assert answered == {"capabilities": 200, "heartbeat": 200, "write": 201}
-
-
-@pytest.fixture(params=["memory", "sqlite"])
-def any_store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[ExecutionStore]:
-    store: ExecutionStore = (
-        InMemoryExecutionStore()
-        if request.param == "memory"
-        else SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    )
-    yield store
-    store.close()
 
 
 def test_section_posts_racing_for_the_last_slot_never_pass_the_bound(

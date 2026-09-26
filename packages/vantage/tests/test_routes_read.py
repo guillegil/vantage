@@ -19,14 +19,11 @@ clock control (freezegun, `time.sleep`) is needed.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
-from memory_store import InMemoryExecutionStore
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, LIST_FAILURE_MESSAGE_CHARS
 from vantage.core.domain.result import CaseIdentity, Result
@@ -40,8 +37,10 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.service.app import create_app
-from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _captured, _failure, _result
+
+# `any_store`, for each adapter in turn.
+pytest_plugins = ["store_fixtures"]
 
 _KNOWN_ROOT = "/home/example/very-unique-repo-root-xyz123"
 
@@ -124,22 +123,11 @@ def _captured_metadata(
     )
 
 
-@pytest.fixture(params=["memory", "sqlite"])
-def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[ExecutionStore]:
-    """Both `ExecutionStore` implementations, one test run each.
-
-    The id of each parametrisation appears in the test id (`[memory]` /
-    `[sqlite]`), so a failure names the adapter that produced it without any
-    further digging. The SQLite adapter gets a fresh database under
-    `tmp_path` per test and is closed afterwards, matching
-    `test_sqlite_store.py`'s own fixture -- these tests share no state and
-    the file never outlives the test that made it."""
-    if request.param == "memory":
-        yield InMemoryExecutionStore()
-        return
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    yield adapter
-    adapter.close()
+@pytest.fixture
+def store(any_store: ExecutionStore) -> ExecutionStore:
+    """`store_fixtures.any_store` under the name every test here uses:
+    each adapter in turn, fresh for each test."""
+    return any_store
 
 
 @pytest.fixture

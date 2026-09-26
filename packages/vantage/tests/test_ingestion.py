@@ -6,7 +6,6 @@ the few that depend on how SQLite stores timestamps use the real adapter.
 
 from __future__ import annotations
 
-import functools
 import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -16,7 +15,6 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
-from sqlite_rows import read_metadata
 from vantage.core.domain.metadata import (
     MAX_METADATA_ENTRIES,
     MAX_METADATA_KEY_CHARS,
@@ -26,6 +24,9 @@ from vantage.core.ports.storage import ExecutionStore, MetadataEntry, MetadataFi
 from vantage.service.app import create_app
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import StoredMetadata
+
+# `any_store` and `any_stored_metadata`, for each adapter in turn.
+pytest_plugins = ["store_fixtures"]
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -510,31 +511,6 @@ _SURROGATE_CASES: dict[str, object] = {
     "metadata.path": {f"{_REPLACED}.json"},
     "metadata.key": {_REPLACED},
 }
-
-
-@pytest.fixture(params=["memory", "sqlite"])
-def any_adapter(
-    request: pytest.FixtureRequest, tmp_path: Path
-) -> Iterator[tuple[ExecutionStore, StoredMetadata]]:
-    """Each adapter, with a reader of the metadata rows it stores."""
-    if request.param == "memory":
-        memory = InMemoryExecutionStore()
-        yield memory, memory.metadata
-        return
-    database = tmp_path / "store" / "vantage.db"
-    adapter = SqliteExecutionStore(database)
-    yield adapter, functools.partial(read_metadata, database)
-    adapter.close()
-
-
-@pytest.fixture
-def any_store(any_adapter: tuple[ExecutionStore, StoredMetadata]) -> ExecutionStore:
-    return any_adapter[0]
-
-
-@pytest.fixture
-def any_stored_metadata(any_adapter: tuple[ExecutionStore, StoredMetadata]) -> StoredMetadata:
-    return any_adapter[1]
 
 
 @pytest.mark.parametrize(("field", "expected"), _SURROGATE_CASES.items(), ids=_SURROGATE_CASES)

@@ -10,8 +10,6 @@ import json
 import logging
 import socket
 import threading
-from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,7 +19,9 @@ from memory_store import InMemoryExecutionStore
 from starlette.types import ASGIApp, Receive, Scope, Send
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
-from vantage.storage.sqlite_store import SqliteExecutionStore
+
+# `any_store`, for each adapter in turn.
+pytest_plugins = ["store_fixtures"]
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -86,18 +86,6 @@ def store() -> InMemoryExecutionStore:
 @pytest.fixture
 def client(store: InMemoryExecutionStore) -> TestClient:
     return TestClient(create_app(store))
-
-
-@pytest.fixture(params=["memory", "sqlite"])
-def any_store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Any]:
-    """Both adapters, for rejections that must not depend on which store
-    would have received the write."""
-    if request.param == "memory":
-        yield InMemoryExecutionStore()
-        return
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    yield adapter
-    adapter.close()
 
 
 def test_422_response_never_echoes_input_or_pydantic_types(client: TestClient) -> None:
