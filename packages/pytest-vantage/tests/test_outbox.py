@@ -351,6 +351,38 @@ def test_a_run_answered_with_a_5xx_stays_queued_and_the_rest_are_sent(
     assert _column(box.path, "claimed_until") == [None]
 
 
+class _RetryLaterError(RejectionError):
+    """What a proxy in front of the server answers when it is busy."""
+
+    error = "retry_later"
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("try again later")
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize("status", [408, 429])
+def test_a_run_answered_with_408_or_429_stays_queued_and_sending_stops(
+    box: Outbox, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    """Both statuses ask the client to send the same request again later,
+    so the run is not dropped; and the next run would be answered the same,
+    so it is not tried."""
+    first, second = _run_reports(), _run_reports()
+    _refuse_run(vantage_server, monkeypatch, _run_id(first), _RetryLaterError(status))
+    box.enqueue(vantage_server.address, _run_id(first), first)
+    box.enqueue(vantage_server.address, _run_id(second), second)
+
+    summary = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0)
+
+    assert (summary.sent, summary.dropped, summary.waiting) == (0, (), 2)
+    assert summary.stopped is not None
+    assert f"HTTP Error {status}" in summary.stopped
+    assert _column(box.path, "run_id") == [_run_id(first), _run_id(second)]
+    assert _column(box.path, "attempts") == [1, 0]
+    assert _column(box.path, "claimed_until") == [None, None]
+
+
 def test_an_unreachable_server_stops_sending_and_keeps_every_run(box: Outbox) -> None:
     address = _closed_port_address()
     for _ in range(3):

@@ -317,12 +317,12 @@ by the xdist controller alone, and closed again: nothing holds it open while
 tests run.
 
 **What is queued.** Sending stops at the first failed report. A failure a
-later attempt can fix -- no connection, a broken one, a timeout, a 5xx
-(`outbox.worth_retrying`) -- queues that report and the ones after it; the
-reports the server acknowledged are not queued again, and a replay of any of
-them would change nothing anyway. A 4xx, a redirect or an answer that does
-not acknowledge the run would fail the same way next time and is not
-queued. A server unreachable at the start queues every report. The session
+later attempt can fix -- no connection, a broken one, a timeout, a 5xx, a
+408 or 429 asking for the request again later (`outbox.worth_retrying`) --
+queues that report and the ones after it; the reports the server
+acknowledged are not queued again, and a replay of any of them would change
+nothing anyway. Any other 4xx, a redirect or an answer that does not
+acknowledge the run would fail the same way next time and is not queued. A server unreachable at the start queues every report. The session
 then warns once, saying where the run is: stored, queued, both, or lost.
 
 **The outbox** (`pytest_vantage/outbox.py`) is the plugin's own SQLite file
@@ -344,10 +344,11 @@ order as JSON text, when it was queued, attempts and the last error.
   as long as sending it can take plus a minute, so concurrent senders -- two
   sessions, or a session and `vantage push` -- take different runs, and a
   claim left by a killed sender lapses. An acknowledged run is deleted; one
-  refused with a 4xx is deleted and named in the summary; a 5xx releases it
-  with its attempt counted and moves on, since it may be that run's own
-  problem; no answer, a redirect or a stranger's answer releases it and
-  stops, and so does a spent budget, without counting an attempt. A
+  refused with a 4xx other than 408 or 429 is deleted and named in the
+  summary; a 5xx releases it with its attempt counted and moves on, since it
+  may be that run's own problem; no answer, a 408 or 429, a redirect or a
+  stranger's answer releases it and stops, and so does a spent budget,
+  without counting an attempt. A
   duplicate send is harmless: the server's writes are idempotent.
 - A session whose own run reached its server sends that server's queue
   within the report timeout and prints one line. It never creates the

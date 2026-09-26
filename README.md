@@ -203,11 +203,12 @@ vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.
   the same, without a start report or heartbeats, and the run is stored and
   queued when it ends.
 - **The final report gets no answer** (the connection is refused or broken,
-  or it times out) **or a 5xx:** the run is stored locally and the reports
+  or it times out)**, a 5xx, or a 408 or 429** (a busy server or proxy
+  asking for it again later): the run is stored locally and the reports
   the server has not acknowledged are queued. A report that timed out may
   have been stored after all; sending it again stores nothing twice.
-- **The final report is refused outright** (a 4xx, a redirect, an answer
-  that does not acknowledge the run): the warning is the usual
+- **The final report is refused outright** (any other 4xx, a redirect, an
+  answer that does not acknowledge the run): the warning is the usual
   `vantage: error while reporting: ...`, and the run is not queued, since
   the server would refuse it again. It is still stored locally.
 
@@ -215,10 +216,10 @@ vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.
 plugin sends the runs queued for that server, oldest first, within the
 report timeout, and prints one line:
 `vantage: sent 3 queued runs to http://ci-vantage:8765 (0 waiting)`. It stops
-when the server is unreachable again or the time is spent, and says why. A
-run the server answers with a 5xx stays queued and the next is sent; one it
-refuses with a 4xx can never succeed, and is dropped with a warning naming
-its run id. Each run is only ever sent to the address it was queued for,
+when the server is unreachable again, answers a 408 or 429, or the time is
+spent, and says why. A run the server answers with a 5xx stays queued and
+the next is sent; one it refuses with any other 4xx can never succeed, and
+is dropped with a warning naming its run id. Each run is only ever sent to the address it was queued for,
 compared exactly as written, so `http://ci-vantage:8765` and
 `http://ci-vantage:8765/` are two different servers to the queue.
 `vantage push` sends the queue on demand.

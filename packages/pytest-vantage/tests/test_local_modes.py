@@ -593,6 +593,44 @@ def test_a_5xx_at_the_finish_leaves_the_run_stored_and_queued(
     assert (server, run_id, reports) == (vantage_server.address, _run_id_of(stored), stored)
 
 
+class _RetryLaterError(RejectionError):
+    """What a proxy in front of the server answers when it is busy."""
+
+    error = "retry_later"
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__("try again later")
+        self.status_code = status_code
+
+
+@pytest.mark.parametrize("status", [408, 429])
+def test_a_408_or_429_at_the_finish_leaves_the_run_stored_and_queued(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    """Unlike any other 4xx, both ask for the same request again later."""
+    _fail_finishing_reports(vantage_server, monkeypatch, _RetryLaterError(status))
+    database = _stand_in(pytester)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", "--vantage-mode=server+backup", f"--vantage-server={vantage_server.address}"
+    )
+
+    assert result.ret == 0
+    output = _output(result)
+    assert output.count("VantageWarning:") == 1, output
+    assert (
+        f"vantage: {vantage_server.address} did not take this run (HTTP Error {status}: " in output
+    )
+    assert f"this run was stored in {database} and queued (1 run waiting to be sent)" in output
+    (stored,) = _stored_sessions(database)
+    ((server, run_id, reports),) = _queued(database)
+    assert (server, run_id, reports) == (vantage_server.address, _run_id_of(stored), stored)
+
+
 def test_a_server_gone_by_the_finish_leaves_the_run_stored_and_queued(
     pytester: pytest.Pytester, server_gate: ServerGate, vantage_server: VantageTestServer
 ) -> None:

@@ -617,10 +617,11 @@ class Recorder:
         locally when the mode or a failure calls for it, queue what a later
         session could still deliver, and say what happened in one warning.
 
-        Only a failure a retry can fix is queued: no answer, or a 5xx. A
-        4xx, a redirect or an answer that does not acknowledge the run would
-        fail the same way every time. Reports the server has acknowledged
-        are not queued again.
+        Only a failure a retry can fix is queued: no answer, a 5xx, or a
+        408 or 429 asking for the report again later. Any other 4xx, a
+        redirect or an answer that does not acknowledge the run would fail
+        the same way every time. Reports the server has acknowledged are not
+        queued again.
         """
         from pytest_vantage.outbox import unreachable, worth_retrying
 

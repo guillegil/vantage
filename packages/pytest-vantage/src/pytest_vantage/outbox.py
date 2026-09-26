@@ -53,6 +53,11 @@ _CLAIM_MARGIN_SECONDS = 60.0
 # at once; no transaction here spans a network request, so the wait is short.
 _BUSY_TIMEOUT_SECONDS = 5.0
 
+# Request Timeout and Too Many Requests: a busy server, or a proxy in front
+# of it, asking for the same request again later. Dropping a run over one
+# would lose every queued run that a burst of sending trips a rate limit with.
+_RETRY_LATER = frozenset({408, 429})
+
 _SCHEMA = (
     """
     CREATE TABLE entry (
@@ -95,15 +100,24 @@ def unreachable(exc: BaseException) -> bool:
 
 def worth_retrying(exc: BaseException) -> bool:
     """Whether sending the same report later could succeed: the server was
-    unreachable, or answered 5xx. A 4xx, a redirect or an answer that does
-    not acknowledge the run would be the same the next time."""
+    unreachable, answered 5xx, or asked for the request again later. Any
+    other 4xx, a redirect or an answer that does not acknowledge the run
+    would be the same the next time."""
     if isinstance(exc, urllib_error.HTTPError):
-        return exc.code >= 500
+        return exc.code >= 500 or exc.code in _RETRY_LATER
     return unreachable(exc)
 
 
 def _rejected(exc: BaseException) -> bool:
-    return isinstance(exc, urllib_error.HTTPError) and 400 <= exc.code < 500
+    return (
+        isinstance(exc, urllib_error.HTTPError)
+        and 400 <= exc.code < 500
+        and exc.code not in _RETRY_LATER
+    )
+
+
+def _server_error(exc: BaseException) -> bool:
+    return isinstance(exc, urllib_error.HTTPError) and exc.code >= 500
 
 
 @dataclass(frozen=True)
@@ -114,7 +128,8 @@ class SendSummary:
     sent: int
     """Entries acknowledged and deleted."""
     dropped: tuple[str, ...]
-    """Run ids of the entries the server rejected with a 4xx, now deleted."""
+    """Run ids of the entries the server rejected with a 4xx other than 408
+    or 429, now deleted."""
     waiting: int
     """Entries still queued for `server`."""
     stopped: str | None
@@ -319,11 +334,12 @@ def send_queued(outbox: Outbox, server: str, *, timeout: float, budget: float) -
     """Send `server`'s queued runs, oldest first, each report bounded by
     `timeout` and all of them by `budget` seconds (`math.inf` for none).
 
-    An acknowledged run is deleted. One the server rejects with a 4xx
-    could never succeed, and is deleted too, its run id in `dropped`. A 5xx
-    leaves the run queued and goes on to the next, since it may be that
-    run's own problem. Anything else leaves the run queued and stops: an
-    unreachable server, or an answer that is not a vantage server's.
+    An acknowledged run is deleted. One the server rejects with a 4xx other
+    than 408 or 429 could never succeed, and is deleted too, its run id in
+    `dropped`. A 5xx leaves the run queued and goes on to the next, since it
+    may be that run's own problem. Anything else leaves the run queued and
+    stops: an unreachable server, a 408 or 429 asking for it again later,
+    or an answer that is not a vantage server's.
     """
     deadline = time.monotonic() + budget
     ran_out = f"the {budget:g}s allowed for sending ran out"
@@ -357,7 +373,7 @@ def send_queued(outbox: Outbox, server: str, *, timeout: float, budget: float) -
                 dropped.append(claimed.run_id)
                 continue
             outbox._release(claimed.id, str(exc) or type(exc).__name__)
-            if not worth_retrying(exc) or unreachable(exc):
+            if not _server_error(exc):
                 stopped = (
                     f"{server} is unreachable ({exc})"
                     if unreachable(exc)
