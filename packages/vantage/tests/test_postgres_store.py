@@ -18,6 +18,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -629,6 +630,64 @@ def test_every_timestamp_reads_back_in_utc_whatever_the_sessions_time_zone(
     ]
     assert all(moment is not None and moment.tzinfo is timezone.utc for moment in moments)
     assert detail.execution.started_at == started
+
+
+@pytest.mark.parametrize(
+    ("setting", "moment"),
+    [
+        ("DateStyle = 'SQL, DMY'", datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)),
+        ("DateStyle = 'German'", datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)),
+        (
+            "TimeZone = 'Pacific/Kiritimati'",
+            datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc),
+        ),
+        ("TimeZone = 'America/Los_Angeles'", datetime(1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)),
+    ],
+    ids=["sql-date-style", "german-date-style", "year-9999-east-of-utc", "year-1-west-of-utc"],
+)
+def test_timestamps_read_back_whatever_the_databases_date_style_and_time_zone(
+    postgres_url: str, setting: str, moment: datetime
+) -> None:
+    """A database may set any `DateStyle` and `TimeZone`, and many carry the
+    host's local zone. psycopg parses timestamps only in the ISO style, and
+    reads them in the session's zone, where the ends of the years 1-9999 the
+    service accepts in UTC fall outside what a `datetime` can hold: one such
+    run would fail every read of the run list."""
+    database = urlsplit(postgres_url).path.lstrip("/")
+    _query(postgres_url, f'ALTER DATABASE "{database}" SET {setting}')
+    node_id = "t.py::test_x"
+    store = PostgresExecutionStore(postgres_url)
+    try:
+        store.record_session(
+            _start_only_execution(_RUN, started=moment),
+            results=(replace(_result(node_id), started_at=moment, finished_at=moment),),
+            received_at=moment,
+        )
+        store.upsert_setting("ns", "k", value="{}", updated_at=moment)
+
+        detail = store.get_run_detail(_RUN)
+        (listed,) = store.list_runs(limit=10, offset=0).items
+        (history,) = store.list_history(node_id=node_id, limit=10, offset=0).items
+        (result,) = store.get_results(_RUN)
+        entry = store.get_catalogue_entry(node_id)
+        (setting_row,) = store.list_settings("ns")
+    finally:
+        store.close()
+
+    assert detail is not None
+    assert entry is not None
+    assert [
+        detail.execution.started_at,
+        detail.last_contact_at,
+        listed.execution.started_at,
+        listed.last_contact_at,
+        history.started_at,
+        result.started_at,
+        result.finished_at,
+        entry.first_seen_at,
+        entry.last_seen_at,
+        setting_row.updated_at,
+    ] == [moment] * 10
 
 
 def test_durations_read_back_exactly_whatever_the_databases_float_output(

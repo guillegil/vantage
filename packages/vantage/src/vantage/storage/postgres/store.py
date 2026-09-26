@@ -27,8 +27,8 @@ serialised:
   run's metadata -- is one `REPEATABLE READ` transaction; every other read is
   a single statement.
 
-Timestamps are `timestamptz`, compared as instants and read back in UTC
-whatever the session's time zone. PostgreSQL text cannot hold U+0000, so it
+Timestamps are `timestamptz`, compared as instants and read back in UTC,
+the zone every session is set to. PostgreSQL text cannot hold U+0000, so it
 becomes U+FFFD in everything written, and a lookup by a value holding one
 matches nothing, as it would in a store that never held one.
 """
@@ -419,8 +419,8 @@ def _unmatchable(*values: str) -> bool:
 
 
 def _utc(value: object) -> datetime:
-    """A `NOT NULL` timestamp, in UTC. psycopg hands it back in the
-    session's time zone, whatever the server was told."""
+    """A `NOT NULL` timestamp, with the `timezone.utc` the other adapters
+    return rather than the session zone psycopg attaches."""
     return cast(datetime, value).astimezone(timezone.utc)
 
 

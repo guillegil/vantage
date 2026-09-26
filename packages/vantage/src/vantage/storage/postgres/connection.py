@@ -62,9 +62,12 @@ _POOL_WAIT_SECONDS = 30.0
 #   back cut to 15 significant digits, a different number from the one
 #   stored. Any value above 0 gives the shortest exact text from
 #   PostgreSQL 12 on; 3 also gives an exact one before that.
+# - Timestamps in ISO style and in UTC: psycopg parses no other style, and
+#   reads a timestamp in the session's zone, where either end of the years
+#   1-9999 the service accepts in UTC lies outside what a `datetime` holds.
 _SESSION_SETUP = (
     "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED;"
-    " SET extra_float_digits = 3"
+    " SET extra_float_digits = 3; SET DateStyle = 'ISO'; SET TimeZone = 'UTC'"
 )
 
 # Advisory lock keys are shared by everything that uses the database; a

@@ -473,7 +473,10 @@ and speaks UTF-8 on the wire whatever `PGCLIENTENCODING` says.
 - **Parity with SQLite is the contract.** The port contract runs against
   this adapter too, so what differs underneath must not show: text is
   ordered and compared with `COLLATE "C"`, code point order as in SQLite;
-  timestamps come back aware and are normalised to UTC; every connection
+  timestamps come back aware, in UTC, because every connection sets its
+  session to UTC and the ISO date style whatever the database says: psycopg
+  parses no other style, and in a local zone either end of the years
+  1-9999 falls outside what a `datetime` holds; every connection
   asks for doubles with all their digits (`extra_float_digits`), which a
   database set to 0 would cut to 15; paging and `has_more` are computed
   the same way.

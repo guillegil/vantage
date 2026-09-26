@@ -72,9 +72,10 @@ One uv workspace, one lockfile, two distributions:
   never check-then-act; snapshot reads use `REPEATABLE READ` or one
   statement; serialization failures and deadlocks are retried, bounded.
   Every connection sets its session to `READ COMMITTED` (and full float
-  digits) first, since the locks assume it whatever the database defaults
-  to, and a connection the server closed is replaced at once
-  (`live_connection`), not through the pool's own backing-off check.
+  digits, ISO dates, UTC) first, since the locks and the readers assume it
+  whatever the database defaults to, and a connection the server closed is
+  replaced at once (`live_connection`), not through the pool's own
+  backing-off check.
 - **No U+0000 reaches a store.** The body decoder replaces it (and a lone
   surrogate in reports) with U+FFFD; a lookup value holding it matches
   nothing without asking the store.
