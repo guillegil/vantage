@@ -429,11 +429,17 @@ def test_a_server_stopped_with_sigterm_leaves_everything_in_the_database_file(
         assert conn.execute("SELECT id FROM run").fetchall() == [("a" * 32,)]
 
 
-def test_a_result_with_a_long_node_id_can_be_read_back_by_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "database", ["sqlite", pytest.param("postgres", marks=pytest.mark.postgres)]
+)
+def test_a_result_with_a_long_node_id_can_be_read_back_by_it(
+    tmp_path: Path, request: pytest.FixtureRequest, database: str
+) -> None:
     """A result is read by its node id, in the query string, and pytest
     never shortens a parametrize id. Percent-encoded, this one is over half
     a megabyte of request line, which the HTTP parser's own 16 KiB bound
-    refused before any route saw it, while `/results` listed it."""
+    refused before any route saw it, while `/results` listed it. In
+    PostgreSQL it is also far past what one index entry can hold."""
     node_id = "tests/" + "é/" * 60_000 + "test_a.py::test_x"
     result = {
         "node_id": node_id,
@@ -454,7 +460,8 @@ def test_a_result_with_a_long_node_id_can_be_read_back_by_it(tmp_path: Path) -> 
         "worker_id": None,
     }
     run_id = "b" * 32
-    with _running_vantage(tmp_path / "v.db") as (_proc, base):
+    target = tmp_path / "v.db" if database == "sqlite" else request.getfixturevalue("postgres_url")
+    with _running_vantage(target) as (_proc, base):
         assert _post_json(f"{base}/runs", {**_start_report(run_id), "results": [result]}) == 201
         query = urllib.parse.urlencode({"node_id": node_id})
         assert len(query) > 500_000
