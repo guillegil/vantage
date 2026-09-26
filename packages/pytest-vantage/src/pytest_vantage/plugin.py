@@ -133,18 +133,25 @@ def _preflight_reachable(address: str, timeout: float) -> bool:
     only that something is listening at `address`, never anything about the
     protocol or route.
 
-    `ConnectionRefusedError` (nothing listening) and `socket.gaierror` (the
-    host does not resolve) are both `OSError` subclasses, and the caller's
-    response is the same either way. `ValueError` covers what validation
-    already refuses -- a bad port, a host the socket layer cannot encode --
-    should anything slip past it: the answer is still "cannot reach", never
-    an exception out of `pytest_configure`.
+    Bounded as a whole, like every request (`transport.run_within`): the
+    socket timeout does not cover resolving the host name, and a resolver
+    that never answers must not hold session start for its own timeout.
+
+    `ConnectionRefusedError` (nothing listening), `socket.gaierror` (the
+    host does not resolve) and the deadline's `TimeoutError` are all
+    `OSError` subclasses, and the caller's response is the same either way.
+    `ValueError` covers what validation already refuses -- a bad port, a
+    host the socket layer cannot encode -- should anything slip past it: the
+    answer is still "cannot reach", never an exception out of
+    `pytest_configure`.
     """
+    from pytest_vantage.transport import run_within
+
     try:
         parsed = urlparse(address)
         default_port = _DEFAULT_HTTPS_PORT if parsed.scheme == "https" else _DEFAULT_HTTP_PORT
-        port = parsed.port or default_port
-        socket.create_connection((parsed.hostname, port), timeout=timeout).close()
+        target = (parsed.hostname, parsed.port or default_port)
+        run_within(timeout, lambda: socket.create_connection(target, timeout=timeout).close())
     except (OSError, ValueError):
         return False
     return True

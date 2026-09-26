@@ -256,6 +256,31 @@ def test_preflight_reachable_is_false_on_unresolvable_host() -> None:
     )
 
 
+def test_preflight_is_bounded_while_the_name_is_still_resolving(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The socket timeout does not cover name resolution, so a resolver that
+    never answers would hold session start for its own timeout. The probe
+    gives up at its deadline whatever it is waiting on.
+    """
+    release = threading.Event()
+
+    def _unanswered_lookup(*args: object, **kwargs: object) -> list[object]:
+        release.wait(timeout=10)
+        raise socket.gaierror("no answer")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _unanswered_lookup)
+    try:
+        started = time.monotonic()
+        reachable = _preflight_reachable("http://vantage.internal:9", timeout=0.3)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert reachable is False
+    assert elapsed < 2.0
+
+
 def test_preflight_reachable_is_true_when_something_listens() -> None:
     with _StubServer(_accept_then_close) as server:
         assert _preflight_reachable(server.address, timeout=1.0) is True

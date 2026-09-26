@@ -14,8 +14,8 @@ HTTPS handlers:
 
 ``timeout`` is a deadline on the whole exchange, not on each socket
 operation: a peer that trickles its answer a byte at a time would reset a
-per-operation timeout on every byte. `_within` waits at most ``timeout`` for
-the exchange; the socket timeout still frees its thread once the peer goes
+per-operation timeout on every byte. `run_within` waits at most ``timeout``
+for the exchange; the socket timeout still frees its thread once the peer goes
 silent.
 
 The response side is bounded and defensive because the server is not trusted
@@ -73,7 +73,7 @@ def _build_opener() -> urllib_request.OpenerDirector:
 _OPENER = _build_opener()
 
 
-def _within(timeout: float, work: Callable[[], _T]) -> _T:
+def run_within(timeout: float, work: Callable[[], _T]) -> _T:
     """Run ``work`` on a daemon thread and wait at most ``timeout`` seconds
     for it, returning its result or re-raising its exception.
 
@@ -118,7 +118,7 @@ def _exchange(http_request: urllib_request.Request, timeout: float) -> bytes:
             body: bytes = response.read(MAX_RESPONSE_BYTES)
         return body
 
-    return _within(timeout, attempt)
+    return run_within(timeout, attempt)
 
 
 def send(address: str, report: dict[str, object], *, timeout: float) -> None:
@@ -236,6 +236,7 @@ __all__ = [
     "MAX_RESPONSE_BYTES",
     "Capabilities",
     "fetch_capabilities",
+    "run_within",
     "send",
     "send_heartbeat",
 ]
