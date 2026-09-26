@@ -86,7 +86,7 @@ Every field is required, `null` where allowed. An unknown field is rejected.
 | `finished_at` | timestamp or null | When it came to an orderly end. Null while in progress, and for a session that stopped without one. |
 | `exit_status` | integer or null | Null in an in-progress report; the session's exit status in a finishing report. Signed 64-bit. |
 | `interrupted` | boolean | Whether the session was cut short by the user or by an explicit exit call. |
-| `interrupt_reason` | string or null | Why the session stopped early, when it did. Stored up to 64 KiB. |
+| `interrupt_reason` | string or null | Why the session stopped early, when it did. Stored up to 64 KiB; a longer reason is cut with no record of the cut. |
 
 A report whose `exit_status` is null is **in progress**; one with an exit
 status is **finishing**.

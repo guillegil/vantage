@@ -62,8 +62,9 @@ storage on the core, and the core on nothing but the standard library.
   vocabularies), and the server's configuration resolution.
 - **The storage port** is `ExecutionStore` in `core/ports/storage.py`, a
   `typing.Protocol`. An adapter satisfies it by shape, without importing or
-  subclassing anything from the core, so the dependency arrow points inwards
-  at the type level too.
+  subclassing the protocol itself. It does import the core's domain and
+  value types (`Execution`, `Result`, `Page`, `RunListEntry` and the like),
+  which it takes and returns; the core imports nothing from any adapter.
 - **`vantage.storage`** holds `SqliteExecutionStore`, the one adapter the
   server ships.
 - **`vantage.service`** is the HTTP edge. Pydantic models (`schemas.py`)
@@ -333,8 +334,13 @@ its row: run, catalogue, results, metadata.
 - Results insert with `ON CONFLICT DO NOTHING`, metadata rows likewise, so a
   replay changes nothing.
 
-Booleans are `0`/`1`; `vcs_dirty` is null when unknown, never `0`. Unbounded
-text columns carry a `<name>_truncated` flag. Foreign keys are on,
+Booleans are `0`/`1`; `vcs_dirty` is null when unknown, never `0`. The long
+free-text columns (the commit subject, and a result's failure message,
+`repr`, traceback, skip and xfail reasons and captured output) are cut to
+64 KiB and carry a `<name>_truncated` flag. `interrupt_reason` is the
+exception: the server cuts it to 64 KiB too, but no column records the cut,
+so a reason that was cut reads like a whole one. pytest-vantage never sends
+more than 1,024 characters there. Foreign keys are on,
 `synchronous` is `FULL`, the journal is WAL. A new directory is created 0700
 and a new database file 0600 before `sqlite3` touches the path; existing
 modes are never rewritten, and a database open to others is reported. List
@@ -376,19 +382,24 @@ The workspace has one pytest configuration, `[tool.pytest.ini_options]` in the
 root `pyproject.toml`: `--strict-markers`, the `slow` marker and the
 `pythonpath`. pytest would silently prefer a configuration file under
 `packages/` for runs on that directory, so `tests/test_workspace_pytest_ini.py`
-fails if one appears. The root `conftest.py` registers `pytester` and
-`vantage_test_server` as plugins, since pytest honours `pytest_plugins` only
-there.
+fails if one appears. pytest honours `pytest_plugins` in the root
+`conftest.py` and in test modules, but fails collection over one in a
+package-level `conftest.py`, so the workspace has no package-level conftest.
+The root `conftest.py` registers `pytester` and `vantage_test_server` for
+every test; a test module that needs `store_fixtures` loads it with its own
+`pytest_plugins = ["store_fixtures"]`.
 
 `pythonpath` puts both `tests/` directories on the import path, so the support
 modules import by bare name. None lives under a `src/` tree, so none ships in
-a wheel; deptry's per-rule ignores name each of them.
+a wheel. deptry's per-rule ignores name each one a test imports with an
+`import` statement; `store_fixtures`, loaded only as a plugin, needs none.
 
 | Module | Purpose |
 | --- | --- |
 | `packages/vantage/tests/importwalk.py` | the AST import walker behind the dependency checks of both distributions |
 | `packages/vantage/tests/memory_store.py` | `InMemoryExecutionStore`, a complete second implementation of the port; the server never uses it |
 | `packages/vantage/tests/vantage_port_contract.py` | `ExecutionStoreContract`, the behaviour every store must have; `test_sqlite_store.py` and `test_memory_store.py` subclass it |
+| `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]` and `[sqlite]`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
 | `packages/vantage/tests/sqlite_rows.py` | reads rows the port never returns (metadata) with plain SQL on a separate connection |
 | `packages/vantage/tests/loopback_server.py` | `LoopbackServer`: a real Uvicorn server on a thread, on a `127.0.0.1` port the OS assigns, with bounded start and stop |
 | `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a temporary directory, recording each request's method and path, for the plugin's end-to-end tests |
