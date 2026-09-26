@@ -44,6 +44,7 @@ import psycopg
 import pytest
 import uvicorn
 from memory_store import InMemoryExecutionStore
+from vantage.core.config.database import redacted
 from vantage.service import cli
 from vantage.service.app import create_app
 from vantage.service.cli import (
@@ -51,8 +52,13 @@ from vantage.service.cli import (
     ensure_database_directory_writable,
     warn_if_bound_wide,
 )
+from vantage.storage.postgres import PostgresExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage.storage.version import SchemaVersionError
+from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
+
+# `postgres_url` and `create_postgres_database`, for the tests of the real
+# PostgreSQL adapter.
+pytest_plugins = ["postgres_fixtures"]
 
 # Root ignores directory mode bits; Windows ACLs need a different check.
 _needs_enforced_mode_bits = pytest.mark.skipif(
@@ -354,10 +360,10 @@ def _wait_until_serving(proc: subprocess.Popen[bytes], base: str) -> None:
 
 
 @contextlib.contextmanager
-def _running_vantage(database: Path) -> Iterator[tuple[subprocess.Popen[bytes], str]]:
-    """The real `vantage` command, serving `database` on a free loopback
-    port, and the base URL of its API. Killed on the way out if it is still
-    running."""
+def _running_vantage(database: Path | str) -> Iterator[tuple[subprocess.Popen[bytes], str]]:
+    """The real `vantage` command, serving `database` -- a SQLite path or a
+    PostgreSQL URL -- on a free loopback port, and the base URL of its API.
+    Killed on the way out if it is still running."""
     port = _free_loopback_port()
     base = f"http://127.0.0.1:{port}/api/v1"
     command = "from vantage.service.cli import main; main()"
@@ -811,3 +817,151 @@ def test_a_start_that_goes_on_hears_from_the_driver_again(
     assert [r.getMessage() for r in caplog.records if r.name.startswith("psycopg")] == [
         "while serving"
     ]
+
+
+# --- PostgreSQL, the real adapter -------------------------------------------
+#
+# The command itself, in a process of its own as a service manager runs it,
+# against a database on the server `VANTAGE_TEST_POSTGRES_URL` names.
+
+
+def _refused(database: str) -> str:
+    """The one line the real command prints refusing `database`, having
+    exited 1 without serving."""
+    command = "from vantage.service.cli import main; main()"
+    listen = ["--port", str(_free_loopback_port())]
+    completed = subprocess.run(  # noqa: S603 -- the interpreter running this test
+        [sys.executable, "-c", command, "--database", database, *listen],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 1, completed.stderr
+    assert completed.stderr.count("\n") == 1, completed.stderr
+    return completed.stderr
+
+
+def _password(url: str) -> str | None:
+    return urllib.parse.unquote(urllib.parse.urlsplit(url).password or "") or None
+
+
+def _with_password(url: str, password: str) -> str:
+    parts = urllib.parse.urlsplit(url)
+    host = f"[{parts.hostname}]" if ":" in (parts.hostname or "") else parts.hostname
+    user = parts.username or "postgres"
+    port = f":{parts.port}" if parts.port else ""
+    netloc = f"{user}:{urllib.parse.quote(password, safe='')}@{host}{port}"
+    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
+
+
+def _execute(url: str, statement: str, params: Sequence[object] | None = None) -> None:
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(statement, params)
+
+
+def _database_connections(admin_url: str, url: str) -> int:
+    database = urllib.parse.urlsplit(url).path.lstrip("/")
+    with psycopg.connect(admin_url, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = %s", (database,)
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(os.name != "posix", reason="SIGTERM is how POSIX service managers stop one")
+def test_a_server_on_postgresql_keeps_what_it_stored_and_hangs_up_when_stopped(
+    postgres_url: str, postgres_admin_url: str
+) -> None:
+    run_id = "c" * 32
+    with _running_vantage(postgres_url) as (proc, base):
+        assert _post_json(f"{base}/runs", _start_report(run_id)) == 201
+        with urllib.request.urlopen(f"{base}/runs/{run_id}", timeout=10) as got:  # noqa: S310
+            assert json.loads(got.read())["id"] == run_id
+
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=20)
+        assert proc.stderr is not None
+        logged = proc.stderr.read().decode()
+
+    password = _password(postgres_url)
+    assert password is None or password not in logged
+    # A backend leaves pg_stat_activity a moment after its client hangs up.
+    deadline = time.monotonic() + 10
+    while _database_connections(postgres_admin_url, postgres_url):
+        assert time.monotonic() < deadline, "the stopped server left connections open"
+        time.sleep(0.05)
+    store = PostgresExecutionStore(postgres_url)
+    try:
+        assert store.get_execution(run_id) is not None
+    finally:
+        store.close()
+
+
+def _foreign_schema(url: str) -> str:
+    _execute(url, "CREATE SCHEMA vantage; CREATE TABLE vantage.things (id int)")
+    return "the vantage schema holds objects but no schema_version stamp"
+
+
+def _other_version(url: str) -> str:
+    PostgresExecutionStore(url).close()
+    other = _SCHEMA_VERSION - 1
+    _execute(url, "UPDATE vantage.meta SET value = %s WHERE key = 'schema_version'", [str(other)])
+    return f"the vantage schema's schema_version is {other}, but this build requires"
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("make", [_foreign_schema, _other_version], ids=["foreign", "version"])
+def test_a_postgresql_schema_this_build_cannot_use_is_one_line_naming_the_redacted_url(
+    postgres_url: str, make: Callable[[str], str]
+) -> None:
+    said = make(postgres_url)
+
+    line = _refused(postgres_url)
+
+    assert line.startswith(f"vantage: {redacted(postgres_url)}: {said}"), line
+    password = _password(postgres_url)
+    assert password is None or password not in line
+
+
+@pytest.mark.postgres
+def test_a_postgresql_login_refused_is_one_line_without_the_password(postgres_url: str) -> None:
+    wrong = "wr0ng-s3cr3t"  # noqa: S105
+    url = _with_password(postgres_url, wrong)
+    try:
+        psycopg.connect(url, connect_timeout=5).close()
+    except psycopg.OperationalError:
+        pass
+    else:
+        pytest.skip("the server lets this role in without checking its password")
+
+    line = _refused(url)
+
+    assert line.startswith(f"vantage: cannot open the database at {redacted(url)}: "), line
+    assert "password authentication failed" in line
+    assert wrong not in line
+
+
+@pytest.mark.postgres
+def test_a_postgresql_database_not_in_utf8_is_one_line_naming_the_redacted_url(
+    create_postgres_database: Callable[..., str],
+) -> None:
+    url = create_postgres_database(encoding="LATIN1")
+
+    assert _refused(url) == (
+        f"vantage: cannot open the database at {redacted(url)}: "
+        "the database's encoding is LATIN1; vantage needs a UTF8 database\n"
+    )
+
+
+def test_an_unreachable_postgresql_server_is_one_line_without_the_password() -> None:
+    url = f"postgresql://vantage:{_PASSWORD}@127.0.0.1:{_free_loopback_port()}/vantage"
+
+    line = _refused(url)
+
+    assert line.startswith(f"vantage: cannot open the database at {redacted(url)}: "), line
+    assert "Connection refused" in line
+    assert _PASSWORD not in line
+    assert _DECODED_PASSWORD not in line
