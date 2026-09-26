@@ -273,6 +273,8 @@ class ValuesPlan:
     - `shadowed`: keys the session reported that a declared file also
       supplies; the file's row is kept.
     - `undeclared`: keys sent that the declaration does not declare.
+    - `declared`: every key it declares, which a close match for an
+      undeclared key is looked for among.
     - `capped`, `over_budget`: how many were left out past the entry cap,
       and past `budget.MAX_METADATA_VALUES_BYTES`.
     """
