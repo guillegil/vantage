@@ -244,12 +244,19 @@ jobs:
             exit 1
           fi
 
-  # Proves that installing pytest-vantage into an environment that already
-  # has pytest adds exactly one distribution: the plugin pulls in no
-  # third-party dependency and never drags the server in.
+  # What each install brings, from the built wheels, in fresh environments.
+  # Installing pytest-vantage into an environment that already has pytest
+  # adds exactly one distribution: the plugin pulls in no third-party
+  # dependency and never drags the server in. `vantage` brings the plugin,
+  # Pydantic and PyYAML to store runs locally, and no web framework: without
+  # the server extra, serving is refused in one line naming it while
+  # `vantage push` still runs. `vantage[server]` serves.
   clean-environment-install:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      BASE_VENV: /tmp/vantage-base
+      SERVER_VENV: /tmp/vantage-server
     steps:
       - uses: actions/checkout@v4
 
@@ -259,8 +266,8 @@ jobs:
       - name: Set up build Python
         run: uv python install 3.12
 
-      - name: Build the plugin wheel
-        run: uv build --wheel --package pytest-vantage -o dist --python 3.12
+      - name: Build both wheels
+        run: uv build --wheel --all-packages -o dist --python 3.12
 
       - name: Assert exactly one distribution is added
         run: |
@@ -282,6 +289,100 @@ jobs:
           removed_count="$(printf '%s\n' "$removed" | grep -c . || true)"
           if [ "$added_count" -ne 1 ] || [ "$removed_count" -ne 0 ]; then
             echo "expected exactly one distribution added and none removed/changed" >&2
+            exit 1
+          fi
+
+      - name: Assert vantage brings the plugin and no web framework
+        run: |
+          shopt -s nullglob
+          vantage_wheels=(dist/vantage-*.whl)
+          plugin_wheels=(dist/pytest_vantage-*.whl)
+          if [ "${#vantage_wheels[@]}" -ne 1 ] || [ "${#plugin_wheels[@]}" -ne 1 ]; then
+            echo "expected one vantage and one pytest-vantage wheel in dist/," \
+              "found ${#vantage_wheels[@]} and ${#plugin_wheels[@]}" >&2
+            exit 1
+          fi
+          uv venv "$BASE_VENV" --python 3.12
+          # The plugin's wheel alongside, so vantage's dependency on it is
+          # this build rather than whatever an index holds under that name.
+          uv pip install --python "$BASE_VENV/bin/python" "${vantage_wheels[0]}" "${plugin_wheels[0]}"
+          # Names normalised as the packaging spec does, one per line.
+          installed="$(uv pip list --python "$BASE_VENV/bin/python" --format=freeze \
+            | cut -d= -f1 | tr '[:upper:]_.' '[:lower:]--' | sort)"
+          echo "Installed:"
+          echo "$installed"
+          for name in vantage pytest-vantage pytest pydantic pyyaml; do
+            if ! grep -qx "$name" <<<"$installed"; then
+              echo "expected vantage to bring $name" >&2
+              exit 1
+            fi
+          done
+          for name in fastapi starlette uvicorn; do
+            if grep -qx "$name" <<<"$installed"; then
+              echo "vantage brought $name, which only the server extra may install" >&2
+              exit 1
+            fi
+          done
+
+      - name: Assert serving without the server extra is refused in one line
+        run: |
+          home="$(mktemp -d)"
+          if out="$(env -u XDG_DATA_HOME -u VANTAGE_DATABASE HOME="$home" "$BASE_VENV/bin/vantage" 2>&1)"; then
+            status=0
+          else
+            status=$?
+          fi
+          printf '%s\n' "$out"
+          expected="vantage: serving needs the server extra: pip install 'vantage[server]'"
+          if [ "$status" -ne 1 ] || [ "$out" != "$expected" ]; then
+            echo "expected exit status 1 and exactly: $expected" >&2
+            exit 1
+          fi
+          if [ -n "$(ls -A "$home")" ]; then
+            echo "the refused start created files under the home directory" >&2
+            exit 1
+          fi
+
+      - name: Assert vantage push runs without the server extra
+        run: |
+          home="$(mktemp -d)"
+          "$BASE_VENV/bin/vantage" push --help
+          out="$(env -u XDG_DATA_HOME HOME="$home" "$BASE_VENV/bin/vantage" push)"
+          printf '%s\n' "$out"
+          if [[ "$out" != "vantage: nothing queued"* ]]; then
+            echo "expected vantage push to find nothing queued in an empty home directory" >&2
+            exit 1
+          fi
+          if [ -n "$(ls -A "$home")" ]; then
+            echo "vantage push created files under the home directory" >&2
+            exit 1
+          fi
+
+      - name: Assert vantage[server] serves
+        run: |
+          uv venv "$SERVER_VENV" --python 3.12
+          vantage_wheel="$(ls dist/vantage-*.whl)"
+          plugin_wheel="$(ls dist/pytest_vantage-*.whl)"
+          uv pip install --python "$SERVER_VENV/bin/python" \
+            "vantage[server] @ file://$PWD/$vantage_wheel" "$plugin_wheel"
+          "$SERVER_VENV/bin/vantage" --database "$(mktemp -d)/vantage.db" --port 8765 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true' EXIT
+          answer=""
+          for _ in $(seq 150); do
+            if answer="$(curl -fs http://127.0.0.1:8765/api/v1/capabilities)"; then
+              break
+            fi
+            answer=""
+            if ! kill -0 "$server" 2>/dev/null; then
+              echo "vantage exited instead of serving" >&2
+              exit 1
+            fi
+            sleep 0.2
+          done
+          echo "$answer"
+          if ! grep -Eq '"session_lifecycle": ?true' <<<"$answer"; then
+            echo "expected vantage[server] to answer its capabilities" >&2
             exit 1
           fi
 

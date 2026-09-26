@@ -240,3 +240,195 @@ def test_networking_control_proves_every_counter_it_asserts_on(
     )
 
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+# --- What each install brings --------------------------------------------------
+
+_INSTALLS = "clean-environment-install"
+_VANTAGE_WHEEL = "vantage-0.1.0-py3-none-any.whl"
+_BOTH_WHEELS = [_VANTAGE_WHEEL, _WHEEL]
+
+# `uv pip list` prints $FAKE_FREEZE, one requirement per line; every other
+# uv command succeeds.
+_FAKE_UV_LIST = """\
+if [ "$1 $2" = "pip list" ]; then printf '%s\\n' $FAKE_FREEZE; fi
+"""
+_BASE_INSTALL = [
+    "iniconfig==2.3.0",
+    "pydantic==2.13.5",
+    "pydantic-core==2.46.5",
+    "pytest==9.1.1",
+    "pytest-vantage==0.1.0",
+    "pyyaml==6.0.3",
+    "vantage==0.1.0",
+]
+
+
+def _dist(workdir: Path, wheels: list[str]) -> None:
+    (workdir / "dist").mkdir()
+    for wheel in wheels:
+        (workdir / "dist" / wheel).touch()
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("wheels", "installed", "passes"),
+    [
+        pytest.param(_BOTH_WHEELS, _BASE_INSTALL, True, id="plugin-and-validation"),
+        pytest.param(
+            _BOTH_WHEELS,
+            [*_BASE_INSTALL[:-3], "PyYAML==6.0.3", "pytest_vantage==0.1.0", "vantage==0.1.0"],
+            True,
+            id="names-as-written",
+        ),
+        pytest.param(_BOTH_WHEELS, [*_BASE_INSTALL, "fastapi==0.141.1"], False, id="fastapi"),
+        pytest.param(_BOTH_WHEELS, [*_BASE_INSTALL, "starlette==1.7.0"], False, id="starlette"),
+        pytest.param(_BOTH_WHEELS, [*_BASE_INSTALL, "uvicorn==0.54.0"], False, id="uvicorn"),
+        pytest.param(
+            _BOTH_WHEELS,
+            [name for name in _BASE_INSTALL if not name.startswith("pytest-vantage")],
+            False,
+            id="no-plugin",
+        ),
+        pytest.param(
+            _BOTH_WHEELS,
+            [name for name in _BASE_INSTALL if not name.startswith("pyyaml")],
+            False,
+            id="no-pyyaml",
+        ),
+        pytest.param([_WHEEL], _BASE_INSTALL, False, id="no-vantage-wheel"),
+        pytest.param(
+            [*_BOTH_WHEELS, "vantage-0.2.0-py3-none-any.whl"],
+            _BASE_INSTALL,
+            False,
+            id="two-vantage-wheels",
+        ),
+    ],
+)
+def test_the_vantage_install_step_passes_only_without_the_web_framework(
+    tmp_path: Path, wheels: list[str], installed: list[str], passes: bool
+) -> None:
+    _dist(tmp_path, wheels)
+    script = _step_script(_INSTALLS, "Assert vantage brings the plugin and no web framework")
+
+    result = _run_step(
+        script,
+        tmp_path,
+        {"uv": _FAKE_UV_LIST},
+        {"BASE_VENV": str(tmp_path / "base"), "FAKE_FREEZE": " ".join(installed)},
+    )
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+def _fake_vantage(venv: Path, body: str) -> None:
+    """`body`, as the `vantage` command installed into `venv`."""
+    command = venv / "bin" / "vantage"
+    command.parent.mkdir(parents=True)
+    command.write_text(f"#!/bin/bash\n{body}", encoding="utf-8")
+    command.chmod(0o755)
+
+
+_EXTRA_MISSING = "vantage: serving needs the server extra: pip install 'vantage[server]'"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("vantage", "passes"),
+    [
+        pytest.param(f'echo "{_EXTRA_MISSING}" >&2; exit 1', True, id="refused"),
+        pytest.param("exit 0", False, id="served"),
+        pytest.param(f'echo "{_EXTRA_MISSING}" >&2; exit 2', False, id="another-status"),
+        pytest.param(
+            "echo 'Traceback (most recent call last):' >&2\n"
+            "echo \"ModuleNotFoundError: No module named 'uvicorn'\" >&2\nexit 1",
+            False,
+            id="traceback",
+        ),
+        pytest.param(
+            f'mkdir -p "$HOME/.local"; echo "{_EXTRA_MISSING}" >&2; exit 1',
+            False,
+            id="created-something",
+        ),
+    ],
+)
+def test_the_serving_refusal_step_passes_only_on_the_one_line(
+    tmp_path: Path, vantage: str, passes: bool
+) -> None:
+    _fake_vantage(tmp_path / "base", vantage)
+    script = _step_script(
+        _INSTALLS, "Assert serving without the server extra is refused in one line"
+    )
+
+    result = _run_step(script, tmp_path, {}, {"BASE_VENV": str(tmp_path / "base")})
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+_PUSH_HELP = 'if [ "$1 $2" = "push --help" ]; then echo "usage: vantage push"; exit 0; fi\n'
+_NOTHING_QUEUED = 'if [ "$1" = push ]; then echo "vantage: nothing queued (no queue at x)"; fi\n'
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("vantage", "passes"),
+    [
+        pytest.param(_PUSH_HELP + _NOTHING_QUEUED, True, id="runs"),
+        pytest.param('[ "$2" = --help ] && exit 1\n' + _NOTHING_QUEUED, False, id="help-fails"),
+        pytest.param(_PUSH_HELP + "exit 1", False, id="push-fails"),
+        pytest.param(_PUSH_HELP + "echo 'vantage: sent 1 queued run'", False, id="found-a-queue"),
+        pytest.param(
+            _PUSH_HELP + 'touch "$HOME/vantage.db-outbox"\n' + _NOTHING_QUEUED,
+            False,
+            id="created-a-queue",
+        ),
+    ],
+)
+def test_the_push_step_passes_only_when_push_runs_and_creates_nothing(
+    tmp_path: Path, vantage: str, passes: bool
+) -> None:
+    _fake_vantage(tmp_path / "base", vantage)
+    script = _step_script(_INSTALLS, "Assert vantage push runs without the server extra")
+
+    result = _run_step(script, tmp_path, {}, {"BASE_VENV": str(tmp_path / "base")})
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+# `curl` answers $FAKE_ANSWER with exit status $FAKE_CURL_EXIT.
+_FAKE_CURL = """\
+printf '%s' "$FAKE_ANSWER"; exit "$FAKE_CURL_EXIT"
+"""
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("vantage", "answer", "curl_exit", "passes"),
+    [
+        pytest.param("exec sleep 30", '{"session_lifecycle":true}', 0, True, id="serves"),
+        pytest.param(
+            "exec sleep 30", '{"session_lifecycle": true}', 0, True, id="serves-spaced-json"
+        ),
+        pytest.param("exec sleep 30", '{"session_lifecycle":false}', 0, False, id="no-lifecycle"),
+        pytest.param("exit 1", "", 7, False, id="exits"),
+    ],
+)
+def test_the_server_install_step_passes_only_when_it_answers(
+    tmp_path: Path, vantage: str, answer: str, curl_exit: int, passes: bool
+) -> None:
+    _dist(tmp_path, _BOTH_WHEELS)
+    _fake_vantage(tmp_path / "server", vantage)
+    script = _step_script(_INSTALLS, "Assert vantage[server] serves")
+
+    result = _run_step(
+        script,
+        tmp_path,
+        {"uv": "exit 0", "curl": _FAKE_CURL},
+        {
+            "SERVER_VENV": str(tmp_path / "server"),
+            "FAKE_ANSWER": answer,
+            "FAKE_CURL_EXIT": str(curl_exit),
+        },
+    )
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
