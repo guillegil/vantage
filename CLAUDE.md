@@ -39,6 +39,15 @@ adapter satisfies a port by shape, without importing or subclassing the
 protocol. It still imports the core's domain and value types; the core never
 imports an adapter.
 
+The server ships one adapter, `SqliteExecutionStore`. `InMemoryExecutionStore`
+is a test double in `packages/vantage/tests/memory_store.py`; the shared port
+contract (`vantage_port_contract.py`) runs against both.
+
+`README.md` describes behaviour for users, `docs/architecture.md` is the
+maintainer's map, and `docs/api/v1-ingestion.md` plus
+`packages/vantage/src/vantage/service/openapi/v1.yaml` define the HTTP contract.
+Keep them true when behaviour changes.
+
 **The plugin never opens a database.** It reports to `POST /api/v1/runs` with
 `urllib` and `json`, and the server performs every write. That is what keeps the
 plugin dependency-free; installing `pytest-vantage` must never pull in `vantage`.
@@ -51,8 +60,10 @@ numbers — they release independently on prefixed tags.
   switch. An ini value, a config file or an environment variable may say *where*
   the server is, never *whether* to record: a value committed by one person must
   not silently enable recording for everyone who clones the repository. The
-  same holds for `--vantage-failure-text` and `--vantage-metadata`, which have no
-  ini equivalent at all. Tests for this are differential — run once with the
+  same holds for `--vantage-failure-text` and `--vantage-metadata`. All three
+  count only when typed: the plugin checks `config.invocation_params.args`, so
+  the same flags arriving through `addopts`, `PYTEST_ADDOPTS` or an `@file` are
+  ignored with a warning. Tests for this are differential — run once with the
   flag absent and once with `-p no:vantage` and compare the trees — because
   pytest itself writes `.pytest_cache` and `__pycache__`.
 - **Plugin failures never change the suite's exit status**, with one
@@ -72,9 +83,11 @@ numbers — they release independently on prefixed tags.
   order is chronological order. The server normalizes everything it receives.
 - **Python 3.10 is the floor.** `StrEnum`, `datetime.UTC` and `tomllib` are
   3.11+ and must not be used.
-- **Schema.** `schema.sql` is applied whole on first open and stamps
-  `meta.schema_version`; a database stamped with any other version is refused
-  rather than migrated. There is no migration framework.
+- **Schema.** `schema.sql` is applied whole on first open, in the same
+  transaction that stamps `meta.schema_version` from `_SCHEMA_VERSION` in
+  `storage/connection.py` (the only version literal); a database stamped with
+  any other version is refused rather than migrated. There is no migration
+  framework, and no table or column exists before code writes it.
 
 ## Conventions
 

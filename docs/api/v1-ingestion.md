@@ -173,8 +173,8 @@ The server re-applies the client's bounds by dropping, never by rejecting:
 - A file is dropped, with its keys, when its path is absolute, contains `..`,
   a backslash or a drive, is longer than 1,024 characters, or repeats an
   earlier file's path, or when its `format` or `status` is not one listed
-  above. `pytest-vantage` sends an absolute or `..` path it refused to read
-  as `path_rejected`, so such a path never reaches the run.
+  above. `pytest-vantage` refuses a declaration holding such a path, with a
+  warning, so it never sends one.
 - A key is dropped when it is longer than 1,024 characters, was declared by
   an earlier file, or comes after the 200th key of the report.
 - A `captured` file is recorded `malformed` when its content is null, cannot

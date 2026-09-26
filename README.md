@@ -170,9 +170,9 @@ deployment region a run was made against.
 - `files` is a list of at most 16 entries, each with a `path`, a `format`
   (`"json"` or `"yaml"`; it is never guessed from the extension) and a list
   of `keys`.
-- A `path` uses forward slashes. It may not contain a backslash, a drive
-  letter or a NUL character, may not exceed 1,024 characters, and may
-  appear only once.
+- A `path` is relative to the rootdir and uses forward slashes. It may not
+  be absolute or contain a `..` component, a backslash, a drive letter or a
+  NUL character, may not exceed 1,024 characters, and may appear only once.
 - A key may appear only once in the whole declaration and may not exceed
   1,024 characters. At most 200 keys in total.
 - The declaration itself must be a JSON object in UTF-8, at most 1 MiB, and
@@ -183,15 +183,10 @@ warning; the session is still recorded, without metadata.
 
 **The declared files:**
 
-- Each path must be relative, have no `..` component, and resolve, symlinks
-  followed, to a regular file strictly inside the rootdir. A file that fails
-  this is never opened.
-- **An absolute path or one containing `..` is dropped without a warning.**
-  The session is recorded with the rest of its metadata, but the server
-  discards that file and its keys, so the run carries no trace of them.
-  Every other path that fails the check (a symlink leading out of the
-  rootdir, a directory) is recorded as `path_rejected`, or as `not_found`
-  when nothing exists there.
+- Each path must resolve, symlinks followed, to a regular file strictly
+  inside the rootdir. A file that fails this is never opened: it is recorded
+  as `path_rejected` (a symlink leading out of the rootdir, a directory), or
+  as `not_found` when nothing exists there.
 - A file larger than 8 KiB is recorded as `too_large`, one that is not UTF-8
   as `not_text`, and one that cannot be read as `unreadable`; none is sent.
   The whole metadata section of a report, file contents included, is capped
@@ -206,8 +201,7 @@ warning; the session is still recorded, without metadata.
 **What leaves the machine is the whole text of every declared file that
 passes these checks**, not only the declared keys; the server keeps only the
 declared values and each file's status. Declare only files you are content to
-upload. Every declared path is recorded with the run, with its status, except
-the absolute and `..` paths the server drops.
+upload. Every declared path is recorded with the run, with its status.
 
 Runs can be filtered by a recorded value:
 `GET /api/v1/runs?metadata_key=region&metadata_value=eu-west-1`.
