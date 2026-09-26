@@ -21,10 +21,9 @@
 -- A few values are recorded for whoever reads the database directly and
 -- are returned by no route: `meta.created_at`/`created_by`,
 -- `run.received_at`, `test_case.first_seen_at`/`last_seen_run_id`, and the
--- status and source file of each declared metadata file and key
--- (`run_metadata_file`, `run_metadata.source_file`/`status`), which say why
--- a declared key has no value. The tests read them to check what a write
--- stored.
+-- format and status of each declared metadata file (`run_metadata_file`),
+-- which say why its keys have no value. The tests read them to check what a
+-- write stored.
 
 -- ---------------------------------------------------------------------------
 -- meta -- `schema_version`, plus the best-effort `created_at`/`created_by`
@@ -148,20 +147,29 @@ CREATE TABLE IF NOT EXISTS run_metadata_file (
 );
 
 -- ---------------------------------------------------------------------------
--- run_metadata -- one row per DECLARED key. `value` is NULL whenever `status`
--- is not 'captured': a declared-but-uncaptured key is a row, never a missing
--- row. All values are TEXT, numbers included: comparison is string
--- equality, and the declaration names keys, not types.
+-- run_metadata -- one row per key a run reported: every key of a declared
+-- file (`source` 'file', with its `source_file`), then every key the test
+-- session set itself, and every declared key nothing gave a value (`source`
+-- 'session', no file). `value` is NULL whenever `status` is not 'captured':
+-- a key without a value is a row, never a missing row. All values are TEXT,
+-- numbers included: comparison is string equality, and a declaration names
+-- keys, not types. `name` is the display name that run's declaration gave
+-- the key, and `declared` whether it named the key at all; a file's key
+-- always is.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS run_metadata (
     run_id       TEXT NOT NULL REFERENCES run (id),
     key          TEXT NOT NULL,
+    name         TEXT NULL,
     value        TEXT NULL,
-    source_file  TEXT NOT NULL,
     status       TEXT NOT NULL CHECK (status IN (
                      'captured', 'absent', 'not_scalar', 'value_too_large',
                      'source_unavailable')),
-    PRIMARY KEY (run_id, key)
+    source       TEXT NOT NULL CHECK (source IN ('file', 'session')),
+    source_file  TEXT NULL,
+    declared     INTEGER NOT NULL CHECK (declared IN (0, 1)),
+    PRIMARY KEY (run_id, key),
+    CHECK ((source = 'file') = (source_file IS NOT NULL))
 );
 
 -- ---------------------------------------------------------------------------
@@ -172,7 +180,7 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 -- `result(test_case_id)`: one test's history.
 -- `test_case(node_id)`: the catalogue upsert's conflict target and every
 -- lookup by node id.
--- `run_metadata(key, value)`: filtering runs by a declared key/value pair,
+-- `run_metadata(key, value)`: filtering runs by metadata key/value pairs,
 -- a full scan without it.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_started_at

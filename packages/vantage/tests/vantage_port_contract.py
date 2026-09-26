@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
@@ -191,8 +192,8 @@ def _captured(
 
 StoredMetadata = Callable[[str], RunMetadata]
 """Reads back the metadata files and entries an adapter stored for one run
-id. The port never returns them, so each adapter's test module reads its own
-storage."""
+id. The port never returns the files, so each adapter's test module reads its
+own storage for both."""
 
 
 class ExecutionStoreContract:
@@ -1640,6 +1641,157 @@ class ExecutionStoreContract:
         assert set(pair.files) == set(single.files) == set(metadata.files)
         assert set(pair.entries) == set(single.entries) == set(metadata.entries)
 
+    def test_every_kind_of_key_round_trips_with_its_source_name_and_declaration(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A file key and the keys a session reported itself -- declared or
+        not, with and without a value -- are stored side by side, each with
+        where it came from, its display name and whether it was declared."""
+        execution = _execution("3" * 32)
+        metadata = RunMetadata(
+            files=(MetadataFile(source_file="board.json", content_type="json", status="captured"),),
+            entries=(
+                MetadataEntry(
+                    key="board.revision",
+                    value="rev-b",
+                    source_file="board.json",
+                    status="captured",
+                    name="Board revision",
+                ),
+                MetadataEntry(
+                    key="fpga.firmware",
+                    value="1.1.0",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    name="FPGA firmware version",
+                    declared=True,
+                ),
+                MetadataEntry(
+                    key="bench",
+                    value="lab-3",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    declared=False,
+                ),
+                MetadataEntry(
+                    key="fmc.hardware",
+                    value=None,
+                    source_file=None,
+                    status="absent",
+                    source="session",
+                    name="FMC hardware version",
+                    declared=True,
+                ),
+                MetadataEntry(
+                    key="fpga.dna",
+                    value=None,
+                    source_file=None,
+                    status="value_too_large",
+                    source="session",
+                    declared=False,
+                ),
+            ),
+        )
+
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        stored = stored_metadata(execution.identity.value)
+        assert set(stored.files) == set(metadata.files)
+        assert set(stored.entries) == set(metadata.entries)
+
+    def test_a_key_recorded_from_a_file_keeps_its_value_over_a_later_session_value(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A file's keys arrive with the start report and the session's own
+        values only with the finish report; the first row for a key is the
+        one kept, whichever source the later one comes from."""
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        identity = "4" * 32
+        from_file = MetadataEntry(
+            key="fpga.firmware", value="1.0.0", source_file="fw.json", status="captured"
+        )
+        store.record_session(
+            _start_only_execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=RunMetadata(
+                files=(
+                    MetadataFile(source_file="fw.json", content_type="json", status="captured"),
+                ),
+                entries=(from_file,),
+            ),
+        )
+
+        store.record_session(
+            _execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=RunMetadata(
+                entries=(
+                    MetadataEntry(
+                        key="fpga.firmware",
+                        value="1.1.0",
+                        source_file=None,
+                        status="captured",
+                        source="session",
+                        declared=False,
+                    ),
+                ),
+            ),
+        )
+
+        assert stored_metadata(identity).entries == (from_file,)
+
+    def test_a_run_holds_at_most_the_entry_bound_of_keys_across_its_reports(
+        self, store: ExecutionStore
+    ) -> None:
+        """Each report is bounded on its way in, but a run may be sent any
+        number of them. The store keeps the first keys up to the bound and
+        drops every new one after it; a key the run already holds takes no
+        second place."""
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        identity = "9" * 32
+
+        def _values(*keys: str, value: str = "v") -> RunMetadata:
+            return RunMetadata(
+                entries=tuple(
+                    MetadataEntry(
+                        key=key,
+                        value=value,
+                        source_file=None,
+                        status="captured",
+                        source="session",
+                        declared=False,
+                    )
+                    for key in keys
+                )
+            )
+
+        first = [f"a{index:03d}" for index in range(MAX_METADATA_ENTRIES - 1)]
+        store.record_session(
+            _start_only_execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=_values(*first),
+        )
+        store.record_session(
+            _execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=_values(first[0], "b000", "b001", value="later"),
+        )
+
+        stored = store.get_run_metadata(identity)
+        assert stored is not None
+        assert [(entry.key, entry.value) for entry in stored] == [
+            *((key, "v") for key in first),
+            ("b000", "later"),
+        ]
+
     def test_a_session_with_no_metadata_argument_persists_no_metadata_rows(
         self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:
@@ -1663,12 +1815,12 @@ class ExecutionStoreContract:
             )
 
         page, predating = store.list_runs_with_metadata_horizon(
-            key="fw", value="2.1", limit=10, offset=0
+            filters=[("fw", "2.1")], limit=10, offset=0
         )
 
         assert page.items == ()
         assert page.has_more is False
-        assert predating == 3
+        assert predating == (3,)
 
     def test_the_horizon_counts_the_runs_started_before_the_key_was_first_declared(
         self, store: ExecutionStore
@@ -1712,9 +1864,174 @@ class ExecutionStoreContract:
         )
 
         page, predating = store.list_runs_with_metadata_horizon(
-            key="fw", value="2.1", limit=1, offset=0
+            filters=[("fw", "2.1")], limit=1, offset=0
         )
 
         assert [entry.execution.identity.value for entry in page.items] == ["c" * 32]
         assert page.has_more is True
-        assert predating == 2
+        assert predating == (2,)
+
+    def test_several_pairs_match_the_runs_holding_every_one_from_either_source(
+        self, store: ExecutionStore
+    ) -> None:
+        """A run matches only when it holds each pair, whether the value was
+        read from a file or reported by the session; each distinct key gets
+        its own horizon, in the order the filter first names it."""
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+        def _holding(**values: str) -> RunMetadata:
+            return RunMetadata(
+                files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+                entries=tuple(
+                    MetadataEntry(key=key, value=value, source_file="m.json", status="captured")
+                    if key == "fw"
+                    else MetadataEntry(
+                        key=key, value=value, source_file=None, status="captured", source="session"
+                    )
+                    for key, value in values.items()
+                ),
+            )
+
+        runs = {
+            "0" * 32: RunMetadata(),
+            "1" * 32: _holding(fmc="5.2.0"),
+            "2" * 32: _holding(fw="1.1.0", fmc="5.2.0"),
+            "3" * 32: _holding(fw="1.1.0", fmc="5.3.0"),
+            "4" * 32: _holding(fw="1.1.0", fmc="5.2.0", bench="lab-3"),
+            "5" * 32: _holding(fw="1.0.0", fmc="5.2.0"),
+        }
+        for minute, (run_id, metadata) in enumerate(runs.items()):
+            store.record_session(
+                _execution(run_id, started=base + timedelta(minutes=minute)),
+                results=(),
+                received_at=base,
+                metadata=metadata,
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "1.1.0"), ("fmc", "5.2.0"), ("fw", "1.1.0")], limit=10, offset=0
+        )
+
+        assert [entry.execution.identity.value for entry in page.items] == ["4" * 32, "2" * 32]
+        assert page.has_more is False
+        assert predating == (2, 1)
+
+    def test_two_values_for_one_key_match_no_run(self, store: ExecutionStore) -> None:
+        store.record_session(
+            _execution("a" * 32),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(
+                files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+                entries=(
+                    MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured"),
+                ),
+            ),
+        )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "2.1"), ("fw", "2.2")], limit=10, offset=0
+        )
+
+        assert page.items == ()
+        assert predating == (0,)
+
+    def test_no_pairs_narrow_nothing_and_count_nothing(self, store: ExecutionStore) -> None:
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+        for i in range(2):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
+                results=(),
+                received_at=base,
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(filters=[], limit=10, offset=0)
+
+        assert page == store.list_runs(limit=10, offset=0)
+        assert predating == ()
+
+    # -- get_run_metadata --
+
+    def test_get_run_metadata_is_none_for_an_unknown_run(self, store: ExecutionStore) -> None:
+        assert store.get_run_metadata("0" * 32) is None
+
+    def test_get_run_metadata_is_empty_for_a_run_that_reported_none(
+        self, store: ExecutionStore
+    ) -> None:
+        execution = _execution("5" * 32)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        stored = store.get_run_metadata(execution.identity.value)
+
+        assert stored is not None
+        assert list(stored) == []
+
+    def test_get_run_metadata_returns_the_runs_rows_whole_in_code_point_order(
+        self, store: ExecutionStore
+    ) -> None:
+        """Every field of every row of that run and no other, whichever
+        source it came from, ordered by key the same way on either adapter:
+        by code point, so capitals before lower case and ASCII before
+        anything else."""
+        execution = _execution("6" * 32)
+        other = _execution("7" * 32)
+        entries = (
+            MetadataEntry(
+                key="zeta",
+                value="z",
+                source_file=None,
+                status="captured",
+                source="session",
+                declared=False,
+            ),
+            MetadataEntry(
+                key="fw",
+                value="2.1",
+                source_file="m.json",
+                status="captured",
+                name="Firmware version",
+            ),
+            MetadataEntry(
+                key="é",
+                value=None,
+                source_file=None,
+                status="absent",
+                source="session",
+                name="Accented",
+                declared=True,
+            ),
+            MetadataEntry(key="Zeta", value=None, source_file="m.json", status="not_scalar"),
+            MetadataEntry(
+                key="\U0001f600",
+                value=None,
+                source_file=None,
+                status="value_too_large",
+                source="session",
+                declared=False,
+            ),
+            MetadataEntry(key="a.b", value="1", source_file="m.json", status="captured"),
+        )
+        files = (MetadataFile(source_file="m.json", content_type="json", status="captured"),)
+        store.record_session(
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(files=files, entries=entries),
+        )
+        store.record_session(
+            other,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(
+                files=files,
+                entries=(
+                    MetadataEntry(key="b", value="2", source_file="m.json", status="captured"),
+                ),
+            ),
+        )
+
+        stored = store.get_run_metadata(execution.identity.value)
+
+        assert stored is not None
+        assert [entry.key for entry in stored] == ["Zeta", "a.b", "fw", "zeta", "é", "\U0001f600"]
+        assert list(stored) == sorted(entries, key=lambda entry: entry.key)

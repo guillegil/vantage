@@ -18,10 +18,12 @@ clock control (freezegun, `time.sleep`) is needed.
 
 from __future__ import annotations
 
+import importlib.resources
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, LIST_FAILURE_MESSAGE_CHARS
@@ -40,6 +42,10 @@ from vantage_port_contract import _captured, _failure, _result
 
 # `any_store`, for each adapter in turn.
 pytest_plugins = ["store_fixtures"]
+
+_OPENAPI_DOCUMENT_BYTES = (
+    importlib.resources.files("vantage.service.openapi").joinpath("v1.yaml").read_bytes()
+)
 
 _KNOWN_ROOT = "/home/example/very-unique-repo-root-xyz123"
 
@@ -583,6 +589,122 @@ def test_run_detail_unknown_id_is_404(client: TestClient) -> None:
     response = client.get(f"/api/v1/runs/{_run_id(999)}")
 
     assert response.status_code == 404
+
+
+def test_run_metadata_returns_every_key_ordered_by_key_with_every_field(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """File and session keys alike, each field carried by value, and the
+    keys of another run left out."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(150)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+        metadata=RunMetadata(
+            files=(MetadataFile(source_file="fw.yaml", content_type="yaml", status="captured"),),
+            entries=(
+                MetadataEntry(
+                    key="fpga.firmware",
+                    value="1.1.0",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    name="FPGA firmware version",
+                    declared=True,
+                ),
+                MetadataEntry(
+                    key="firmware_version",
+                    value="2.1",
+                    source_file="fw.yaml",
+                    status="captured",
+                    name="Firmware version",
+                ),
+                MetadataEntry(
+                    key="bench",
+                    value=None,
+                    source_file=None,
+                    status="value_too_large",
+                    source="session",
+                    declared=False,
+                ),
+            ),
+        ),
+    )
+    store.record_session(
+        _execution(_run_id(151), started_at=now - timedelta(hours=2), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=2),
+        metadata=_captured_metadata("other_run_key", "x"),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/metadata")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            {
+                "key": "bench",
+                "name": None,
+                "value": None,
+                "status": "value_too_large",
+                "source": "session",
+                "source_file": None,
+                "declared": False,
+            },
+            {
+                "key": "firmware_version",
+                "name": "Firmware version",
+                "value": "2.1",
+                "status": "captured",
+                "source": "file",
+                "source_file": "fw.yaml",
+                "declared": True,
+            },
+            {
+                "key": "fpga.firmware",
+                "name": "FPGA firmware version",
+                "value": "1.1.0",
+                "status": "captured",
+                "source": "session",
+                "source_file": None,
+                "declared": True,
+            },
+        ]
+    }
+
+
+def test_run_metadata_of_a_run_that_reported_none_has_no_items(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(152)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/metadata")
+
+    assert response.status_code == 200
+    assert response.json() == {"items": []}
+
+
+def test_run_metadata_of_an_unknown_run_is_404_unknown_run(client: TestClient) -> None:
+    response = client.get(f"/api/v1/runs/{_run_id(999)}/metadata")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_run"
+
+
+def test_run_metadata_of_a_malformed_run_id_is_422(client: TestClient) -> None:
+    response = client.get("/api/v1/runs/NOT-AN-ID/metadata")
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_parameter"
+    assert response.json()["fields"] == ["path.run_id"]
 
 
 def test_abandoned_run_reads_back_as_abandoned(store: ExecutionStore) -> None:
@@ -1289,21 +1411,6 @@ def test_run_list_metadata_filter_returns_only_matching_runs(
     assert [item["id"] for item in response.json()["items"]] == [matching_run]
 
 
-def test_run_list_metadata_filter_requires_both_params_together(client: TestClient) -> None:
-    """`metadata_key` and `metadata_value` are both or neither -- one
-    without the other is `422 invalid_metadata_filter`, naming the missing
-    one."""
-    key_only = client.get("/api/v1/runs", params={"metadata_key": "firmware_version"})
-    value_only = client.get("/api/v1/runs", params={"metadata_value": "2.1"})
-
-    assert key_only.status_code == 422
-    assert key_only.json()["error"] == "invalid_metadata_filter"
-    assert key_only.json()["fields"] == ["metadata_value"]
-    assert value_only.status_code == 422
-    assert value_only.json()["error"] == "invalid_metadata_filter"
-    assert value_only.json()["fields"] == ["metadata_key"]
-
-
 def test_run_list_unknown_metadata_key_yields_empty_match_not_an_error(
     client: TestClient, store: ExecutionStore
 ) -> None:
@@ -1356,7 +1463,7 @@ def test_run_list_metadata_horizon_excludes_and_counts_predating_runs(
     assert response.status_code == 200
     body = response.json()
     assert [item["id"] for item in body["items"]] == [declared_run]
-    assert body["metadata_horizon"] == {"key": "firmware_version", "predating": 2}
+    assert body["metadata_horizon"] == [{"key": "firmware_version", "predating": 2}]
 
 
 def test_run_list_metadata_horizon_equals_total_when_key_never_declared(
@@ -1381,7 +1488,7 @@ def test_run_list_metadata_horizon_equals_total_when_key_never_declared(
     assert response.status_code == 200
     body = response.json()
     assert body["items"] == []
-    assert body["metadata_horizon"] == {"key": "never_declared", "predating": 3}
+    assert body["metadata_horizon"] == [{"key": "never_declared", "predating": 3}]
 
 
 def test_run_list_metadata_horizon_is_null_without_a_filter(
@@ -1445,4 +1552,112 @@ def test_run_list_metadata_horizon_counts_a_declared_but_dropped_key(
     assert response.status_code == 200
     body = response.json()
     assert body["items"] == []
-    assert body["metadata_horizon"] == {"key": "firmware_version", "predating": 1}
+    assert body["metadata_horizon"] == [{"key": "firmware_version", "predating": 1}]
+
+
+def _session_metadata(**values: str) -> RunMetadata:
+    """Values the session reported itself, with no file behind them."""
+    return RunMetadata(
+        entries=tuple(
+            MetadataEntry(
+                key=key, value=value, source_file=None, status="captured", source="session"
+            )
+            for key, value in values.items()
+        )
+    )
+
+
+def test_run_list_metadata_pairs_match_only_runs_holding_every_pair(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """Each value pairs with the key in the same position, a run must hold
+    every pair to match, and a value the session reported matches like one
+    read from a file. The horizon has one entry per distinct key, in the
+    order first given."""
+    now = datetime.now(timezone.utc)
+    runs = {
+        _run_id(160): RunMetadata(),
+        _run_id(161): _session_metadata(fmc="5.2.0"),
+        _run_id(162): _session_metadata(fw="1.1.0", fmc="5.2.0"),
+        _run_id(163): _session_metadata(fw="1.1.0", fmc="5.3.0"),
+        _run_id(164): _session_metadata(fw="5.2.0", fmc="1.1.0"),
+    }
+    for age, (run_id, metadata) in enumerate(reversed(runs.items())):
+        store.record_session(
+            _execution(run_id, started_at=now - timedelta(hours=age + 1), finished_at=now),
+            results=[],
+            received_at=now - timedelta(hours=age + 1),
+            metadata=metadata,
+        )
+
+    response = client.get(
+        "/api/v1/runs",
+        params=[
+            ("metadata_key", "fw"),
+            ("metadata_key", "fmc"),
+            ("metadata_value", "1.1.0"),
+            ("metadata_value", "5.2.0"),
+            ("metadata_key", "fw"),
+            ("metadata_value", "1.1.0"),
+        ],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert [item["id"] for item in body["items"]] == [_run_id(162)]
+    assert body["metadata_horizon"] == [
+        {"key": "fw", "predating": 2},
+        {"key": "fmc", "predating": 1},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("params", "field"),
+    [
+        ({"metadata_key": "fw"}, "query.metadata_value"),
+        ({"metadata_value": "1.1.0"}, "query.metadata_key"),
+        ({"metadata_key": ["fw", "fmc"], "metadata_value": "1.1.0"}, "query.metadata_value"),
+        ({"metadata_key": "fw", "metadata_value": ["1.1.0", "5.2.0"]}, "query.metadata_key"),
+    ],
+    ids=["key-only", "value-only", "fewer-values", "fewer-keys"],
+)
+def test_run_list_metadata_keys_and_values_repeated_unequally_are_422(
+    client: TestClient, params: dict[str, str | list[str]], field: str
+) -> None:
+    """A value without its key, or a key without its value, is not a pair.
+    `fields` names the parameter given fewer times."""
+    response = client.get("/api/v1/runs", params=params)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_parameter"
+    assert response.json()["fields"] == [field]
+
+
+def test_run_list_takes_as_many_metadata_pairs_as_the_document_states_and_no_more(
+    client: TestClient,
+) -> None:
+    """The bound is read from the interface document, so the two cannot
+    drift apart."""
+    document = yaml.safe_load(_OPENAPI_DOCUMENT_BYTES)
+    parameters = {
+        parameter["name"]: parameter["schema"]
+        for parameter in document["paths"]["/runs"]["get"]["parameters"]
+        if "name" in parameter
+    }
+    bound = parameters["metadata_key"]["maxItems"]
+    assert parameters["metadata_value"]["maxItems"] == bound
+
+    def _pairs(count: int) -> dict[str, list[str]]:
+        return {
+            "metadata_key": [f"key_{index}" for index in range(count)],
+            "metadata_value": ["v"] * count,
+        }
+
+    at_bound = client.get("/api/v1/runs", params=_pairs(bound))
+    past_bound = client.get("/api/v1/runs", params=_pairs(bound + 1))
+
+    assert at_bound.status_code == 200
+    assert len(at_bound.json()["metadata_horizon"]) == bound
+    assert past_bound.status_code == 422
+    assert past_bound.json()["error"] == "invalid_parameter"
+    assert past_bound.json()["fields"] == ["query.metadata_key", "query.metadata_value"]

@@ -221,7 +221,9 @@ def test_metadata_section_is_identical_on_both_reports(
 
     call_count = [0]
 
-    def _fake_capture(config: pytest.Config, rootpath: Path) -> metadata_module.MetadataSection:
+    def _fake_capture(
+        config: pytest.Config, rootpath: Path, *, read_files: bool
+    ) -> metadata_module.MetadataSection:
         call_count[0] += 1
         return metadata_module.MetadataSection(
             declaration=metadata_module.DECLARATION_FILENAME,
@@ -260,6 +262,41 @@ def test_metadata_section_is_identical_on_both_reports(
     assert call_count[0] == 1
 
 
+def test_declared_keys_are_sent_under_vantage_alone_and_no_file_is_read(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--vantage` alone reads the declaration for the keys it declares,
+    and every report carries them; the files it names are neither read nor
+    sent without `--vantage-metadata`. A declared key the session never
+    reported is sent `absent` in the last report."""
+    sent: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send",
+        lambda address, report, *, timeout: sent.append(report),
+    )
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+    (pytester.path / "settings.json").write_text('{"region": "eu-west-1"}')
+    keys = {"fpga.firmware": {"name": "FPGA firmware version"}}
+    (pytester.path / "vantage-metadata.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "keys": keys,
+                "files": [{"path": "settings.json", "format": "json", "keys": ["region"]}],
+            }
+        )
+    )
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=1)
+    declared = {"declaration": "vantage-metadata.json", "keys": keys, "files": []}
+    absent = {"key": "fpga.firmware", "value": None, "status": "absent"}
+    assert [report["metadata"] for report in sent] == [declared, {**declared, "values": [absent]}]
+
+
 def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,
@@ -271,7 +308,7 @@ def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
     than left unrecorded by the failed `Recorder` construction.
     """
 
-    def _raise(config: pytest.Config, rootpath: Path) -> None:
+    def _raise(config: pytest.Config, rootpath: Path, *, read_files: bool) -> None:
         raise RuntimeError("synthetic metadata failure")
 
     monkeypatch.setattr("pytest_vantage.recorder.metadata.capture_metadata", _raise)
@@ -293,8 +330,8 @@ def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
 
     result.assert_outcomes(passed=1)
     assert [str(w.message) for w in warned] == [
-        "vantage: error while capturing metadata: synthetic metadata failure, "
-        "metadata will not be captured"
+        "vantage: error while reading vantage-metadata.json: synthetic metadata failure, "
+        "the declaration is ignored"
     ]
     assert len(sent) == 2
     assert not any("metadata" in report for report in sent)
@@ -303,14 +340,14 @@ def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
     assert len(vantage_server.results()) == 1
 
 
-def test_no_metadata_section_when_capture_was_not_requested(
+def test_no_metadata_section_when_there_is_nothing_to_say(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The `metadata` wire key is absent entirely -- not `null` -- on both
-    reports when `--vantage-metadata` was never passed, the same
-    additive-section shape `vcs`/`results` already establish."""
+    reports when there is no declaration and the session reported nothing,
+    the same additive-section shape `vcs`/`results` already establish."""
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send",

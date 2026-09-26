@@ -45,6 +45,28 @@ _SAMPLE_TEST = "def test_it():\n    assert True\n"
 _METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
 _ALL_FLAGS = "--vantage --vantage-failure-text --vantage-metadata"
 
+_REPORTS_METADATA = """
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def dut(vantage_metadata):
+    vantage_metadata.update({"fpga": {"firmware": "1.1.0"}})
+    vantage_metadata["bench"] = "lab-3"
+
+
+def test_it():
+    assert True
+"""
+
+# The same report, made only while the plugin is loaded, so that the control
+# run with `-p no:vantage` passes too.
+_REPORTS_METADATA_WHEN_LOADED = """
+def test_it(request):
+    if request.config.pluginmanager.has_plugin("vantage"):
+        request.getfixturevalue("vantage_metadata")["fpga"] = {"firmware": "1.1.0"}
+"""
+
 
 def _tree_snapshot(root: Path) -> dict[str, bytes]:
     """Map every file under ``root`` to its raw bytes, keyed by relative path."""
@@ -73,14 +95,20 @@ def _vantage_warnings(recwarn: pytest.WarningsRecorder) -> list[str]:
     return [str(w.message) for w in recwarn.list if issubclass(w.category, VantageWarning)]
 
 
+@pytest.mark.parametrize(
+    "sample",
+    [_SAMPLE_TEST, _REPORTS_METADATA_WHEN_LOADED],
+    ids=["plain", "reporting-metadata-with-a-declaration"],
+)
 def test_project_tree_is_byte_identical_with_plugin_absent(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch, sample: str
 ) -> None:
     """No CLI option, ini value or env var present anywhere: a bare run and a
     ``-p no:vantage`` run of the identical project must leave byte-identical
     trees. ``-p no:vantage`` is the control -- it is pytest with the plugin
     definitively absent, so any difference the bare run introduces is
-    something the plugin did.
+    something the plugin did. The second project also reports metadata
+    through the fixture and carries a declaration.
 
     Two independent, freshly-written directories -- never a copy of one
     run's output directory into the other -- so neither run's own debug
@@ -96,8 +124,10 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
 
     bare_root = tmp_path_factory.mktemp("vantage-bare")
     control_root = tmp_path_factory.mktemp("vantage-control")
-    (bare_root / "test_sample.py").write_text(_SAMPLE_TEST)
-    (control_root / "test_sample.py").write_text(_SAMPLE_TEST)
+    for root in (bare_root, control_root):
+        (root / "test_sample.py").write_text(sample)
+        if sample is _REPORTS_METADATA_WHEN_LOADED:
+            _declare_one_file(root)
 
     bare = _run_pytest(bare_root)
     control = _run_pytest(control_root, "-p", "no:vantage")
@@ -396,7 +426,7 @@ def test_capture_is_enabled_only_by_its_typed_flag(
     result.assert_outcomes(failed=1)
     (stored,) = vantage_server.results()
     page, _predating = vantage_server.store.list_runs_with_metadata_horizon(
-        key="db_password", value="s3cr3t-db", limit=1, offset=0
+        filters=[("db_password", "s3cr3t-db")], limit=1, offset=0
     )
     runs_storing_the_declared_secret = page.items
     if kind == "typed":
@@ -582,14 +612,29 @@ def _patch_path_open_recorder(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     return paths_opened
 
 
-def test_declaration_is_not_opened_when_metadata_capture_was_not_requested(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _declare_one_file(root: Path) -> None:
+    (root / "settings.json").write_text('{"region": "eu-west-1"}')
+    (root / _METADATA_DECLARATION_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "keys": {"bench": {}},
+                "files": [{"path": "settings.json", "format": "json", "keys": ["region"]}],
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("metadata_requested", [False, True])
+def test_the_declared_files_are_opened_only_when_metadata_capture_was_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, metadata_requested: bool
 ) -> None:
-    """The declaration is read only after both gates pass. A `Recorder`
-    constructed with `metadata_requested=False` -- what either closed gate
-    collapses to -- must never open the declaration file.
+    """A recording session reads the declaration for the keys it declares,
+    but opens a file it names only once `--vantage-metadata` passed its
+    gate, which `metadata_requested` stands for. The requested row proves
+    the other is not an implementation that never opens anything at all.
     """
-    (tmp_path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
+    _declare_one_file(tmp_path)
     paths_opened = _patch_path_open_recorder(monkeypatch)
     monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
 
@@ -598,32 +643,28 @@ def test_declaration_is_not_opened_when_metadata_capture_was_not_requested(
         address="http://example.invalid",
         timeout=1.0,
         lifecycle_available=True,
-        metadata_requested=False,
+        metadata_requested=metadata_requested,
     )
 
-    assert not any(path.name == _METADATA_DECLARATION_FILENAME for path in paths_opened)
+    assert _METADATA_DECLARATION_FILENAME in {path.name for path in paths_opened}
+    assert ("settings.json" in {path.name for path in paths_opened}) is metadata_requested
 
 
-def test_declaration_is_opened_when_metadata_capture_was_requested(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_nothing_is_read_without_vantage_even_when_a_test_reports_metadata(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Once both gates pass, the declaration IS consulted --
-    `metadata_requested=True` must reach the filesystem, proving the
-    previous test's zero-calls result is not an implementation that never
-    opens anything at all."""
-    (tmp_path / _METADATA_DECLARATION_FILENAME).write_text('{"version": 1, "files": []}\n')
+    """Without `--vantage` neither the declaration nor a file it names is
+    opened, however many flags and fixtures ask, and nothing connects."""
+    _declare_one_file(pytester.path)
+    pytester.makepyfile(test_sample=_REPORTS_METADATA)
     paths_opened = _patch_path_open_recorder(monkeypatch)
-    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+    monkeypatch.setattr(socket, "create_connection", _forbidden_create_connection)
 
-    Recorder(
-        config=SimpleNamespace(rootpath=str(tmp_path)),  # type: ignore[arg-type]
-        address="http://example.invalid",
-        timeout=1.0,
-        lifecycle_available=True,
-        metadata_requested=True,
-    )
+    result = pytester.runpytest("--vantage-metadata")
 
-    assert any(path.name == _METADATA_DECLARATION_FILENAME for path in paths_opened)
+    result.assert_outcomes(passed=1, warnings=0)
+    opened = {path.name for path in paths_opened}
+    assert not opened & {_METADATA_DECLARATION_FILENAME, "settings.json"}
 
 
 def test_recorder_warns_exactly_once_when_metadata_requested_and_declaration_absent(
@@ -647,6 +688,24 @@ def test_recorder_warns_exactly_once_when_metadata_requested_and_declaration_abs
     metadata_warnings = [w for w in recwarn.list if issubclass(w.category, VantageWarning)]
     assert len(metadata_warnings) == 1
     assert _METADATA_DECLARATION_FILENAME in str(metadata_warnings[0].message)
+
+
+def test_recorder_is_silent_about_an_absent_declaration_when_no_file_was_asked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+) -> None:
+    """A declaration is optional: `--vantage` alone looks for one, and most
+    projects have none."""
+    monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
+
+    Recorder(
+        config=SimpleNamespace(rootpath=str(tmp_path)),  # type: ignore[arg-type]
+        address="http://example.invalid",
+        timeout=1.0,
+        lifecycle_available=True,
+        metadata_requested=False,
+    )
+
+    assert not any(issubclass(w.category, VantageWarning) for w in recwarn.list)
 
 
 def test_recorder_emits_no_warning_when_metadata_requested_and_declaration_present(

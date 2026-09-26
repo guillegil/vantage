@@ -8,7 +8,7 @@ no Pydantic type crosses into the core.
 **The ``extra=`` setting differs per model on purpose**, because an unknown
 key means something different in each place:
 
-- ``RunReport``, ``VcsReport`` and the two metadata models are
+- ``RunReport``, ``VcsReport`` and the metadata models are
   ``extra="forbid"``. An unknown field *inside* one of these sections means
   client and server disagree about what the section is -- a bug or a typo,
   which is rejected loudly rather than swallowed.
@@ -202,18 +202,55 @@ class MetadataFileReport(BaseModel):
     content: str | None
 
 
-class MetadataReport(BaseModel):
-    """The ``metadata`` section of a session report: the declaration's own
-    name, and one `MetadataFileReport` per file it named.
+class MetadataKeyReport(BaseModel):
+    """One entry of `MetadataReport.keys`: what the declaration says about
+    one key it names.
 
-    ``extra="forbid"``, and **no constraint on `declaration` either** (see
-    the module docstring).
+    ``extra="forbid"``, and no constraint on `name` (see the module
+    docstring). `name` is optional because a declaration need not give a key
+    a display name.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    declaration: str
-    files: list[MetadataFileReport]
+    name: str | None = None
+
+
+class MetadataValueReport(BaseModel):
+    """One entry of `MetadataReport.values`: a key the test session set
+    itself, or a declared key that nothing gave a value.
+
+    ``extra="forbid"``, and no constraint on any field (see the module
+    docstring). `value` is `None` unless `status` is `"captured"`; the
+    plugin decides every status, and `_to_run_metadata` stores an entry that
+    contradicts itself as `absent` rather than refusing the report.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    value: str | None
+    status: str
+
+
+class MetadataReport(BaseModel):
+    """The ``metadata`` section of a session report: the declaration's own
+    name (`None` when the session had no declaration file), the display
+    names it gives keys, one `MetadataFileReport` per file it named, and the
+    values the session reported itself.
+
+    ``extra="forbid"``, and **no constraint on `declaration` either** (see
+    the module docstring). `keys`, `files` and `values` may each be left
+    out: a session reporting values needs no declaration file, and a report
+    other than the last of a session carries no values.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    declaration: str | None
+    keys: dict[str, MetadataKeyReport] = {}
+    files: list[MetadataFileReport] = []
+    values: list[MetadataValueReport] = []
 
 
 class SessionReport(BaseModel):
@@ -223,8 +260,8 @@ class SessionReport(BaseModel):
     sections a newer plugin adds rather than rejecting the report.
 
     ``results``, ``vcs`` and ``metadata`` default to `None`, because an older
-    plugin -- or, for ``metadata``, a session run without
-    `--vantage-metadata` -- sends no such key. For ``results``, `None` (the
+    plugin -- or, for ``metadata``, a session with no metadata to report --
+    sends no such key. For ``results``, `None` (the
     section is absent) and `[]` (the session collected nothing) both mean
     zero result rows; the run is still stored.
     """
@@ -318,10 +355,9 @@ class RunListItemResponse(BaseModel):
 
 
 class MetadataHorizonResponse(BaseModel):
-    """`RunListResponse.metadata_horizon`'s populated shape -- present only
-    when a metadata filter was supplied. `predating` is the count of runs
-    recorded before `key` was ever declared, which equals the total run
-    count when `key` was never declared at all."""
+    """One entry of `RunListResponse.metadata_horizon`, for one filtered
+    key. `predating` is the count of runs recorded before any run carried
+    `key`, which equals the total run count when none ever has."""
 
     key: str
     predating: int
@@ -329,12 +365,13 @@ class MetadataHorizonResponse(BaseModel):
 
 class RunListResponse(BaseModel):
     """The response body for `GET /api/v1/runs`. No `total`, which would cost
-    a `COUNT(*)` on every page. `metadata_horizon` is `None` when no metadata
-    filter was given: there is no horizon to report."""
+    a `COUNT(*)` on every page. `metadata_horizon` holds one entry per
+    distinct filtered key, in the order first given, and is `None` when no
+    metadata filter was given: there is no horizon to report."""
 
     items: list[RunListItemResponse]
     has_more: bool
-    metadata_horizon: MetadataHorizonResponse | None
+    metadata_horizon: list[MetadataHorizonResponse] | None
 
 
 class RunDetailResponse(BaseModel):
@@ -350,6 +387,29 @@ class RunDetailResponse(BaseModel):
     interrupt_reason: str | None
     presentation: str
     vcs: RunVcsResponse | None
+
+
+class MetadataItemResponse(BaseModel):
+    """One entry of `RunMetadataResponse`: one key a run reported. `source`
+    is `file` or `session`, and `source_file` names the declared file of a
+    `file` key and is `None` for a `session` one. `value` is `None` unless
+    `status` is `captured`. Built field by field in `routes/read.py`."""
+
+    key: str
+    name: str | None
+    value: str | None
+    status: str
+    source: str
+    source_file: str | None
+    declared: bool
+
+
+class RunMetadataResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/metadata`: every
+    key the run reported, ordered by key. Not paged -- a run holds at most
+    `MAX_METADATA_ENTRIES` keys."""
+
+    items: list[MetadataItemResponse]
 
 
 class FailureProjectionResponse(BaseModel):

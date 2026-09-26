@@ -47,6 +47,12 @@ _REPORT_BYTES_CAP = 1024 * 1024  # mirrors vantage.service.errors.MAX_REPORT_BYT
 MAX_FAILURE_TEXT_BYTES = _REPORT_BYTES_CAP // 2
 _FIELD_BYTES_CAP = 64 * 1024  # mirrors vantage.service.truncation.MAX_TEXT_FIELD_BYTES
 
+MAX_METADATA_VALUES_BYTES = _REPORT_BYTES_CAP // 2
+"""Room for the metadata values the session reports, all of which ride in
+the last report. Two hundred keys and values at their own bounds fit in
+plain text; only escape-heavy text can reach it, and would otherwise make
+the last report too large to be accepted at all."""
+
 # Smallest and most informative first: "what broke?" is answered for as many
 # results as possible before "how did it get there?" is answered for any.
 _BUDGETED_FIELDS = (
@@ -143,11 +149,16 @@ def spend_failure_text_budget(entries: list[dict[str, object]]) -> None:
 
 
 def split_results(
-    results: list[dict[str, object]], *, envelope_bytes: int
+    results: list[dict[str, object]], *, envelope_bytes: int, last_extra_bytes: int = 0
 ) -> tuple[list[list[dict[str, object]]], int]:
     """Split `results`, in order, into consecutive slices that each fit one
     report under `_REPORT_BYTES_CAP`, next to report sections that encode
     to `envelope_bytes` with an empty `results` list.
+
+    The last report carries `last_extra_bytes` more than the others (the
+    values the session reported). When the last slice leaves no room for
+    them, an empty slice is added so they go out in a report of their own,
+    and no result is left out on their account.
 
     `json.dumps` joins list items with `", "`, so a report carrying n
     results costs `envelope_bytes`, plus each result's own cost, plus two
@@ -174,11 +185,14 @@ def split_results(
             used = 0
         slices[-1].append(entry)
         used += cost
+    if slices[-1] and used + last_extra_bytes > room:
+        slices.append([])
     return slices, left_out
 
 
 __all__ = [
     "MAX_FAILURE_TEXT_BYTES",
+    "MAX_METADATA_VALUES_BYTES",
     "encoded_cost",
     "spend_failure_text_budget",
     "split_results",

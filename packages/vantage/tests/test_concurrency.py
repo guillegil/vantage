@@ -239,8 +239,9 @@ def test_every_read_returns_rather_than_waiting_on_the_stores_own_lock(tmp_path:
         store.count_results,
         partial(store.get_catalogue_entry, "t.py::test_a"),
         partial(store.list_runs, limit=10, offset=0),
-        partial(store.list_runs_with_metadata_horizon, key="k", value="v", limit=10, offset=0),
+        partial(store.list_runs_with_metadata_horizon, filters=[("k", "v")], limit=10, offset=0),
         partial(store.get_run_detail, run_id),
+        partial(store.get_run_metadata, run_id),
         partial(store.list_results, run_id, limit=10, offset=0),
         partial(store.get_result, run_id, node_id="t.py::test_a"),
         partial(store.list_history, node_id="t.py::test_a", limit=10, offset=0),
@@ -386,6 +387,7 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
         "list_runs_with_metadata_horizon",
     ),
     "get_run_detail": ("GET", f"/api/v1/runs/{_HELD_RUN}", {}, "get_run_detail"),
+    "get_run_metadata": ("GET", f"/api/v1/runs/{_HELD_RUN}/metadata", {}, "get_run_metadata"),
     "list_results": ("GET", f"/api/v1/runs/{_HELD_RUN}/results", {}, "get_execution"),
     "get_result": (
         "GET",

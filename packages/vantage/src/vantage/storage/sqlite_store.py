@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import TypeVar, cast
 
 from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
@@ -67,6 +68,7 @@ from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
     HistoryEntry,
+    MetadataEntry,
     NamespaceFullError,
     Page,
     ResultListEntry,
@@ -179,29 +181,37 @@ _LIST_RUNS = f"""
     LIMIT ? OFFSET ?
 """
 
-# `_LIST_RUNS` filtered to runs holding one `(key, value)` metadata pair.
-#
-# `id IN (subquery)`, not a correlated `EXISTS`: with `EXISTS`, SQLite anchors
-# on `rm.run_id = run.id` and probes the primary-key autoindex once per `run`
-# row, so cost grows with the total run count. The uncorrelated `IN` seeks
-# `idx_run_metadata_key_value` once, then looks each `run` up by primary key.
-# `value` is NULL for any non-captured row, and NULL never equals a bound
-# string, so a declared-but-dropped entry never matches.
-# `test_list_runs_by_metadata_uses_the_key_value_index` pins the plan.
-_LIST_RUNS_BY_METADATA = f"""
-    {_SELECT_RUN_LIST}
-    WHERE run.id IN (
-        SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value = ?
-    )
-    ORDER BY run.started_at DESC, run.id DESC
-    LIMIT ? OFFSET ?
-"""  # noqa: S608
+# The runs holding one `(key, value)` metadata pair. `value` is NULL for any
+# row without a captured value, and NULL never equals a bound string, so a
+# key whose value was dropped never matches.
+_RUNS_HOLDING_PAIR = "SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value = ?"
 
-# How many runs started before `key` was first declared, as one statement so
-# it reads one state of the database. `first_seen` is the earliest
-# `started_at` among runs holding any `run_metadata` row for `key`, whatever
-# its status, found through `idx_run_metadata_key_value`; the count is served
-# by `idx_run_started_at`. A key never declared has no `first_seen`, and
+
+def _list_runs_by_metadata(pair_count: int) -> str:
+    """`_LIST_RUNS` narrowed to the runs holding each of `pair_count`
+    `(key, value)` pairs, bound after the subject prefix width.
+
+    `id IN (subquery)`, not a correlated `EXISTS`: with `EXISTS`, SQLite
+    anchors on `rm.run_id = run.id` and probes the primary-key autoindex
+    once per `run` row, so cost grows with the total run count. Each pair's
+    uncorrelated `SELECT` seeks `idx_run_metadata_key_value` once, the
+    `INTERSECT` keeps the runs every pair found, and each is then looked up
+    by primary key. `test_list_runs_by_metadata_uses_the_key_value_index`
+    pins the plan. Only the module's own constants are interpolated."""
+    holding_every_pair = " INTERSECT ".join([_RUNS_HOLDING_PAIR] * pair_count)
+    return f"""
+        {_SELECT_RUN_LIST}
+        WHERE run.id IN ({holding_every_pair})
+        ORDER BY run.started_at DESC, run.id DESC
+        LIMIT ? OFFSET ?
+    """  # noqa: S608
+
+
+# How many runs started before `key` first appeared, as one statement so it
+# reads one state of the database. `first_seen` is the earliest `started_at`
+# among runs holding any `run_metadata` row for `key`, whatever its status or
+# source, found through `idx_run_metadata_key_value`; the count is served by
+# `idx_run_started_at`. A key no run ever carried has no `first_seen`, and
 # every run predates it.
 _COUNT_RUNS_PREDATING_KEY = """
     SELECT CASE WHEN first_seen.started_at IS NULL
@@ -267,7 +277,10 @@ _INSERT_RESULT = """
 """
 
 # `ON CONFLICT(<primary key>) DO NOTHING` makes metadata write-once: a
-# replay, even one carrying different values, never changes a stored row.
+# replay, even one carrying different values, never changes a stored row,
+# and the first report to carry a key keeps it whichever source a later row
+# comes from. The plugin sends a file's keys from the start report on and the
+# session's own values only in the finish report, so a file's value wins.
 # Not `INSERT OR IGNORE`, which would also skip a row that fails a CHECK
 # constraint and commit the session without it.
 _INSERT_METADATA_FILE = """
@@ -276,10 +289,26 @@ _INSERT_METADATA_FILE = """
     ON CONFLICT(run_id, source_file) DO NOTHING
 """
 
+# A new key is also dropped once its run holds `MAX_METADATA_ENTRIES` rows:
+# each report is bounded on its way in, but a run can be sent any number of
+# reports, and its metadata is returned whole. The count sees the rows this
+# statement's earlier executions inserted, and is served by the primary
+# key's index. An upsert on a `SELECT` needs a `WHERE` for the parser to
+# tell `ON CONFLICT` from a join's `ON`.
 _INSERT_METADATA_ENTRY = """
-    INSERT INTO run_metadata (run_id, key, value, source_file, status)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO run_metadata (run_id, key, name, value, status, source, source_file, declared)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE (SELECT COUNT(*) FROM run_metadata WHERE run_id = ?) < ?
     ON CONFLICT(run_id, key) DO NOTHING
+"""
+
+# `_row_to_metadata_entry`'s seven columns. `ORDER BY key` walks the primary
+# key's index for the run, so no sort is needed; `BINARY` compares UTF-8
+# bytes, whose order is code point order.
+_SELECT_RUN_METADATA = """
+    SELECT key, name, value, status, source, source_file, declared
+    FROM run_metadata WHERE run_id = ?
+    ORDER BY key
 """
 
 # `_decode_identity`'s five columns and the eleven outcome and timing
@@ -587,6 +616,20 @@ def _row_to_result_list_entry(row: tuple[object, ...]) -> ResultListEntry:
     return ResultListEntry.from_result(_decode_result(row[:16], _decode_failure(row[16:29])))
 
 
+def _row_to_metadata_entry(row: tuple[object, ...]) -> MetadataEntry:
+    """A `_SELECT_RUN_METADATA` row."""
+    key, name, value, status, source, source_file, declared = row
+    return MetadataEntry(
+        key=cast(str, key),
+        name=cast("str | None", name),
+        value=cast("str | None", value),
+        status=cast(str, status),
+        source=cast(str, source),
+        source_file=cast("str | None", source_file),
+        declared=bool(declared),
+    )
+
+
 def _row_to_catalogue_entry(row: tuple[object, ...]) -> CatalogueEntry:
     first_seen_at, last_seen_at, last_seen_run_id = row[5:]
     return CatalogueEntry(
@@ -627,11 +670,20 @@ def _metadata_file_rows(run_id: str, metadata: RunMetadata) -> list[tuple[str, s
     return [(run_id, file.source_file, file.content_type, file.status) for file in metadata.files]
 
 
-def _metadata_entry_rows(
-    run_id: str, metadata: RunMetadata
-) -> list[tuple[str, str, str | None, str, str]]:
+def _metadata_entry_rows(run_id: str, metadata: RunMetadata) -> list[tuple[object, ...]]:
     return [
-        (run_id, entry.key, entry.value, entry.source_file, entry.status)
+        (
+            run_id,
+            entry.key,
+            entry.name,
+            entry.value,
+            entry.status,
+            entry.source,
+            entry.source_file,
+            1 if entry.declared else 0,
+            run_id,
+            MAX_METADATA_ENTRIES,
+        )
         for entry in metadata.entries
     ]
 
@@ -873,16 +925,26 @@ class SqliteExecutionStore:
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def list_runs_with_metadata_horizon(
-        self, *, key: str, value: str, limit: int, offset: int
-    ) -> tuple[Page[RunListEntry], int]:
+        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
+        # A repeated pair narrows nothing further; dropping it keeps the query
+        # one seek per distinct pair.
+        pairs = list(dict.fromkeys(filters))
+        sql = _list_runs_by_metadata(len(pairs)) if pairs else _LIST_RUNS
+        params = [
+            _LIST_SUBJECT_PREFIX_BYTES,
+            *(part for pair in pairs for part in pair),
+            page_limit + 1,
+            offset,
+        ]
         with self._read_snapshot() as conn:
-            rows = conn.execute(
-                _LIST_RUNS_BY_METADATA,
-                (_LIST_SUBJECT_PREFIX_BYTES, key, value, page_limit + 1, offset),
-            ).fetchall()
-            (predating,) = conn.execute(_COUNT_RUNS_PREDATING_KEY, (key,)).fetchone()
-        return _page(rows, page_limit, _row_to_run_list_entry), int(predating)
+            rows = conn.execute(sql, params).fetchall()
+            predating = tuple(
+                int(conn.execute(_COUNT_RUNS_PREDATING_KEY, (key,)).fetchone()[0])
+                for key in dict.fromkeys(key for key, _value in pairs)
+            )
+        return _page(rows, page_limit, _row_to_run_list_entry), predating
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         row = self._fetchone(_SELECT_RUN, (execution_id,))
@@ -891,6 +953,13 @@ class SqliteExecutionStore:
         return RunDetail(
             execution=_decode_execution(row[:12]), last_contact_at=_opt_datetime(row[12])
         )
+
+    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+        with self._read_snapshot() as conn:
+            if conn.execute(_PROBE_RUN_EXISTS, (execution_id,)).fetchone() is None:
+                return None
+            rows = conn.execute(_SELECT_RUN_METADATA, (execution_id,)).fetchall()
+        return tuple(_row_to_metadata_entry(row) for row in rows)
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)

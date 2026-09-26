@@ -13,6 +13,7 @@ import functools
 import sys
 import warnings
 from collections.abc import Callable
+from types import FrameType
 from typing import Any, TypeVar
 
 import pytest
@@ -30,8 +31,32 @@ class VantageWarning(UserWarning):
     """
 
 
-def warn(config: pytest.Config, message: str) -> None:
-    """Emit `message` as a `VantageWarning`.
+_PACKAGE = __name__.partition(".")[0]
+
+
+def _in_this_package(frame: FrameType) -> bool:
+    name = frame.f_globals.get("__name__")
+    return isinstance(name, str) and name.partition(".")[0] == _PACKAGE
+
+
+def _project_stacklevel() -> int:
+    """The `stacklevel`, as `warn` passes it, of the nearest frame outside
+    this package: the project's own line that called into the plugin. 2,
+    `warn`'s caller, when every frame is the plugin's."""
+    # Counted from this function's own frame, 0, so that `warn`'s is 1, as
+    # `stacklevel` counts from the function calling `warnings.warn`.
+    frame: FrameType | None = sys._getframe()
+    level = 0
+    while frame is not None and _in_this_package(frame):
+        frame = frame.f_back
+        level += 1
+    return 2 if frame is None else level
+
+
+def warn(config: pytest.Config, message: str, *, at_project_line: bool = False) -> None:
+    """Emit `message` as a `VantageWarning`, located at the caller, or with
+    `at_project_line` at the project's own line that called into the
+    plugin, for a warning about something that line did.
 
     `warnings.warn` raises the warning instance itself when the active
     filters turn it into an error (`filterwarnings = ["error"]`, `-W
@@ -41,8 +66,9 @@ def warn(config: pytest.Config, message: str) -> None:
     no terminal reporter is registered (e.g. `-q -q` or a very early
     failure): either way the message is not lost.
     """
+    stacklevel = _project_stacklevel() if at_project_line else 2
     try:
-        warnings.warn(VantageWarning(message), stacklevel=2)
+        warnings.warn(VantageWarning(message), stacklevel=stacklevel)
         return
     except VantageWarning:
         pass

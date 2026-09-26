@@ -40,7 +40,7 @@ _SCHEMA_SENTINEL_TABLE = "meta"
 # Bumped whenever `schema.sql` changes shape. The only statement of the
 # version: `_apply_schema` stamps it and `_check_schema_version` compares
 # against it.
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 # `OR IGNORE` keeps a second process racing to create the same fresh
 # database from failing on the row the first one stamped.

@@ -21,8 +21,9 @@ the whole liveness path warns at most once. `pytest_keyboard_interrupt` and
 xdist's `pytest_testnodedown` only record what stopped the session, and
 share `accumulation_isolated`.
 
-`WorkerInterruptRelay` is the one piece that runs on an xdist worker: it
-tells the controller that the worker was interrupted, and why.
+`WorkerInterruptRelay` and `WorkerMetadataRelay` are the pieces that run on
+an xdist worker: they tell the controller that the worker was interrupted,
+and why, and what metadata its session fixtures reported.
 
 Every other hook is wrapped in `fault_isolated`: an error anywhere in the
 reporting path becomes one warning and never changes the suite's exit status.
@@ -54,6 +55,15 @@ from pytest_vantage.capture import (
     isoformat_utc,
 )
 from pytest_vantage.config import resolve_liveness_timeout
+from pytest_vantage.session_metadata import (
+    ReportedValues,
+    SessionMetadata,
+    ValuesPlan,
+    plan_values,
+    plan_warnings,
+    relay,
+    unrelay,
+)
 from pytest_vantage.transport import Capabilities, send, send_heartbeat
 
 # Used only if something escapes `vcs.capture`, which handles its own failures
@@ -77,18 +87,23 @@ def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
         return vcs.VcsSnapshot(warning=_VCS_CAPTURE_ESCAPED_WARNING)
 
 
-def _capture_metadata(config: pytest.Config, rootpath: Path) -> metadata.MetadataSection | None:
-    """Capture the declared metadata, or `None` after one warning on any error.
+def _capture_metadata(
+    config: pytest.Config, rootpath: Path, *, read_files: bool
+) -> metadata.MetadataSection | None:
+    """Read the declaration, and the files it names if `read_files`, or
+    `None` after one warning on any error.
 
     The same net as `_capture_vcs`: `metadata.capture_metadata` warns about
     every problem it expects and never raises on its own, and anything that
-    escapes it costs the run its metadata, never its recording.
+    escapes it costs the run its declaration, never its recording.
     """
     try:
-        return metadata.capture_metadata(config, rootpath)
+        return metadata.capture_metadata(config, rootpath, read_files=read_files)
     except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
         warn(
-            config, f"vantage: error while capturing metadata: {exc}, metadata will not be captured"
+            config,
+            f"vantage: error while reading {metadata.DECLARATION_FILENAME}: {exc}, "
+            "the declaration is ignored",
         )
         return None
 
@@ -113,6 +128,22 @@ _MAX_INTERRUPT_REASON_CHARS = 1024
 # reason under ("" when there is none).
 _WORKER_INTERRUPT_KEY = "vantage_interrupt_reason"
 
+# The `workeroutput` key an xdist worker hands its controller the metadata
+# its session reported under.
+_WORKER_METADATA_KEY = "vantage_metadata"
+
+# The `workerinput` key a recording controller hands each xdist worker.
+# `--vantage` reaches a worker whether or not its controller records, and
+# only the controller probes the server.
+_CONTROLLER_RECORDS_KEY = "vantage_records"
+
+
+def controller_records(config: pytest.Config) -> bool:
+    """Whether the controller of the xdist worker `config` belongs to
+    records the session (`Recorder.pytest_configure_node`)."""
+    workerinput = getattr(config, "workerinput", None)
+    return isinstance(workerinput, dict) and workerinput.get(_CONTROLLER_RECORDS_KEY) is True
+
 
 def _interrupted_by_a_person(stop: BaseException) -> bool:
     """Ctrl-C (a bare `KeyboardInterrupt`) or `pytest.exit()`, never one of
@@ -123,6 +154,13 @@ def _interrupted_by_a_person(stop: BaseException) -> bool:
 
 def _bounded_reason(text: str) -> str:
     return text[:_MAX_INTERRUPT_REASON_CHARS]
+
+
+def _fixture_mapping(config: pytest.Config) -> SessionMetadata:
+    """The mapping the `vantage_metadata` fixture hands out in a recorded
+    session. A key it skips is the project's mistake, so the warning
+    points at the project's line that set it."""
+    return SessionMetadata(warn=lambda message: warn(config, message, at_project_line=True))
 
 
 class WorkerInterruptRelay:
@@ -145,6 +183,31 @@ class WorkerInterruptRelay:
         workeroutput = getattr(self._config, "workeroutput", None)
         if _interrupted_by_a_person(stop) and isinstance(workeroutput, dict):
             workeroutput[_WORKER_INTERRUPT_KEY] = _bounded_reason(str(stop))
+
+
+class WorkerMetadataRelay:
+    """Registered on every xdist worker whose controller records
+    (`controller_records`); the fixture of any other worker records nothing
+    and warns about nothing, as an unrecorded controller's does.
+
+    Session fixtures run on each worker, not on the controller, so the
+    `vantage_metadata` fixture there hands out this relay's
+    `session_metadata`. As the worker's session finishes, the values go in
+    `workeroutput`, which xdist hands the controller
+    (`Recorder.pytest_testnodedown`). They already carry their wire status,
+    so an over-long value never crosses the hop.
+    """
+
+    def __init__(self, config: pytest.Config) -> None:
+        self._config = config
+        self._disabled = False
+        self.session_metadata = _fixture_mapping(config)
+
+    @fault_isolated
+    def pytest_sessionfinish(self) -> None:
+        workeroutput = getattr(self._config, "workeroutput", None)
+        if isinstance(workeroutput, dict) and self.session_metadata:
+            workeroutput[_WORKER_METADATA_KEY] = relay(self.session_metadata.entries())
 
 
 class Recorder:
@@ -175,14 +238,18 @@ class Recorder:
       otherwise. `_lifecycle_problem` is the probe's reason, for the one
       warning that says so.
     - `_vcs` and `_metadata` are captured once here and never re-read, so
-      both reports describe the same repository state and the same metadata.
-      Each capture warns at most once and never raises: `pytest_configure`
-      leaves the session unrecorded when construction fails, and a failure
-      in either capture must cost the run that section alone. No `Recorder`
-      is constructed on an xdist worker, so each happens once per session.
-      `_metadata` is `None` when `--vantage-metadata` was not passed, the
-      declaration is missing or invalid, or capturing it failed; the
-      `metadata` key is then omitted from both reports.
+      every report describes the same repository state and the same
+      declaration. Each capture warns at most once and never raises:
+      `pytest_configure` leaves the session unrecorded when construction
+      fails, and a failure in either capture must cost the run that section
+      alone. No `Recorder` is constructed on an xdist worker, so each
+      happens once per session. The declaration is read in every recorded
+      session, the files it names only when `metadata_requested`
+      (`--vantage-metadata`); `_metadata` is `None` when the declaration is
+      missing or invalid, or reading it failed.
+    - `session_metadata` is what the `vantage_metadata` fixture hands the
+      tests this process runs; `_reported` collects what xdist workers
+      relay. Both are sent only in the run's last report.
     """
 
     def __init__(
@@ -217,9 +284,11 @@ class Recorder:
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
             warn(config, f"vantage: {self._vcs.warning}")
-        self._metadata: metadata.MetadataSection | None = None
-        if metadata_requested:
-            self._metadata = _capture_metadata(config, Path(str(config.rootpath)))
+        self._metadata = _capture_metadata(
+            config, Path(str(config.rootpath)), read_files=metadata_requested
+        )
+        self.session_metadata = _fixture_mapping(config)
+        self._reported = ReportedValues()
 
     def _vcs_section(self) -> dict[str, object]:
         """Serialises the snapshot captured in `__init__`."""
@@ -231,33 +300,18 @@ class Recorder:
             "root": self._vcs.root,
         }
 
-    def _metadata_section(self) -> dict[str, object] | None:
-        """Serialises the metadata captured in `__init__`, or `None` when there
-        is none -- the caller then omits the `metadata` key rather than
-        sending it as `null`.
-        """
-        if self._metadata is None:
-            return None
-        return {
-            "declaration": self._metadata.declaration,
-            "files": [
-                {
-                    "path": entry.path,
-                    "format": entry.format,
-                    "status": entry.status,
-                    "keys": list(entry.keys),
-                    "content": entry.content,
-                }
-                for entry in self._metadata.files
-            ],
-        }
-
-    def _sections(self) -> dict[str, object]:
-        """The report sections every report of the session carries alike:
-        `vcs`, and `metadata` when it was captured.
+    def _sections(self, plan: ValuesPlan | None = None) -> dict[str, object]:
+        """The report sections: `vcs`, and `metadata` when it says anything.
+        Every report carries the same declared keys and files; only the
+        last carries `plan`'s values. The `metadata` key is omitted rather
+        than sent as `null`.
         """
         sections: dict[str, object] = {"vcs": self._vcs_section()}
-        metadata_section = self._metadata_section()
+        metadata_section = metadata.wire_section(
+            self._metadata,
+            values=() if plan is None else plan.values,
+            named_keys=() if plan is None else plan.named_keys,
+        )
         if metadata_section is not None:
             sections["metadata"] = metadata_section
         return sections
@@ -347,13 +401,53 @@ class Recorder:
 
     @pytest.hookimpl(optionalhook=True)
     @accumulation_isolated
+    def pytest_configure_node(self, node: object) -> None:
+        """xdist's hook for a worker about to start: tells it that this
+        session is recorded (`controller_records`). Optional, so the plugin
+        registers without xdist installed."""
+        workerinput = getattr(node, "workerinput", None)
+        if isinstance(workerinput, dict):
+            workerinput[_CONTROLLER_RECORDS_KEY] = True
+
+    @pytest.hookimpl(optionalhook=True)
+    @accumulation_isolated
     def pytest_testnodedown(self, node: object, error: object) -> None:
         """xdist's hook for a worker whose session has ended: keeps the
-        reason an interrupted worker gave (`WorkerInterruptRelay`). Optional,
-        so the plugin registers without xdist installed."""
+        reason an interrupted worker gave (`WorkerInterruptRelay`) and merges
+        the metadata it reported (`WorkerMetadataRelay`). Optional, so the
+        plugin registers without xdist installed.
+
+        xdist calls it twice for an interrupted worker; merging the same
+        values again changes nothing."""
         workeroutput = getattr(node, "workeroutput", None)
-        if isinstance(workeroutput, dict) and _WORKER_INTERRUPT_KEY in workeroutput:
+        if not isinstance(workeroutput, dict):
+            return
+        if _WORKER_INTERRUPT_KEY in workeroutput:
             self._worker_interruption = _bounded_reason(str(workeroutput[_WORKER_INTERRUPT_KEY]))
+        self._reported.add(unrelay(workeroutput.get(_WORKER_METADATA_KEY)))
+
+    def _plan_values(self) -> ValuesPlan | None:
+        """What the last report sends of the session's values, after the
+        warnings the plan calls for; `None` after one warning on any error.
+
+        The same net as `_capture_metadata`: a failure here costs the run
+        its values, never its finish report. The values of this process's
+        tests follow those xdist workers relayed; a session has one or the
+        other.
+        """
+        try:
+            self._reported.add(self.session_metadata.entries())
+            plan = plan_values(self._reported.entries(), self._metadata)
+            for message in plan_warnings(plan, self._reported.conflicting):
+                warn(self._config, message)
+        except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+            warn(
+                self._config,
+                f"vantage: error while reporting metadata: {exc}, "
+                "the session's values will not be sent",
+            )
+            return None
+        return plan
 
     def _how_it_ended(
         self, exit_status: int, early_stop: object = None
@@ -412,11 +506,17 @@ class Recorder:
         }
         in_progress_run = self._in_progress_run()
         sections = self._sections()
+        last_sections = self._sections(self._plan_values())
         envelope_bytes = max(
             encoded_cost({"run": run, "results": [], **sections})
             for run in (finish_run, in_progress_run)
         )
-        slices, left_out = split_results(results, envelope_bytes=envelope_bytes)
+        last_extra_bytes = encoded_cost(
+            {"run": finish_run, "results": [], **last_sections}
+        ) - encoded_cost({"run": finish_run, "results": [], **sections})
+        slices, left_out = split_results(
+            results, envelope_bytes=envelope_bytes, last_extra_bytes=last_extra_bytes
+        )
         if left_out:
             warn(
                 self._config,
@@ -426,12 +526,13 @@ class Recorder:
         # server stores its results without finishing the run. The run reads
         # as finished only once the last report, carrying the rest, arrives:
         # a report lost on the way leaves an unfinished run, never a finished
-        # one with results silently missing.
+        # one with results silently missing. The session's values are sent
+        # once, in the last report.
         for chunk in slices[:-1]:
             report = {"run": in_progress_run, "results": chunk, **sections}
             send(self._address, report, timeout=self._timeout)
-        report = {"run": finish_run, "results": slices[-1], **sections}
+        report = {"run": finish_run, "results": slices[-1], **last_sections}
         send(self._address, report, timeout=self._timeout)
 
 
-__all__ = ["Recorder", "WorkerInterruptRelay"]
+__all__ = ["Recorder", "WorkerInterruptRelay", "WorkerMetadataRelay", "controller_records"]

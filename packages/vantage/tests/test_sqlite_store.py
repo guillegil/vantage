@@ -21,9 +21,9 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.storage.sqlite_store import (
-    _LIST_RUNS_BY_METADATA,
     _LIST_SUBJECT_PREFIX_BYTES,
     SqliteExecutionStore,
+    _list_runs_by_metadata,
 )
 from vantage_port_contract import (
     ExecutionStoreContract,
@@ -162,9 +162,10 @@ def test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository(
         store.close()
 
 
-def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
-    """`_LIST_RUNS_BY_METADATA` uses `idx_run_metadata_key_value` rather than
-    scanning `run` with one correlated subquery per row.
+@pytest.mark.parametrize("pair_count", [1, 3])
+def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path, pair_count: int) -> None:
+    """`_list_runs_by_metadata` seeks `idx_run_metadata_key_value` once per
+    pair rather than scanning `run` with one correlated subquery per row.
 
     A correlated `EXISTS` form returns the same rows but makes SQLite prefer
     `run_metadata`'s primary-key autoindex, so cost grows with the total run
@@ -177,12 +178,12 @@ def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:
         plan_rows = store._conn.execute(  # noqa: SLF001
-            f"EXPLAIN QUERY PLAN {_LIST_RUNS_BY_METADATA}",
-            (_LIST_SUBJECT_PREFIX_BYTES, "firmware_version", "2.1", 21, 0),
+            f"EXPLAIN QUERY PLAN {_list_runs_by_metadata(pair_count)}",
+            (_LIST_SUBJECT_PREFIX_BYTES, *["firmware_version", "2.1"] * pair_count, 21, 0),
         ).fetchall()
         plan_text = "\n".join(str(row[-1]) for row in plan_rows)
 
-        assert "idx_run_metadata_key_value" in plan_text
+        assert plan_text.count("USING INDEX idx_run_metadata_key_value") == pair_count
         assert "sqlite_autoindex_run_metadata_1" not in plan_text
     finally:
         store.close()
@@ -317,11 +318,11 @@ def test_the_filtered_page_and_its_horizon_are_read_from_one_snapshot(tmp_path: 
         store._conn.set_trace_callback(_commit_a_keyed_run_during_the_horizon_read)  # noqa: SLF001
 
         page, predating = store.list_runs_with_metadata_horizon(
-            key="fw", value="2.1", limit=10, offset=0
+            filters=[("fw", "2.1")], limit=10, offset=0
         )
 
         assert fired, "the horizon statement never ran"
-        assert (len(page.items), predating) in {(0, 3), (1, 0)}
+        assert (len(page.items), predating) in {(0, (3,)), (1, (0,))}
     finally:
         store._conn.set_trace_callback(None)  # noqa: SLF001
         other_process.close()
@@ -376,7 +377,7 @@ def test_a_timestamp_from_an_early_year_is_stored_zero_padded(tmp_path: Path) ->
     assert found.started_at == started
 
 
-def _forced(row: _Row, **fields: str) -> _Row:
+def _forced(row: _Row, **fields: str | None) -> _Row:
     """`row` with values the core refuses, forced past its validation -- the
     shape a caller bypassing the domain types could hand the adapter."""
     for name, value in fields.items():
@@ -386,6 +387,9 @@ def _forced(row: _Row, **fields: str) -> _Row:
 
 _VALID_FILE = MetadataFile(source_file="m.json", content_type="json", status="captured")
 _VALID_ENTRY = MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured")
+_SESSION_ENTRY = MetadataEntry(
+    key="bench", value="lab-3", source_file=None, status="captured", source="session"
+)
 
 # Every table `record_session` writes.
 _SESSION_TABLES = ("run", "test_case", "result", "run_metadata_file", "run_metadata")
@@ -397,8 +401,18 @@ _SESSION_TABLES = ("run", "test_case", "result", "run_metadata_file", "run_metad
         ((_forced(replace(_VALID_FILE), content_type="xml"),), (_VALID_ENTRY,)),
         ((_forced(replace(_VALID_FILE), status="bogus"),), (_VALID_ENTRY,)),
         ((_VALID_FILE,), (_forced(replace(_VALID_ENTRY), status="bogus"),)),
+        ((_VALID_FILE,), (_forced(replace(_VALID_ENTRY), source="bogus"),)),
+        ((_VALID_FILE,), (_forced(replace(_VALID_ENTRY), source_file=None),)),
+        ((_VALID_FILE,), (_forced(replace(_SESSION_ENTRY), source_file="m.json"),)),
     ],
-    ids=["content-type", "file-status", "entry-status"],
+    ids=[
+        "content-type",
+        "file-status",
+        "entry-status",
+        "entry-source",
+        "file-entry-without-file",
+        "session-entry-with-file",
+    ],
 )
 def test_a_metadata_row_the_schema_refuses_rolls_back_the_whole_session(
     tmp_path: Path, files: tuple[MetadataFile, ...], entries: tuple[MetadataEntry, ...]

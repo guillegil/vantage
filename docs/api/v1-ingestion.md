@@ -145,20 +145,34 @@ A section whose fields are all null is stored as no VCS data.
 
 #### `metadata`
 
-Values read from files the test repository declares. Both fields are
-required, and an unknown field is rejected. No length or pattern constraint
-applies: a value the server cannot store is dropped, never a reason to reject
-the report.
+What the run was made against: values read from files the test repository
+declares, and values the test session reported itself. `declaration` is
+required; `keys`, `files` and `values` are optional and default to empty.
+An unknown field, in the section or in any of its entries, is rejected. No
+length or pattern constraint applies: a value the server cannot store is
+dropped, never a reason to reject the report.
 
 ```json
 {
   "declaration": "vantage-metadata.json",
+  "keys": {"fpga.firmware": {"name": "FPGA firmware version"}},
   "files": [
     {"path": "settings.json", "format": "json", "status": "captured",
      "keys": ["service_version"], "content": "{\"service_version\": \"2.10\"}"}
+  ],
+  "values": [
+    {"key": "fpga.firmware", "value": "1.1.0", "status": "captured"},
+    {"key": "fmc.hardware", "value": null, "status": "absent"}
   ]
 }
 ```
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `declaration` | string or null | The declaration's file name, or null when the session had none. |
+| `keys` | object | The keys the declaration names, each mapped to `{"name": ...}`: the display name to show it under, a string or null. `name` may be left out. |
+| `files` | list | One entry per file the declaration lists. |
+| `values` | list | The values the session reported. |
 
 | Field of a file | Type | Meaning |
 | --- | --- | --- |
@@ -168,6 +182,20 @@ the report.
 | `keys` | list of strings | The top-level keys to record from this file. |
 | `content` | string or null | The file's text when `status` is `captured`, otherwise null. |
 
+Every field of a value is required:
+
+| Field of a value | Type | Meaning |
+| --- | --- | --- |
+| `key` | string | A flat key, such as `fpga.firmware`. |
+| `value` | string or null | The value, as text, when `status` is `captured`; otherwise null. |
+| `status` | string | `captured`; `absent` for a key reported without a value, or declared in `keys` and never reported; or `value_too_large` for a value over 1,024 bytes of UTF-8, sent without it. |
+
+A key is **declared** when the same report names it, in `keys` or in any
+file's `keys`. Each stored key records whether it was declared and the
+display name `keys` gives it; a file's key is always declared. The server
+derives no key from the declaration: a declared key that was never reported
+is stored only if the client sends it, as `absent`.
+
 The server re-applies the client's bounds by dropping, never by rejecting:
 
 - A file is dropped, with its keys, when its path is absolute, contains `..`,
@@ -175,19 +203,41 @@ The server re-applies the client's bounds by dropping, never by rejecting:
   earlier file's path, or when its `format` or `status` is not one listed
   above. `pytest-vantage` refuses a declaration holding such a path, with a
   warning, so it never sends one.
-- A key is dropped when it is longer than 1,024 characters, was declared by
-  an earlier file, or comes after the 200th key of the report.
+- A file's key is dropped when it is longer than 1,024 characters or was
+  declared by an earlier file.
+- A value is dropped when its key is longer than 1,024 characters, its
+  `status` is not one of the three above, or its key was already given by a
+  file or by an earlier value of the report: a file's value is kept over the
+  session's.
+- A value whose `value` and `status` disagree (a value with a status other
+  than `captured`, or `captured` with a null value) is stored as `absent`,
+  and a `captured` value over 1,024 bytes of UTF-8 as `value_too_large`,
+  without it.
+- A display name longer than 256 characters is stored as no name; its key
+  is kept.
+- A run holds at most 200 keys, counted over all its reports. Within a
+  report the files' keys come first, then the values, in order; every key
+  past the 200th is dropped.
 - A `captured` file is recorded `malformed` when its content is null, cannot
   be parsed, or is not a mapping at the top level; `too_large` when its
   content exceeds 8 KiB; and `over_budget` once the files' contents pass
   32 KiB in total, counted in order. Other statuses are stored as sent.
 
-Each declared key is stored with a status: `captured` (its value, as text,
+Each key of a file is stored with a status: `captured` (its value, as text,
 when it is a scalar of at most 1,024 bytes), `absent`, `not_scalar`,
 `value_too_large`, or `source_unavailable` when its file was not captured or
 parsed. JSON numbers keep their literal text (`2.10` stays `"2.10"`), and
 YAML is parsed without constructing any object. The file's text itself is
 not stored.
+
+`keys` and `values` were added to `/api/v1` before either distribution was
+released. A server that predates them rejects a report carrying either with
+`422 invalid_report`, so `pytest-vantage` leaves both out when they are
+empty: a session that declares no key and reports no value is accepted by
+such a server as before.
+
+What was stored reads back from `GET /api/v1/runs/{run_id}/metadata`, and
+filters the run list; see the OpenAPI document.
 
 ### The answer
 
@@ -216,8 +266,9 @@ any of them.
   is null in the finishing report keeps its earlier value.
 - **Results accumulate.** Each report adds the results whose node ids the run
   does not have yet. A result already stored is never replaced.
-- **Metadata** is stored once per file path and per key; later copies are
-  ignored.
+- **Metadata** is stored once per file path and per key: the first report
+  to carry a key decides its value, and later copies are ignored. A run
+  holds at most 200 keys over all its reports.
 - **`200` does not mean nothing changed.** It means the run already existed.
   A finishing report after a start report answers `200` and stores the
   finish and its results.
@@ -229,6 +280,12 @@ run unfinished rather than finished with results missing. Its full sequence
 is: a start report (in progress, no results), heartbeats, any in-progress
 reports with results, and the finishing report. Without the
 `session_lifecycle` capability it sends only the last two.
+
+Every report of a session carries the declaration's `keys` and `files`, so
+the files' keys are stored from the first report that arrives. Only the
+finishing report carries `values`; when the last results leave no room for
+them, those results go in one more in-progress report and the finishing
+report carries none. The server takes values from any report.
 
 ## `POST /api/v1/runs/{run_id}/heartbeat`
 

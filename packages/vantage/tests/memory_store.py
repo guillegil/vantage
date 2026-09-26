@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Concatenate, ParamSpec, TypeVar
 
 from vantage.core.domain.execution import Execution, VcsContext
+from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
@@ -159,12 +160,18 @@ class InMemoryExecutionStore:
             if key not in self._results:
                 self._results[key] = _normalized_result(result)
 
-        # `setdefault` mirrors the SQLite adapter's `ON CONFLICT DO NOTHING`:
-        # a metadata file/entry is written once and never updated.
+        # Mirrors the SQLite adapter's `ON CONFLICT DO NOTHING`: a metadata
+        # file/entry is written once and never updated. A run also stops
+        # taking new keys once it holds `MAX_METADATA_ENTRIES`, however many
+        # reports carry them.
         for metadata_file in metadata.files:
             self._metadata_files.setdefault((identity, metadata_file.source_file), metadata_file)
+        held = sum(1 for run_id, _key in self._metadata_entries if run_id == identity)
         for metadata_entry in metadata.entries:
-            self._metadata_entries.setdefault((identity, metadata_entry.key), metadata_entry)
+            slot = (identity, metadata_entry.key)
+            if slot not in self._metadata_entries and held < MAX_METADATA_ENTRIES:
+                self._metadata_entries[slot] = metadata_entry
+                held += 1
 
         return created
 
@@ -262,45 +269,48 @@ class InMemoryExecutionStore:
     def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
         return self._run_page(self._executions.values(), limit=limit, offset=offset)
 
-    @_locked
-    def list_runs_with_metadata_horizon(
-        self, *, key: str, value: str, limit: int, offset: int
-    ) -> tuple[Page[RunListEntry], int]:
-        # Both reads happen under one hold of the lock, so they describe one
-        # state.
-        #
-        # Mirrors `rm.key = ? AND rm.value = ?`: `entry.value` is `None` for
-        # a declared-but-uncaptured key, so it never matches, just as SQL
-        # NULL never equals a bound string.
-        matching_run_ids = {
-            run_id
-            for (run_id, entry_key), entry in self._metadata_entries.items()
-            if entry_key == key and entry.value == value
-        }
-        page = self._run_page(
-            (
-                execution
-                for execution in self._executions.values()
-                if execution.identity.value in matching_run_ids
-            ),
-            limit=limit,
-            offset=offset,
-        )
-        # A row for `key` of any status counts towards `first_seen`,
-        # mirroring the SQLite adapter's `run_metadata` join, which does not
-        # filter on `value` either.
-        declared_at = [
+    def _holds(self, run_id: str, key: str, value: str) -> bool:
+        """Mirrors `rm.key = ? AND rm.value = ?`: `entry.value` is `None`
+        for a key without a captured value, so it never matches, just as
+        SQL NULL never equals a bound string. For a caller already holding
+        the lock."""
+        entry = self._metadata_entries.get((run_id, key))
+        return entry is not None and entry.value == value
+
+    def _predating(self, key: str) -> int:
+        """How many runs started before `key` first appeared, for a caller
+        already holding the lock. A row for `key` of any status or source
+        counts towards `first_seen`, mirroring the SQLite adapter's
+        `run_metadata` join, which does not filter on either."""
+        carried_at = [
             self._executions[run_id].started_at
             for (run_id, entry_key) in self._metadata_entries
             if entry_key == key
         ]
-        if not declared_at:
-            return page, len(self._executions)
-        first_seen = min(declared_at)
-        predating = sum(
+        if not carried_at:
+            return len(self._executions)
+        first_seen = min(carried_at)
+        return sum(
             1 for execution in self._executions.values() if execution.started_at < first_seen
         )
-        return page, predating
+
+    @_locked
+    def list_runs_with_metadata_horizon(
+        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
+        # Every read happens under one hold of the lock, so the page and the
+        # counts describe one state.
+        page = self._run_page(
+            (
+                execution
+                for execution in self._executions.values()
+                if all(self._holds(execution.identity.value, key, value) for key, value in filters)
+            ),
+            limit=limit,
+            offset=offset,
+        )
+        keys = dict.fromkeys(key for key, _value in filters)
+        return page, tuple(self._predating(key) for key in keys)
 
     @_locked
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
@@ -310,6 +320,23 @@ class InMemoryExecutionStore:
         return RunDetail(
             execution=execution,
             last_contact_at=self._last_contact.get(execution_id),
+        )
+
+    @_locked
+    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+        # `sorted()` compares code points, the order the SQLite adapter's
+        # `ORDER BY key` gets from comparing UTF-8 bytes.
+        if execution_id not in self._executions:
+            return None
+        return tuple(
+            sorted(
+                (
+                    entry
+                    for (run_id, _key), entry in self._metadata_entries.items()
+                    if run_id == execution_id
+                ),
+                key=lambda entry: entry.key,
+            )
         )
 
     @_locked
@@ -408,7 +435,7 @@ class InMemoryExecutionStore:
     @_locked
     def metadata(self, run_id: str) -> RunMetadata:
         """The metadata files and entries stored for `run_id`, for a test to
-        inspect: the port never returns them."""
+        inspect: the port never returns the files."""
         return RunMetadata(
             files=tuple(
                 metadata_file

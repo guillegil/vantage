@@ -9,7 +9,12 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from vantage.core.domain.metadata import MAX_METADATA_ENTRIES, MAX_METADATA_KEY_CHARS
+from vantage.core.domain.metadata import (
+    MAX_METADATA_ENTRIES,
+    MAX_METADATA_KEY_CHARS,
+    MAX_METADATA_NAME_CHARS,
+    MAX_METADATA_VALUE_BYTES,
+)
 from vantage.core.domain.result import CapturedOutput
 from vantage.core.ports.storage import EMPTY_RUN_METADATA, MetadataEntry, MetadataFile
 from vantage.service import metadata_parse
@@ -545,3 +550,222 @@ def test_to_run_metadata_keeps_at_most_the_entry_bound_across_files() -> None:
     assert len(result.files) == 2
     assert [entry.key for entry in result.entries] == [*first, "b_0"]
     assert result.entries[0].source_file == "config/a.json"
+
+
+# --- values the session reported --------------------------------------------
+
+
+def _value(key: str, value: str | None = "1.1.0", status: str = "captured") -> dict[str, object]:
+    return {"key": key, "value": value, "status": status}
+
+
+def _session_metadata(
+    *values: dict[str, object],
+    keys: dict[str, dict[str, object]] | None = None,
+    files: tuple[MetadataFileReport, ...] = (),
+) -> MetadataReport:
+    return MetadataReport.model_validate(
+        {
+            "declaration": "vantage-metadata.json",
+            "keys": {} if keys is None else keys,
+            "files": list(files),
+            "values": list(values),
+        }
+    )
+
+
+def _session_entry(
+    key: str,
+    value: str | None = "1.1.0",
+    status: str = "captured",
+    *,
+    name: str | None = None,
+    declared: bool = False,
+) -> MetadataEntry:
+    return MetadataEntry(
+        key=key,
+        value=value,
+        source_file=None,
+        status=status,
+        source="session",
+        name=name,
+        declared=declared,
+    )
+
+
+def test_to_run_metadata_records_each_session_value_as_a_session_row() -> None:
+    """In the order reported, each with the name its declaration gives it
+    and whether it is declared at all; a declared key the session never set
+    arrives as `absent` and is stored as it came."""
+    metadata = _session_metadata(
+        _value("fpga.firmware"),
+        _value("bench", "lab-3"),
+        _value("fmc.hardware", None, "absent"),
+        _value("fpga.dna", None, "value_too_large"),
+        keys={"fpga.firmware": {"name": "FPGA firmware version"}, "fmc.hardware": {}},
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result.files == ()
+    assert result.entries == (
+        _session_entry("fpga.firmware", name="FPGA firmware version", declared=True),
+        _session_entry("bench", "lab-3"),
+        _session_entry("fmc.hardware", None, "absent", declared=True),
+        _session_entry("fpga.dna", None, "value_too_large"),
+    )
+
+
+def test_to_run_metadata_gives_a_file_key_the_name_its_declaration_gives_it() -> None:
+    metadata = _session_metadata(
+        keys={"firmware_version": {"name": "Firmware version"}}, files=(_metadata_file_report(),)
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result.entries == (
+        MetadataEntry(
+            key="firmware_version",
+            value="2.1",
+            source_file="config/firmware.json",
+            status="captured",
+            name="Firmware version",
+        ),
+    )
+
+
+def test_a_key_a_file_declares_is_declared_even_when_the_session_gives_its_value() -> None:
+    """The declared set is every key in `keys` and every key any file
+    lists, including a file the server drops."""
+    metadata = _session_metadata(
+        _value("firmware_version", "2.1"),
+        files=(_metadata_file_report(path="../escape.json"),),
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result.files == ()
+    assert result.entries == (_session_entry("firmware_version", "2.1", declared=True),)
+
+
+def test_to_run_metadata_keeps_a_files_value_over_the_sessions_for_the_same_key() -> None:
+    metadata = _session_metadata(
+        _value("firmware_version", "9.9"),
+        _value("bench", "lab-3"),
+        files=(_metadata_file_report(),),
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result.entries == (
+        MetadataEntry(
+            key="firmware_version",
+            value="2.1",
+            source_file="config/firmware.json",
+            status="captured",
+        ),
+        _session_entry("bench", "lab-3"),
+    )
+
+
+def test_to_run_metadata_keeps_the_first_stored_session_value_of_a_key() -> None:
+    """An entry dropped for its status does not claim the key; of the
+    entries that could be stored, the first is."""
+    metadata = _session_metadata(
+        _value("k", None, "not_scalar"), _value("k", "first"), _value("k", "second")
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result.entries == (_session_entry("k", "first"),)
+
+
+@pytest.mark.parametrize("status", ["bogus", "Captured", "not_scalar", "source_unavailable"])
+def test_to_run_metadata_drops_a_session_value_with_a_status_it_cannot_have(status: str) -> None:
+    """`not_scalar` and `source_unavailable` describe a declared file, which
+    a session value never comes from."""
+    result = _to_run_metadata(_session_metadata(_value("k", None, status)))
+
+    assert result == EMPTY_RUN_METADATA
+
+
+@pytest.mark.parametrize(
+    ("value", "status"),
+    [(None, "captured"), ("x", "absent"), ("x", "value_too_large")],
+    ids=["captured-without-value", "absent-with-value", "too-large-with-value"],
+)
+def test_to_run_metadata_stores_a_self_contradicting_session_value_as_absent(
+    value: str | None, status: str
+) -> None:
+    result = _to_run_metadata(_session_metadata(_value("k", value, status)))
+
+    assert result.entries == (_session_entry("k", None, "absent"),)
+
+
+def test_to_run_metadata_bounds_a_session_value_in_utf8_bytes() -> None:
+    """The same bound a file's value has, counted in bytes: two-byte
+    characters reach it at half as many characters."""
+    at_bound = "é" * (MAX_METADATA_VALUE_BYTES // 2)
+    over_bound = at_bound + "x"
+
+    result = _to_run_metadata(_session_metadata(_value("a", at_bound), _value("b", over_bound)))
+
+    assert result.entries == (
+        _session_entry("a", at_bound),
+        _session_entry("b", None, "value_too_large"),
+    )
+
+
+def test_to_run_metadata_drops_a_session_key_over_the_key_bound_and_keeps_one_at_it() -> None:
+    at_bound = "k" * MAX_METADATA_KEY_CHARS
+    over_bound = "k" * (MAX_METADATA_KEY_CHARS + 1)
+
+    result = _to_run_metadata(_session_metadata(_value(over_bound), _value(at_bound)))
+
+    assert result.entries == (_session_entry(at_bound),)
+
+
+def test_to_run_metadata_counts_file_keys_first_towards_the_entry_bound() -> None:
+    file_keys = [f"file_{index}" for index in range(MAX_METADATA_ENTRIES - 1)]
+    metadata = _session_metadata(
+        _value("first"),
+        _value("second"),
+        files=(_metadata_file_report(content="{}", keys=file_keys),),
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert [entry.key for entry in result.entries] == [*file_keys, "first"]
+
+
+def test_to_run_metadata_keeps_at_most_the_entry_bound_of_session_values() -> None:
+    keys = [f"key_{index}" for index in range(MAX_METADATA_ENTRIES + 5)]
+
+    result = _to_run_metadata(_session_metadata(*(_value(key) for key in keys)))
+
+    assert [entry.key for entry in result.entries] == keys[:MAX_METADATA_ENTRIES]
+
+
+def test_to_run_metadata_drops_a_display_name_over_the_bound_and_keeps_its_key() -> None:
+    at_bound = "n" * MAX_METADATA_NAME_CHARS
+    metadata = _session_metadata(
+        _value("a"),
+        _value("b"),
+        keys={"a": {"name": at_bound}, "b": {"name": at_bound + "n"}},
+    )
+
+    result = _to_run_metadata(metadata)
+
+    assert result.entries == (
+        _session_entry("a", name=at_bound, declared=True),
+        _session_entry("b", declared=True),
+    )
+
+
+def test_to_run_metadata_records_nothing_for_a_section_with_only_a_declaration_name() -> None:
+    """`keys`, `files` and `values` are each optional, and a session with no
+    declaration file sends a null `declaration`."""
+    for declaration in ("vantage-metadata.json", None):
+        metadata = MetadataReport.model_validate({"declaration": declaration})
+
+        assert _to_run_metadata(metadata) == EMPTY_RUN_METADATA

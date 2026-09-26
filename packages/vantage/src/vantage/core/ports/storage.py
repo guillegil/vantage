@@ -9,7 +9,13 @@ from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.execution import Execution
-from vantage.core.domain.metadata import FILE_STATUSES, KEY_STATUSES, METADATA_CONTENT_TYPES
+from vantage.core.domain.metadata import (
+    FILE_STATUSES,
+    KEY_STATUSES,
+    METADATA_CONTENT_TYPES,
+    METADATA_SOURCES,
+    SESSION_KEY_STATUSES,
+)
 from vantage.core.domain.projection import (
     FailureProjection,
     VcsProjection,
@@ -204,17 +210,43 @@ class MetadataFile:
 
 @dataclass(frozen=True, slots=True)
 class MetadataEntry:
-    """One row of `run_metadata`. `value` is `None` whenever `status` is not
-    `'captured'` -- a declared-but-uncaptured key is a row, never a missing
-    row. `status` is checked as `MetadataFile`'s is."""
+    """One row of `run_metadata`: one key's outcome in one run.
+
+    `source` is where the value came from: `'file'`, a key of the declared
+    file `source_file`, or `'session'`, a key the test session reported
+    itself, which has no `source_file`. `name` is the display name the run's
+    declaration gave the key, and `declared` whether the declaration named
+    the key at all -- a file's key always is. The defaults describe a file
+    key with no display name.
+
+    `value` is set exactly when `status` is `'captured'` -- a key without a
+    value is a row, never a missing row. `status` and `source` are checked
+    as `MetadataFile`'s fields are, and a session key's status against the
+    narrower `SESSION_KEY_STATUSES`, so no adapter is handed a row that
+    contradicts itself."""
 
     key: str
     value: str | None
-    source_file: str
+    source_file: str | None
     status: str
+    source: str = "file"
+    name: str | None = None
+    declared: bool = True
 
     def __post_init__(self) -> None:
         _check_vocabulary("status", self.status, KEY_STATUSES)
+        _check_vocabulary("source", self.source, METADATA_SOURCES)
+        if (self.status == "captured") != (self.value is not None):
+            raise ValueError("value must be set exactly when status is 'captured'")
+        if self.source == "file":
+            if self.source_file is None:
+                raise ValueError("a file key must name its source_file")
+            if not self.declared:
+                raise ValueError("a file key is always declared")
+        elif self.source_file is not None:
+            raise ValueError("a session key has no source_file")
+        else:
+            _check_vocabulary("status", self.status, SESSION_KEY_STATUSES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,10 +287,13 @@ class ExecutionStore(Protocol):
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
-        """Store the run, its results and its declared metadata. Return True
-        if a row was created, False if the id was already stored.
-        `metadata`'s two tables are written once each -- a report with
-        metadata identical to what is already stored is a no-op."""
+        """Store the run, its results and its metadata. Return True if a row
+        was created, False if the id was already stored. Every metadata row
+        is written once: the first report to carry a file or a key keeps it,
+        whatever a later report says, and whichever source a later row of the
+        same key comes from. A run holds at most `MAX_METADATA_ENTRIES` keys:
+        once it does, every new key a report carries is dropped, in order,
+        however many reports the run is sent."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:
@@ -302,29 +337,41 @@ class ExecutionStore(Protocol):
         ...
 
     def list_runs_with_metadata_horizon(
-        self, *, key: str, value: str, limit: int, offset: int
-    ) -> tuple[Page[RunListEntry], int]:
-        """`list_runs` narrowed to runs holding the exact declared
-        `(key, value)` pair, together with how many runs were recorded
-        before `key` was first declared, both read from one snapshot of the
-        store. Two separate reads can straddle a session another process
-        records, and then describe two different sets of runs. This is the
-        only filtered read of the run list.
+        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
+        """`list_runs` narrowed to runs holding every `(key, value)` pair of
+        `filters` -- a captured value exactly equal to it, from a file or
+        the session alike -- together with, for each distinct key of
+        `filters` in the order it first appears, how many runs were recorded
+        before that key first appeared. The page and the counts are read
+        from one snapshot of the store: separate reads can straddle a
+        session another process records, and then describe two different
+        sets of runs. This is the only filtered read of the run list.
 
-        A key declared but not captured has no value, so it never matches.
+        A key without a captured value has no value, so it never matches,
+        and two pairs giving one key different values match no run. An
+        empty `filters` narrows nothing and counts nothing.
 
-        `first_seen` is `MIN(run.started_at)` over runs holding **any**
-        `run_metadata` row for `key`, regardless of status -- a
-        declared-but-dropped row still counts, since without it a run whose
+        A key's `first_seen` is `MIN(run.started_at)` over runs holding
+        **any** `run_metadata` row for it, whatever its status or source --
+        a row without a value still counts, since without it a run whose
         value was too large to capture would be miscounted as predating the
-        declaration. When no run has ever carried `key`, every run predates
-        it and the count is the total run count."""
+        key. When no run has ever carried the key, every run predates it and
+        its count is the total run count."""
         ...
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         """Return the full record for one run, or None if `execution_id` is
         unknown. The whole stored commit subject is reachable here -- the
         complement of `list_runs`' bounded projection."""
+        ...
+
+    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+        """Return every metadata row stored for one run, ordered by `key`
+        (code point order), or None if `execution_id` is unknown. A known
+        run with no metadata has an empty sequence. Not paginated:
+        `MAX_METADATA_ENTRIES` bounds a run's rows. The existence check and
+        the rows are read from one snapshot."""
         ...
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:

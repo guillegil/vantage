@@ -17,7 +17,7 @@ paths:
       operationId: create_run
       tags: [write]
       summary: Report a session's run and its results.
-      description: Declared metadata never rejects a report. The server bounds it the way the plugin does -- it drops a file repeating an earlier file's path, over-long and repeated keys and every key past the per-run entry bound, and records a document past the per-file or per-report size as too_large or over_budget without parsing it.
+      description: Metadata values never reject a report. The server bounds them the way the plugin does -- it drops a file repeating an earlier file's path, over-long and repeated keys, a session value with a status it cannot have, and every key past the per-run entry bound, files first; it records a document past the per-file or per-report size as too_large or over_budget without parsing it, and a value past the per-value size as value_too_large. Each key is stored once, by the first report carrying it.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReport'}}}}
       responses:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
@@ -30,15 +30,15 @@ paths:
       operationId: list_runs
       tags: [read]
       summary: Page through recorded runs, newest first.
-      description: metadata_key and metadata_value together filter to runs holding that declared key=value pair -- both or neither, one without the other is 422. A run recorded before the key was ever declared has no value for it and is excluded; metadata_horizon in the response reports how many runs predate it (null when no metadata filter was given).
+      description: "metadata_key and metadata_value filter the list by key=value pairs, the n-th value pairing with the n-th key, so each is repeated once per pair -- ?metadata_key=a&metadata_value=1&metadata_key=b&metadata_value=2. A run matches when it holds every pair: a captured value exactly equal, read from a declared file or reported by the session. A run recorded before a key ever appeared has no value for it and is excluded; metadata_horizon in the response reports, for each distinct filtered key in the order first given, how many runs predate it (null when no metadata filter was given)."
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
-        - {name: metadata_key, in: query, required: false, schema: {type: string}}
-        - {name: metadata_value, in: query, required: false, schema: {type: string}}
+        - {name: metadata_key, in: query, required: false, schema: {type: array, items: {type: string}, maxItems: 16}}
+        - {name: metadata_value, in: query, required: false, schema: {type: array, items: {type: string}, maxItems: 16}}
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
-        "422": {description: "limit below 1 or offset out of range -- not a page (invalid_parameter); or metadata_key/metadata_value supplied without its pair (invalid_metadata_filter).", content: *rejection}
+        "422": {description: "limit below 1 or offset out of range -- not a page; or metadata_key and metadata_value repeated a different number of times, or more than 16 pairs (invalid_parameter).", content: *rejection}
   /runs/{run_id}:
     get:
       operationId: get_run_detail
@@ -48,6 +48,18 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: The run., content: {application/json: {schema: {$ref: '#/components/schemas/RunDetailResponse'}}}}
+        "404": {description: No run with that id has been recorded., content: *rejection}
+        "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
+  /runs/{run_id}/metadata:
+    get:
+      operationId: get_run_metadata
+      tags: [read]
+      summary: Every metadata key one run reported, ordered by key.
+      description: Keys read from declared files and keys the test session reported itself alike; source tells them apart. Not paged -- a run holds at most 200 keys. A run that reported no metadata has no items.
+      parameters:
+        - $ref: '#/components/parameters/run_id'
+      responses:
+        "200": {description: The run's metadata., content: {application/json: {schema: {$ref: '#/components/schemas/RunMetadataResponse'}}}}
         "404": {description: No run with that id has been recorded., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/heartbeat:
@@ -190,8 +202,9 @@ components:
     #     annotation admits `None`;
     #   * each `$ref`, against the model the field actually holds;
     #   * `additionalProperties`, against the model's `extra` setting;
-    #   * every declared `enum`, against `OUTCOMES` / `PRESENTATIONS` -- the
-    #     domain frozensets that decide what the server can emit.
+    #   * every declared `enum`, against `OUTCOMES` / `PRESENTATIONS` and the
+    #     metadata vocabularies -- the domain frozensets that decide what the
+    #     server can emit.
     #
     # Not checked here: the JSON `type` and `format` keywords, `default`, and
     # the `pattern` / `maxLength` constraints. A `string` declared where the
@@ -219,11 +232,30 @@ components:
       required: [commit, branch, commit_subject, dirty, root]
       additionalProperties: false
       properties: {commit: {type: [string, "null"], maxLength: 64}, branch: {type: [string, "null"]}, commit_subject: {type: [string, "null"]}, dirty: {type: [boolean, "null"]}, root: {type: [string, "null"]}}
+    # `declaration` is null when the session had no declaration file. `keys`
+    # maps a declared key to what the declaration says about it; `values` are
+    # the keys the session reported itself, and only a session's last report
+    # carries them.
     MetadataReport:
       type: object
-      required: [declaration, files]
+      required: [declaration]
       additionalProperties: false
-      properties: {declaration: {type: string}, files: {type: array, items: {$ref: '#/components/schemas/MetadataFileReport'}}}
+      properties: {declaration: {type: [string, "null"]}, keys: {type: object, additionalProperties: {$ref: '#/components/schemas/MetadataKeyReport'}, default: {}}, files: {type: array, items: {$ref: '#/components/schemas/MetadataFileReport'}, default: []}, values: {type: array, items: {$ref: '#/components/schemas/MetadataValueReport'}, default: []}}
+    # A name over 256 characters is stored as no name; the key is kept.
+    MetadataKeyReport:
+      type: object
+      additionalProperties: false
+      properties: {name: {type: [string, "null"], default: null}}
+    # No constraint on any field, as for a file. `status` is captured, absent
+    # or value_too_large, and `value` is null unless it is captured: an entry
+    # with any other status is dropped, and one whose value contradicts its
+    # status is stored as absent. A key a file already gave, or an earlier
+    # entry, keeps that value.
+    MetadataValueReport:
+      type: object
+      required: [key, value, status]
+      additionalProperties: false
+      properties: {key: {type: string}, value: {type: [string, "null"]}, status: {type: string}}
     # No constraint on any field: a declared value is text this project does
     # not control, so the server drops what it cannot store rather than
     # rejecting the report. `content` is null unless `status` is `captured`.
@@ -258,8 +290,8 @@ components:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs]
       properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
-    # `predating` equals the total run count when `key` was never declared.
-    # Populated only when a metadata filter was given.
+    # One per distinct filtered key, in the order first given. `predating`
+    # equals the total run count when no run ever carried `key`.
     MetadataHorizon:
       type: object
       required: [key, predating]
@@ -267,7 +299,7 @@ components:
     RunListResponse:
       type: object
       required: [items, has_more, metadata_horizon]
-      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}, metadata_horizon: {oneOf: [{$ref: '#/components/schemas/MetadataHorizon'}, {type: "null"}]}}
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}, metadata_horizon: {type: [array, "null"], items: {$ref: '#/components/schemas/MetadataHorizon'}}}
     # Carries `interrupt_reason` and an untruncated `commit_subject`, which
     # the lean list entry omits -- the detail path keeps the full record
     # reachable.
@@ -275,6 +307,17 @@ components:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs]
       properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
+    # `source_file` names the declared file of a `file` key and is null for a
+    # `session` one; `value` is null unless `status` is `captured`; `name`
+    # is the display name the run's declaration gave the key.
+    MetadataItem:
+      type: object
+      required: [key, name, value, status, source, source_file, declared]
+      properties: {key: {type: string}, name: {type: [string, "null"]}, value: {type: [string, "null"]}, status: {type: string, enum: [captured, absent, not_scalar, value_too_large, source_unavailable]}, source: {type: string, enum: [file, session]}, source_file: {type: [string, "null"]}, declared: {type: boolean}}
+    RunMetadataResponse:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/MetadataItem'}}}
     # No traceback, failure_repr or captured output at any depth -- a
     # results list never carries them; the single-result endpoint does.
     FailureProjection:

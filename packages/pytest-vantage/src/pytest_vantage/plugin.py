@@ -2,7 +2,8 @@
 
 pytest imports this module on every invocation, activated or not, so it
 implements no hook capable of a side effect: only ``pytest_addoption`` and
-``pytest_configure``. The recorder that reports lives in
+``pytest_configure``, plus the ``vantage_metadata`` fixture, which runs only
+when a test asks for it. The recorder that reports lives in
 ``pytest_vantage.recorder`` and is registered through
 ``config.pluginmanager.register(...)`` only once ``--vantage`` is given --
 pytest fires every ``pytest_*`` hook it finds on a registered plugin, so a
@@ -18,13 +19,16 @@ conflict with nothing in the environment it lands in.
 from __future__ import annotations
 
 import socket
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 import pytest
 
 from pytest_vantage.boundary import warn
 from pytest_vantage.config import VantageConfigError, resolve_liveness_timeout, resolve_settings
+
+if TYPE_CHECKING:
+    from pytest_vantage.session_metadata import SessionMetadata
 
 # The preflight probe waits at most min(2.0, report timeout): it must not
 # itself wait as long as a full report is allowed to.
@@ -210,14 +214,15 @@ def _failure_text_capture_requested(config: pytest.Config) -> bool:
 
 
 def _metadata_capture_requested(config: pytest.Config) -> bool:
-    """Whether `Recorder` should attempt to read the metadata declaration
-    for this session: the same gate as `_failure_text_capture_requested`,
-    for the `--vantage-metadata` flag, so a committed configuration file can
-    never enable a filesystem read.
+    """Whether `Recorder` should read the files the metadata declaration
+    names: the same gate as `_failure_text_capture_requested`, for the
+    `--vantage-metadata` flag, so a committed configuration file can never
+    enable reading them. The declaration itself is read in any recorded
+    session, for the keys it declares.
 
     Called only on the controller: no `Recorder` is ever constructed on a
-    worker, so the declaration is read once per session regardless of
-    worker count.
+    worker, so the files are read once per session regardless of worker
+    count.
     """
     return _activation_requested(config) and _opt_in(config, "vantage_metadata")
 
@@ -245,6 +250,28 @@ def _session_runs_no_tests(config: pytest.Config) -> bool:
     return any(config.getoption(name, default=False) for name in _NO_TEST_OPTIONS)
 
 
+@pytest.fixture(scope="session")
+def vantage_metadata(pytestconfig: pytest.Config) -> SessionMetadata:
+    """Run metadata this session reports: what it ran against, known only
+    once a fixture has looked (a firmware version, a board revision).
+
+    A mapping of flat dotted keys to text. Setting a dict flattens it, so
+    ``vantage_metadata["fpga"] = {"firmware": "1.1.0"}`` sets
+    ``fpga.firmware``. Values become text as they are set: pass a string
+    when the spelling matters, since ``1.10`` becomes ``"1.1"``. A key or
+    value that cannot be recorded is skipped with a warning; nothing here
+    raises.
+
+    The values go out with the run's last report only: a session killed
+    before it finishes loses them. Set them in a fixture's setup rather than
+    its teardown. Without ``--vantage`` the mapping records nothing.
+    """
+    from pytest_vantage.session_metadata import SESSION_METADATA, SessionMetadata
+
+    recorded = pytestconfig.stash.get(SESSION_METADATA, None)
+    return SessionMetadata() if recorded is None else recorded
+
+
 def pytest_configure(config: pytest.Config) -> None:
     """The always-imported hook: decides what, if anything, to register.
 
@@ -254,10 +281,13 @@ def pytest_configure(config: pytest.Config) -> None:
        process that ran the test, so a worker registers `EvidenceCollector`
        if failure text was requested, and returns. If recording was
        requested it also registers `WorkerInterruptRelay`, since only the
-       worker knows whether Ctrl-C or ``pytest.exit()`` interrupted it. It
-       never resolves an address, reads a timeout, probes the server or
-       constructs a `Recorder`: a `Recorder` per worker would record one
-       session as several runs.
+       worker knows whether Ctrl-C or ``pytest.exit()`` interrupted it, and,
+       when the controller says it records, `WorkerMetadataRelay`, whose
+       mapping the ``vantage_metadata`` fixture hands the worker's session
+       fixtures. It never resolves an
+       address, reads a timeout, probes the server or constructs a
+       `Recorder`: a `Recorder` per worker would record one session as
+       several runs.
     3. **Controller branch.** An invocation that runs no test is never
        recorded. Otherwise an opt-in flag that was not typed is reported
        once, and absent a typed ``--vantage`` nothing further happens: no
@@ -283,7 +313,9 @@ def pytest_configure(config: pytest.Config) -> None:
        warn once, naming the probe's reason.
     8. This hook has no fault-isolation boundary of its own, so a failure
        constructing the `Recorder` warns once and leaves the session
-       unrecorded rather than ending it as an INTERNALERROR.
+       unrecorded rather than ending it as an INTERNALERROR. Once
+       registered, its mapping is the one the ``vantage_metadata`` fixture
+       hands out; any session left unrecorded gets one nobody reads.
 
     A server that passes the preflight and later disappears or fails is
     handled by ``pytest_vantage.boundary``'s fault-isolation decorator on
@@ -291,9 +323,18 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     if hasattr(config, "workerinput"):
         if _activation_requested(config):
-            from pytest_vantage.recorder import WorkerInterruptRelay
+            from pytest_vantage.recorder import (
+                WorkerInterruptRelay,
+                WorkerMetadataRelay,
+                controller_records,
+            )
+            from pytest_vantage.session_metadata import SESSION_METADATA
 
             config.pluginmanager.register(WorkerInterruptRelay(config))
+            if controller_records(config):
+                relay = WorkerMetadataRelay(config)
+                config.pluginmanager.register(relay)
+                config.stash[SESSION_METADATA] = relay.session_metadata
         if _failure_text_capture_requested(config):
             from pytest_vantage.evidence import EvidenceCollector
 
@@ -317,6 +358,7 @@ def pytest_configure(config: pytest.Config) -> None:
         warn(config, f"vantage: cannot reach {settings.address}, this session will not be recorded")
         return
     from pytest_vantage.recorder import Recorder
+    from pytest_vantage.session_metadata import SESSION_METADATA
     from pytest_vantage.transport import fetch_capabilities
 
     liveness_timeout = resolve_liveness_timeout(settings.timeout)
@@ -335,3 +377,4 @@ def pytest_configure(config: pytest.Config) -> None:
         )
         return
     config.pluginmanager.register(recorder)
+    config.stash[SESSION_METADATA] = recorder.session_metadata
