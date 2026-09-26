@@ -51,6 +51,13 @@ _CONNECT_TIMEOUT_SECONDS = 10
 # call for a free one.
 _POOL_WAIT_SECONDS = 30.0
 
+# How long the pool keeps retrying a connection that failed before it gives
+# up on it; a store call that finds none then has a new one opened at once.
+# Its retries double their interval, so psycopg_pool's own five minutes
+# would leave a server that came back after a minute unused for another,
+# while every call in between waited and failed.
+_RECONNECT_SECONDS = 5.0
+
 # Every connection's first statements, whatever the database's or the
 # role's defaults say.
 # - READ COMMITTED, which the locking relies on: a REPEATABLE READ or
@@ -186,6 +193,7 @@ def open_pool(url: str, *, max_connections: int) -> ConnectionPool[PgConnection]
         configure=configure_session,
         name="vantage",
         timeout=_POOL_WAIT_SECONDS,
+        reconnect_timeout=_RECONNECT_SECONDS,
     )
     try:
         pool.open(wait=True, timeout=_POOL_WAIT_SECONDS)

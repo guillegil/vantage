@@ -335,7 +335,11 @@ and from several server processes on one database, run in parallel. A
 connection answers a round trip before a call gets it; one the server has
 closed -- a restart or a failover closes them all -- is discarded and the
 next tried at once, rather than through the pool's own check, which waits
-longer after each failure than the one before. Every connection sets its
+longer after each failure than the one before. For the same reason the
+pool gives up retrying a connection it cannot open after five seconds, not
+psycopg_pool's five minutes: a call made once the server is back has a new
+connection opened at once, rather than waiting for a retry that a long
+outage has spaced out by a minute or more. Every connection sets its
 session to `READ COMMITTED` first, whatever the database or the role
 defaults to: the locks below rely on it, since a `REPEATABLE READ`
 transaction reads the snapshot its first statement took, before the lock

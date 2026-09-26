@@ -342,6 +342,98 @@ def test_connections_the_server_closed_are_replaced_at_once(
         store.close()
 
 
+class _Relay:
+    """A TCP relay to a PostgreSQL server that can go down -- closing every
+    connection through it and turning each new one away -- and come back,
+    as the server itself does across a restart."""
+
+    def __init__(self, host: str, port: int) -> None:
+        self._target = (host, port)
+        self._listener = socket.create_server(("127.0.0.1", 0))
+        self.port: int = self._listener.getsockname()[1]
+        self._serving = threading.Event()
+        self._serving.set()
+        self._lock = threading.Lock()
+        self._open: list[socket.socket] = []
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self) -> None:
+        while True:
+            try:
+                client, _address = self._listener.accept()
+            except OSError:
+                return
+            if not self._serving.is_set():
+                client.close()
+                continue
+            upstream = socket.create_connection(self._target)
+            with self._lock:
+                self._open += [client, upstream]
+            for source, sink in ((client, upstream), (upstream, client)):
+                threading.Thread(target=self._pump, args=(source, sink), daemon=True).start()
+
+    @staticmethod
+    def _pump(source: socket.socket, sink: socket.socket) -> None:
+        try:
+            while data := source.recv(65536):
+                sink.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for end in (source, sink):
+                end.close()
+
+    def down(self) -> None:
+        self._serving.clear()
+        with self._lock:
+            for end in self._open:
+                # `shutdown` rather than `close` alone, which leaves a
+                # socket a pump thread is blocked on open.
+                try:
+                    end.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            self._open.clear()
+
+    def up(self) -> None:
+        self._serving.set()
+
+    def close(self) -> None:
+        self.down()
+        self._listener.close()
+
+
+@pytest.mark.slow
+def test_a_store_serves_again_as_soon_as_the_server_is_back_from_an_outage(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call made while the server is down sets the pool reconnecting,
+    which psycopg_pool spaces out by a doubling interval for five minutes
+    unless told otherwise: after eight seconds down, its next attempt comes
+    about seven seconds after the server is back, and every call until then
+    waits for it and fails."""
+    monkeypatch.setattr(postgres_connection, "_POOL_WAIT_SECONDS", 2.0)
+    parts = urlsplit(postgres_url)
+    relay = _Relay(parts.hostname or "127.0.0.1", parts.port or 5432)
+    credentials, at, _address = parts.netloc.rpartition("@")
+    store = PostgresExecutionStore(
+        urlunsplit(parts._replace(netloc=f"{credentials}{at}127.0.0.1:{relay.port}"))
+    )
+    try:
+        assert store.count_executions() == 0
+        relay.down()
+        outage_began = time.monotonic()
+        with pytest.raises(psycopg.OperationalError):
+            store.count_executions()
+        time.sleep(max(0.0, outage_began + 8 - time.monotonic()))
+        relay.up()
+
+        assert store.count_executions() == 0
+    finally:
+        store.close()
+        relay.close()
+
+
 # -- transactions the server aborts --
 
 # Raises the error the server reports for `sqlstate`, from inside a
