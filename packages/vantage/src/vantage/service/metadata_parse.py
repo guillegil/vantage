@@ -35,6 +35,11 @@ UTF-8 form and so cannot be stored, raises `UnicodeDecodeError` from
 empty YAML document, for which `compose()` returns `None`) cannot hold a
 declared key and is also `None`. One leading byte order mark is ignored in
 either format.
+
+A U+0000 the document spells as an escape (`\\u0000` in JSON, `\\0` in
+YAML) is replaced by U+FFFD, as the request body's own are
+(`service/text.py`), so a key and value read from a file are text every
+store can hold.
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ import yaml
 from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES, METADATA_CONTENT_TYPES
+from vantage.service.text import without_nul
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 """The tag `compose()` resolves a plain `<<` key to. A quoted `'<<'` keeps
@@ -89,16 +95,17 @@ def parse(content: str, content_type: str, keys: Sequence[str]) -> dict[str, Key
 
 def _well_formed(text: str) -> str:
     """`text` with each surrogate pair combined into the character it
-    encodes; raises `UnicodeDecodeError` on a lone surrogate.
+    encodes and each U+0000 replaced by U+FFFD; raises `UnicodeDecodeError`
+    on a lone surrogate.
 
     PyYAML turns every `\\uXXXX` escape into its own code point, so a
     non-BMP character escaped as a pair -- what a JSON serialiser writes --
     arrives as two surrogates. `json.loads` combines pairs but passes a lone
-    one through.
+    one through. U+0000 cannot be stored by every adapter.
     """
     if text.isascii():
-        return text
-    return text.encode("utf-16-le", "surrogatepass").decode("utf-16-le")
+        return without_nul(text)
+    return without_nul(text.encode("utf-16-le", "surrogatepass").decode("utf-16-le"))
 
 
 def _parse_json(content: str) -> dict[str, str | None] | None:

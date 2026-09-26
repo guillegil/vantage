@@ -38,6 +38,10 @@ excluded, so `metadata_horizon` reports, per filtered key, how many runs
 predate it -- otherwise "not asked yet" would read as "did not match". The
 page and the counts come from one store call, so they describe the same set
 of runs. `metadata_horizon` is `None` when no filter was given.
+
+A node id or metadata filter holding U+0000 matches nothing: nothing stored
+holds one (`service/text.py`), and PostgreSQL cannot even be asked about
+one, so these routes answer it without passing it to the store.
 """
 
 from __future__ import annotations
@@ -56,6 +60,7 @@ from vantage.core.ports.storage import (
     ExecutionStore,
     HistoryEntry,
     MetadataEntry,
+    Page,
     ResultListEntry,
     RunDetail,
     RunListEntry,
@@ -77,6 +82,7 @@ from vantage.service.schemas import (
     RunMetadataResponse,
     RunVcsResponse,
 )
+from vantage.service.text import NUL, without_nul
 
 router = APIRouter()
 
@@ -275,7 +281,12 @@ def list_runs(
     must be repeated the same number of times, checked here because
     FastAPI's parameter binding cannot express a cross-field rule.
     `metadata_horizon` has one entry per distinct filtered key, in the order
-    first given, and is `None` when no filter was given."""
+    first given, and is `None` when no filter was given.
+
+    A pair holding U+0000 matches no run. Its key's horizon is that of the
+    key with U+0000 replaced by U+FFFD, the text a report carrying the key
+    stores, so the store is still asked once, for one snapshot, and never
+    with U+0000."""
     keys = metadata_key or []
     values = metadata_value or []
     if len(keys) != len(values):
@@ -286,13 +297,18 @@ def list_runs(
         raise InvalidMetadataFilterError.too_many(MAX_METADATA_FILTERS)
     horizon: list[MetadataHorizonResponse] | None = None
     if keys:
+        stored_keys = [without_nul(key) for key in keys]
         page, predating = store.list_runs_with_metadata_horizon(
-            filters=list(zip(keys, values)), limit=limit, offset=offset
+            filters=list(zip(stored_keys, map(without_nul, values))), limit=limit, offset=offset
         )
+        # Two keys differing only in U+0000 and U+FFFD are one key to the store.
+        counts = dict(zip(dict.fromkeys(stored_keys), predating, strict=True))
         horizon = [
-            MetadataHorizonResponse(key=key, predating=count)
-            for key, count in zip(dict.fromkeys(keys), predating, strict=True)
+            MetadataHorizonResponse(key=key, predating=counts[without_nul(key)])
+            for key in dict.fromkeys(keys)
         ]
+        if any(NUL in text for text in (*keys, *values)):
+            page = Page(items=(), has_more=False)
     else:
         page = store.list_runs(limit=limit, offset=offset)
     now = datetime.now(timezone.utc)
@@ -360,7 +376,7 @@ def get_result(
     distinct `404`, `UnknownResultError`."""
     if store.get_execution(run_id) is None:
         raise UnknownRunError()
-    result = store.get_result(run_id, node_id=node_id)
+    result = None if NUL in node_id else store.get_result(run_id, node_id=node_id)
     if result is None:
         raise UnknownResultError()
     return _result_detail_response(result)
@@ -376,6 +392,8 @@ def list_history(
     """`GET /api/v1/tests/history?node_id=...` -- see the module docstring
     for why `node_id` is a query value, not a path segment. An unknown
     `node_id` yields an empty page, not an error."""
+    if NUL in node_id:
+        return HistoryResponse(items=[], has_more=False)
     page = store.list_history(node_id=node_id, limit=limit, offset=offset)
     items = [_history_entry(entry) for entry in page.items]
     return HistoryResponse(items=items, has_more=page.has_more)

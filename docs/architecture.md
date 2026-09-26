@@ -318,6 +318,20 @@ where it would see rows not yet committed. Multi-statement writes open with
 `BEGIN IMMEDIATE`. WAL mode and a five-second busy timeout cover a second
 process on the same file, which no in-process lock can reach.
 
+**No store is ever handed U+0000.** PostgreSQL's `text` cannot hold it,
+and no UTF-8 encoder takes a lone surrogate, so `decode_json`
+(`service/text.py`) replaces every U+0000 in a key or string value of a body
+with U+FFFD, and every lone surrogate too for `POST /runs`;
+`POST /config/sections` refuses a lone surrogate instead. `metadata_parse`
+replaces a U+0000 that a declared document spells as an escape the same
+way. Every adapter therefore stores the same text. A value that is only
+looked up with -- a node id, a metadata filter, a section name to delete --
+is not rewritten into something else to find: holding U+0000, it matches
+nothing, and the route answers without asking the store, even where an
+older SQLite database holds that very text. The run list still asks the
+store for the `metadata_horizon` of a filtered key holding U+0000, as the
+key with U+FFFD in its place: the text a report carrying it stored.
+
 **Rejections have one shape**, built in `service/errors.py`: an error code, a
 fixed sentence and dotted field paths. Pydantic's own error details, which
 echo the submitted value, are never forwarded, and a client-chosen key name

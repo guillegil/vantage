@@ -4,7 +4,8 @@ per-run section summary.
 Runs the app factory against an injected `InMemoryExecutionStore`. These
 routes do not depend on the SQLite row-to-domain mappers, and the port
 contract (`vantage_port_contract.py`) already proves the two adapters agree
-beneath the port.
+beneath the port. The U+0000 tests run on every adapter, because what an
+adapter can hold is what they are about.
 """
 
 from __future__ import annotations
@@ -22,9 +23,13 @@ from vantage.core.domain.sections import (
     SECTION_NAME_MAX_CHARS,
     SECTION_PREFIX_MAX_CHARS,
 )
+from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES, TEST_SECTIONS_NAMESPACE
 from vantage_port_contract import _execution, _result
+
+# `any_store`, for each adapter in turn.
+pytest_plugins = ["store_fixtures"]
 
 _SECTIONS = "/api/v1/config/sections"
 
@@ -348,6 +353,43 @@ def test_a_lone_surrogate_is_rejected_and_nothing_is_stored(
     assert store.list_settings(TEST_SECTIONS_NAMESPACE) == before
     listing = client.get(_SECTIONS)
     assert listing.json() == {"items": [{"name": "Billing", "prefix": "tests/billing/"}]}
+
+
+def test_a_nul_in_a_name_or_prefix_is_stored_as_the_replacement_character(
+    any_store: ExecutionStore,
+) -> None:
+    """PostgreSQL cannot store U+0000, so it is replaced as the body is
+    read, and every adapter stores, lists and deletes the same name."""
+    client = TestClient(create_app(any_store))
+    body = b'{"name": "Check\\u0000out", "prefix": "tests/check\\u0000out"}'
+
+    response = client.post(_SECTIONS, content=body, headers={"content-type": "application/json"})
+
+    stored = {"name": "Check�out", "prefix": "tests/check�out/"}
+    assert response.status_code == 201
+    assert response.json() == stored
+    assert client.get(_SECTIONS).json() == {"items": [stored]}
+    assert client.delete(_SECTIONS, params={"name": "Check�out"}).status_code == 204
+
+
+def test_deleting_a_name_holding_nul_deletes_nothing(any_store: ExecutionStore) -> None:
+    """Nothing a request stores holds U+0000, and PostgreSQL cannot be
+    asked about one, so such a name is unknown -- even in a database an
+    earlier server wrote, where SQLite kept it as it came. That row is
+    written straight to the store here."""
+    any_store.upsert_setting(
+        TEST_SECTIONS_NAMESPACE,
+        "Check\x00out",
+        value='{"prefix": "tests/checkout/"}',
+        updated_at=datetime.now(timezone.utc),
+    )
+    client = TestClient(create_app(any_store))
+
+    response = client.delete(_SECTIONS, params={"name": "Check\x00out"})
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_section"
+    assert len(any_store.list_settings(TEST_SECTIONS_NAMESPACE)) == 1
 
 
 # --- GET /runs/{run_id}/sections: the run aggregate -------------------------

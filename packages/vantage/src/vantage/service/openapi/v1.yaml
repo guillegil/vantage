@@ -17,7 +17,7 @@ paths:
       operationId: create_run
       tags: [write]
       summary: Report a session's run and its results.
-      description: Metadata values never reject a report. The server bounds them the way the plugin does -- it drops a file repeating an earlier file's path, over-long and repeated keys, a session value with a status it cannot have, and every key past the per-run entry bound, files first; it records a document past the per-file or per-report size as too_large or over_budget without parsing it, and a value past the per-value size as value_too_large. Each key is stored once, by the first report carrying it.
+      description: Every U+0000, and every lone surrogate, in a key or string value of the body is stored as U+FFFD, and so is every U+0000 a declared metadata document escapes. Metadata values never reject a report. The server bounds them the way the plugin does -- it drops a file repeating an earlier file's path, over-long and repeated keys, a session value with a status it cannot have, and every key past the per-run entry bound, files first; it records a document past the per-file or per-report size as too_large or over_budget without parsing it, and a value past the per-value size as value_too_large. Each key is stored once, by the first report carrying it.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReport'}}}}
       responses:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
@@ -30,7 +30,7 @@ paths:
       operationId: list_runs
       tags: [read]
       summary: Page through recorded runs, newest first.
-      description: "metadata_key and metadata_value filter the list by key=value pairs, the n-th value pairing with the n-th key, so each is repeated once per pair -- ?metadata_key=a&metadata_value=1&metadata_key=b&metadata_value=2. A run matches when it holds every pair: a captured value exactly equal, read from a declared file or reported by the session. A run recorded before a key ever appeared has no value for it and is excluded; metadata_horizon in the response reports, for each distinct filtered key in the order first given, how many runs predate it (null when no metadata filter was given)."
+      description: "metadata_key and metadata_value filter the list by key=value pairs, the n-th value pairing with the n-th key, so each is repeated once per pair -- ?metadata_key=a&metadata_value=1&metadata_key=b&metadata_value=2. A run matches when it holds every pair: a captured value exactly equal, read from a declared file or reported by the session. A run recorded before a key ever appeared has no value for it and is excluded; metadata_horizon in the response reports, for each distinct filtered key in the order first given, how many runs predate it (null when no metadata filter was given). A pair holding U+0000 matches no run; its key's horizon is that of the key with U+0000 replaced by U+FFFD, the text a report carrying it stored."
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
@@ -91,7 +91,7 @@ paths:
       operationId: get_result
       tags: [read]
       summary: The full record for one result, unbounded by any list display width.
-      description: node_id is a named query parameter, not a path segment, because a node id may contain `/` -- the same as on /tests/history.
+      description: node_id is a named query parameter, not a path segment, because a node id may contain `/` -- the same as on /tests/history. A node_id holding U+0000 names no result.
       parameters:
         - $ref: '#/components/parameters/run_id'
         - {name: node_id, in: query, required: true, schema: {type: string}}
@@ -104,7 +104,7 @@ paths:
       operationId: list_history
       tags: [read]
       summary: A test's execution history, newest first, by its node id.
-      description: node_id is a named query parameter on an identity-free path, not a path segment, because a node id may contain `/`. The parameter name is the identity scheme, so another scheme can later be added as a sibling parameter.
+      description: node_id is a named query parameter on an identity-free path, not a path segment, because a node id may contain `/`. The parameter name is the identity scheme, so another scheme can later be added as a sibling parameter. A node_id holding U+0000 has no history.
       parameters:
         - {name: node_id, in: query, required: true, schema: {type: string}}
         - $ref: '#/components/parameters/limit'
@@ -141,6 +141,7 @@ paths:
       operationId: upsert_section
       tags: [write]
       summary: Create or update a section's prefix. A section name may contain `/`, so it travels as a body field, never as a path segment.
+      description: A U+0000 in the name or the prefix is stored as U+FFFD; a lone surrogate in either is rejected.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SectionUpsertRequest'}}}}
       responses:
         "201": {description: Stored, a new section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
@@ -153,7 +154,7 @@ paths:
       operationId: delete_section
       tags: [write]
       summary: Delete a section by name.
-      description: name is a query value, not a path segment, because a section name may contain `/`.
+      description: name is a query value, not a path segment, because a section name may contain `/`. A name holding U+0000 names no section.
       parameters:
         - {name: name, in: query, required: true, schema: {type: string}}
       responses:
