@@ -331,3 +331,56 @@ def test_creating_a_database_survives_a_username_lookup_failure(
     # The database exists and is usable; only the convenience row is absent.
     assert stored["schema_version"] == str(_SCHEMA_VERSION)
     assert "created_by" not in stored
+
+
+def _wal_switch_locked(monkeypatch: pytest.MonkeyPatch, times: int | None) -> list[str]:
+    """Patch `sqlite3.connect` so the first `times` switches to WAL -- every
+    one, for `None` -- fail as SQLite fails one of two connections switching
+    a new database at once. Returns the answer each attempt got."""
+    attempts: list[str] = []
+
+    class _ContendedConnection(sqlite3.Connection):
+        def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+            if sql == "PRAGMA journal_mode=WAL":
+                if times is None or len(attempts) < times:
+                    attempts.append("locked")
+                    raise sqlite3.OperationalError("database is locked")
+                attempts.append("switched")
+            return super().execute(sql, *args)
+
+    real_connect = sqlite3.connect
+
+    def _connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        kwargs.setdefault("factory", _ContendedConnection)
+        return cast(sqlite3.Connection, real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(sqlite3, "connect", _connect)
+    return attempts
+
+
+def test_a_switch_to_wal_another_connection_holds_up_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two processes opening one new database at once -- two pytest
+    sessions storing their first runs -- must both get it."""
+    attempts = _wal_switch_locked(monkeypatch, times=2)
+
+    conn = open_database(tmp_path / "store" / "vantage.db")
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    finally:
+        conn.close()
+
+    assert attempts == ["locked", "locked", "switched"]
+
+
+def test_a_switch_to_wal_that_stays_locked_gives_up_after_the_busy_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("vantage.storage.connection._BUSY_TIMEOUT_SECONDS", 0.05)
+    attempts = _wal_switch_locked(monkeypatch, times=None)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        open_database(tmp_path / "store" / "vantage.db")
+
+    assert len(attempts) > 1
