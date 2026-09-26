@@ -162,7 +162,7 @@ the report.
 
 | Field of a file | Type | Meaning |
 | --- | --- | --- |
-| `path` | string | The declared path, relative to the repository root. |
+| `path` | string | The declared path, relative to the directory holding the declaration (pytest's rootdir, for `pytest-vantage`), which need not be the repository root. |
 | `format` | string | `json` or `yaml`. |
 | `status` | string | `captured`, or why not: `not_found`, `path_rejected`, `unreadable`, `too_large`, `not_text`, `over_budget`, `malformed`. |
 | `keys` | list of strings | The top-level keys to record from this file. |
@@ -173,7 +173,8 @@ The server re-applies the client's bounds by dropping, never by rejecting:
 - A file is dropped, with its keys, when its path is absolute, contains `..`,
   a backslash or a drive, is longer than 1,024 characters, or repeats an
   earlier file's path, or when its `format` or `status` is not one listed
-  above.
+  above. `pytest-vantage` sends an absolute or `..` path it refused to read
+  as `path_rejected`, so such a path never reaches the run.
 - A key is dropped when it is longer than 1,024 characters, was declared by
   an earlier file, or comes after the 200th key of the report.
 - A `captured` file is recorded `malformed` when its content is null, cannot
