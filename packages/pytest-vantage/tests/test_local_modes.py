@@ -703,6 +703,49 @@ def test_a_server_gone_by_the_finish_leaves_the_run_stored_and_queued(
     assert (server, run_id, reports) == (gate.address, execution.identity.value, stored)
 
 
+def test_only_the_reports_the_server_did_not_take_are_queued(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A session too large for one report sends its results in several. The
+    ones the server took stay taken; the queue holds the rest, and sending
+    it later finishes the run with every result."""
+    failing = [True]
+    real = vantage_server.store.record_session
+
+    def _record_session(execution: Execution, **kwargs: Any) -> bool:
+        if failing[0] and execution.exit_status is not None:
+            raise _UnavailableError("storage is down")
+        return real(execution, **kwargs)
+
+    monkeypatch.setattr(vantage_server.store, "record_session", _record_session)
+    database = _stand_in(pytester)
+    pytester.makepyfile(
+        test_large="import pytest\n\n\n"
+        "@pytest.mark.parametrize('n', range(300), ids=lambda n: f'{n:04d}-' + 'x' * 2000)\n"
+        "def test_p(n):\n    assert True\n",
+        test_small=_PASSING_TEST,
+    )
+    args = (
+        "--vantage",
+        "--vantage-mode=server+backup",
+        f"--vantage-server={vantage_server.address}",
+    )
+
+    pytester.runpytest_subprocess(*args, "test_large.py").assert_outcomes(passed=300)
+    (stored,) = _stored_sessions(database)
+    ((_, run_id, queued),) = _queued(database)
+    failing[0] = False
+    later = pytester.runpytest_subprocess(*args, "test_small.py")
+
+    assert len(stored) > 1
+    assert queued == stored[-1:]
+    later.stdout.fnmatch_lines([f"vantage: sent 1 queued run to {vantage_server.address} *"])
+    assert _queued(database) == []
+    (execution,) = [e for e in vantage_server.executions() if e.identity.value == run_id]
+    assert execution.exit_status == 0
+    assert len(vantage_server.store.get_results(run_id)) == 300
+
+
 @pytest.mark.slow
 def test_a_timeout_at_the_finish_leaves_the_run_queued(
     pytester: pytest.Pytester, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
