@@ -145,13 +145,17 @@ _EXECUTION_COLUMNS = """
 _LIST_EXECUTION_COLUMNS = """
     run.id, run.started_at, run.finished_at, run.exit_status, run.interrupted,
     run.interrupt_reason,
-    run.vcs_commit, run.vcs_branch, substr(CAST(run.vcs_commit_subject AS BLOB), 1, ?),
+    run.vcs_commit, run.vcs_branch,
+    CASE WHEN run.vcs_commit_subject = '' THEN ''
+         ELSE substr(CAST(run.vcs_commit_subject AS BLOB), 1, ?) END,
     run.vcs_commit_subject_truncated, run.vcs_dirty, run.vcs_root
 """
 
 # How much of a bounded list column to load. The prefix is taken in bytes,
 # from the value cast to a BLOB, because SQLite's text `substr` stops at the
-# first NUL and would hand back a short prefix that looks complete. UTF-8
+# first NUL and would hand back a short prefix that looks complete. An empty
+# value is read as itself: a zero-length BLOB has no data, and `substr` of it
+# is NULL, which would list a stored `''` as no value at all. UTF-8
 # spends at most four bytes on a character, so this many bytes always hold
 # the first width + 1 characters whole -- one past the display width, which
 # is what `project_vcs` and `project_failure` need to tell a longer value
@@ -309,13 +313,15 @@ _SELECT_RESULT = f"{_SELECT_FULL_RESULT} WHERE r.run_id = ? AND r.node_id = ?"
 # `list_results`' SELECT -- the paginated, lean sibling of
 # `_SELECT_RESULTS_FOR_RUN`, in `_FAILURE_COLUMNS`' shape so the row decodes
 # as a `Result` for `project_failure`. `failure_message` is a byte prefix,
-# as in `_LIST_EXECUTION_COLUMNS`. `failure_repr` and `traceback` are never
+# read as in `_LIST_EXECUTION_COLUMNS`. `failure_repr` and `traceback` are never
 # loaded: `substr(x, 1, 0)` is '' for a stored value and NULL for none, which
 # is all the emptiness rule needs of them. No captured-output column is
 # selected. Binds `_LIST_MESSAGE_PREFIX_BYTES`.
 _LIST_RESULTS = f"""
     SELECT {_RESULT_COLUMNS},
-           r.failure_type, substr(CAST(r.failure_message AS BLOB), 1, ?),
+           r.failure_type,
+           CASE WHEN r.failure_message = '' THEN ''
+                ELSE substr(CAST(r.failure_message AS BLOB), 1, ?) END,
            r.failure_message_truncated,
            r.failure_path, r.failure_lineno,
            substr(r.failure_repr, 1, 0), r.failure_repr_truncated,

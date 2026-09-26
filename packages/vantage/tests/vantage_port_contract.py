@@ -891,6 +891,43 @@ class ExecutionStoreContract:
         assert run_entry.vcs.commit_subject_truncated is True
         assert history_entry.vcs == run_entry.vcs
 
+    def test_list_views_keep_empty_text_empty(self, store: ExecutionStore) -> None:
+        """The plugin sends an empty commit subject for a commit whose
+        message is empty, and any client can send an empty failure message.
+        A list entry carries a value exactly when the full record does, so
+        `""` lists as `""` -- and a result whose only evidence is that empty
+        message still lists with a failure object."""
+        vcs = _vcs(commit_subject="", commit_subject_truncated=False)
+        failure = _failure(
+            failure_type=None,
+            failure_message="",
+            failure_path=None,
+            failure_lineno=None,
+            failure_repr=None,
+            traceback=None,
+        )
+        store.record_session(
+            _execution("a" * 32, vcs=vcs),
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0).items
+        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+        detail = store.get_run_detail("a" * 32)
+
+        assert result_entry.failure == project_failure(failure)
+        assert result_entry.failure is not None
+        assert result_entry.failure.failure_message == ""
+        assert run_entry.vcs == project_vcs(vcs)
+        assert run_entry.vcs is not None
+        assert run_entry.vcs.commit_subject == ""
+        assert history_entry.vcs == run_entry.vcs
+        assert detail is not None
+        assert detail.execution.vcs is not None
+        assert detail.execution.vcs.commit_subject == ""
+
     def test_list_views_bound_multibyte_text_by_characters(self, store: ExecutionStore) -> None:
         """The display width counts characters, whatever their UTF-8 length."""
         message = "é" * 250
