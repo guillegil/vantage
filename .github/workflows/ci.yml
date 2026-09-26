@@ -358,6 +358,44 @@ jobs:
             exit 1
           fi
 
+      - name: Assert pytest records locally with only vantage installed
+        run: |
+          home="$(mktemp -d)"
+          project="$(mktemp -d)"
+          printf 'def test_it():\n    assert True\n' > "$project/test_it.py"
+          database="$home/.local/share/vantage/vantage.db"
+          if ! out="$(cd "$project" && env -u XDG_DATA_HOME HOME="$home" \
+            "$BASE_VENV/bin/python" -m pytest -p no:cacheprovider --vantage --vantage-mode local 2>&1)"; then
+            printf '%s\n' "$out"
+            echo "the recorded session failed" >&2
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          if ! grep -Eq "^vantage: recording run [0-9a-f]{32} to $database\$" <<<"$out"; then
+            echo "expected the session to record to $database, where vantage serves by default" >&2
+            exit 1
+          fi
+          if grep -q VantageWarning <<<"$out"; then
+            echo "the recorded session warned" >&2
+            exit 1
+          fi
+          if [ ! -f "$database" ]; then
+            echo "nothing was stored at $database" >&2
+            exit 1
+          fi
+          # Read back through the store vantage serves it with.
+          runs="$("$BASE_VENV/bin/python" -c '
+          import sys
+          from vantage.storage.sqlite_store import SqliteExecutionStore
+          store = SqliteExecutionStore(sys.argv[1])
+          print(len(store.list_runs(limit=10, offset=0).items))
+          store.close()
+          ' "$database")"
+          if [ "$runs" != 1 ]; then
+            echo "expected one run stored at $database, found ${runs:-none}" >&2
+            exit 1
+          fi
+
       - name: Assert vantage[server] serves
         run: |
           uv venv "$SERVER_VENV" --python 3.12

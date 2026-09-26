@@ -432,3 +432,52 @@ def test_the_server_install_step_passes_only_when_it_answers(
     )
 
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+# The base install's `python`: `-m pytest` runs $FAKE_SESSION; `-c` prints
+# $FAKE_RUNS, the runs the store reads back.
+_FAKE_PYTHON = """\
+if [ "$1" = -m ]; then eval "$FAKE_SESSION"; exit; fi
+echo "$FAKE_RUNS"
+"""
+_HEADER = 'echo "vantage: recording run 0123456789abcdef0123456789abcdef to $DB"\n'
+_STORE = 'mkdir -p "$(dirname "$DB")"; touch "$DB"\n'
+_DEFAULT_DB = 'DB="$HOME/.local/share/vantage/vantage.db"\n'
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("session", "runs", "passes"),
+    [
+        pytest.param(_DEFAULT_DB + _HEADER + _STORE, "1", True, id="records"),
+        pytest.param(_DEFAULT_DB + _HEADER + _STORE + "exit 1", "1", False, id="session-fails"),
+        pytest.param(
+            'DB="$HOME/elsewhere.db"\n' + _HEADER + _STORE, "1", False, id="another-database"
+        ),
+        pytest.param(
+            _DEFAULT_DB + _HEADER + _STORE + "echo 'VantageWarning: vantage: could not store'",
+            "1",
+            False,
+            id="warned",
+        ),
+        pytest.param(_DEFAULT_DB + _HEADER, "1", False, id="nothing-stored"),
+        pytest.param(_DEFAULT_DB + _HEADER + _STORE, "0", False, id="no-run-read-back"),
+    ],
+)
+def test_the_local_recording_step_passes_only_when_the_run_is_stored_where_vantage_serves(
+    tmp_path: Path, session: str, runs: str, passes: bool
+) -> None:
+    _fake_vantage(tmp_path / "base", "exit 0")
+    python = tmp_path / "base" / "bin" / "python"
+    python.write_text(f"#!/bin/bash\n{_FAKE_PYTHON}", encoding="utf-8")
+    python.chmod(0o755)
+    script = _step_script(_INSTALLS, "Assert pytest records locally with only vantage installed")
+
+    result = _run_step(
+        script,
+        tmp_path,
+        {},
+        {"BASE_VENV": str(tmp_path / "base"), "FAKE_SESSION": session, "FAKE_RUNS": runs},
+    )
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
