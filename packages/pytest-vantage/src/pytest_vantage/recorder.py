@@ -132,6 +132,18 @@ _WORKER_INTERRUPT_KEY = "vantage_interrupt_reason"
 # its session reported under.
 _WORKER_METADATA_KEY = "vantage_metadata"
 
+# The `workerinput` key a recording controller hands each xdist worker.
+# `--vantage` reaches a worker whether or not its controller records, and
+# only the controller probes the server.
+_CONTROLLER_RECORDS_KEY = "vantage_records"
+
+
+def controller_records(config: pytest.Config) -> bool:
+    """Whether the controller of the xdist worker `config` belongs to
+    records the session (`Recorder.pytest_configure_node`)."""
+    workerinput = getattr(config, "workerinput", None)
+    return isinstance(workerinput, dict) and workerinput.get(_CONTROLLER_RECORDS_KEY) is True
+
 
 def _interrupted_by_a_person(stop: BaseException) -> bool:
     """Ctrl-C (a bare `KeyboardInterrupt`) or `pytest.exit()`, never one of
@@ -167,7 +179,9 @@ class WorkerInterruptRelay:
 
 
 class WorkerMetadataRelay:
-    """Registered on every xdist worker of a recorded session.
+    """Registered on every xdist worker whose controller records
+    (`controller_records`); the fixture of any other worker records nothing
+    and warns about nothing, as an unrecorded controller's does.
 
     Session fixtures run on each worker, not on the controller, so the
     `vantage_metadata` fixture there hands out this relay's
@@ -380,6 +394,16 @@ class Recorder:
 
     @pytest.hookimpl(optionalhook=True)
     @accumulation_isolated
+    def pytest_configure_node(self, node: object) -> None:
+        """xdist's hook for a worker about to start: tells it that this
+        session is recorded (`controller_records`). Optional, so the plugin
+        registers without xdist installed."""
+        workerinput = getattr(node, "workerinput", None)
+        if isinstance(workerinput, dict):
+            workerinput[_CONTROLLER_RECORDS_KEY] = True
+
+    @pytest.hookimpl(optionalhook=True)
+    @accumulation_isolated
     def pytest_testnodedown(self, node: object, error: object) -> None:
         """xdist's hook for a worker whose session has ended: keeps the
         reason an interrupted worker gave (`WorkerInterruptRelay`) and merges
@@ -504,4 +528,4 @@ class Recorder:
         send(self._address, report, timeout=self._timeout)
 
 
-__all__ = ["Recorder", "WorkerInterruptRelay", "WorkerMetadataRelay"]
+__all__ = ["Recorder", "WorkerInterruptRelay", "WorkerMetadataRelay", "controller_records"]

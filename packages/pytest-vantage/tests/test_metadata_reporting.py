@@ -429,6 +429,68 @@ def test_xdist_workers_hand_their_values_to_the_controller(
     ) in output
 
 
+def test_the_workers_of_an_unrecorded_session_hand_out_a_mapping_that_says_nothing(
+    pytester: pytest.Pytester, sent: list[dict[str, object]]
+) -> None:
+    """`--vantage` reaches every worker, but nothing listens, so the
+    controller records nothing: the workers' fixture takes a key it could
+    never record without a word, as the controller's own would. The only
+    warning is the one saying the session is not recorded."""
+    pytest.importorskip("xdist")
+    pytester.makepyfile(
+        test_workers="""
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def dut(vantage_metadata):
+    vantage_metadata[""] = "no key"
+    vantage_metadata["fpga"] = {"firmware": "1.1.0"}
+
+
+def test_one():
+    assert True
+
+
+def test_two():
+    assert True
+"""
+    )
+
+    with pytest.warns(VantageWarning) as warned:
+        result = pytester.runpytest(
+            "--vantage", "--vantage-server=http://127.0.0.1:1", "-n", "2", "--dist", "each"
+        )
+
+    result.assert_outcomes(passed=4)
+    assert "VantageWarning" not in result.stdout.str()
+    assert sent == []
+    assert [str(w.message) for w in warned] == [
+        "vantage: cannot reach http://127.0.0.1:1, this session will not be recorded"
+    ]
+
+
+def test_the_controller_tells_each_worker_it_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker cannot tell from its own arguments whether the controller
+    records: `--vantage` reaches it either way, and only the controller
+    probes the server. Only a `Recorder` exists to say so, in the
+    `workerinput` xdist hands the worker's config."""
+    monkeypatch.setattr(vcs, "capture", lambda rootpath: vcs.VcsSnapshot())
+    config = SimpleNamespace(rootpath=str(tmp_path))
+    controller = Recorder(config, "http://127.0.0.1:1", 1.0)  # type: ignore[arg-type]
+    node = SimpleNamespace(workerinput={"workerid": "gw0"})
+    unrecorded_worker = SimpleNamespace(workerinput={"workerid": "gw0"})
+
+    controller.pytest_configure_node(node=node)
+    recorded_worker = SimpleNamespace(workerinput=node.workerinput)
+
+    assert recorder.controller_records(recorded_worker)  # type: ignore[arg-type]
+    assert not recorder.controller_records(unrecorded_worker)  # type: ignore[arg-type]
+    assert node.workerinput["workerid"] == "gw0"
+
+
 def test_text_xdist_cannot_carry_as_it_came_still_reaches_the_controller(
     pytester: pytest.Pytester, vantage_server: VantageTestServer, sent: list[dict[str, object]]
 ) -> None:

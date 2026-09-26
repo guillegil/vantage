@@ -263,9 +263,9 @@ example records `fpga.firmware`, `fpga.hardware`, `fmc.hardware`,
 **Setting never raises.** A key that is not a string, is empty, is longer
 than 1,024 characters or contains a control character, or a value that
 cannot be turned into text, is skipped with one warning naming it. Without
-`--vantage` the fixture takes everything silently and sends nothing, and a
-session that is not recorded (the server was unreachable, say) sends
-nothing either, so the same fixtures run either way.
+`--vantage` the fixture takes everything silently and sends nothing, and so
+does it in a session that is not recorded (the server was unreachable,
+say), so the same fixtures run either way.
 
 **When it is sent.** The values go to the server in the session's last
 report only, once every test has run. A session that is killed loses them,

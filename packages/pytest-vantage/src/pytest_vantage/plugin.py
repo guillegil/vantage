@@ -281,9 +281,10 @@ def pytest_configure(config: pytest.Config) -> None:
        process that ran the test, so a worker registers `EvidenceCollector`
        if failure text was requested, and returns. If recording was
        requested it also registers `WorkerInterruptRelay`, since only the
-       worker knows whether Ctrl-C or ``pytest.exit()`` interrupted it, and
-       `WorkerMetadataRelay`, whose mapping the ``vantage_metadata``
-       fixture hands the worker's session fixtures. It never resolves an
+       worker knows whether Ctrl-C or ``pytest.exit()`` interrupted it, and,
+       when the controller says it records, `WorkerMetadataRelay`, whose
+       mapping the ``vantage_metadata`` fixture hands the worker's session
+       fixtures. It never resolves an
        address, reads a timeout, probes the server or constructs a
        `Recorder`: a `Recorder` per worker would record one session as
        several runs.
@@ -322,13 +323,18 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     if hasattr(config, "workerinput"):
         if _activation_requested(config):
-            from pytest_vantage.recorder import WorkerInterruptRelay, WorkerMetadataRelay
+            from pytest_vantage.recorder import (
+                WorkerInterruptRelay,
+                WorkerMetadataRelay,
+                controller_records,
+            )
             from pytest_vantage.session_metadata import SESSION_METADATA
 
             config.pluginmanager.register(WorkerInterruptRelay(config))
-            relay = WorkerMetadataRelay(config)
-            config.pluginmanager.register(relay)
-            config.stash[SESSION_METADATA] = relay.session_metadata
+            if controller_records(config):
+                relay = WorkerMetadataRelay(config)
+                config.pluginmanager.register(relay)
+                config.stash[SESSION_METADATA] = relay.session_metadata
         if _failure_text_capture_requested(config):
             from pytest_vantage.evidence import EvidenceCollector
 

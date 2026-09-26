@@ -209,7 +209,10 @@ Some things only a worker knows, and it tells the controller through
 or `pytest.exit()` interrupted the worker, and why. `WorkerMetadataRelay`
 holds the mapping the `vantage_metadata` fixture hands the worker's session
 fixtures, which run on every worker and never on the controller, and relays
-its values. execnet refuses a `str` subclass and any text holding a lone
+its values. A worker cannot tell from `--vantage` alone whether its
+controller records, so the `Recorder` says so the other way, in each
+worker's `workerinput` (`pytest_configure_node`); without that word the
+worker registers no metadata relay and its fixture stays silent. execnet refuses a `str` subclass and any text holding a lone
 surrogate, and either would crash the worker as it finishes, so keys and
 values are plain `str` from the moment they are set and cross as
 ASCII-escaped JSON text. The controller merges the values in the order it
