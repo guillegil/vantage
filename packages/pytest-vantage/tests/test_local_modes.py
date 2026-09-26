@@ -16,6 +16,7 @@ import json
 import re
 import socket
 import sqlite3
+import struct
 import subprocess
 import sys
 import threading
@@ -143,7 +144,10 @@ class _Gate:
     """A loopback address that refuses every connection until `open`, then
     forwards each to a real server: one address for a server that is down
     and then back. Bound but not listening is what makes a connect fail
-    with "connection refused"."""
+    with "connection refused".
+
+    Opened for a number of `connections`, it resets every connection after
+    those: a server that went away in the middle of a session."""
 
     def __init__(self) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -151,9 +155,11 @@ class _Gate:
         self.address = f"http://127.0.0.1:{self._sock.getsockname()[1]}"
         self._stopped = threading.Event()
         self._target: tuple[str, int] | None = None
+        self._forwarding: int | None = None
 
-    def open(self, target: VantageTestServer) -> None:
+    def open(self, target: VantageTestServer, *, connections: int | None = None) -> None:
         self._target = ("127.0.0.1", target.port)
+        self._forwarding = connections
         self._sock.listen(16)
         self._sock.settimeout(0.1)
         threading.Thread(target=self._accept, daemon=True).start()
@@ -164,6 +170,13 @@ class _Gate:
                 client, _ = self._sock.accept()
             except OSError:
                 continue
+            if self._forwarding is not None:
+                if self._forwarding == 0:
+                    # A zero linger makes close send a reset, not a clean end.
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    client.close()
+                    continue
+                self._forwarding -= 1
             threading.Thread(target=self._forward, args=(client,), daemon=True).start()
 
     def _forward(self, client: socket.socket) -> None:
@@ -663,6 +676,31 @@ def test_a_5xx_at_the_finish_leaves_the_run_stored_and_queued(
     (stored,) = _stored_sessions(database)
     ((server, run_id, reports),) = _queued(database)
     assert (server, run_id, reports) == (vantage_server.address, _run_id_of(stored), stored)
+
+
+def test_a_server_gone_by_the_finish_leaves_the_run_stored_and_queued(
+    pytester: pytest.Pytester, gate: _Gate, vantage_server: VantageTestServer
+) -> None:
+    """It answered the preflight, the probe and the start report, and then
+    went away before the run's finish report."""
+    gate.open(vantage_server, connections=3)
+    database = _stand_in(pytester)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", "--vantage-mode=server+backup", f"--vantage-server={gate.address}"
+    )
+
+    assert result.ret == 0
+    output = _output(result)
+    assert output.count("VantageWarning:") == 1, output
+    assert f"vantage: {gate.address} is unreachable (" in output
+    assert f"this run was stored in {database} and queued (1 run waiting to be sent)" in output
+    (execution,) = vantage_server.executions()
+    assert execution.exit_status is None
+    (stored,) = _stored_sessions(database)
+    ((server, run_id, reports),) = _queued(database)
+    assert (server, run_id, reports) == (gate.address, execution.identity.value, stored)
 
 
 @pytest.mark.slow

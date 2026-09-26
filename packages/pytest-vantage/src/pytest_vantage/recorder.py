@@ -622,7 +622,7 @@ class Recorder:
         fail the same way every time. Reports the server has acknowledged
         are not queued again.
         """
-        from pytest_vantage.outbox import worth_retrying
+        from pytest_vantage.outbox import unreachable, worth_retrying
 
         address = self._server()
         queue_from: int | None = None
@@ -637,7 +637,11 @@ class Recorder:
                 except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
                     if worth_retrying(exc):
                         queue_from = index
-                        failure = f"{address} did not take this run ({exc})"
+                        failure = (
+                            f"{address} is unreachable ({exc})"
+                            if unreachable(exc)
+                            else f"{address} did not take this run ({exc})"
+                        )
                     else:
                         rejection = exc
                     break
