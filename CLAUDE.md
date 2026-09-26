@@ -80,6 +80,8 @@ numbers — they release independently on prefixed tags.
   attribute: workers collect failure evidence and hand the controller, through
   `workeroutput`, only what they alone know (an interrupt, the metadata their
   session fixtures reported); the `Recorder` exists only on the controller.
+  `--vantage` reaches a worker even when the controller records nothing, so a
+  worker learns that it does from its `workerinput`, set by the `Recorder`.
 - **Timestamps** are stored as fixed-width ISO-8601 UTC text so lexicographic
   order is chronological order. The server normalizes everything it receives.
 - **Python 3.10 is the floor.** `StrEnum`, `datetime.UTC` and `tomllib` are
