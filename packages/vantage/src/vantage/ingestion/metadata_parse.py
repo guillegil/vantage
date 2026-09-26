@@ -38,7 +38,7 @@ either format.
 
 A U+0000 the document spells as an escape (`\\u0000` in JSON, `\\0` in
 YAML) is replaced by U+FFFD, as the request body's own are
-(`service/text.py`), so a key and value read from a file are text every
+(`ingestion/text.py`), so a key and value read from a file are text every
 store can hold.
 """
 
@@ -52,7 +52,7 @@ import yaml
 from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES, METADATA_CONTENT_TYPES
-from vantage.service.text import without_nul
+from vantage.ingestion.text import without_nul
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
 """The tag `compose()` resolves a plain `<<` key to. A quoted `'<<'` keeps

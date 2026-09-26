@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import TypeAlias
 
 _POSTGRES_SCHEMES = frozenset({"postgresql", "postgres"})
+# An RFC 3986 scheme followed by `//`: a URL, never a file path.
+_URL_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 _MASK = "***"
 
 # The libpq connection parameters that carry a secret: the user's password,
@@ -62,10 +64,20 @@ class PostgresTarget:
 DatabaseTarget: TypeAlias = SqliteTarget | PostgresTarget
 
 
+class UnsupportedDatabaseURLError(ValueError):
+    """A database value shaped like a URL whose scheme is not PostgreSQL's.
+
+    The message never repeats the value: a URL may carry a password."""
+
+
 def database_target(value: str) -> DatabaseTarget:
     """`value` as a database target: a URL whose scheme is `postgresql` or
-    `postgres`, in any case, is a PostgreSQL database; anything else is a
-    SQLite path, taken as given.
+    `postgres`, in any case, is a PostgreSQL database; any other URL
+    (`mysql://`, `sqlite:///`, `postgresql+psycopg://`) is refused; anything
+    else is a SQLite path, taken as given.
+
+    Taking another URL as a path would create directories named after it and
+    show it, password included, in every message about the path.
 
     The scheme is lower-cased. libpq recognises a URL only by the lower-case
     scheme, and reads anything else as a `key=value` connection string,
@@ -74,6 +86,11 @@ def database_target(value: str) -> DatabaseTarget:
     scheme, separator, rest = value.partition("://")
     if separator and scheme.lower() in _POSTGRES_SCHEMES:
         return PostgresTarget(f"{scheme.lower()}://{rest}")
+    if _URL_PREFIX.match(value):
+        raise UnsupportedDatabaseURLError(
+            f"a {scheme.lower()}:// URL is not a database vantage can use: "
+            "give a SQLite file path or a postgresql:// URL"
+        )
     return SqliteTarget(Path(value))
 
 

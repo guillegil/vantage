@@ -25,6 +25,7 @@ import logging
 import os
 import sqlite3
 import stat
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +43,10 @@ _SCHEMA_SENTINEL_TABLE = "meta"
 # `OR IGNORE` keeps a second process racing to create the same fresh
 # database from failing on the row the first one stamped.
 _STAMP_SCHEMA_VERSION = "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)"
+
+# How long a connection waits for another's lock before giving up.
+_BUSY_TIMEOUT_SECONDS = 5.0
+_WAL_RETRY_INTERVAL_SECONDS = 0.01
 
 
 def isoformat_utc(moment: datetime) -> str:
@@ -84,9 +89,11 @@ def open_database(path: Path) -> sqlite3.Connection:
 
     # `check_same_thread=False`: the store may be called from any thread, so
     # several can share this one connection; `SqliteExecutionStore`'s lock
-    # serialises them. `timeout=5.0`: a second process contending for the
+    # serialises them. `timeout`: a second process contending for the
     # write lock waits rather than failing instantly with `SQLITE_BUSY`.
-    conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False, timeout=5.0)
+    conn = sqlite3.connect(
+        str(path), isolation_level=None, check_same_thread=False, timeout=_BUSY_TIMEOUT_SECONDS
+    )
     try:
         conn.execute("PRAGMA foreign_keys = ON")
         # A committed session survives a power loss; one fsync per session is
@@ -141,13 +148,33 @@ def _warn_if_permissive(path: Path) -> None:
 
 
 def _enable_wal(conn: sqlite3.Connection) -> None:
-    row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+    row = _switch_to_wal(conn)
     mode = row[0] if row is not None else None
     if mode != "wal":
         _LOGGER.warning(
             "journal_mode=WAL was not applied (got %r); continuing in the fallback mode.",
             mode,
         )
+
+
+def _switch_to_wal(conn: sqlite3.Connection) -> tuple[object, ...] | None:
+    """`PRAGMA journal_mode=WAL`'s answer, retried while another connection
+    holds the lock it needs, for as long as the busy timeout.
+
+    Switching needs the file to itself for an instant. When two connections
+    switch a new database at once, SQLite answers one of them "database is
+    locked" straight away rather than through the busy timeout, since
+    waiting could deadlock; the other's switch then completes, and the
+    retry finds the database in WAL already."""
+    deadline = time.monotonic() + _BUSY_TIMEOUT_SECONDS
+    while True:
+        try:
+            row: tuple[object, ...] | None = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            return row
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc) or time.monotonic() >= deadline:
+                raise
+        time.sleep(_WAL_RETRY_INTERVAL_SECONDS)
 
 
 def _schema_objects(conn: sqlite3.Connection) -> set[str]:

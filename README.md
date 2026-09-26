@@ -21,34 +21,52 @@ new one.
 
 ```
 pytest + pytest-vantage  ──HTTP /api/v1──>  vantage server  ──>  SQLite file
-                                                  │              or PostgreSQL
-                          any HTTP client  <──────┘  read API (JSON)
+        │                                         │              or PostgreSQL
+        │ local modes     any HTTP client  <──────┘  read API (JSON)
+        └──> local SQLite file  <──  vantage, started on the test machine
 ```
 
 - **`pytest-vantage`** is the pytest plugin. It collects the session in
-  memory and reports it to the server over HTTP. It depends on pytest and the
-  standard library only, and never opens a database.
-- **`vantage`** is the server. It validates each report and performs every
-  write, to one SQLite or PostgreSQL database, and serves the recorded
-  history.
+  memory and reports it to a server over HTTP. It depends on pytest and the
+  standard library only, and its own code never opens a database.
+- **`vantage`** is the server, and the local storage. Its base package
+  brings the plugin and the code that validates a report and stores it, so a
+  test machine can keep its runs in a SQLite file of its own, with no server
+  (see [Where runs go](#where-runs-go)). The `server` extra adds the HTTP
+  server, which stores reports in one SQLite or PostgreSQL database and
+  serves the recorded history, a local file's included.
 
-Recording therefore needs a running server that the test machine can reach,
-in CI as much as on a laptop.
+Recording to a server needs one the test machine can reach. The local modes
+need none, and the backup modes keep what a server could not take and send
+it once the server is back.
 
 ## Install
 
-Python 3.10 to 3.13. The two distributions are installed separately.
+Python 3.10 to 3.13.
+
+| Install | Brings | Enough for |
+| --- | --- | --- |
+| `pytest-vantage` | the plugin, and nothing but pytest | recording to a server |
+| `vantage` | the plugin, local storage (with Pydantic and PyYAML) and `vantage push` | every mode, the local ones included |
+| `vantage[server]` | also FastAPI and Uvicorn: the `vantage` server | serving recorded runs, from a local file or a shared database |
+| `vantage[server,postgres]` | also psycopg and its connection pool | a server storing in PostgreSQL |
+
+Neither distribution is published yet, so install from a checkout. Name the
+plugin's directory alongside `vantage`'s: `vantage` depends on
+`pytest-vantage`, which pip would otherwise look for on an index.
 
 ```bash
 git clone https://github.com/guillegil/vantage.git
 
-# In the environment that runs your tests (needs nothing but pytest):
+# Where your tests run, recording to a server:
 pip install ./vantage/packages/pytest-vantage
+# ...or recording locally as well:
+pip install ./vantage/packages/pytest-vantage ./vantage/packages/vantage
 
-# Wherever the server runs (brings FastAPI, Uvicorn and PyYAML):
-pip install ./vantage/packages/vantage
-# ...or, to store in PostgreSQL, with psycopg and its connection pool:
-pip install './vantage/packages/vantage[postgres]'
+# Where the server runs:
+pip install ./vantage/packages/pytest-vantage './vantage/packages/vantage[server]'
+# ...or, to store in PostgreSQL:
+pip install ./vantage/packages/pytest-vantage './vantage/packages/vantage[server,postgres]'
 ```
 
 The plugin needs pytest 8.0 or later. It registers itself through pytest's
@@ -62,11 +80,14 @@ pytest --vantage                                # record this session
 pytest --vantage --vantage-server http://ci-vantage:8765
 pytest --vantage --vantage-failure-text         # also record failure text
 pytest --vantage --vantage-metadata             # also record declared configuration
+pytest --vantage --vantage-mode local           # keep it in a local database, no server
+pytest --vantage --vantage-mode server+backup   # and locally what the server cannot take
 pytest                                          # records nothing
 ```
 
 At the start of a recorded session pytest prints
-`vantage: recording run <id> to <address>`. Recording works under
+`vantage: recording run <id> to <address>` (or to the local database, or to
+both; see [Where runs go](#where-runs-go)). Recording works under
 pytest-xdist; a session is one run however many workers it uses.
 
 ### Options
@@ -76,6 +97,8 @@ pytest-xdist; a session is one run however many workers it uses.
 | `--vantage` | none | none | off | Turns recording on. |
 | `--vantage-server URL` | `vantage_server` | `VANTAGE_SERVER` | `http://127.0.0.1:8765` | Where to report. |
 | `--vantage-timeout SECONDS` | `vantage_timeout` | none | `10` | Upper bound on each report request, start to finish. |
+| `--vantage-mode MODE` | `vantage_mode` | none | `server` | Where the run goes: `server`, `local`, `server+backup` or `server+local`. |
+| `--vantage-local-database PATH` | `vantage_local_database` | none | the database `vantage` serves by default | The SQLite file the other three modes store in. |
 | `--vantage-failure-text` | none | none | off | Adds failure text and captured output. |
 | `--vantage-metadata` | none | none | off | Adds values from declared files. |
 
@@ -105,8 +128,9 @@ therefore cannot start recording, or start capturing failure text or reading
 files, for everyone who checks the project out. Arguments after a bare `--`
 never count.
 
-`--vantage-server` and `--vantage-timeout` are honoured wherever they come
-from: they say where and how, never whether.
+`--vantage-server`, `--vantage-timeout`, `--vantage-mode` and
+`--vantage-local-database` are honoured wherever they come from: they say
+where and how, never whether.
 
 ### What is not recorded
 
@@ -116,6 +140,148 @@ These invocations never run a test and are not recorded, even with
 `--help`. A session whose selection turns out empty (`-k` or `-m` matching
 nothing) is still recorded, as a finished run with exit status 5 and no
 results.
+
+## Where runs go
+
+`--vantage-mode` (or `vantage_mode` in the ini file) says where a recorded
+run goes:
+
+| Mode | The server | The local database |
+| --- | --- | --- |
+| `server` (the default) | every run | never |
+| `local` | none: nothing touches the network | every run |
+| `server+backup` | every run | the runs the server could not take, which are also queued and sent later |
+| `server+local` | every run | every run; those the server could not take are also queued and sent later |
+
+The three modes with a local database need `vantage` installed where the
+tests run (see [Install](#install)); without it they stop pytest with a
+usage error:
+`vantage: --vantage-mode local stores runs locally and needs the vantage package: pip install vantage`.
+
+**The local database** is a SQLite file, by default the one `vantage`
+serves when started with no options: `$XDG_DATA_HOME/vantage/vantage.db`, or
+`~/.local/share/vantage/vantage.db` (an empty or relative `XDG_DATA_HOME`
+is ignored, and `VANTAGE_DATABASE` is not read). So on that machine
+`vantage` shows what the tests stored; see
+[Browsing the local database](#browsing-the-local-database).
+
+- `--vantage-local-database PATH`, or `vantage_local_database` in the ini
+  file, names another. A relative path is taken from the directory pytest
+  was started in when typed (or given with `-o`), and from the ini file's
+  directory when written there; `~` is expanded. There is no environment
+  variable for it.
+- It must be a file path: a `postgresql://` URL, or any other URL, is a
+  usage error, since local storage is SQLite only, and so is a directory.
+- A new directory is created 0700 and a new database 0600, as `vantage`
+  creates them. A database made by a build with another schema version is
+  left untouched, and the run is not stored there.
+- The run is stored once, when the session ends, from the same reports a
+  server would get, so it reads back exactly as it would from a server. A
+  session that is killed stores nothing locally.
+
+**`local` mode** makes no reachability check, capability probe, start report
+or heartbeat, and never reads the server address. The header reads
+`vantage: recording run <id> to <database>`. A run it cannot store (the path
+cannot be written, the disk is full, the database is from another schema
+version) produces one warning ending `the run is lost`.
+
+**`server+local`** reports to the server exactly as `server` does and also
+stores every run locally; the header reads
+`vantage: recording run <id> to <address> and <database>`. A local database
+that cannot take the run costs one warning and never the server's copy.
+
+### When the server cannot take the run
+
+In `server+backup` and `server+local`, a run the server could not take is
+stored locally and queued, and one warning says so:
+
+```
+vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.local/share/vantage/vantage.db and queued (3 runs waiting to be sent)
+```
+
+- **The server is unreachable at the start:** the session is recorded all
+  the same, without a start report or heartbeats, and the run is stored and
+  queued when it ends.
+- **The final report gets no answer** (the connection is refused or broken,
+  or it times out)**, a 5xx, or a 408 or 429** (a busy server or proxy
+  asking for it again later): the run is stored locally and the reports
+  the server has not acknowledged are queued. A report that timed out may
+  have been stored after all; sending it again stores nothing twice.
+- **The final report is refused outright** (any other 4xx, a redirect, an
+  answer that does not acknowledge the run): the warning is the usual
+  `vantage: error while reporting: ...`, and the run is not queued, since
+  the server would refuse it again. It is still stored locally.
+
+**Sending the queue.** After a session whose own run reached a server, the
+plugin sends the runs queued for that server, oldest first, within the
+report timeout, and prints one line with the test summary:
+`vantage: sent 3 queued runs to http://ci-vantage:8765 (0 waiting)`. It stops
+when the server is unreachable again, answers a 408 or 429, or the time is
+spent, and says why. A run the server answers with a 5xx stays queued and
+the next is sent; one it refuses with any other 4xx can never succeed, and
+is dropped with a warning naming its run id. Each run is only ever sent to
+the address it was queued for, compared exactly as written, so
+`http://ci-vantage:8765` and `http://ci-vantage:8765/` are two different
+servers to the queue. `vantage push` sends the queue on demand.
+
+Under pytest-xdist only the controller stores or queues a run.
+
+### The outbox
+
+The queue lives in the outbox, a SQLite file of the plugin's own next to the
+local database, named after it: `vantage.db-outbox` beside `vantage.db`. It
+is not a vantage database. It holds each queued run's reports exactly as
+they would have been sent, failure text and metadata included, so it is
+created 0600, in a directory created 0700 if missing.
+
+- It holds at most 1,000 runs and 256 MiB of reports. Queueing past either
+  drops the oldest runs, with one warning naming them.
+- Several sessions, and `vantage push`, may send from it at once. Each run
+  is claimed before it is sent, so two senders do not both send it; a run
+  sent twice would still be stored once.
+- A run whose reports no longer read back from the file, because the file
+  was damaged, is dropped with a warning naming it rather than left to hold
+  up the runs behind it.
+- Deleting the file drops every queued run; the local database keeps its
+  copies.
+
+### `vantage push`
+
+```
+vantage push [--database PATH] [--to URL] [--timeout SECONDS]
+```
+
+Sends every queued run now, each to the server it was queued for, or only
+those queued for `--to`, written exactly as it was configured. It needs
+`vantage` but not its `server` extra.
+
+- `--database` is the local database the outbox sits beside, as given to
+  `--vantage-local-database`; by default the same default database
+  (`VANTAGE_DATABASE` is not read). A PostgreSQL URL is refused.
+- `--timeout` bounds each report, 10 seconds by default. There is no bound
+  on the whole: every run is tried.
+- It prints one line per server, for example
+  `vantage: sent 2 queued runs to http://ci-vantage:8765, dropped 1 it refused (<run id>) (0 waiting)`,
+  with `then stopped: <why>` when the server could not be reached. It exits
+  0 when nothing is left waiting for the servers it sent to, and 1
+  otherwise. Ctrl-C stops it in one line, with exit status 130; the run it
+  was sending stays queued.
+- With nothing queued it says `vantage: nothing queued`, and creates
+  nothing. Beside a `pytest-vantage` too old to have an outbox, it refuses
+  in one line naming the upgrade.
+
+### Browsing the local database
+
+With the `server` extra installed on the test machine, `vantage` started
+with no options serves the default local database, on
+`http://127.0.0.1:8765`, through the same read API as any server:
+
+```bash
+vantage                                  # the default local database
+vantage --database ./runs/vantage.db     # one named with --vantage-local-database
+```
+
+Sessions can keep storing into the file while it serves.
 
 ## What each switch uploads
 
@@ -381,15 +547,19 @@ Without a metadata filter, `metadata_horizon` is null.
 ## When something goes wrong
 
 **Invalid configuration** (an address that is not `http` or `https`, no
-host, a bad port, a timeout that is not a positive number, an ini value of
+host, a bad port, a timeout that is not a positive number, an unknown mode,
+a local database that is a PostgreSQL URL or a directory, an ini value of
 the wrong type) stops pytest with a usage error naming the option, exit
-status 4, before any test runs: recording was asked for and cannot work.
+status 4, before any test runs: recording was asked for and cannot work. So
+does a mode with a local database where `vantage` is not installed.
 
 Everything else produces at most one warning per kind of problem. The tests
 still run and the suite's exit status is never changed.
 
 - **Server unreachable at the start** (nothing listening, host does not
-  resolve): the session runs unrecorded.
+  resolve): in `server` mode the session runs unrecorded; `server+backup`
+  and `server+local` record it and keep it locally (see
+  [When the server cannot take the run](#when-the-server-cannot-take-the-run)).
 - **Server does not offer session tracking** (an older server, or the check
   got no usable answer): no start report or heartbeats are sent, so the run
   appears only when the session ends.
@@ -397,12 +567,15 @@ still run and the suite's exit status is never changed.
   report is still sent.
 - **The final report fails** (HTTP error, rejected report): if the start
   report got through, the run stays unfinished on the server and later reads
-  as `abandoned`; otherwise nothing is recorded.
+  as `abandoned`; otherwise nothing is recorded on the server. The backup
+  modes keep the run locally, and queue it unless the server refused it.
 - **The final report times out:** the plugin stops waiting at the deadline,
   but the server may still finish storing the report, so the run may be
   recorded as finished after all. The warning cannot tell which.
 - **Something cannot be read** (git, the metadata declaration, a test report
   of an unexpected shape): that part of the report is left out.
+- **The local database or the outbox cannot take the run:** one warning
+  saying where the run is, if anywhere; the server's copy is unaffected.
 
 Warnings are `VantageWarning`, a `UserWarning` subclass. Where one appears
 depends on when it is raised:
@@ -413,8 +586,9 @@ depends on when it is raised:
   a plain Python warning, above pytest's session header. pytest neither
   lists nor counts it in its warnings summary, so in a long CI log the line
   saying a session is not being recorded is at the top.
-- **At the end of the session** (the final report failed, results left
-  out, metadata keys undeclared, left out or reported twice): in pytest's
+- **At the end of the session** (the final report failed, where a run the
+  server could not take was kept, a queued run dropped, results left out,
+  metadata keys undeclared, left out or reported twice): in pytest's
   warnings summary.
 - **While tests run** (a heartbeat failed, a test report of an unexpected
   shape): in the warnings summary, listed under whichever test was running
@@ -428,13 +602,20 @@ the terminal instead.
 
 A run whose final report never arrives (the process was killed, the machine
 lost power) reads as `abandoned` once the server has heard nothing from it
-for the grace period, provided the server received its start report.
+for the grace period, provided the server received its start report. One
+whose final report was queued reads the same until the queue is sent, and
+then as finished.
 
 ## Running the server
 
 ```
 vantage [--database PATH-OR-URL] [--host HOST] [--port PORT] [--grace-period SECONDS]
 ```
+
+Serving needs the `server` extra. Without it, `vantage` refuses in one line,
+`vantage: serving needs the server extra: pip install 'vantage[server]'`,
+with exit status 1 and nothing created; `vantage push` and `vantage --help`
+work either way.
 
 | Setting | Flag | Environment | Default |
 | --- | --- | --- | --- |
@@ -447,6 +628,9 @@ vantage [--database PATH-OR-URL] [--host HOST] [--port PORT] [--grace-period SEC
   `--database`, `VANTAGE_DATABASE` or `XDG_DATA_HOME` counts as unset, and a
   relative `XDG_DATA_HOME` is ignored. An empty `--host` is refused rather
   than taken to mean every interface.
+- The default database is also where the plugin's local modes store by
+  default, so on a test machine `vantage` with no options serves what the
+  tests stored.
 - A missing SQLite database directory is created with mode 0700 and a new
   database file with mode 0600. An existing database file open to its group
   or to others is used as it is, with a warning.
@@ -495,6 +679,8 @@ vantage --database postgresql://vantage@db.example:5432/vantage
 VANTAGE_DATABASE=postgresql://vantage@db.example/vantage vantage
 ```
 
+- Any other URL (`mysql://`, `sqlite:///`, `postgresql+psycopg://`) is
+  refused with one line, never taken as a file path.
 - The driver comes with the `postgres` extra (see [Install](#install)).
   Without it, a PostgreSQL URL is refused with one line naming the extra; a
   server storing in SQLite never needs it.

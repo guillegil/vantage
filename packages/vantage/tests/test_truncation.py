@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 from pytest_vantage.vcs import _MAX_SUBJECT_BYTES as _PLUGIN_CAP_BYTES
-from vantage.service.truncation import MAX_TEXT_FIELD_BYTES, truncate
+from vantage.ingestion.truncation import MAX_TEXT_FIELD_BYTES, truncate
 
 
 def test_truncate_returns_none_and_false_for_none() -> None:

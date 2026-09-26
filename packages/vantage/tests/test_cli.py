@@ -8,10 +8,10 @@ writable-directory check, the wide-bind warning, and the grace period
 process -- these tests are about what `main` does around serving -- and so
 is `_listen`, by a stand-in that records the address asked for and binds an
 ephemeral loopback port instead, so no test holds 8765 or a wide address.
-Both are patched by dotted path rather than through `cli.uvicorn`, because
-`cli.py`'s `__all__` does not re-export its imports and mypy flags reaching
-through the module. One test runs the real command in a subprocess, to stop
-it the way a service manager does.
+Both are patched by dotted path, `uvicorn.Server.run` on uvicorn itself,
+since `cli.py` imports uvicorn only once it serves. Some tests run the real
+command in a subprocess: to stop it the way a service manager does, and to
+run it where the `server` extra's modules cannot be imported.
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ def served(
         served["app"] = server.config.app
         served["sockets"] = sockets
 
-    monkeypatch.setattr("vantage.service.cli.uvicorn.Server.run", _run)
+    monkeypatch.setattr("uvicorn.Server.run", _run)
     return served
 
 
@@ -105,7 +105,7 @@ def _refuse_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
     def _run(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("main started serving a configuration it should refuse")
 
-    monkeypatch.setattr("vantage.service.cli.uvicorn.Server.run", _run)
+    monkeypatch.setattr("uvicorn.Server.run", _run)
 
 
 @pytest.fixture
@@ -125,6 +125,19 @@ def _refusal(capsys: pytest.CaptureFixture[str], argv: list[str]) -> str:
     assert err.startswith("vantage: ")
     assert err.count("\n") == 1, err
     return err
+
+
+@pytest.mark.usefixtures("never_served")
+def test_a_database_url_of_another_scheme_is_refused_and_creates_nothing(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    err = _refusal(capsys, ["--database", "postgresql+psycopg://vantage:s3cret@db/vantage"])
+
+    assert err.startswith("vantage: --database: a postgresql+psycopg:// URL")
+    assert "s3cret" not in err
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.usefixtures("never_served")
@@ -284,7 +297,7 @@ def test_main_needs_no_home_directory_when_the_database_is_named(
     assert "--database" in err
 
     database = tmp_path / "v.db"
-    monkeypatch.setattr("vantage.service.cli.uvicorn.Server.run", lambda *_a, **_k: None)
+    monkeypatch.setattr("uvicorn.Server.run", lambda *_a, **_k: None)
     cli.main(["--database", str(database)])
     assert database.exists()
 
@@ -332,7 +345,7 @@ def test_main_closes_the_store_when_the_server_stops(
         if stops_with is not None:
             raise stops_with
 
-    monkeypatch.setattr("vantage.service.cli.uvicorn.Server.run", _run)
+    monkeypatch.setattr("uvicorn.Server.run", _run)
 
     with contextlib.suppress(SystemExit):
         cli.main(["--database", str(tmp_path / "v.db")])
@@ -530,6 +543,119 @@ def test_create_app_refuses_a_grace_period_it_cannot_apply(seconds: float) -> No
     positive would present every unfinished run as abandoned."""
     with pytest.raises((ValueError, OverflowError)):
         create_app(InMemoryExecutionStore(), grace_period_seconds=seconds)
+
+
+# --- The server extra ---------------------------------------------------------
+#
+# FastAPI, Starlette and uvicorn come with the `server` extra. These run the
+# command in an interpreter where the named modules cannot be imported, as
+# in an install of `vantage` without the extra.
+
+_WITHOUT = """
+import sys
+
+for name in sys.argv[1].split(","):
+    sys.modules[name] = None
+del sys.argv[1]
+
+from vantage.service.cli import main
+
+main()
+"""
+_SERVER_EXTRA_MISSING = "vantage: serving needs the server extra: pip install 'vantage[server]'\n"
+
+
+def _run_without(
+    modules: Sequence[str], argv: Sequence[str], *, home: Path
+) -> subprocess.CompletedProcess[str]:
+    """The command, with `modules` unimportable and `home` as the home
+    directory, so a default database would land there."""
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in {"VANTAGE_DATABASE", "XDG_DATA_HOME"}
+    }
+    return subprocess.run(  # noqa: S603 -- the interpreter running this test
+        [sys.executable, "-c", _WITHOUT, ",".join(modules), *argv],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env={**environment, "HOME": str(home)},
+    )
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [["fastapi", "starlette", "uvicorn"], ["uvicorn"], ["fastapi"], ["starlette"]],
+    ids=["all", "uvicorn", "fastapi", "starlette"],
+)
+def test_serving_without_the_server_extra_is_one_line_naming_it(
+    tmp_path: Path, missing: list[str]
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    completed = _run_without(missing, [], home=home)
+
+    assert completed.returncode == 1, completed.stderr
+    assert completed.stderr == _SERVER_EXTRA_MISSING
+    assert list(home.iterdir()) == []
+
+
+def test_the_server_extra_is_checked_before_anything_is_bound_or_created(tmp_path: Path) -> None:
+    """Named settings, even unusable ones, are not looked at first: the
+    missing extra is what there is to fix."""
+    database_dir = tmp_path / "db"
+    port = _free_loopback_port()
+
+    completed = _run_without(
+        ["uvicorn"],
+        ["--database", str(database_dir / "v.db"), "--port", str(port), "--grace-period", "0"],
+        home=tmp_path,
+    )
+
+    assert completed.stderr == _SERVER_EXTRA_MISSING
+    assert not database_dir.exists()
+    with contextlib.closing(_REAL_LISTEN("127.0.0.1", port)):
+        pass
+
+
+def test_help_needs_no_server_extra(tmp_path: Path) -> None:
+    completed = _run_without(["fastapi", "starlette", "uvicorn"], ["--help"], home=tmp_path)
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.startswith("usage: vantage")
+
+
+@pytest.mark.usefixtures("never_served")
+def test_an_import_failure_that_is_not_the_server_extra_is_not_blamed_on_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A broken installation of the service itself is a fault to see in
+    full, not advice to install what is already there."""
+    app = "vantage.service.app"
+
+    class _BrokenApp(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        def find_spec(
+            self,
+            fullname: str,
+            path: Sequence[str] | None,
+            target: types.ModuleType | None = None,
+        ) -> importlib.machinery.ModuleSpec | None:
+            return importlib.util.spec_from_loader(fullname, self) if fullname == app else None
+
+        def create_module(self, spec: importlib.machinery.ModuleSpec) -> None:
+            return None
+
+        def exec_module(self, module: types.ModuleType) -> None:
+            raise ImportError("cannot import name 'Gone'", name="vantage.service.routes")
+
+    monkeypatch.delitem(sys.modules, app)
+    monkeypatch.setattr(sys, "meta_path", [_BrokenApp(), *sys.meta_path])
+
+    with pytest.raises(ImportError, match="Gone"):
+        cli.main(["--database", str(tmp_path / "v.db")])
 
 
 # --- PostgreSQL -----------------------------------------------------------------

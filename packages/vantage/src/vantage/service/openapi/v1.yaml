@@ -189,9 +189,10 @@ components:
     # the contract for what the server accepts and what it returns, and a
     # `type: object` stub would leave a generated client guessing.
     #
-    # That duplicates `service/schemas.py`, and the schema checks at the end
-    # of `test_interface_document.py` bound the duplication. They parse this
-    # file and read `model_fields` independently -- neither side is
+    # That duplicates the Pydantic models -- `ingestion/schemas.py` for the
+    # report, `service/schemas.py` for the rest -- and the schema checks at
+    # the end of `test_interface_document.py` bound the duplication. They
+    # parse this file and read `model_fields` independently -- neither side is
     # generated from the other -- and compare, in both directions:
     #
     #   * which schemas are declared, against the models bound to them, and

@@ -1,4 +1,4 @@
-"""`vantage.service.metadata_parse`: the one place a *declared document* --
+"""`vantage.ingestion.metadata_parse`: the one place a *declared document* --
 not the declaration itself -- is parsed. A malformed declared document never
 raises; it degrades to a per-key or per-document status.
 
@@ -16,7 +16,7 @@ import time
 import pytest
 import yaml
 from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES, METADATA_CONTENT_TYPES
-from vantage.service.metadata_parse import KeyResult, parse
+from vantage.ingestion.metadata_parse import KeyResult, parse
 
 
 def test_json_malformed_document_yields_none() -> None:

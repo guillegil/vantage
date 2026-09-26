@@ -12,13 +12,19 @@ problem -- a value of the wrong type, a bad scheme, no host, credentials, a
 query or fragment, an unusable port, a timeout the socket layer cannot use
 -- is a `VantageConfigError` naming the option it came from, so nothing
 malformed ever reaches the socket layer.
+
+`resolve_mode` and `resolve_local_database` do the same for where a run is
+kept: on the server, in a local SQLite database, or both.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -199,6 +205,91 @@ def resolve_settings(config: pytest.Config) -> ReportSettings:
     )
 
 
+SERVER_MODE = "server"
+LOCAL_MODE = "local"
+BACKUP_MODE = "server+backup"
+SERVER_AND_LOCAL_MODE = "server+local"
+MODES = (SERVER_MODE, LOCAL_MODE, BACKUP_MODE, SERVER_AND_LOCAL_MODE)
+
+# The schemes `vantage --database` reads as a PostgreSQL URL, in any case.
+_POSTGRES_SCHEMES = frozenset({"postgresql", "postgres"})
+# An RFC 3986 scheme followed by `//`: a URL, never a file path.
+_URL_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
+
+
+def resolve_mode(config: pytest.Config) -> str:
+    """Where a recorded run goes: `--vantage-mode` > the `vantage_mode` ini
+    value > `server`. Like the address, it says where, never whether, so the
+    ini value is honoured."""
+    cli_mode = config.getoption("vantage_mode", default=None)
+    if cli_mode:
+        option, mode = "--vantage-mode", cli_mode
+    else:
+        option, mode = "vantage_mode ini value", _read_ini(config, "vantage_mode")
+        if mode is None or mode == "":
+            return SERVER_MODE
+    if mode not in MODES:
+        raise VantageConfigError(f"{option} must be one of {', '.join(MODES)} (got {mode!r})")
+    return str(mode)
+
+
+def _local_database_value(raw: object, option: str, base: Path) -> Path:
+    if not isinstance(raw, str):
+        raise VantageConfigError(f"{option} must be a file path (got {raw!r})")
+    scheme, separator, _rest = raw.partition("://")
+    if separator and scheme.lower() in _POSTGRES_SCHEMES:
+        # Never repeated back: the URL may carry a password.
+        raise VantageConfigError(
+            f"{option} must be a SQLite file path, not a PostgreSQL URL: "
+            "local storage is SQLite only"
+        )
+    if _URL_PREFIX.match(raw):
+        # Taken as a path, it would create directories named after the URL
+        # and show it, password included, in the session header.
+        raise VantageConfigError(
+            f"{option} must be a SQLite file path, not a {scheme.lower()}:// URL"
+        )
+    if "\0" in raw:
+        raise VantageConfigError(f"{option} must not contain a NUL character")
+    try:
+        path = base / Path(raw).expanduser()
+    except RuntimeError as exc:  # `~` with no home directory to expand it to
+        raise VantageConfigError(f"{option} {raw!r} cannot be expanded: {exc}") from None
+    try:
+        is_directory = path.is_dir()
+    except OSError:
+        # Not knowable from here; opening the database says what is wrong.
+        is_directory = False
+    if is_directory:
+        raise VantageConfigError(f"{option} {str(path)!r} is a directory, not a database file")
+    return path
+
+
+def resolve_local_database(config: pytest.Config, *, default: Callable[[], Path]) -> Path:
+    """The local SQLite database: `--vantage-local-database` > the
+    `vantage_local_database` ini value > `default()`, the `vantage`
+    command's own default, so `vantage` started with no options serves what
+    was stored here. There is no environment variable for it.
+
+    A relative path is taken from where pytest was started when typed, and
+    from the ini file's directory when configured there, as pytest reads its
+    own path options; a file committed with the project means the same
+    place whichever directory pytest runs from.
+    """
+    cli_value = config.getoption("vantage_local_database", default=None)
+    if cli_value:
+        return _local_database_value(
+            cli_value, "--vantage-local-database", Path(config.invocation_params.dir)
+        )
+    ini_value = _read_ini(config, "vantage_local_database")
+    if ini_value is not None and ini_value != "":
+        # With no ini file the value came from `-o`, typed like an option.
+        inipath = getattr(config, "inipath", None)
+        base = Path(inipath).parent if inipath else Path(config.invocation_params.dir)
+        return _local_database_value(ini_value, "vantage_local_database ini value", base)
+    return default()
+
+
 def resolve_liveness_timeout(report_timeout: float) -> float:
     """The bound on a liveness request (start-write, heartbeat): `min(2.0,
     report_timeout)`.
@@ -212,10 +303,17 @@ def resolve_liveness_timeout(report_timeout: float) -> float:
 
 
 __all__ = [
+    "BACKUP_MODE",
+    "LOCAL_MODE",
+    "MODES",
+    "SERVER_AND_LOCAL_MODE",
+    "SERVER_MODE",
     "ReportSettings",
     "VantageConfigError",
     "resolve_and_validate_address",
     "resolve_liveness_timeout",
+    "resolve_local_database",
+    "resolve_mode",
     "resolve_report_timeout",
     "resolve_server_address",
     "resolve_settings",

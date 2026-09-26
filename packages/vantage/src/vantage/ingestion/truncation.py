@@ -1,6 +1,6 @@
 """The uniform 64 KiB bound on stored text fields.
 
-Applied by `service/routes/runs.py` to the commit subject, the interrupt
+Applied by `ingestion/conversion.py` to the commit subject, the interrupt
 reason, the failure evidence text and captured output. It only bounds size:
 the values are stored, not echoed back, so output encoding is the reader's
 concern.

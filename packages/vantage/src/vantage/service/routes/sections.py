@@ -17,7 +17,7 @@ event loop, stalling every other request -- heartbeats included -- for as
 long as a large body takes.
 
 **A name is stored as the body decoder leaves it**, U+0000 replaced by
-U+FFFD (`service/text.py`), so a delete naming U+0000 matches no section and
+U+FFFD (`ingestion/text.py`), so a delete naming U+0000 matches no section and
 is answered without asking the store.
 
 **Section definitions are read fresh on every request, never cached.** No
@@ -51,7 +51,9 @@ from vantage.core.domain.sections import (
     summarize_sections,
 )
 from vantage.core.ports.storage import ExecutionStore, NamespaceFullError
-from vantage.service.body import decode_json, read_bounded_body, require_json_media_type
+from vantage.ingestion.decode import decode_json
+from vantage.ingestion.text import NUL
+from vantage.service.body import read_bounded_body, require_json_media_type
 from vantage.service.dependencies import get_store
 from vantage.service.errors import (
     InvalidSectionError,
@@ -71,7 +73,6 @@ from vantage.service.schemas import (
     SectionUpsertRequest,
     SectionValue,
 )
-from vantage.service.text import NUL
 
 router = APIRouter()
 
