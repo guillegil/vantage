@@ -501,8 +501,10 @@ VANTAGE_DATABASE=postgresql://vantage@db.example/vantage vantage
 - The password goes wherever libpq looks for one: in the URL
   (`postgresql://user:password@host/db`, with special characters
   percent-encoded), or in `PGPASSWORD`, `~/.pgpass` or libpq's other `PG*`
-  environment variables, which apply to the rest of the connection too. The
-  server prints the URL only with its password replaced by `***`.
+  environment variables, which apply to the rest of the connection too. A
+  password in `--database` is shown to every user of the machine in the
+  process list; `VANTAGE_DATABASE`, `PGPASSWORD` or `~/.pgpass` keep it out.
+  The server prints the URL only with its passwords replaced by `***`.
 - Everything the server stores lives in a schema named `vantage`, so its
   tables never collide with anything else in the database. The first server
   to start on a database creates the schema and all its tables in one

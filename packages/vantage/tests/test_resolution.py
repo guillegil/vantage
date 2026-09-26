@@ -349,6 +349,14 @@ _REDACTIONS = {
         "postgresql://db.example/vantage?password=s3@cret",
         "postgresql://db.example/vantage?password=***",
     ),
+    "query-password-unencoded-ampersand": (
+        "postgresql://db.example/vantage?password=s3&cr&et&sslmode=require",
+        "postgresql://db.example/vantage?password=***&sslmode=require",
+    ),
+    "query-sslpassword": (
+        "postgresql://db.example/vantage?sslpassword=s3cret&sslmode=verify-full",
+        "postgresql://db.example/vantage?sslpassword=***&sslmode=verify-full",
+    ),
     "both": (
         "postgresql://vantage:s3cret@db.example/vantage?password=s3cret",
         "postgresql://vantage:***@db.example/vantage?password=***",
@@ -405,14 +413,45 @@ def test_redact_message_hides_the_password_as_written_and_decoded() -> None:
     assert shown.startswith("connecting to postgresql://vantage:***@db.example/vantage")
 
 
-def test_redact_message_hides_what_follows_an_unencoded_at_sign() -> None:
-    """libpq takes what follows an unencoded `@` in the password for the
-    host, and names that host when it cannot find it."""
-    url = "postgresql://vantage:s3@cr3t@db.example/vantage"
+# What libpq says of a URL whose password holds an unencoded `@` or `/`
+# (or `&`, in a query parameter): it splits the password into other fields
+# and quotes any one of them alone.
+_SPLIT_PASSWORDS = {
+    "host-after-an-at": (
+        "postgresql://vantage:s3@cr3t@db.example/vantage",
+        "failed to resolve host 'cr3t@db.example'",
+        "cr3t",
+    ),
+    "password-before-an-at": (
+        "postgresql://vantage:s3cr%zz@h0st@db.example/vantage",
+        'invalid percent-encoded token: "s3cr%zz"',
+        "s3cr%zz",
+    ),
+    "host-between-an-at-and-a-colon": (
+        "postgresql://vantage:s3cr@h0st:p0rt@db.example/vantage",
+        "failed to resolve host 'h0st': [Errno -8] Servname not supported",
+        "h0st",
+    ),
+    "database-after-a-slash": (
+        "postgresql://localhost:5432/cr3t@db.example/vantage",
+        'FATAL: database "cr3t@db.example/vantage" does not exist',
+        "cr3t",
+    ),
+    "parameter-after-an-ampersand": (
+        "postgresql://db.example/vantage?password=s3&cr3t",
+        'missing key/value separator "=" in URI query parameter: "cr3t"',
+        "cr3t",
+    ),
+}
 
-    shown = redact_message("failed to resolve host 'cr3t@db.example'", url)
 
-    assert "cr3t" not in shown
+@pytest.mark.parametrize(
+    ("url", "message", "piece"), _SPLIT_PASSWORDS.values(), ids=_SPLIT_PASSWORDS
+)
+def test_redact_message_hides_each_field_libpq_splits_a_password_into(
+    url: str, message: str, piece: str
+) -> None:
+    assert piece not in redact_message(message, url)
 
 
 def test_redact_message_leaves_a_message_without_the_password_alone() -> None:

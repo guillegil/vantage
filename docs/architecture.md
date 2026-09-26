@@ -492,10 +492,12 @@ Resolution names the database as a target (`core/config/database.py`): a
 the default. The scheme is lower-cased, because libpq recognises no other
 spelling and reads anything else as a `key=value` string, whose parse error
 quotes it whole. A URL is shown only through `redacted`, which replaces the
-password in the user part and any `password=` query parameter with `***`;
-since an unencoded password may hold `@`, `/`, `?` or `#`, everything
-between the first `:` and the last `@` counts as the password. A
-`PostgresTarget`'s `repr` is redacted too.
+password in the user part, and any `password`, `sslpassword` or
+`oauth_client_secret` query parameter, with `***`. Since an unencoded
+password may hold `@`, `/`, `?` or `#`, everything between the first `:`
+and the last `@` counts as the password, and a query parameter's value runs
+on over any `&` piece without an `=`. A `PostgresTarget`'s `repr` is
+redacted too.
 
 `service/cli.py` acts on the result. For SQLite it checks that an existing
 database directory is writable. For PostgreSQL it imports
@@ -508,7 +510,9 @@ absent, or psycopg without a libpq) is refused with one line naming the
 PostgreSQL refusal names the redacted URL, and quotes the driver's message
 on one line with the URL's password taken out by `redact_message`, as
 written and percent-decoded: libpq quotes a percent-escape it cannot
-decode, and takes what follows an unencoded `@` for a host it then names.
+decode, and splits a password holding an unencoded `@` or `/` into fields
+-- a host, a port, a database -- that it names one at a time, so each piece
+of such a password is taken out as well.
 Credentials beyond the URL are libpq's own (`PGPASSWORD`, `~/.pgpass`, the
 other `PG*` variables); the command adds no flag for them.
 

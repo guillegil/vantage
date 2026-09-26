@@ -24,6 +24,7 @@ import importlib.util
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import sqlite3
@@ -536,18 +537,18 @@ _SHOWN = "postgresql://vantage:***@db.example:5432/vantage"
 
 class _StandInAdapter:
     """What `main` finds as `vantage.storage.postgres`: its
-    `PostgresExecutionStore` records each URL it is given and opens an
-    in-memory store, or raises `failure`."""
+    `PostgresExecutionStore` records each URL it is given, runs
+    `during_open`, which may raise, and opens an in-memory store."""
 
     def __init__(self) -> None:
         self.urls: list[str] = []
         self.stores: list[InMemoryExecutionStore] = []
-        self.failure: Callable[[str], None] | None = None
+        self.during_open: Callable[[str], None] | None = None
 
     def open(self, url: str, *, max_connections: int = 10) -> InMemoryExecutionStore:
         self.urls.append(url)
-        if self.failure is not None:
-            self.failure(url)
+        if self.during_open is not None:
+            self.during_open(url)
         store = InMemoryExecutionStore()
         self.stores.append(store)
         return store
@@ -696,7 +697,7 @@ def test_a_database_that_cannot_be_used_is_one_line_naming_the_redacted_url(
     failure: Exception,
     line: str,
 ) -> None:
-    postgres_adapter.failure = _raising(failure)
+    postgres_adapter.during_open = _raising(failure)
 
     assert _refusal(capsys, ["--database", _URL]) == line
 
@@ -707,22 +708,33 @@ def _connect(url: str) -> None:
     raise AssertionError(f"something answered at {url}")
 
 
+_DRIVER_FAILURES = {
+    "bad-escape": ("s3cr%zzt", "percent-encoded"),
+    # libpq takes the password to end at the first `@`, and quotes it alone.
+    "bad-escape-before-an-at": ("s3cr%zzt@h0st", "percent-encoded"),
+    # ... and the rest for a host, which it cuts at the first `:`.
+    "at-and-colon": ("s3cr@h0st:p0rt", "resolve host"),
+    "refused": ("s3cret", "Connection refused"),
+}
+
+
 @pytest.mark.usefixtures("never_served")
-@pytest.mark.parametrize("failure", ["bad-escape", "refused"])
+@pytest.mark.parametrize(("password", "said"), _DRIVER_FAILURES.values(), ids=_DRIVER_FAILURES)
 def test_the_drivers_own_message_is_quoted_on_one_line_without_the_password(
-    capsys: pytest.CaptureFixture[str], postgres_adapter: _StandInAdapter, failure: str
+    capsys: pytest.CaptureFixture[str], postgres_adapter: _StandInAdapter, password: str, said: str
 ) -> None:
     """libpq quotes a percent-escape it cannot decode, password and all,
-    and spreads a refused connection over two lines."""
+    splits a password holding an unencoded `@` into fields it names one at
+    a time, and spreads a refused connection over two lines."""
     port = _free_loopback_port()
-    password = "s3cr%zzt" if failure == "bad-escape" else "s3cret"
     url = f"postgresql://vantage:{password}@127.0.0.1:{port}/vantage"
-    postgres_adapter.failure = _connect
+    postgres_adapter.during_open = _connect
 
     err = _refusal(capsys, ["--database", url])
 
     assert err.startswith(
         f"vantage: cannot open the database at postgresql://vantage:***@127.0.0.1:{port}/vantage: "
     )
-    assert password not in err
-    assert ("percent-encoded" if failure == "bad-escape" else "Connection refused") in err
+    for piece in re.split("[@:]", password):
+        assert piece not in err
+    assert said in err
