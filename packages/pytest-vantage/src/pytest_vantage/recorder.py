@@ -28,11 +28,17 @@ and why, and what metadata its session fixtures reported.
 Every other hook is wrapped in `fault_isolated`: an error anywhere in the
 reporting path becomes one warning and never changes the suite's exit status.
 
+Where the finished run goes depends on the mode (`config.MODES`): to the
+server, to a local SQLite database through `pytest_vantage.local`, or to
+both, with the outbox (`pytest_vantage.outbox`) keeping what a server could
+not take until a later session reaches it again.
+
 Never imports `pytest_vantage.plugin`, which imports this module.
 """
 
 from __future__ import annotations
 
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -54,7 +60,13 @@ from pytest_vantage.capture import (
     assemble_results,
     isoformat_utc,
 )
-from pytest_vantage.config import resolve_liveness_timeout
+from pytest_vantage.config import (
+    LOCAL_MODE,
+    MODES,
+    SERVER_AND_LOCAL_MODE,
+    SERVER_MODE,
+    resolve_liveness_timeout,
+)
 from pytest_vantage.session_metadata import (
     ReportedValues,
     SessionMetadata,
@@ -250,20 +262,38 @@ class Recorder:
     - `session_metadata` is what the `vantage_metadata` fixture hands the
       tests this process runs; `_reported` collects what xdist workers
       relay. Both are sent only in the run's last report.
+    - `_mode` says where the finished run goes, `_local_database` where a
+      local mode stores it. `address` is `None` only in `local` mode, which
+      never touches the network. `server_reachable` is `False` when a
+      mode with a local copy found the server unreachable at the start:
+      the run is then recorded all the same, with the lifecycle off and no
+      warning about it until the one describing where the run went.
     """
 
     def __init__(
         self,
         config: pytest.Config,
-        address: str,
+        address: str | None,
         timeout: float,
         *,
         lifecycle_available: bool | Capabilities = False,
         metadata_requested: bool = False,
+        mode: str = SERVER_MODE,
+        local_database: Path | None = None,
+        server_reachable: bool = True,
     ) -> None:
+        if mode not in MODES:
+            raise ValueError(f"unknown mode {mode!r}")
+        if (address is None) != (mode == LOCAL_MODE):
+            raise ValueError(f"mode {mode} needs {'no' if mode == LOCAL_MODE else 'a'} server")
+        if (local_database is None) != (mode == SERVER_MODE):
+            raise ValueError(f"mode {mode} needs {'no' if mode == SERVER_MODE else 'a'} database")
         self._config = config
         self._address = address
         self._timeout = timeout
+        self._mode = mode
+        self._local_database = local_database
+        self._server_reachable = server_reachable and address is not None
         self._liveness_timeout = resolve_liveness_timeout(timeout)
         # The probe's `Capabilities` carries why the lifecycle is off; a plain
         # bool, from a caller with no probe, reads as a negative answer.
@@ -338,17 +368,25 @@ class Recorder:
         When `_lifecycle_available` is `False`, sends nothing: warns once,
         with the probe's reason, and latches `_liveness_disabled` directly so
         every later `_maybe_beat` is a silent no-op without a second warning.
+        Without a server that was reachable at the start there is nothing to
+        warn about here: the run's one warning comes at the finish.
         """
-        if not self._lifecycle_available:
+        if not self._lifecycle_available or not self._server_reachable:
             self._liveness_disabled = True
-            warn(
-                self._config,
-                f"vantage: {self._lifecycle_problem}, "
-                "this session's start and heartbeats will not be recorded",
-            )
+            if self._server_reachable:
+                warn(
+                    self._config,
+                    f"vantage: {self._lifecycle_problem}, "
+                    "this session's start and heartbeats will not be recorded",
+                )
             return
         report = {"run": self._in_progress_run(), **self._sections()}
-        send(self._address, report, timeout=self._liveness_timeout)
+        send(self._server(), report, timeout=self._liveness_timeout)
+
+    def _server(self) -> str:
+        if self._address is None:
+            raise RuntimeError("local mode has no server to report to")
+        return self._address
 
     @fault_isolated
     def pytest_report_header(self) -> str:
@@ -356,7 +394,13 @@ class Recorder:
         correlate a session with the row it produced, without reaching into
         storage internals.
         """
-        return f"vantage: recording run {self._run_id} to {self._address}"
+        if self._mode == LOCAL_MODE:
+            where = str(self._local_database)
+        elif self._mode == SERVER_AND_LOCAL_MODE:
+            where = f"{self._address} and {self._local_database}"
+        else:
+            where = str(self._address)
+        return f"vantage: recording run {self._run_id} to {where}"
 
     @accumulation_isolated
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
@@ -379,13 +423,13 @@ class Recorder:
         (`pytest_sessionstart` has already latched `_liveness_disabled`) but
         keeps this method correct on its own regardless of call order.
         """
-        if not self._lifecycle_available:
+        if not self._lifecycle_available or not self._server_reachable:
             return
         now = time.monotonic()
         if now - self._last_beat_at < _BEAT_INTERVAL_SECONDS:
             return
         self._last_beat_at = now
-        send_heartbeat(self._address, self._run_id, timeout=self._liveness_timeout)
+        send_heartbeat(self._server(), self._run_id, timeout=self._liveness_timeout)
 
     @accumulation_isolated
     def pytest_keyboard_interrupt(self, excinfo: pytest.ExceptionInfo[BaseException]) -> None:
@@ -484,7 +528,24 @@ class Recorder:
 
     @fault_isolated
     def pytest_sessionfinish(self, session: pytest.Session, exitstatus: int) -> None:
-        exit_status = int(exitstatus)
+        reports = self._finish_reports(session, int(exitstatus))
+        if self._mode == SERVER_MODE:
+            for report in reports:
+                send(self._server(), report, timeout=self._timeout)
+        elif self._mode == LOCAL_MODE:
+            problem = self._store_locally(reports)
+            if problem is not None:
+                warn(
+                    self._config,
+                    f"vantage: could not store this run in {self._local_database}: {problem}; "
+                    "the run is lost",
+                )
+        else:
+            self._deliver_with_local_copy(reports)
+
+    def _finish_reports(self, session: pytest.Session, exit_status: int) -> list[dict[str, object]]:
+        """The session's finish reports, in send order: every one but the
+        last is an in-progress report carrying a slice of the results."""
         early_stop = session.shouldfail or session.shouldstop
         finished_at, interrupted, interrupt_reason = self._how_it_ended(exit_status, early_stop)
 
@@ -527,12 +588,176 @@ class Recorder:
         # as finished only once the last report, carrying the rest, arrives:
         # a report lost on the way leaves an unfinished run, never a finished
         # one with results silently missing. The session's values are sent
-        # once, in the last report.
-        for chunk in slices[:-1]:
-            report = {"run": in_progress_run, "results": chunk, **sections}
-            send(self._address, report, timeout=self._timeout)
-        report = {"run": finish_run, "results": slices[-1], **last_sections}
-        send(self._address, report, timeout=self._timeout)
+        # once, in the last report. A local store is handed the same reports,
+        # so it holds exactly what a server would.
+        reports: list[dict[str, object]] = [
+            {"run": in_progress_run, "results": chunk, **sections} for chunk in slices[:-1]
+        ]
+        reports.append({"run": finish_run, "results": slices[-1], **last_sections})
+        return reports
+
+    def _store_locally(self, reports: list[dict[str, object]]) -> str | None:
+        """Store the run in the local database; what went wrong, or `None`.
+        A failure here costs the local copy alone, never the server path."""
+        from pytest_vantage import local
+
+        try:
+            local.store_reports(self._local_database_path(), reports)
+        except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+            return str(exc) or type(exc).__name__
+        return None
+
+    def _local_database_path(self) -> Path:
+        if self._local_database is None:
+            raise RuntimeError("server mode has no local database")
+        return self._local_database
+
+    def _deliver_with_local_copy(self, reports: list[dict[str, object]]) -> None:
+        """`server+backup` and `server+local`: report to the server, store
+        locally when the mode or a failure calls for it, queue what a later
+        session could still deliver, and say what happened in one warning.
+
+        Only a failure a retry can fix is queued: no answer, or a 5xx. A
+        4xx, a redirect or an answer that does not acknowledge the run would
+        fail the same way every time. Reports the server has acknowledged
+        are not queued again.
+        """
+        from pytest_vantage.outbox import worth_retrying
+
+        address = self._server()
+        queue_from: int | None = None
+        failure = f"{address} is unreachable"
+        rejection: Exception | None = None
+        if not self._server_reachable:
+            queue_from = 0
+        else:
+            for index, report in enumerate(reports):
+                try:
+                    send(address, report, timeout=self._timeout)
+                except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+                    if worth_retrying(exc):
+                        queue_from = index
+                        failure = f"{address} did not take this run ({exc})"
+                    else:
+                        rejection = exc
+                    break
+        delivered = queue_from is None and rejection is None
+        stored: str | None = None
+        store_problem: str | None = None
+        if self._mode == SERVER_AND_LOCAL_MODE or not delivered:
+            store_problem = self._store_locally(reports)
+            if store_problem is None:
+                stored = str(self._local_database)
+
+        if queue_from is not None:
+            self._queue(failure, reports[queue_from:], stored, store_problem)
+        elif rejection is not None:
+            where = (
+                f"this run was stored in {stored} only"
+                if stored is not None
+                else f"it could not be stored in {self._local_database} either "
+                f"({store_problem}), so the run is lost"
+            )
+            warn(self._config, f"vantage: error while reporting: {rejection}; {where}")
+        elif store_problem is not None:
+            warn(
+                self._config,
+                f"vantage: could not store this run in {self._local_database}: {store_problem}",
+            )
+        if delivered:
+            self._send_queued()
+
+    def _queue(
+        self,
+        failure: str,
+        reports: list[dict[str, object]],
+        stored: str | None,
+        store_problem: str | None,
+    ) -> None:
+        """Put `reports` in the outbox and warn once, saying where the run is."""
+        from pytest_vantage.outbox import Outbox, outbox_path
+
+        database = self._local_database_path()
+        path = outbox_path(database)
+        waiting: int | None = None
+        queue_problem: str | None = None
+        evicted: list[str] = []
+        try:
+            with Outbox(path) as outbox:
+                waiting = outbox.enqueue(self._server(), self._run_id, reports)
+                evicted = outbox.evicted
+        except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+            queue_problem = str(exc) or type(exc).__name__
+        if evicted:
+            noun = "run" if len(evicted) == 1 else f"{len(evicted)} runs"
+            warn(
+                self._config,
+                f"vantage: the outbox {path} is full; dropped the oldest queued {noun} "
+                f"to make room: {', '.join(evicted)}",
+            )
+        if waiting is not None:
+            queued = f"queued ({_runs(waiting)} waiting to be sent)"
+            outcome = (
+                f"this run was stored in {stored} and {queued}"
+                if stored is not None
+                else f"this run could not be stored in {database} ({store_problem}) "
+                f"but was {queued}"
+            )
+        elif stored is not None:
+            outcome = f"this run was stored in {stored} but could not be queued ({queue_problem})"
+        else:
+            outcome = (
+                f"this run could not be stored in {database} ({store_problem}) "
+                f"or queued ({queue_problem}), so it is lost"
+            )
+        warn(self._config, f"vantage: {failure}; {outcome}")
+
+    def _send_queued(self) -> None:
+        """Once this session's own run has reached the server, send the runs
+        queued for it, within the report timeout. Never creates an outbox
+        only to find it empty."""
+        from pytest_vantage.outbox import Outbox, outbox_path, send_queued
+
+        address = self._server()
+        path = outbox_path(self._local_database_path())
+        if not path.exists():
+            return
+        try:
+            with Outbox(path) as outbox:
+                if not outbox.waiting(address):
+                    return
+                summary = send_queued(outbox, address, timeout=self._timeout, budget=self._timeout)
+        except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+            warn(self._config, f"vantage: could not send the runs queued in {path}: {exc}")
+            return
+        for run_id in summary.dropped:
+            warn(
+                self._config,
+                f"vantage: {address} rejected queued run {run_id}, which can never be sent; "
+                f"it was dropped from {path}",
+            )
+        noun = "run" if summary.sent == 1 else "runs"
+        line = (
+            f"vantage: sent {summary.sent} queued {noun} to {address} ({summary.waiting} waiting)"
+        )
+        if summary.stopped is not None:
+            line = f"{line}; stopped: {summary.stopped}"
+        _say(self._config, line)
+
+
+def _runs(count: int) -> str:
+    return f"{count} run" if count == 1 else f"{count} runs"
+
+
+def _say(config: pytest.Config, line: str) -> None:
+    """One line of information, not a warning: on the terminal, or on
+    stderr when no terminal reporter is registered."""
+    reporter = config.pluginmanager.get_plugin("terminalreporter")
+    write_line = getattr(reporter, "write_line", None)
+    if callable(write_line):
+        write_line(line)
+    else:
+        print(line, file=sys.stderr)
 
 
 __all__ = ["Recorder", "WorkerInterruptRelay", "WorkerMetadataRelay", "controller_records"]

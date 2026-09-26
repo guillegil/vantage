@@ -191,6 +191,9 @@ class _ActivatedControllerDouble:
     def getoption(self, name: str, default: object = None) -> object:
         return self._options.get(name, default)
 
+    def getini(self, name: str) -> object:
+        return None
+
 
 def test_controller_registers_an_evidencecollector_when_activated() -> None:
     """A session with no xdist workers at all still needs failure evidence
