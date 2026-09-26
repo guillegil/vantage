@@ -47,6 +47,7 @@ from vantage.core.config.resolution import (
     resolve_server_config,
 )
 from vantage.service.app import create_app
+from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
@@ -56,6 +57,14 @@ _LOOPBACK = "127.0.0.1"
 # uvicorn's own logger, which its logging configuration prints at INFO; this
 # module's logger is only printed from WARNING up.
 _UVICORN_LOGGER = logging.getLogger("uvicorn.error")
+
+# How much of a request's line and headers the server buffers before it has
+# them whole; past it, the request is refused before any route sees it. A
+# stored node id is read back by value, in the query string, and it can be
+# as long as a report allows: at most `MAX_REPORT_BYTES` of UTF-8, each byte
+# percent-encoded in at most three. The HTTP parser's own default, 16 KiB,
+# left a result that `/results` lists impossible to fetch.
+_MAX_REQUEST_HEAD_BYTES = 3 * MAX_REPORT_BYTES + 64 * 1024
 
 
 class DatabaseDirectoryNotWritableError(RuntimeError):
@@ -154,7 +163,14 @@ def _open_store(database_path: Path) -> SqliteExecutionStore:
 
 def _serve(app: FastAPI, listener: socket.socket, config: ServerConfig) -> None:
     """Run uvicorn on the already bound `listener` until it is stopped."""
-    server = uvicorn.Server(uvicorn.Config(app, host=config.host, port=config.port))
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host=config.host,
+            port=config.port,
+            h11_max_incomplete_event_size=_MAX_REQUEST_HEAD_BYTES,
+        )
+    )
     # uvicorn announces the address only for a socket it bound itself.
     shown = f"[{config.host}]" if ":" in config.host else config.host
     _UVICORN_LOGGER.info("Listening on http://%s:%d (Press CTRL+C to quit)", shown, config.port)

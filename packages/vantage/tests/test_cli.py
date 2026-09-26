@@ -27,7 +27,9 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -343,16 +345,11 @@ def _wait_until_serving(proc: subprocess.Popen[bytes], base: str) -> None:
     raise AssertionError("the server never answered")
 
 
-@pytest.mark.skipif(os.name != "posix", reason="SIGTERM is how POSIX service managers stop one")
-def test_a_server_stopped_with_sigterm_leaves_everything_in_the_database_file(
-    tmp_path: Path,
-) -> None:
-    """systemd, docker and kubernetes stop a service with SIGTERM. uvicorn
-    ends the process by raising it again once the app has shut down, so a
-    store closed only after the server returns stays open, and every write
-    stays in the `-wal` file beside the database: a backup that copies the
-    database file alone after the stop gets no tables at all."""
-    database = tmp_path / "db" / "v.db"
+@contextlib.contextmanager
+def _running_vantage(database: Path) -> Iterator[tuple[subprocess.Popen[bytes], str]]:
+    """The real `vantage` command, serving `database` on a free loopback
+    port, and the base URL of its API. Killed on the way out if it is still
+    running."""
     port = _free_loopback_port()
     base = f"http://127.0.0.1:{port}/api/v1"
     command = "from vantage.service.cli import main; main()"
@@ -363,26 +360,7 @@ def test_a_server_stopped_with_sigterm_leaves_everything_in_the_database_file(
     )
     try:
         _wait_until_serving(proc, base)
-        report = {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            }
-        }
-        request = urllib.request.Request(  # noqa: S310
-            f"{base}/runs",
-            data=json.dumps(report).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
-            assert response.status == 201
-
-        proc.send_signal(signal.SIGTERM)
-        proc.wait(timeout=20)
+        yield proc, base
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -390,11 +368,87 @@ def test_a_server_stopped_with_sigterm_leaves_everything_in_the_database_file(
         assert proc.stderr is not None
         proc.stderr.close()
 
+
+def _post_json(url: str, body: object) -> int:
+    request = urllib.request.Request(  # noqa: S310
+        url,
+        data=json.dumps(body, ensure_ascii=False).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+        return int(response.status)
+
+
+def _start_report(run_id: str) -> dict[str, Any]:
+    return {
+        "run": {
+            "id": run_id,
+            "started_at": "2026-08-15T09:14:02.481930+00:00",
+            "finished_at": None,
+            "exit_status": None,
+            "interrupted": False,
+            "interrupt_reason": None,
+        }
+    }
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGTERM is how POSIX service managers stop one")
+def test_a_server_stopped_with_sigterm_leaves_everything_in_the_database_file(
+    tmp_path: Path,
+) -> None:
+    """systemd, docker and kubernetes stop a service with SIGTERM. uvicorn
+    ends the process by raising it again once the app has shut down, so a
+    store closed only after the server returns stays open, and every write
+    stays in the `-wal` file beside the database: a backup that copies the
+    database file alone after the stop gets no tables at all."""
+    database = tmp_path / "db" / "v.db"
+    with _running_vantage(database) as (proc, base):
+        assert _post_json(f"{base}/runs", _start_report("a" * 32)) == 201
+
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=20)
+
     assert sorted(path.name for path in database.parent.iterdir()) == ["v.db"]
     backup = tmp_path / "backup.db"
     backup.write_bytes(database.read_bytes())
     with contextlib.closing(sqlite3.connect(backup)) as conn:
         assert conn.execute("SELECT id FROM run").fetchall() == [("a" * 32,)]
+
+
+def test_a_result_with_a_long_node_id_can_be_read_back_by_it(tmp_path: Path) -> None:
+    """A result is read by its node id, in the query string, and pytest
+    never shortens a parametrize id. Percent-encoded, this one is over half
+    a megabyte of request line, which the HTTP parser's own 16 KiB bound
+    refused before any route saw it, while `/results` listed it."""
+    node_id = "tests/" + "é/" * 60_000 + "test_a.py::test_x"
+    result = {
+        "node_id": node_id,
+        "file_path": node_id.partition("::")[0],
+        "class_name": None,
+        "function_name": "test_x",
+        "param_id": None,
+        "outcome": "passed",
+        "duration": None,
+        "started_at": None,
+        "finished_at": None,
+        "setup_outcome": None,
+        "call_outcome": None,
+        "teardown_outcome": None,
+        "setup_duration": None,
+        "call_duration": None,
+        "teardown_duration": None,
+        "worker_id": None,
+    }
+    run_id = "b" * 32
+    with _running_vantage(tmp_path / "v.db") as (_proc, base):
+        assert _post_json(f"{base}/runs", {**_start_report(run_id), "results": [result]}) == 201
+        query = urllib.parse.urlencode({"node_id": node_id})
+        assert len(query) > 500_000
+
+        with urllib.request.urlopen(f"{base}/runs/{run_id}/result?{query}", timeout=10) as got:  # noqa: S310
+            assert json.loads(got.read())["node_id"] == node_id
+        with urllib.request.urlopen(f"{base}/tests/history?{query}", timeout=10) as got:  # noqa: S310
+            assert [item["run_id"] for item in json.loads(got.read())["items"]] == [run_id]
 
 
 @_needs_enforced_mode_bits

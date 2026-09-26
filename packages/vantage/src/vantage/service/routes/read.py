@@ -20,8 +20,10 @@ before routing and may be merged or rejected by a proxy, while a query value
 arrives intact. The parameter name also leaves room for another identity
 scheme as an additive sibling. `node_id` has no length bound here: any
 node id already stored -- pytest never shortens a parametrize id -- must
-stay readable by the exact value `/results` lists. A missing value is
-shaped by `InvalidIdentityError`.
+stay readable by the exact value `/results` lists, and the `vantage`
+command sizes the HTTP parser's request-line bound for the longest one a
+report can carry (`cli.py`). A missing value is shaped by
+`InvalidIdentityError`.
 
 `list_results` returns a lean `ResultListEntry` per result, never the full
 failure evidence or captured output; `get_result` returns every field of one
