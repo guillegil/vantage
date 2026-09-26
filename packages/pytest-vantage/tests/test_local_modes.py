@@ -332,10 +332,12 @@ def test_a_mode_that_stores_locally_needs_the_vantage_package(
     )
 
     assert result.ret == pytest.ExitCode.USAGE_ERROR, _output(result)
-    assert result.stderr.lines[0] == (
+    # Matched anywhere: a terminal library may print its own notice first
+    # (`No entry for terminal type`) when TERM is unset, as under sudo.
+    assert (
         f"ERROR: vantage: --vantage-mode {mode} stores runs locally and needs the vantage "
         "package: pip install vantage"
-    )
+    ) in result.stderr.lines
 
 
 def test_server_mode_never_needs_the_vantage_package_or_reads_the_local_database(
