@@ -424,6 +424,7 @@ for name in ("fastapi", "starlette", "uvicorn", "psycopg", "psycopg_pool"):
 import vantage.ingestion
 import vantage.ingestion.decode
 import vantage.local
+import vantage.service.cli
 
 assert "vantage.storage.postgres" not in sys.modules, "the PostgreSQL adapter was loaded"
 
@@ -434,10 +435,11 @@ except ImportError as exc:
 """
 
 
-def test_ingestion_and_the_local_store_import_without_either_extra() -> None:
+def test_ingestion_the_local_store_and_the_command_import_without_either_extra() -> None:
     """An install without the `server` or `postgres` extra stores runs
-    locally: ingestion and the local store must import there, and the app,
-    asked for, fails on the missing framework."""
+    locally and runs the `vantage` command: ingestion, the local store and
+    the command must import there, and the app, asked for, fails on the
+    missing framework."""
     completed = subprocess.run(  # noqa: S603 -- the interpreter running this test
         [sys.executable, "-c", _WITHOUT_THE_WEB_FRAMEWORK],
         capture_output=True,

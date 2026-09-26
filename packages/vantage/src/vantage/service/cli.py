@@ -1,17 +1,23 @@
 """`vantage` -- resolve configuration, fail fast, then serve.
 
+**Serving needs the `server` extra.** FastAPI and uvicorn are imported only
+once the arguments ask to serve, so `--help` works in an install without
+them, and serving without them is one line naming the extra -- checked
+before anything is bound or created.
+
 **Path check at startup.** A SQLite database directory that exists but
 cannot be written to fails here, before the server accepts a request -- not
 on the first report, by which point the plugin that sent it has exited and
 the report is lost. Resolution itself (`core/config/resolution.py`) is pure
 and creates nothing.
 
-**Every startup refusal is one line.** A setting resolution refuses, an
-address this process cannot listen on (a port already in use, a host that
-does not resolve), a database this process cannot open, create or connect
-to, a PostgreSQL database without its driver installed, and a database from
-another schema version all end as a single `vantage: ...` line on stderr
-and exit status 1, never a traceback. The listening socket is bound here,
+**Every startup refusal is one line.** The `server` extra missing, a
+setting resolution refuses, an address this process cannot listen on (a
+port already in use, a host that does not resolve), a database this
+process cannot open, create or connect to, a PostgreSQL database without
+its driver installed, and a database from another schema version all end
+as a single `vantage: ...` line on stderr and exit status 1, never a
+traceback. The listening socket is bound here,
 before the database is opened, so a refused bind creates nothing; uvicorn
 is handed the bound socket rather than binding its own, which it would do
 only after the database exists and would report in several log lines and
@@ -44,10 +50,7 @@ import socket
 import sqlite3
 import sys
 from pathlib import Path
-from typing import NoReturn
-
-import uvicorn
-from fastapi import FastAPI
+from typing import TYPE_CHECKING, NoReturn
 
 from vantage.core.config.database import (
     DatabaseTarget,
@@ -61,10 +64,11 @@ from vantage.core.config.resolution import (
     resolve_server_config,
 )
 from vantage.core.ports.storage import ExecutionStore
-from vantage.service.app import create_app
-from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage.storage.version import SchemaVersionError
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
 
 _LOGGER = logging.getLogger(__name__)
 _LOOPBACK = "127.0.0.1"
@@ -73,13 +77,8 @@ _LOOPBACK = "127.0.0.1"
 # module's logger is only printed from WARNING up.
 _UVICORN_LOGGER = logging.getLogger("uvicorn.error")
 
-# How much of a request's line and headers the server buffers before it has
-# them whole; past it, the request is refused before any route sees it. A
-# stored node id is read back by value, in the query string, and it can be
-# as long as a report allows: at most `MAX_REPORT_BYTES` of UTF-8, each byte
-# percent-encoded in at most three. The HTTP parser's own default, 16 KiB,
-# left a result that `/results` lists impossible to fetch.
-_MAX_REQUEST_HEAD_BYTES = 3 * MAX_REPORT_BYTES + 64 * 1024
+_SERVER_EXTRA_MODULES = frozenset({"fastapi", "starlette", "uvicorn"})
+_SERVER_EXTRA_MISSING = "serving needs the server extra: pip install 'vantage[server]'"
 
 _POSTGRES_ADAPTER = "vantage.storage.postgres"
 _POSTGRES_DRIVER_MODULES = frozenset({"psycopg", "psycopg_pool"})
@@ -118,7 +117,7 @@ def warn_if_bound_wide(host: str) -> None:
         )
 
 
-def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="vantage", description="Run the vantage server.")
     parser.add_argument(
         "--database",
@@ -193,6 +192,19 @@ def _open_sqlite(database_path: Path) -> SqliteExecutionStore:
         _refuse(f"cannot open the database at {database_path}: {exc}")
 
 
+def _require_the_server_extra() -> None:
+    """Import what serving needs, or refuse in one line naming the extra.
+    An import failure in anything else is a fault in this installation, and
+    raised as it is."""
+    try:
+        importlib.import_module("uvicorn")
+        importlib.import_module("vantage.service.app")
+    except ImportError as exc:
+        if not _is_missing(exc, _SERVER_EXTRA_MODULES):
+            raise
+        _refuse(_SERVER_EXTRA_MISSING)
+
+
 def _open_postgres(url: str) -> ExecutionStore:
     shown = redacted(url)
     try:
@@ -200,7 +212,9 @@ def _open_postgres(url: str) -> ExecutionStore:
         # ever imports the adapter or its driver.
         adapter = importlib.import_module(_POSTGRES_ADAPTER)
     except ImportError as exc:
-        if not _is_driver_missing(exc):
+        # psycopg without the libpq it needs fails with a plain `ImportError`
+        # raised in its own module, which counts as the driver missing too.
+        if not _is_missing(exc, _POSTGRES_DRIVER_MODULES):
             raise
         _refuse(_POSTGRES_DRIVER_MISSING)
     # The pool logs each failed connection attempt itself, on stderr before
@@ -227,18 +241,18 @@ def _open_postgres(url: str) -> ExecutionStore:
     return store
 
 
-def _is_driver_missing(exc: ImportError) -> bool:
-    """Whether the PostgreSQL driver is what failed to import: psycopg or its
-    pool absent, or psycopg present without the libpq it needs, which it
-    reports as a plain `ImportError` raised in its own module. Any other
-    `ImportError` is a fault in this installation, not a missing extra."""
+def _is_missing(exc: ImportError, modules: frozenset[str]) -> bool:
+    """Whether what failed to import is one of `modules` -- top-level names
+    an extra installs -- or a module within one: absent, or raising
+    `ImportError` itself while it imports. Any other `ImportError` is a fault
+    in this installation, not a missing extra."""
     module = exc.name
     if module is None:
         frame = exc.__traceback__
         while frame is not None and frame.tb_next is not None:
             frame = frame.tb_next
         module = frame.tb_frame.f_globals.get("__name__") if frame is not None else None
-    return str(module).partition(".")[0] in _POSTGRES_DRIVER_MODULES
+    return str(module).partition(".")[0] in modules
 
 
 def _driver_detail(exc: Exception, url: str) -> str:
@@ -251,12 +265,23 @@ def _driver_detail(exc: Exception, url: str) -> str:
 
 def _serve(app: FastAPI, listener: socket.socket, config: ServerConfig) -> None:
     """Run uvicorn on the already bound `listener` until it is stopped."""
+    import uvicorn
+
+    from vantage.service.errors import MAX_REPORT_BYTES
+
+    # How much of a request's line and headers the server buffers before it
+    # has them whole; past it, the request is refused before any route sees
+    # it. A stored node id is read back by value, in the query string, and it
+    # can be as long as a report allows: at most `MAX_REPORT_BYTES` of UTF-8,
+    # each byte percent-encoded in at most three. The HTTP parser's own
+    # default, 16 KiB, left a result that `/results` lists impossible to fetch.
+    max_request_head_bytes = 3 * MAX_REPORT_BYTES + 64 * 1024
     server = uvicorn.Server(
         uvicorn.Config(
             app,
             host=config.host,
             port=config.port,
-            h11_max_incomplete_event_size=_MAX_REQUEST_HEAD_BYTES,
+            h11_max_incomplete_event_size=max_request_head_bytes,
         )
     )
     # uvicorn announces the address only for a socket it bound itself.
@@ -271,8 +296,12 @@ def _serve(app: FastAPI, listener: socket.socket, config: ServerConfig) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Resolve configuration, refuse anything unusable, warn on a wide bind, serve, then close."""
-    args = _parse_args(argv)
+    """Resolve configuration, refuse anything unusable, warn on a wide bind,
+    serve, then close."""
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    _require_the_server_extra()
+    from vantage.service.app import create_app
+
     try:
         config = resolve_server_config(
             cli_database=args.database,
