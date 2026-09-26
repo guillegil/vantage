@@ -15,6 +15,7 @@ import pytest
 from vantage.core.config.database import (
     PostgresTarget,
     SqliteTarget,
+    UnsupportedDatabaseURLError,
     database_target,
     redact_message,
     redacted,
@@ -137,17 +138,36 @@ def test_the_scheme_is_matched_in_any_case_and_lower_cased(value: str, url: str)
 
 @pytest.mark.parametrize(
     "value",
-    [
-        "vantage.db",
-        "postgresql:/one-slash",
-        "postgresqlx://h/db",
-        "mysql://h/db",
-        "sqlite:///vantage.db",
-        "./postgresql://h/db",
-    ],
+    ["vantage.db", "postgresql:/one-slash", "./postgresql://h/db", "runs/v.db"],
 )
 def test_any_other_value_is_a_sqlite_path(value: str) -> None:
     assert database_target(value) == SqliteTarget(Path(value))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "postgresql+psycopg://u:s3cret@h/db",
+        "postgresqlx://u:s3cret@h/db",
+        "mysql://u:s3cret@h/db",
+        "sqlite:///vantage.db",
+    ],
+)
+def test_a_url_of_another_scheme_is_refused_without_repeating_it(value: str) -> None:
+    """Taken as a path it would create directories named after the URL and
+    show it, password included, wherever the path is shown."""
+    with pytest.raises(UnsupportedDatabaseURLError) as refused:
+        database_target(value)
+    assert "s3cret" not in str(refused.value)
+
+    with pytest.raises(ServerConfigError) as typed:
+        _resolve(cli_database=value)
+    with pytest.raises(ServerConfigError) as from_environment:
+        _resolve(env_database=value)
+
+    assert str(typed.value).startswith("--database: ")
+    assert str(from_environment.value).startswith("VANTAGE_DATABASE: ")
+    assert "s3cret" not in str(typed.value) + str(from_environment.value)
 
 
 def test_a_postgresql_target_shows_its_url_redacted() -> None:

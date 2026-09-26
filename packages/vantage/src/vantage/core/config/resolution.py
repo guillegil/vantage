@@ -14,7 +14,12 @@ from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 
-from vantage.core.config.database import DatabaseTarget, SqliteTarget, database_target
+from vantage.core.config.database import (
+    DatabaseTarget,
+    SqliteTarget,
+    UnsupportedDatabaseURLError,
+    database_target,
+)
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
@@ -142,9 +147,9 @@ def _resolve_database(
     # An empty value is unset, not `Path("")`: that is the current directory,
     # and `--database "$VAR"` with the variable unset does not mean "here".
     if cli_database:
-        return database_target(cli_database)
+        return _target("--database", cli_database)
     if env_database:
-        return database_target(env_database)
+        return _target("VANTAGE_DATABASE", env_database)
     default = default_sqlite_path(home=home, xdg_data_home=xdg_data_home)
     if default is None:
         raise ServerConfigError(
@@ -152,6 +157,13 @@ def _resolve_database(
             "pass --database or set VANTAGE_DATABASE"
         )
     return SqliteTarget(default)
+
+
+def _target(source: str, value: str) -> DatabaseTarget:
+    try:
+        return database_target(value)
+    except UnsupportedDatabaseURLError as exc:
+        raise ServerConfigError(f"{source}: {exc}") from None
 
 
 def default_sqlite_path(*, home: Path | None, xdg_data_home: str | None) -> Path | None:

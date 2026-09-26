@@ -31,7 +31,11 @@ from pytest_vantage.outbox import (
     send_queued,
 )
 
-from vantage.core.config.database import PostgresTarget, database_target
+from vantage.core.config.database import (
+    PostgresTarget,
+    UnsupportedDatabaseURLError,
+    database_target,
+)
 from vantage.local import LocalStoreError, default_database_path
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
@@ -92,7 +96,11 @@ def _database(value: str | None) -> Path:
             return default_database_path()
         except LocalStoreError as exc:
             _refuse(f"{exc}; pass --database")
-    if isinstance(database_target(value), PostgresTarget):
+    try:
+        target = database_target(value)
+    except UnsupportedDatabaseURLError as exc:
+        _refuse(f"--database: {exc}")
+    if isinstance(target, PostgresTarget):
         _refuse(
             "--database names the local SQLite database the queue sits beside; "
             "runs are only ever queued there, never beside a PostgreSQL database"

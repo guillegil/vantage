@@ -20,6 +20,7 @@ kept: on the server, in a local SQLite database, or both.
 from __future__ import annotations
 
 import os
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -212,6 +213,8 @@ MODES = (SERVER_MODE, LOCAL_MODE, BACKUP_MODE, SERVER_AND_LOCAL_MODE)
 
 # The schemes `vantage --database` reads as a PostgreSQL URL, in any case.
 _POSTGRES_SCHEMES = frozenset({"postgresql", "postgres"})
+# An RFC 3986 scheme followed by `//`: a URL, never a file path.
+_URL_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
 def resolve_mode(config: pytest.Config) -> str:
@@ -239,6 +242,12 @@ def _local_database_value(raw: object, option: str, base: Path) -> Path:
         raise VantageConfigError(
             f"{option} must be a SQLite file path, not a PostgreSQL URL: "
             "local storage is SQLite only"
+        )
+    if _URL_PREFIX.match(raw):
+        # Taken as a path, it would create directories named after the URL
+        # and show it, password included, in the session header.
+        raise VantageConfigError(
+            f"{option} must be a SQLite file path, not a {scheme.lower()}:// URL"
         )
     if "\0" in raw:
         raise VantageConfigError(f"{option} must not contain a NUL character")

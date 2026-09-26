@@ -669,8 +669,10 @@ path comes from `default_sqlite_path`, which `vantage.local` calls too, with
 
 Resolution names the database as a target (`core/config/database.py`): a
 `PostgresTarget` for a value whose scheme is `postgresql://` or
-`postgres://`, in any case, and a `SqliteTarget` for any other value and for
-the default. The scheme is lower-cased, because libpq recognises no other
+`postgres://`, in any case, a refusal for any other URL (`mysql://`,
+`sqlite:///`, `postgresql+psycopg://`; taken as a path, it would create
+directories named after the URL and show its password), and a `SqliteTarget`
+for anything else and for the default. The scheme is lower-cased, because libpq recognises no other
 spelling and reads anything else as a `key=value` string, whose parse error
 quotes it whole. A URL is shown only through `redacted`, which replaces the
 password in the user part, and any `password`, `sslpassword` or

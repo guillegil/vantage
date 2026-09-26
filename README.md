@@ -170,8 +170,8 @@ is ignored, and `VANTAGE_DATABASE` is not read). So on that machine
   was started in when typed (or given with `-o`), and from the ini file's
   directory when written there; `~` is expanded. There is no environment
   variable for it.
-- It must be a file path: a `postgresql://` or `postgres://` URL is a usage
-  error, since local storage is SQLite only, and so is a directory.
+- It must be a file path: a `postgresql://` URL, or any other URL, is a
+  usage error, since local storage is SQLite only, and so is a directory.
 - A new directory is created 0700 and a new database 0600, as `vantage`
   creates them. A database made by a build with another schema version is
   left untouched, and the run is not stored there.
@@ -679,6 +679,8 @@ vantage --database postgresql://vantage@db.example:5432/vantage
 VANTAGE_DATABASE=postgresql://vantage@db.example/vantage vantage
 ```
 
+- Any other URL (`mysql://`, `sqlite:///`, `postgresql+psycopg://`) is
+  refused with one line, never taken as a file path.
 - The driver comes with the `postgres` extra (see [Install](#install)).
   Without it, a PostgreSQL URL is refused with one line naming the extra; a
   server storing in SQLite never needs it.

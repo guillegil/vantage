@@ -276,6 +276,12 @@ _INVALID_SETTINGS = {
         [],
         "ERROR: vantage_local_database ini value must be a SQLite file path*",
     ),
+    "another url scheme": (
+        "vantage_mode = local",
+        ["--vantage-local-database=postgresql+psycopg://u:s3cret@db/v"],
+        "ERROR: --vantage-local-database must be a SQLite file path, not a "
+        "postgresql+psycopg:// URL",
+    ),
     "a directory": (
         "vantage_mode = local",
         ["--vantage-local-database=."],
@@ -310,6 +316,7 @@ def test_an_invalid_mode_or_local_database_is_a_usage_error_naming_it(
     assert "INTERNALERROR" not in output
     assert "s3cret" not in output
     result.stderr.fnmatch_lines([error])
+    assert not list(pytester.path.glob("postgres*")), "a URL was taken as a path"
 
 
 @pytest.mark.parametrize("mode", ["local", "server+backup", "server+local"])

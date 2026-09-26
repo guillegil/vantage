@@ -372,6 +372,16 @@ def test_a_postgresql_database_is_refused(
     assert queue.databases == []
 
 
+def test_a_url_of_another_scheme_is_refused_without_repeating_it(
+    queue: _Queue, capsys: pytest.CaptureFixture[str]
+) -> None:
+    err = _refusal(capsys, "--database", "mysql://vantage:s3cret@db.example/vantage")
+
+    assert "SQLite file path" in err
+    assert "s3cret" not in err
+    assert queue.databases == []
+
+
 @pytest.mark.parametrize("timeout", ["0", "-1", "nan", "inf"])
 def test_a_timeout_that_is_not_a_positive_duration_is_refused(
     queue: _Queue, capsys: pytest.CaptureFixture[str], timeout: str

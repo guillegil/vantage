@@ -128,6 +128,19 @@ def _refusal(capsys: pytest.CaptureFixture[str], argv: list[str]) -> str:
 
 
 @pytest.mark.usefixtures("never_served")
+def test_a_database_url_of_another_scheme_is_refused_and_creates_nothing(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    err = _refusal(capsys, ["--database", "postgresql+psycopg://vantage:s3cret@db/vantage"])
+
+    assert err.startswith("vantage: --database: a postgresql+psycopg:// URL")
+    assert "s3cret" not in err
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.usefixtures("never_served")
 @pytest.mark.parametrize(
     ("setting", "flag"),
     [
