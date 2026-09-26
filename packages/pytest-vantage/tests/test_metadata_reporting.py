@@ -19,7 +19,7 @@ from pytest_vantage import budget, recorder, vcs
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.metadata import SessionValue
 from pytest_vantage.recorder import _WORKER_METADATA_KEY, Recorder, WorkerMetadataRelay
-from pytest_vantage.session_metadata import relay
+from pytest_vantage.session_metadata import relay, unrelay
 from vantage_test_server import VantageTestServer
 
 _DECLARATION = "vantage-metadata.json"
@@ -429,6 +429,49 @@ def test_xdist_workers_hand_their_values_to_the_controller(
     ) in output
 
 
+def test_text_xdist_cannot_carry_as_it_came_still_reaches_the_controller(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, sent: list[dict[str, object]]
+) -> None:
+    """xdist carries plain `str` alone, and only when it encodes as UTF-8:
+    a string enum's member, or text decoded with `surrogateescape`, would
+    otherwise crash the worker as it hands over its output."""
+    pytest.importorskip("xdist")
+    pytester.makepyfile(
+        test_workers="""
+import enum
+
+import pytest
+
+
+class Rig(str, enum.Enum):
+    BENCH = "bench"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def dut(vantage_metadata):
+    vantage_metadata[Rig.BENCH] = Rig.BENCH
+    vantage_metadata["serial"] = b"SN-\\xff".decode("utf-8", "surrogateescape")
+
+
+def test_it():
+    assert True
+"""
+    )
+
+    result = pytester.runpytest(
+        "--vantage", f"--vantage-server={vantage_server.address}", "-n", "1"
+    )
+
+    result.assert_outcomes(passed=1)
+    assert "VantageWarning" not in result.stdout.str()
+    values = _metadata_of(sent[-1])["values"]
+    assert isinstance(values, list)
+    assert values == [
+        {"key": "bench", "value": "bench", "status": "captured"},
+        {"key": "serial", "value": "SN-\udcff", "status": "captured"},
+    ]
+
+
 def test_a_worker_hands_over_its_values_as_its_session_finishes() -> None:
     config = SimpleNamespace(workeroutput={})
     worker = WorkerMetadataRelay(config)  # type: ignore[arg-type]
@@ -439,12 +482,11 @@ def test_a_worker_hands_over_its_values_as_its_session_finishes() -> None:
     worker.session_metadata["dna"] = "d" * 2000
     worker.pytest_sessionfinish()
 
-    assert config.workeroutput == {
-        _WORKER_METADATA_KEY: [
-            ["fpga.firmware", "1.1.0", "captured"],
-            ["dna", None, "value_too_large"],
-        ]
-    }
+    assert list(config.workeroutput) == [_WORKER_METADATA_KEY]
+    assert unrelay(config.workeroutput[_WORKER_METADATA_KEY]) == [
+        SessionValue("fpga.firmware", "1.1.0", "captured"),
+        SessionValue("dna", None, "value_too_large"),
+    ]
 
 
 def test_a_worker_reported_twice_is_merged_once(

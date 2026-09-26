@@ -37,6 +37,13 @@ _SUGGESTED_KEY_CHARS = 128
 short key, and comparing two keys takes time quadratic in their length."""
 
 
+def _plain(text: str) -> str:
+    """`text` as a plain `str`. A subclass, such as a string enum's member,
+    keeps only its text: xdist cannot carry the subclass from a worker, and
+    how one formats changes across Python versions."""
+    return str.__str__(text)
+
+
 def _text(value: object) -> str | None:
     """`value` as the text recorded for it, or `None` for no value.
 
@@ -46,15 +53,19 @@ def _text(value: object) -> str | None:
     through `str`, so a version object records as it prints. Raises when
     the value cannot be turned into text.
     """
-    if value is None or isinstance(value, str):
-        return value
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return _plain(value)
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, (list, tuple)):
-        return json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
-    return str(value)
+        text = str(value)
+    elif isinstance(value, (list, tuple)):
+        text = json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = str(value)
+    return _plain(text)
 
 
 def _key_problem(key: str, *, leaf: bool) -> str | None:
@@ -141,7 +152,7 @@ class SessionMetadata(MutableMapping[str, "str | None"]):
             if not isinstance(sub_key, str):
                 self._skip(_not_a_string(prefix, sub_key), "a key must be a string")
                 continue
-            flat_key = sub_key if prefix is None else f"{prefix}.{sub_key}"
+            flat_key = _plain(sub_key) if prefix is None else f"{prefix}.{_plain(sub_key)}"
             try:
                 if isinstance(sub_value, Mapping):
                     problem = _key_problem(flat_key, leaf=False)
@@ -197,20 +208,31 @@ SESSION_METADATA: pytest.StashKey[SessionMetadata] = pytest.StashKey()
 session, on the controller or on an xdist worker."""
 
 
-def relay(entries: Iterable[SessionValue]) -> list[list[str | None]]:
-    """`entries` in the shape xdist can carry from a worker to its
-    controller."""
-    return [[entry.key, entry.value, entry.status] for entry in entries]
+def relay(entries: Iterable[SessionValue]) -> str:
+    """`entries` as the JSON text an xdist worker hands its controller.
+
+    Text, ASCII-escaped, rather than lists of strings: xdist refuses to
+    carry a string that does not encode as UTF-8, and a lone surrogate
+    (text decoded with `surrogateescape`) would crash the worker as its
+    session ends. The escapes carry it through unchanged.
+    """
+    return json.dumps([[entry.key, entry.value, entry.status] for entry in entries])
 
 
 def unrelay(relayed: object) -> list[SessionValue]:
     """The entries `relay` wrote, skipping anything of another shape."""
-    if not isinstance(relayed, (list, tuple)):
+    if not isinstance(relayed, str):
+        return []
+    try:
+        items = json.loads(relayed)
+    except (RecursionError, ValueError):
+        return []
+    if not isinstance(items, list):
         return []
     return [
         SessionValue(item[0], item[1], item[2])
-        for item in relayed
-        if isinstance(item, (list, tuple))
+        for item in items
+        if isinstance(item, list)
         and len(item) == 3
         and isinstance(item[0], str)
         and (item[1] is None or isinstance(item[1], str))

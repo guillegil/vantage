@@ -8,6 +8,8 @@ Pure unit tests; what a real session sends is in
 
 from __future__ import annotations
 
+import enum
+import json
 from collections.abc import Callable
 
 import pytest
@@ -287,12 +289,43 @@ def test_entries_survive_the_relay_and_anything_else_is_dropped() -> None:
         SessionValue("fpga.firmware", "1.1.0", "captured"),
         SessionValue("bench", None, "absent"),
     ]
+    malformed = [["k", 1, "captured"], ["k", "v", "bogus"], ["k"], "k"]
 
     relayed = relay(entries)
 
     assert unrelay(relayed) == entries
     assert unrelay(None) == []
-    assert unrelay([*relayed, ["k", 1, "captured"], ["k", "v", "bogus"], ["k"], "k"]) == entries
+    assert unrelay("{not json") == []
+    assert unrelay('{"k": "v"}') == []
+    assert unrelay(json.dumps([*json.loads(relayed), *malformed])) == entries
+
+
+def test_the_relay_is_ascii_text_that_carries_any_string_back_unchanged() -> None:
+    """xdist refuses a string that does not encode as UTF-8, which a lone
+    surrogate does not."""
+    entries = [SessionValue("serial", "SN-\udcff é", "captured")]
+
+    relayed = relay(entries)
+
+    assert relayed.isascii()
+    assert unrelay(relayed) == entries
+
+
+def test_a_str_subclass_is_stored_as_plain_text_key_and_value() -> None:
+    """A string enum's member keeps its text alone, whatever its `str` or
+    `format` would print: xdist cannot carry the subclass."""
+
+    class Rig(str, enum.Enum):
+        BENCH = "bench"
+
+    store, warned = _recording()
+
+    store[Rig.BENCH] = Rig.BENCH
+    store["fpga"] = {Rig.BENCH: "lab-3"}
+
+    assert list(store.items()) == [("bench", "bench"), ("fpga.bench", "lab-3")]
+    assert all(type(key) is str and type(value) is str for key, value in store.items())
+    assert warned == []
 
 
 def test_the_first_value_received_for_a_key_is_kept_and_a_different_one_noted() -> None:
