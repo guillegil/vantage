@@ -339,15 +339,19 @@ longer after each failure than the one before. For the same reason the
 pool gives up retrying a connection it cannot open after five seconds, not
 psycopg_pool's five minutes: a call made once the server is back has a new
 connection opened at once, rather than waiting for a retry that a long
-outage has spaced out by a minute or more. Every connection sets its
-session to `READ COMMITTED` first, whatever the database or the role
-defaults to: the locks below rely on it, since a `REPEATABLE READ`
-transaction reads the snapshot its first statement took, before the lock
-that statement waited for. A read that must describe one moment -- a run
-page with its metadata horizons, a run's metadata with the check that the
-run exists -- is one statement or runs under `REPEATABLE READ`. A write is
-safe against the same write from another process by construction, never
-by a check first:
+outage has spaced out by a minute or more. The pool opens a connection
+only as a call starts waiting, so when it gives up and a call is still
+waiting, it is asked to open another (`pool.check()`): the calls that
+began while the server was down, which by then hold every worker thread,
+are served as soon as it is back, in the order they came, not when they
+time out. Every connection sets its session to `READ COMMITTED` first,
+whatever the database or the role defaults to: the locks below rely on it,
+since a `REPEATABLE READ` transaction reads the snapshot its first
+statement took, before the lock that statement waited for. A read that
+must describe one moment -- a run page with its metadata horizons, a run's
+metadata with the check that the run exists -- is one statement or runs
+under `REPEATABLE READ`. A write is safe against the same write from
+another process by construction, never by a check first:
 
 - `record_session` is one transaction. The run is inserted with
   `ON CONFLICT (id) DO UPDATE ... WHERE` the stored run has no exit status

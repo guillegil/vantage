@@ -52,10 +52,10 @@ _CONNECT_TIMEOUT_SECONDS = 10
 _POOL_WAIT_SECONDS = 30.0
 
 # How long the pool keeps retrying a connection that failed before it gives
-# up on it; a store call that finds none then has a new one opened at once.
-# Its retries double their interval, so psycopg_pool's own five minutes
-# would leave a server that came back after a minute unused for another,
-# while every call in between waited and failed.
+# up on it, and `_reconnect_for_waiting_calls` starts again. Its retries
+# double their interval, so psycopg_pool's own five minutes would leave a
+# server that came back after a minute unused for another, while every call
+# in between waited and failed.
 _RECONNECT_SECONDS = 5.0
 
 # Every connection's first statements, whatever the database's or the
@@ -194,6 +194,7 @@ def open_pool(url: str, *, max_connections: int) -> ConnectionPool[PgConnection]
         name="vantage",
         timeout=_POOL_WAIT_SECONDS,
         reconnect_timeout=_RECONNECT_SECONDS,
+        reconnect_failed=_reconnect_for_waiting_calls,
     )
     try:
         pool.open(wait=True, timeout=_POOL_WAIT_SECONDS)
@@ -203,6 +204,20 @@ def open_pool(url: str, *, max_connections: int) -> ConnectionPool[PgConnection]
             f"no connection to the database within {_POOL_WAIT_SECONDS:g} seconds"
         ) from None
     return pool
+
+
+def _reconnect_for_waiting_calls(pool: ConnectionPool[Any]) -> None:
+    """Called when the pool gives up retrying a connection: have it open
+    another if a store call is still waiting for one.
+
+    The pool opens a connection for a call only as the call starts waiting.
+    While the server is down every worker thread ends up waiting, so no call
+    starts, and without this the calls waiting when it comes back would be
+    served only once the oldest had timed out. `check` is what asks the pool
+    to open a connection without a new call, and it leaves the waiting calls
+    in the order they came."""
+    if pool.get_stats().get("requests_waiting"):
+        pool.check()
 
 
 @contextmanager

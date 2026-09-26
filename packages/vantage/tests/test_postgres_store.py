@@ -403,9 +403,22 @@ class _Relay:
         self._listener.close()
 
 
+@pytest.fixture
+def relay(postgres_url: str) -> Iterator[tuple[_Relay, str]]:
+    """A relay to the server holding `postgres_url`, and the URL of that
+    database through it."""
+    parts = urlsplit(postgres_url)
+    relay = _Relay(parts.hostname or "127.0.0.1", parts.port or 5432)
+    credentials, at, _address = parts.netloc.rpartition("@")
+    try:
+        yield relay, urlunsplit(parts._replace(netloc=f"{credentials}{at}127.0.0.1:{relay.port}"))
+    finally:
+        relay.close()
+
+
 @pytest.mark.slow
 def test_a_store_serves_again_as_soon_as_the_server_is_back_from_an_outage(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    relay: tuple[_Relay, str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A call made while the server is down sets the pool reconnecting,
     which psycopg_pool spaces out by a doubling interval for five minutes
@@ -413,25 +426,46 @@ def test_a_store_serves_again_as_soon_as_the_server_is_back_from_an_outage(
     about seven seconds after the server is back, and every call until then
     waits for it and fails."""
     monkeypatch.setattr(postgres_connection, "_POOL_WAIT_SECONDS", 2.0)
-    parts = urlsplit(postgres_url)
-    relay = _Relay(parts.hostname or "127.0.0.1", parts.port or 5432)
-    credentials, at, _address = parts.netloc.rpartition("@")
-    store = PostgresExecutionStore(
-        urlunsplit(parts._replace(netloc=f"{credentials}{at}127.0.0.1:{relay.port}"))
-    )
+    server, url = relay
+    store = PostgresExecutionStore(url)
     try:
         assert store.count_executions() == 0
-        relay.down()
+        server.down()
         outage_began = time.monotonic()
         with pytest.raises(psycopg.OperationalError):
             store.count_executions()
         time.sleep(max(0.0, outage_began + 8 - time.monotonic()))
-        relay.up()
+        server.up()
 
         assert store.count_executions() == 0
     finally:
         store.close()
-        relay.close()
+
+
+@pytest.mark.slow
+def test_a_call_waiting_since_before_the_server_came_back_is_served_once_it_is(
+    relay: tuple[_Relay, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pool opens a connection when a call starts waiting and has none,
+    and gives up retrying it after a few seconds. A call still waiting then
+    -- as every call is while the server is down, until each worker thread
+    is waiting -- must still get one once the server is back, not only when
+    another call starts."""
+    monkeypatch.setattr(postgres_connection, "_POOL_WAIT_SECONDS", 12.0)
+    server, url = relay
+    store = PostgresExecutionStore(url)
+    try:
+        assert store.count_executions() == 0
+        server.down()
+        outage_began = time.monotonic()
+        with ThreadPoolExecutor(1) as pool:
+            waiting = pool.submit(store.count_executions)
+            time.sleep(max(0.0, outage_began + 6.5 - time.monotonic()))
+            server.up()
+
+            assert waiting.result() == 0
+    finally:
+        store.close()
 
 
 # -- transactions the server aborts --
