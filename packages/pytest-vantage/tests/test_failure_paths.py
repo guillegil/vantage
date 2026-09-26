@@ -1403,7 +1403,9 @@ def test_hung_git_does_not_delay_session(
     session in this process, so a half-second budget stands in for the
     five-second one without waiting it out.
     """
-    monkeypatch.setattr(vcs, "_CAPTURE_BUDGET_SECONDS", 0.5)
+    real_budget = vcs._CAPTURE_BUDGET_SECONDS
+    budget = 0.5
+    monkeypatch.setattr(vcs, "_CAPTURE_BUDGET_SECONDS", budget)
     shim_dir = pytester.path / "shim"
     shim_dir.mkdir()
     shim_path = shim_dir / "git"
@@ -1423,9 +1425,13 @@ def test_hung_git_does_not_delay_session(
     elapsed = time.monotonic() - started
 
     result.assert_outcomes(passed=1)
-    # The whole-capture budget, not the shim's 30 seconds, plus slack for
-    # the rest of a one-test session.
-    assert elapsed < vcs._CAPTURE_BUDGET_SECONDS + 5.0
+    # No shorter than the patched budget: the capture ran the fake git and
+    # waited the budget out, rather than finding no git and returning at
+    # once. Shorter than the real budget: a capture that waited on the real
+    # budget -- the patch no longer reaching it -- spends all of it before
+    # the session goes on, while the patched one leaves 4.5 seconds for
+    # the rest of a one-test session on a loaded machine.
+    assert budget <= elapsed < real_budget
     assert sent, "no report captured -- the session never reached the finish-write"
     finish_report = sent[-1]
     assert finish_report["vcs"] == {
