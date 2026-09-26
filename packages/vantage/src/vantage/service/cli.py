@@ -1,9 +1,11 @@
-"""`vantage` -- resolve configuration, fail fast, then serve.
+"""`vantage` -- resolve configuration, fail fast, then serve; and
+`vantage push` (`service/push.py`), which sends the runs the plugin queued.
 
-**Serving needs the `server` extra.** FastAPI and uvicorn are imported only
-once the arguments ask to serve, so `--help` works in an install without
-them, and serving without them is one line naming the extra -- checked
-before anything is bound or created.
+**Serving needs the `server` extra; nothing else does.** FastAPI and
+uvicorn are imported only once the arguments ask to serve, so `vantage
+push` and `--help` work in an install without them, and serving without
+them is one line naming the extra -- checked before anything is bound or
+created.
 
 **Path check at startup.** A SQLite database directory that exists but
 cannot be written to fails here, before the server accepts a request -- not
@@ -118,7 +120,14 @@ def warn_if_bound_wide(host: str) -> None:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="vantage", description="Run the vantage server.")
+    parser = argparse.ArgumentParser(
+        prog="vantage",
+        description="Run the vantage server.",
+        epilog=(
+            "vantage push sends the runs pytest-vantage queued for a server it could not "
+            "reach; vantage push --help says how."
+        ),
+    )
     parser.add_argument(
         "--database",
         default=None,
@@ -296,9 +305,16 @@ def _serve(app: FastAPI, listener: socket.socket, config: ServerConfig) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Resolve configuration, refuse anything unusable, warn on a wide bind,
+    """`vantage push ...` sends the queued runs. Anything else serves:
+    resolve configuration, refuse anything unusable, warn on a wide bind,
     serve, then close."""
-    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments[:1] == ["push"]:
+        from vantage.service.push import push
+
+        raise SystemExit(push(arguments[1:]))
+
+    args = _parse_args(arguments)
     _require_the_server_extra()
     from vantage.service.app import create_app
 
