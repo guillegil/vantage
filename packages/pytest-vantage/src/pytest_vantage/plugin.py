@@ -210,14 +210,15 @@ def _failure_text_capture_requested(config: pytest.Config) -> bool:
 
 
 def _metadata_capture_requested(config: pytest.Config) -> bool:
-    """Whether `Recorder` should attempt to read the metadata declaration
-    for this session: the same gate as `_failure_text_capture_requested`,
-    for the `--vantage-metadata` flag, so a committed configuration file can
-    never enable a filesystem read.
+    """Whether `Recorder` should read the files the metadata declaration
+    names: the same gate as `_failure_text_capture_requested`, for the
+    `--vantage-metadata` flag, so a committed configuration file can never
+    enable reading them. The declaration itself is read in any recorded
+    session, for the keys it declares.
 
     Called only on the controller: no `Recorder` is ever constructed on a
-    worker, so the declaration is read once per session regardless of
-    worker count.
+    worker, so the files are read once per session regardless of worker
+    count.
     """
     return _activation_requested(config) and _opt_in(config, "vantage_metadata")
 

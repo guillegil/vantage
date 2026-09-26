@@ -15,7 +15,6 @@ import pytest
 from pytest_vantage import metadata
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.budget import encoded_cost
-from pytest_vantage.recorder import Recorder
 
 
 def _config() -> pytest.Config:
@@ -154,8 +153,7 @@ def test_an_accepted_section_stays_within_its_budget_on_the_wire(tmp_path: Path,
     assert section is not None
     # The budget was actually reached, not merely never approached.
     assert {"captured", "over_budget"} <= {f.status for f in section.files}
-    wire = Recorder._metadata_section(SimpleNamespace(_metadata=section))  # type: ignore[arg-type]
-    assert encoded_cost(wire) <= metadata.MAX_METADATA_SECTION_BYTES
+    assert encoded_cost(metadata.wire_section(section)) <= metadata.MAX_METADATA_SECTION_BYTES
 
 
 def test_a_non_utf8_file_is_marked_not_text_before_json_encoding(tmp_path: Path) -> None:
@@ -273,3 +271,123 @@ def test_multiple_keys_on_one_captured_file_all_appear_on_its_entry(tmp_path: Pa
     assert section is not None
     assert section.files[0].keys == ("firmware_version", "board_revision")
     assert section.files[0].status == "captured"
+
+
+# --- capture_metadata: the declared keys, with and without the files --------
+
+
+def test_declared_keys_are_captured_whether_or_not_the_files_are_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without `--vantage-metadata` the declaration still says which keys
+    exist, including those of its files, but not one file is opened."""
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "f.json").write_text('{"region": "eu-west-1"}')
+    (root / metadata.DECLARATION_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "keys": {"bench": {"name": "Test bench"}},
+                "files": [{"path": "f.json", "format": "json", "keys": ["region", "zone"]}],
+            }
+        )
+    )
+    opened: list[str] = []
+    real_read = metadata._read_declared_file
+
+    def _spy(rootpath: Path, declared_path: str) -> tuple[str, str | None]:
+        opened.append(declared_path)
+        return real_read(rootpath, declared_path)
+
+    monkeypatch.setattr(metadata, "_read_declared_file", _spy)
+
+    unread = metadata.capture_metadata(_config(), root, read_files=False)
+    assert opened == []
+    read = metadata.capture_metadata(_config(), root)
+
+    assert opened == ["f.json"]
+    keys = (metadata.DeclaredKey("bench", "Test bench"),)
+    assert unread == metadata.MetadataSection(
+        declaration=metadata.DECLARATION_FILENAME,
+        files=(),
+        keys=keys,
+        unread_file_keys=("region", "zone"),
+    )
+    assert read is not None
+    assert read.keys == keys
+    assert read.unread_file_keys == ()
+    assert [entry.status for entry in read.files] == ["captured"]
+
+
+def test_a_missing_declaration_is_silent_when_the_files_are_not_read(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+
+    assert metadata.capture_metadata(_config(), root, read_files=False) is None
+    assert not any(issubclass(w.category, VantageWarning) for w in recwarn.list)
+
+
+# --- wire_section --------------------------------------------------------------
+
+
+def _section(
+    *,
+    files: tuple[metadata.CapturedFile, ...] = (),
+    keys: tuple[metadata.DeclaredKey, ...] = (),
+    unread_file_keys: tuple[str, ...] = (),
+) -> metadata.MetadataSection:
+    return metadata.MetadataSection(
+        declaration=metadata.DECLARATION_FILENAME,
+        files=files,
+        keys=keys,
+        unread_file_keys=unread_file_keys,
+    )
+
+
+def test_a_section_that_says_nothing_is_not_sent() -> None:
+    """Keys of unread files alone have nothing to record."""
+    assert metadata.wire_section(None) is None
+    assert metadata.wire_section(_section(unread_file_keys=("region",))) is None
+
+
+def test_the_wire_section_leaves_out_empty_keys() -> None:
+    """A report that declares no key has the shape a server that predates
+    `keys` accepts."""
+    captured = metadata.CapturedFile("f.json", "json", "captured", ("region",), "{}")
+
+    wire = metadata.wire_section(_section(files=(captured,)))
+
+    assert wire == {
+        "declaration": metadata.DECLARATION_FILENAME,
+        "files": [
+            {
+                "path": "f.json",
+                "format": "json",
+                "status": "captured",
+                "keys": ["region"],
+                "content": "{}",
+            }
+        ],
+    }
+
+
+def test_the_wire_section_carries_the_declared_keys_with_their_names() -> None:
+    section = _section(
+        keys=(
+            metadata.DeclaredKey("fpga.firmware", "FPGA firmware version"),
+            metadata.DeclaredKey("bench"),
+        ),
+        unread_file_keys=("region",),
+    )
+
+    assert metadata.wire_section(section) == {
+        "declaration": metadata.DECLARATION_FILENAME,
+        "keys": {
+            "fpga.firmware": {"name": "FPGA firmware version"},
+            "bench": {"name": None},
+        },
+        "files": [],
+    }

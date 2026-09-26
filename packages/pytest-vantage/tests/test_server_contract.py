@@ -173,7 +173,7 @@ def test_every_path_shape_the_server_drops_is_refused_with_a_warning(
     _declare(root, ["top.json", shape])
     config: pytest.Config = SimpleNamespace()  # type: ignore[assignment]
 
-    with pytest.warns(VantageWarning, match="metadata will not be captured"):
+    with pytest.warns(VantageWarning, match="the declaration is ignored"):
         assert metadata.capture_metadata(config, root) is None
 
 

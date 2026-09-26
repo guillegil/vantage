@@ -164,7 +164,7 @@ def test_the_declaration_is_read_only_up_to_its_byte_bound(
 
     result = metadata.read_declaration(_config(), root)
 
-    assert (result == ()) is accepted
+    assert (result == metadata.Declaration()) is accepted
     assert len(_metadata_warnings(recwarn)) == (0 if accepted else 1)
 
 
@@ -545,10 +545,14 @@ def test_a_well_formed_declaration_is_read_with_no_warning(
 
     result = metadata.read_declaration(_config(), root)
 
-    assert result == (
-        metadata.DeclaredFile(
-            path="config/firmware.yaml", format="yaml", keys=("firmware_version", "board_revision")
-        ),
+    assert result == metadata.Declaration(
+        files=(
+            metadata.DeclaredFile(
+                path="config/firmware.yaml",
+                format="yaml",
+                keys=("firmware_version", "board_revision"),
+            ),
+        )
     )
     assert len(_metadata_warnings(recwarn)) == 0
 
@@ -565,7 +569,9 @@ def test_a_declaration_saved_with_a_utf8_bom_is_accepted(
 
     result = metadata.read_declaration(_config(), root)
 
-    assert result == (metadata.DeclaredFile(path="f.json", format="json", keys=("k",)),)
+    assert result == metadata.Declaration(
+        files=(metadata.DeclaredFile(path="f.json", format="json", keys=("k",)),)
+    )
     assert len(_metadata_warnings(recwarn)) == 0
 
 
@@ -578,5 +584,179 @@ def test_an_empty_files_list_is_accepted_with_no_warning(
 
     result = metadata.read_declaration(_config(), root)
 
-    assert result == ()
+    assert result == metadata.Declaration()
     assert len(_metadata_warnings(recwarn)) == 0
+
+
+# --- read_declaration: the keys section --------------------------------------
+
+
+def _declare(root: Path, document: dict[str, object]) -> None:
+    root.mkdir(exist_ok=True)
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, **document}))
+
+
+def test_declared_keys_are_read_in_order_with_their_names_and_files_are_optional(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    root = tmp_path / "project"
+    _declare(
+        root,
+        {
+            "keys": {
+                "fpga.firmware": {"name": "FPGA firmware version"},
+                "bench": {},
+                "fmc.hardware": {"name": None},
+            }
+        },
+    )
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result == metadata.Declaration(
+        keys=(
+            metadata.DeclaredKey("fpga.firmware", "FPGA firmware version"),
+            metadata.DeclaredKey("bench"),
+            metadata.DeclaredKey("fmc.hardware"),
+        )
+    )
+    assert _metadata_warnings(recwarn) == []
+
+
+def test_a_declared_key_may_also_be_read_from_a_file_to_give_it_a_name(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    files = [{"path": "f.json", "format": "json", "keys": ["region"]}]
+    _declare(root, {"keys": {"region": {"name": "Deployment region"}}, "files": files})
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is not None
+    assert result.keys == (metadata.DeclaredKey("region", "Deployment region"),)
+    assert result.files == (metadata.DeclaredFile("f.json", "json", ("region",)),)
+
+
+@pytest.mark.parametrize(
+    ("keys", "complaint"),
+    [
+        (["fpga.firmware"], '"keys" must be an object'),
+        ({"": {}}, "an empty key"),
+        ({"k" * (metadata.MAX_DECLARED_KEY_CHARS + 1): {}}, "longer than"),
+        ({"bench": "lab-3"}, "'bench' with a malformed entry"),
+        ({"bench": {"nmae": "Bench"}}, "'bench' with the unknown field 'nmae'"),
+        ({"bench": {"name": 3}}, "names the key 'bench'"),
+        ({"bench": {"name": "n" * (metadata.MAX_KEY_NAME_CHARS + 1)}}, "names the key 'bench'"),
+    ],
+    ids=[
+        "not_an_object",
+        "empty_key",
+        "key_too_long",
+        "entry_not_an_object",
+        "unknown_field",
+        "name_not_text",
+        "name_too_long",
+    ],
+)
+def test_a_malformed_keys_section_refuses_the_declaration_with_one_warning(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, keys: object, complaint: str
+) -> None:
+    root = tmp_path / "project"
+    files = [{"path": "f.json", "format": "json", "keys": ["region"]}]
+    _declare(root, {"keys": keys, "files": files})
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    (warned,) = _metadata_warnings(recwarn)
+    assert complaint in str(warned.message)
+    assert str(warned.message).endswith("the declaration is ignored")
+
+
+def test_a_name_at_its_bound_is_accepted(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    name = "n" * metadata.MAX_KEY_NAME_CHARS
+    _declare(root, {"keys": {"bench": {"name": name}}})
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result == metadata.Declaration(keys=(metadata.DeclaredKey("bench", name),))
+
+
+def test_a_key_declared_twice_in_the_keys_section_refuses_the_declaration(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    """A JSON object may repeat a name, and a plain decoder keeps only the
+    last; the declaration is refused instead of losing one name silently."""
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / metadata.DECLARATION_FILENAME).write_text(
+        '{"version": 1, "keys": {"bench": {"name": "Bench"}, "bench": {"name": "Rig"}}}'
+    )
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    (warned,) = _metadata_warnings(recwarn)
+    assert "the key 'bench' more than once" in str(warned.message)
+
+
+def test_the_keys_section_and_the_files_together_count_against_the_key_bound(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key declared in both places counts once."""
+    monkeypatch.setattr(metadata, "MAX_METADATA_ENTRIES", 3)
+    root = tmp_path / "project"
+    files = [{"path": "f.json", "format": "json", "keys": ["a", "b"]}]
+    _declare(root, {"keys": {"a": {}, "c": {}}, "files": files})
+    assert metadata.read_declaration(_config(), root) is not None
+
+    _declare(root, {"keys": {"c": {}, "d": {}}, "files": files})
+
+    assert metadata.read_declaration(_config(), root) is None
+    (warned,) = _metadata_warnings(recwarn)
+    assert "more than 3 keys in total" in str(warned.message)
+
+
+def test_the_keys_section_is_charged_to_the_metadata_budget(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # 200 keys with names at their bound: within every per-item bound, but
+    # hundreds of bytes each on every report.
+    root = tmp_path / "project"
+    keys = {
+        f"{i:03d}.key": {"name": "n" * metadata.MAX_KEY_NAME_CHARS}
+        for i in range(metadata.MAX_METADATA_ENTRIES)
+    }
+    _declare(root, {"keys": keys})
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    (warned,) = _metadata_warnings(recwarn)
+    assert "budget" in str(warned.message)
+
+
+def test_a_missing_declaration_is_silent_when_no_file_was_asked_for(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    """Declaring keys is optional; only `--vantage-metadata` asks for the
+    declaration, and its absence is worth a warning only then."""
+    root = tmp_path / "project"
+    root.mkdir()
+
+    result = metadata.read_declaration(_config(), root, warn_if_missing=False)
+
+    assert result is None
+    assert _metadata_warnings(recwarn) == []
+
+
+def test_a_broken_declaration_warns_even_when_no_file_was_asked_for(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / metadata.DECLARATION_FILENAME).write_text("{not json")
+
+    result = metadata.read_declaration(_config(), root, warn_if_missing=False)
+
+    assert result is None
+    assert len(_metadata_warnings(recwarn)) == 1

@@ -77,18 +77,23 @@ def _capture_vcs(rootpath: Path) -> vcs.VcsSnapshot:
         return vcs.VcsSnapshot(warning=_VCS_CAPTURE_ESCAPED_WARNING)
 
 
-def _capture_metadata(config: pytest.Config, rootpath: Path) -> metadata.MetadataSection | None:
-    """Capture the declared metadata, or `None` after one warning on any error.
+def _capture_metadata(
+    config: pytest.Config, rootpath: Path, *, read_files: bool
+) -> metadata.MetadataSection | None:
+    """Read the declaration, and the files it names if `read_files`, or
+    `None` after one warning on any error.
 
     The same net as `_capture_vcs`: `metadata.capture_metadata` warns about
     every problem it expects and never raises on its own, and anything that
-    escapes it costs the run its metadata, never its recording.
+    escapes it costs the run its declaration, never its recording.
     """
     try:
-        return metadata.capture_metadata(config, rootpath)
+        return metadata.capture_metadata(config, rootpath, read_files=read_files)
     except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
         warn(
-            config, f"vantage: error while capturing metadata: {exc}, metadata will not be captured"
+            config,
+            f"vantage: error while reading {metadata.DECLARATION_FILENAME}: {exc}, "
+            "the declaration is ignored",
         )
         return None
 
@@ -175,14 +180,15 @@ class Recorder:
       otherwise. `_lifecycle_problem` is the probe's reason, for the one
       warning that says so.
     - `_vcs` and `_metadata` are captured once here and never re-read, so
-      both reports describe the same repository state and the same metadata.
-      Each capture warns at most once and never raises: `pytest_configure`
-      leaves the session unrecorded when construction fails, and a failure
-      in either capture must cost the run that section alone. No `Recorder`
-      is constructed on an xdist worker, so each happens once per session.
-      `_metadata` is `None` when `--vantage-metadata` was not passed, the
-      declaration is missing or invalid, or capturing it failed; the
-      `metadata` key is then omitted from both reports.
+      every report describes the same repository state and the same
+      declaration. Each capture warns at most once and never raises:
+      `pytest_configure` leaves the session unrecorded when construction
+      fails, and a failure in either capture must cost the run that section
+      alone. No `Recorder` is constructed on an xdist worker, so each
+      happens once per session. The declaration is read in every recorded
+      session, the files it names only when `metadata_requested`
+      (`--vantage-metadata`); `_metadata` is `None` when the declaration is
+      missing or invalid, or reading it failed.
     """
 
     def __init__(
@@ -217,9 +223,9 @@ class Recorder:
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
             warn(config, f"vantage: {self._vcs.warning}")
-        self._metadata: metadata.MetadataSection | None = None
-        if metadata_requested:
-            self._metadata = _capture_metadata(config, Path(str(config.rootpath)))
+        self._metadata = _capture_metadata(
+            config, Path(str(config.rootpath)), read_files=metadata_requested
+        )
 
     def _vcs_section(self) -> dict[str, object]:
         """Serialises the snapshot captured in `__init__`."""
@@ -231,33 +237,13 @@ class Recorder:
             "root": self._vcs.root,
         }
 
-    def _metadata_section(self) -> dict[str, object] | None:
-        """Serialises the metadata captured in `__init__`, or `None` when there
-        is none -- the caller then omits the `metadata` key rather than
-        sending it as `null`.
-        """
-        if self._metadata is None:
-            return None
-        return {
-            "declaration": self._metadata.declaration,
-            "files": [
-                {
-                    "path": entry.path,
-                    "format": entry.format,
-                    "status": entry.status,
-                    "keys": list(entry.keys),
-                    "content": entry.content,
-                }
-                for entry in self._metadata.files
-            ],
-        }
-
     def _sections(self) -> dict[str, object]:
         """The report sections every report of the session carries alike:
-        `vcs`, and `metadata` when it was captured.
+        `vcs`, and `metadata` when it says anything. The `metadata` key is
+        omitted rather than sent as `null`.
         """
         sections: dict[str, object] = {"vcs": self._vcs_section()}
-        metadata_section = self._metadata_section()
+        metadata_section = metadata.wire_section(self._metadata)
         if metadata_section is not None:
             sections["metadata"] = metadata_section
         return sections
