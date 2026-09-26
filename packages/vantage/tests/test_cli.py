@@ -17,6 +17,10 @@ it the way a service manager does.
 from __future__ import annotations
 
 import contextlib
+import importlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
 import json
 import logging
 import os
@@ -26,14 +30,16 @@ import sqlite3
 import subprocess
 import sys
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 import uvicorn
 from memory_store import InMemoryExecutionStore
@@ -44,6 +50,7 @@ from vantage.service.cli import (
     ensure_database_directory_writable,
     warn_if_bound_wide,
 )
+from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
 # Root ignores directory mode bits; Windows ACLs need a different check.
@@ -509,3 +516,213 @@ def test_create_app_refuses_a_grace_period_it_cannot_apply(seconds: float) -> No
     positive would present every unfinished run as abandoned."""
     with pytest.raises((ValueError, OverflowError)):
         create_app(InMemoryExecutionStore(), grace_period_seconds=seconds)
+
+
+# --- PostgreSQL -----------------------------------------------------------------
+#
+# `main` imports `vantage.storage.postgres` by name, only for a PostgreSQL URL.
+# These tests put a stand-in module under that name, so they check what
+# `main` does with the adapter's constructor and its failures, not the
+# adapter itself.
+
+_ADAPTER = "vantage.storage.postgres"
+# Made up, to look for in what `main` prints; percent-encoded, as libpq
+# requires of a `?`.
+_PASSWORD = "s3cr%3Ft"  # noqa: S105
+_DECODED_PASSWORD = "s3cr?t"  # noqa: S105
+_URL = f"postgresql://vantage:{_PASSWORD}@db.example:5432/vantage"
+_SHOWN = "postgresql://vantage:***@db.example:5432/vantage"
+
+
+class _StandInAdapter:
+    """What `main` finds as `vantage.storage.postgres`: its
+    `PostgresExecutionStore` records each URL it is given and opens an
+    in-memory store, or raises `failure`."""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+        self.stores: list[InMemoryExecutionStore] = []
+        self.failure: Callable[[str], None] | None = None
+
+    def open(self, url: str, *, max_connections: int = 10) -> InMemoryExecutionStore:
+        self.urls.append(url)
+        if self.failure is not None:
+            self.failure(url)
+        store = InMemoryExecutionStore()
+        self.stores.append(store)
+        return store
+
+
+@pytest.fixture
+def postgres_adapter(monkeypatch: pytest.MonkeyPatch) -> _StandInAdapter:
+    adapter = _StandInAdapter()
+    module = types.ModuleType(_ADAPTER)
+    setattr(module, "PostgresExecutionStore", adapter.open)
+    monkeypatch.setitem(sys.modules, _ADAPTER, module)
+    return adapter
+
+
+def test_a_postgresql_url_opens_the_postgresql_adapter_and_serves_it(
+    served: dict[str, Any], postgres_adapter: _StandInAdapter
+) -> None:
+    cli.main(["--database", _URL])
+
+    assert postgres_adapter.urls == [_URL]
+    assert served["app"].state.store is postgres_adapter.stores[0]
+
+
+def test_vantage_database_can_name_a_postgresql_database(
+    monkeypatch: pytest.MonkeyPatch, served: dict[str, Any], postgres_adapter: _StandInAdapter
+) -> None:
+    monkeypatch.setenv("VANTAGE_DATABASE", _URL)
+
+    cli.main([])
+
+    assert postgres_adapter.urls == [_URL]
+
+
+@pytest.mark.usefixtures("served", "postgres_adapter")
+def test_a_postgresql_start_creates_nothing_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Taken for a path, the URL would become directories under the
+    working directory, beginning with `postgresql:`."""
+    monkeypatch.chdir(tmp_path)
+
+    cli.main(["--database", _URL])
+
+    assert list(tmp_path.iterdir()) == []
+
+
+class _FailingImport(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    """Finds `vantage.storage.postgres` before anything else does, and fails
+    to import it the way `fail` does."""
+
+    def __init__(self, fail: Callable[[], object]) -> None:
+        self._fail = fail
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None,
+        target: types.ModuleType | None = None,
+    ) -> importlib.machinery.ModuleSpec | None:
+        return importlib.util.spec_from_loader(fullname, self) if fullname == _ADAPTER else None
+
+    def create_module(self, spec: importlib.machinery.ModuleSpec) -> None:
+        return None
+
+    def exec_module(self, module: types.ModuleType) -> None:
+        self._fail()
+
+
+def _adapter_import_fails(monkeypatch: pytest.MonkeyPatch, fail: Callable[[], object]) -> None:
+    monkeypatch.delitem(sys.modules, _ADAPTER, raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_FailingImport(fail), *sys.meta_path])
+
+
+def _raise_in_psycopg() -> None:
+    """How psycopg without a libpq fails: a plain `ImportError` raised in
+    its own `psycopg.pq` module."""
+    code = compile('raise ImportError("no pq wrapper available.")', "psycopg/pq.py", "exec")
+    exec(code, {"__name__": "psycopg.pq"})  # noqa: S102
+
+
+@pytest.mark.usefixtures("never_served")
+@pytest.mark.parametrize("driver", ["psycopg", "psycopg_pool", "libpq"])
+def test_a_missing_driver_is_one_line_naming_the_extra(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, driver: str
+) -> None:
+    if driver == "libpq":
+        _adapter_import_fails(monkeypatch, _raise_in_psycopg)
+    else:
+        monkeypatch.setitem(sys.modules, driver, None)
+        _adapter_import_fails(monkeypatch, lambda: importlib.import_module(driver))
+
+    err = _refusal(capsys, ["--database", _URL])
+
+    assert err == "vantage: PostgreSQL needs the postgres extra: pip install 'vantage[postgres]'\n"
+
+
+@pytest.mark.usefixtures("never_served")
+def test_an_import_failure_that_is_not_the_driver_is_not_blamed_on_the_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A broken installation of the adapter itself is a fault to see in
+    full, not advice to install what is already there."""
+
+    def _fail() -> None:
+        raise ImportError("cannot import name 'Gone'", name="vantage.storage.version")
+
+    _adapter_import_fails(monkeypatch, _fail)
+
+    with pytest.raises(ImportError, match="Gone"):
+        cli.main(["--database", _URL])
+
+
+def _raising(exc: Exception) -> Callable[[str], None]:
+    def _fail(url: str) -> None:
+        raise exc
+
+    return _fail
+
+
+_REFUSALS = {
+    "connection": (
+        RuntimeError(f"connection to {_URL} failed:\n\tpassword {_DECODED_PASSWORD!r} refused"),
+        f"vantage: cannot open the database at {_SHOWN}: connection to {_SHOWN} failed: "
+        "password '***' refused\n",
+    ),
+    "schema-version": (
+        SchemaVersionError("schema_version is 5, but this build requires schema_version 6"),
+        f"vantage: {_SHOWN}: schema_version is 5, but this build requires schema_version 6\n",
+    ),
+    "schema-version-naming-the-url": (
+        SchemaVersionError(f"{_SHOWN} holds tables but no schema_version stamp"),
+        f"vantage: {_SHOWN} holds tables but no schema_version stamp\n",
+    ),
+    "no-message": (
+        RuntimeError(),
+        f"vantage: cannot open the database at {_SHOWN}: RuntimeError\n",
+    ),
+}
+
+
+@pytest.mark.usefixtures("never_served")
+@pytest.mark.parametrize(("failure", "line"), _REFUSALS.values(), ids=_REFUSALS)
+def test_a_database_that_cannot_be_used_is_one_line_naming_the_redacted_url(
+    capsys: pytest.CaptureFixture[str],
+    postgres_adapter: _StandInAdapter,
+    failure: Exception,
+    line: str,
+) -> None:
+    postgres_adapter.failure = _raising(failure)
+
+    assert _refusal(capsys, ["--database", _URL]) == line
+
+
+def _connect(url: str) -> None:
+    """The real driver's failure, before any store would be built."""
+    psycopg.connect(url, connect_timeout=5).close()
+    raise AssertionError(f"something answered at {url}")
+
+
+@pytest.mark.usefixtures("never_served")
+@pytest.mark.parametrize("failure", ["bad-escape", "refused"])
+def test_the_drivers_own_message_is_quoted_on_one_line_without_the_password(
+    capsys: pytest.CaptureFixture[str], postgres_adapter: _StandInAdapter, failure: str
+) -> None:
+    """libpq quotes a percent-escape it cannot decode, password and all,
+    and spreads a refused connection over two lines."""
+    port = _free_loopback_port()
+    password = "s3cr%zzt" if failure == "bad-escape" else "s3cret"
+    url = f"postgresql://vantage:{password}@127.0.0.1:{port}/vantage"
+    postgres_adapter.failure = _connect
+
+    err = _refusal(capsys, ["--database", url])
+
+    assert err.startswith(
+        f"vantage: cannot open the database at postgresql://vantage:***@127.0.0.1:{port}/vantage: "
+    )
+    assert password not in err
+    assert ("percent-encoded" if failure == "bad-escape" else "Connection refused") in err

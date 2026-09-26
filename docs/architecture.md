@@ -71,8 +71,8 @@ storage on the core, and the core on nothing but the standard library.
   validate what arrives; the routes convert a validated report into core
   dataclasses before calling the store, so no Pydantic type reaches the core
   or storage. `create_app(store)` takes the store as a parameter: `cli.py` is
-  the one place that builds a `SqliteExecutionStore`, and tests pass their
-  own.
+  the one place that builds one, a `SqliteExecutionStore` or a
+  `PostgresExecutionStore`, and tests pass their own.
 
 Two conventions follow from Python and pytest rather than from the design.
 Vocabularies are `frozenset`s of plain `str`, never an `Enum`: a `str` enum
@@ -391,7 +391,7 @@ the whole text.
 
 | Setting | Flag | Environment | Default |
 | --- | --- | --- | --- |
-| Database | `--database` | `VANTAGE_DATABASE` | `$XDG_DATA_HOME/vantage/vantage.db`, else `~/.local/share/vantage/vantage.db` |
+| Database: a SQLite path or a PostgreSQL URL | `--database` | `VANTAGE_DATABASE` | `$XDG_DATA_HOME/vantage/vantage.db`, else `~/.local/share/vantage/vantage.db` |
 | Host | `--host` | none | `127.0.0.1` |
 | Port | `--port` | none | `8765` |
 | Grace period | `--grace-period` | none | 900 seconds |
@@ -400,16 +400,38 @@ A flag beats the environment, which beats the default. An empty
 `--database`, `VANTAGE_DATABASE` or `XDG_DATA_HOME` is unset and a relative
 `XDG_DATA_HOME` is ignored; an empty `--host` is refused instead, because
 the event loop would bind `""` as every interface. Resolution
-(`core/config/resolution.py`) is a pure function with no filesystem access,
-so asking where the database would go never creates it, and it rejects an
-unusable value (an empty host, a port outside 1 to 65535, a grace period
-that is not positive or exceeds 365 days) before anything opens. A port or
-grace period that is not a number never reaches it: `argparse` refuses it
-with its usage message and exit status 2. `service/cli.py` acts on the
-result: it checks that an existing database directory is writable, opens the
-store, refuses any failure with one `vantage: ...` line and exit status 1,
-warns about a bind other than `127.0.0.1` once the database is open, and
-closes the store on shutdown.
+(`core/config/resolution.py`) is a pure function with no filesystem or
+network access, so asking where the database would go never creates it, and
+it rejects an unusable value (an empty host, a port outside 1 to 65535, a
+grace period that is not positive or exceeds 365 days) before anything
+opens. A port or grace period that is not a number never reaches it:
+`argparse` refuses it with its usage message and exit status 2.
+
+Resolution names the database as a target (`core/config/database.py`): a
+`PostgresTarget` for a value whose scheme is `postgresql://` or
+`postgres://`, in any case, and a `SqliteTarget` for any other value and for
+the default. The scheme is lower-cased, because libpq recognises no other
+spelling and reads anything else as a `key=value` string, whose parse error
+quotes it whole. A URL is shown only through `redacted`, which replaces the
+password in the user part and any `password=` query parameter with `***`;
+since an unencoded password may hold `@`, `/`, `?` or `#`, everything
+between the first `:` and the last `@` counts as the password. A
+`PostgresTarget`'s `repr` is redacted too.
+
+`service/cli.py` acts on the result. For SQLite it checks that an existing
+database directory is writable. For PostgreSQL it imports
+`vantage.storage.postgres` by name, so no other start loads the adapter or
+its driver, and a driver that is not installed (psycopg or psycopg-pool
+absent, or psycopg without a libpq) is refused with one line naming the
+`postgres` extra. It then opens the store, refuses any failure with one
+`vantage: ...` line and exit status 1, warns about a bind other than
+`127.0.0.1` once the database is open, and closes the store on shutdown. A
+PostgreSQL refusal names the redacted URL, and quotes the driver's message
+on one line with the URL's password taken out by `redact_message`, as
+written and percent-decoded: libpq quotes a percent-escape it cannot
+decode, and takes what follows an unencoded `@` for a host it then names.
+Credentials beyond the URL are libpq's own (`PGPASSWORD`, `~/.pgpass`, the
+other `PG*` variables); the command adds no flag for them.
 
 The server takes configuration from the environment while the plugin's
 switches refuse it, because the two are started differently: the server is

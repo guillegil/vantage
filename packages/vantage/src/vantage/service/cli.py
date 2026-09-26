@@ -1,20 +1,27 @@
 """`vantage` -- resolve configuration, fail fast, then serve.
 
-**Path check at startup.** A database directory that exists but cannot be
-written to fails here, before the server accepts a request -- not on the
-first report, by which point the plugin that sent it has exited and the
-report is lost. Resolution itself (`core/config/resolution.py`) is pure and
-creates nothing.
+**Path check at startup.** A SQLite database directory that exists but
+cannot be written to fails here, before the server accepts a request -- not
+on the first report, by which point the plugin that sent it has exited and
+the report is lost. Resolution itself (`core/config/resolution.py`) is pure
+and creates nothing.
 
 **Every startup refusal is one line.** A setting resolution refuses, an
 address this process cannot listen on (a port already in use, a host that
-does not resolve), a database this process cannot open or create, and a
-database from another schema version all end as a single `vantage: ...`
-line on stderr and exit status 1, never a traceback. The listening socket
-is bound here, before the database is opened, so a refused bind creates
-nothing; uvicorn is handed the bound socket rather than binding its own,
-which it would do only after the database exists and would report in
-several log lines and exit status 3.
+does not resolve), a database this process cannot open, create or connect
+to, a PostgreSQL database without its driver installed, and a database from
+another schema version all end as a single `vantage: ...` line on stderr
+and exit status 1, never a traceback. The listening socket is bound here,
+before the database is opened, so a refused bind creates nothing; uvicorn
+is handed the bound socket rather than binding its own, which it would do
+only after the database exists and would report in several log lines and
+exit status 3.
+
+**PostgreSQL is optional.** Its adapter is imported only when a PostgreSQL
+URL is given, since the driver it needs comes with the `postgres` extra and
+a SQLite server must start without it. A URL is only ever shown redacted,
+and every message quoted from the driver has the URL's password taken out
+first.
 
 **The store is closed by the app's shutdown** (`create_app`'s
 `close_store_on_shutdown`). On SIGTERM uvicorn shuts the app down and then
@@ -30,6 +37,7 @@ that matters.
 from __future__ import annotations
 
 import argparse
+import importlib
 import logging
 import os
 import socket
@@ -41,11 +49,18 @@ from typing import NoReturn
 import uvicorn
 from fastapi import FastAPI
 
+from vantage.core.config.database import (
+    DatabaseTarget,
+    PostgresTarget,
+    redact_message,
+    redacted,
+)
 from vantage.core.config.resolution import (
     ServerConfig,
     ServerConfigError,
     resolve_server_config,
 )
+from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.storage.connection import SchemaVersionError
@@ -65,6 +80,10 @@ _UVICORN_LOGGER = logging.getLogger("uvicorn.error")
 # percent-encoded in at most three. The HTTP parser's own default, 16 KiB,
 # left a result that `/results` lists impossible to fetch.
 _MAX_REQUEST_HEAD_BYTES = 3 * MAX_REPORT_BYTES + 64 * 1024
+
+_POSTGRES_ADAPTER = "vantage.storage.postgres"
+_POSTGRES_DRIVER_MODULES = frozenset({"psycopg", "psycopg_pool"})
+_POSTGRES_DRIVER_MISSING = "PostgreSQL needs the postgres extra: pip install 'vantage[postgres]'"
 
 
 class DatabaseDirectoryNotWritableError(RuntimeError):
@@ -98,7 +117,11 @@ def warn_if_bound_wide(host: str) -> None:
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="vantage", description="Run the vantage server.")
-    parser.add_argument("--database", default=None, help="Path to the SQLite database file.")
+    parser.add_argument(
+        "--database",
+        default=None,
+        help="Path to the SQLite database file, or a postgresql:// URL.",
+    )
     parser.add_argument("--host", default=None, help=f"Bind address (default {_LOOPBACK}).")
     parser.add_argument("--port", type=int, default=None, help="Bind port (default 8765).")
     parser.add_argument(
@@ -147,8 +170,14 @@ def _listen(host: str, port: int) -> socket.socket:
     return sock
 
 
-def _open_store(database_path: Path) -> SqliteExecutionStore:
+def _open_store(database: DatabaseTarget) -> ExecutionStore:
     """The store, or a one-line refusal."""
+    if isinstance(database, PostgresTarget):
+        return _open_postgres(database.url)
+    return _open_sqlite(database.path)
+
+
+def _open_sqlite(database_path: Path) -> SqliteExecutionStore:
     try:
         ensure_database_directory_writable(database_path)
         return SqliteExecutionStore(database_path)
@@ -159,6 +188,50 @@ def _open_store(database_path: Path) -> SqliteExecutionStore:
         # path, a file that is not a database: the OS or sqlite3 message
         # already says what is wrong.
         _refuse(f"cannot open the database at {database_path}: {exc}")
+
+
+def _open_postgres(url: str) -> ExecutionStore:
+    shown = redacted(url)
+    try:
+        # By name, through `sys.modules`, so nothing but a PostgreSQL start
+        # ever imports the adapter or its driver.
+        adapter = importlib.import_module(_POSTGRES_ADAPTER)
+    except ImportError as exc:
+        if not _is_driver_missing(exc):
+            raise
+        _refuse(_POSTGRES_DRIVER_MISSING)
+    try:
+        store: ExecutionStore = adapter.PostgresExecutionStore(url)
+    except SchemaVersionError as exc:
+        detail = _driver_detail(exc, url)
+        _refuse(detail if shown in detail else f"{shown}: {detail}")
+    except Exception as exc:
+        # The driver's own errors cannot be named here without importing it
+        # into the service; every one of them is a start that cannot go on.
+        _refuse(f"cannot open the database at {shown}: {_driver_detail(exc, url)}")
+    return store
+
+
+def _is_driver_missing(exc: ImportError) -> bool:
+    """Whether the PostgreSQL driver is what failed to import: psycopg or its
+    pool absent, or psycopg present without the libpq it needs, which it
+    reports as a plain `ImportError` raised in its own module. Any other
+    `ImportError` is a fault in this installation, not a missing extra."""
+    module = exc.name
+    if module is None:
+        frame = exc.__traceback__
+        while frame is not None and frame.tb_next is not None:
+            frame = frame.tb_next
+        module = frame.tb_frame.f_globals.get("__name__") if frame is not None else None
+    return str(module).partition(".")[0] in _POSTGRES_DRIVER_MODULES
+
+
+def _driver_detail(exc: Exception, url: str) -> str:
+    """`exc`'s message on one line, with `url`'s password taken out: the
+    driver spreads a connection failure over several lines, and quotes a
+    URL it cannot parse."""
+    detail = " ".join(redact_message(str(exc), url).split())
+    return detail or type(exc).__name__
 
 
 def _serve(app: FastAPI, listener: socket.socket, config: ServerConfig) -> None:
@@ -204,7 +277,7 @@ def main(argv: list[str] | None = None) -> None:
         _refuse(f"cannot listen on {config.host} port {config.port}: {exc}")
 
     try:
-        store = _open_store(config.database_path)
+        store = _open_store(config.database)
     except BaseException:
         listener.close()
         raise

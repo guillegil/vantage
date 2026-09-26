@@ -1,11 +1,11 @@
 """Where the server's own database and bind address come from.
 
-**Pure -- no filesystem access, ever.** Resolution only computes a path; it
-never stats, creates or opens anything. If resolving created the directory,
-merely asking where the database would go -- to display it, or to validate a
-`--database` value that turns out to be a typo -- would materialise it as a
-side effect. Creating anything belongs to whoever acts on the resolved path
-(`service/cli.py`).
+**Pure -- no filesystem or network access, ever.** Resolution only computes
+a path, or takes a URL as given; it never stats, creates, opens or connects
+to anything. If resolving created the directory, merely asking where the
+database would go -- to display it, or to validate a `--database` value that
+turns out to be a typo -- would materialise it as a side effect. Creating
+anything belongs to whoever acts on the resolved target (`service/cli.py`).
 """
 
 from __future__ import annotations
@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+
+from vantage.core.config.database import DatabaseTarget, SqliteTarget, database_target
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
@@ -34,7 +36,7 @@ _MAX_GRACE_PERIOD_SECONDS = 365 * 24 * 60 * 60.0
 class ServerConfig:
     """Everything the `vantage` command needs to start, already resolved."""
 
-    database_path: Path
+    database: DatabaseTarget
     host: str
     port: int
     grace_period_seconds: float
@@ -50,24 +52,26 @@ def resolve_server_config(
     home: Path | None,
     xdg_data_home: str | None,
 ) -> ServerConfig:
-    """Resolve the server's database path, bind address, and grace period.
+    """Resolve the server's database, bind address, and grace period.
 
     Database precedence: ``--database`` > ``VANTAGE_DATABASE`` >
     ``$XDG_DATA_HOME/vantage/vantage.db``, default
-    ``~/.local/share/vantage/vantage.db``. An empty value counts as unset,
-    and a relative ``XDG_DATA_HOME`` is ignored. `home` is `None` when the
-    process has no home directory to find; that refuses only a start that
-    falls back to the default path. The plugin's activation
-    switch is flag-only so shared configuration can never silently turn
-    recording on; the environment is fine here because this server is
-    started deliberately by whoever runs it.
+    ``~/.local/share/vantage/vantage.db``. A value whose scheme is
+    ``postgresql://`` or ``postgres://`` names a PostgreSQL database; any
+    other value is a SQLite path, and the default is always SQLite. An empty
+    value counts as unset, and a relative ``XDG_DATA_HOME`` is ignored.
+    `home` is `None` when the process has no home directory to find; that
+    refuses only a start that falls back to the default path. The plugin's
+    activation switch is flag-only so shared configuration can never
+    silently turn recording on; the environment is fine here because this
+    server is started deliberately by whoever runs it.
 
     Host, port and the grace period each take only a CLI value or a fixed
     default; none has an environment variable. A value the server cannot run
     with raises `ServerConfigError` here, before anything is created.
     """
     return ServerConfig(
-        database_path=_resolve_database_path(cli_database, env_database, home, xdg_data_home),
+        database=_resolve_database(cli_database, env_database, home, xdg_data_home),
         host=_resolve_host(cli_host),
         port=_resolve_port(cli_port),
         grace_period_seconds=_resolve_grace_period(cli_grace_period),
@@ -129,29 +133,29 @@ def _resolve_grace_period(cli_grace_period: float | None) -> float:
     return cli_grace_period
 
 
-def _resolve_database_path(
+def _resolve_database(
     cli_database: str | None,
     env_database: str | None,
     home: Path | None,
     xdg_data_home: str | None,
-) -> Path:
+) -> DatabaseTarget:
     # An empty value is unset, not `Path("")`: that is the current directory,
     # and `--database "$VAR"` with the variable unset does not mean "here".
     if cli_database:
-        return Path(cli_database)
+        return database_target(cli_database)
     if env_database:
-        return Path(env_database)
+        return database_target(env_database)
     # The XDG Base Directory spec says a relative XDG_DATA_HOME is invalid and
     # must be ignored; used as-is it would move the database with the cwd.
     xdg = Path(xdg_data_home) if xdg_data_home else None
     if xdg is not None and xdg.is_absolute():
-        return xdg / "vantage" / "vantage.db"
+        return SqliteTarget(xdg / "vantage" / "vantage.db")
     if home is None:
         raise ServerConfigError(
             "there is no home directory to put the default database under; "
             "pass --database or set VANTAGE_DATABASE"
         )
-    return home / ".local" / "share" / "vantage" / "vantage.db"
+    return SqliteTarget(home / ".local" / "share" / "vantage" / "vantage.db")
 
 
 DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_PERIOD_SECONDS
