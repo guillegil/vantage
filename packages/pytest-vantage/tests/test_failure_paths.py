@@ -1413,6 +1413,7 @@ def test_git_failure_disables_nothing_else(
 
 
 @pytest.mark.slow
+@pytest.mark.usefixtures("git_confined_to_basetemp")
 def test_hung_git_does_not_delay_session(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,

@@ -27,6 +27,10 @@ from vantage_test_server import (
     wait_for_file,
 )
 
+# Several tests build a broken repository in their project directory; git
+# must not find one above it instead.
+pytestmark = pytest.mark.usefixtures("git_confined_to_basetemp")
+
 _PASSING_TEST = "def test_it():\n    assert True\n"
 _SLOW_TEST = "import time\n\n\ndef test_slow():\n    time.sleep(5)\n"
 

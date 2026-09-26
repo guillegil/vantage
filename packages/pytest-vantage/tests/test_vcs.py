@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 from pytest_vantage import vcs
 
+pytestmark = pytest.mark.usefixtures("git_confined_to_basetemp")
+
 # Set via the environment, not `git config`, so no fixture touches or
 # leaves behind a real `~/.gitconfig`.
 _GIT_IDENTITY_ENV = {

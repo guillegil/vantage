@@ -1,5 +1,7 @@
 """`VantageTestServer` -- a real `vantage` server for `pytest-vantage`'s own
-end-to-end tests, and the `vantage_server` fixture that wraps it.
+end-to-end tests, and the `vantage_server` fixture that wraps it. Also
+`git_confined_to_basetemp`, for the tests that need git to find no
+repository above their temp directory.
 
 A separate, non-`test_*` module rather than a `conftest.py`: a package-level
 `conftest.py` alongside the workspace-root one both resolve to the bare
@@ -133,3 +135,19 @@ def vantage_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Vantage
         yield server
     finally:
         server.close()
+
+
+@pytest.fixture
+def git_confined_to_basetemp(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stops git's upward search at the session's base temp directory.
+
+    A test that builds a directory with no repository, or a broken one,
+    relies on git finding nothing above it. A base temp directory inside
+    some git work tree (a `--basetemp` in a checkout, a TMPDIR under a
+    git-managed home) would let git find that repository instead. git and
+    `vcs.capture` both honour the ceiling, and a subprocess session
+    inherits it.
+    """
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path_factory.getbasetemp()))
