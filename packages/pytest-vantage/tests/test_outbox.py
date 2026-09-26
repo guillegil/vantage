@@ -383,6 +383,29 @@ def test_a_run_answered_with_408_or_429_stays_queued_and_sending_stops(
     assert _column(box.path, "claimed_until") == [None, None]
 
 
+def test_an_interrupted_send_gives_its_run_back_at_once(
+    box: Outbox, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C still stops sending, but the run it was sending is not left
+    claimed until the claim lapses: the next sender takes it at once."""
+    reports = _run_reports()
+    box.enqueue(vantage_server.address, _run_id(reports), reports)
+
+    def _interrupted(*args: object, **kwargs: object) -> None:
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(outbox_module, "send", _interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            send_queued(box, vantage_server.address, timeout=5.0, budget=30.0)
+
+    assert _column(box.path, "claimed_until") == [None]
+    assert _column(box.path, "attempts") == [0]
+    summary = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0)
+    assert (summary.sent, summary.waiting) == (1, 0)
+    assert set(_stored(vantage_server)) == {_run_id(reports)}
+
+
 def test_an_unreachable_server_stops_sending_and_keeps_every_run(box: Outbox) -> None:
     address = _closed_port_address()
     for _ in range(3):

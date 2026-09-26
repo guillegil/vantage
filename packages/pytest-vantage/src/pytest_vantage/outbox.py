@@ -28,7 +28,7 @@ import os
 import sqlite3
 import time
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -379,6 +379,12 @@ def send_queued(outbox: Outbox, server: str, *, timeout: float, budget: float) -
                     if unreachable(exc)
                     else f"{server} did not take run {claimed.run_id} ({exc})"
                 )
+        except BaseException:
+            # Ctrl-C stops sending, but the run is given back now rather
+            # than held until its claim lapses, a minute or more away.
+            with suppress(Exception):
+                outbox._release(claimed.id, None)
+            raise
         else:
             outbox._delete(claimed.id)
             sent += 1

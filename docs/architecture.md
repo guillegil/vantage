@@ -343,13 +343,14 @@ order as JSON text, when it was queued, attempts and the last error.
   claimed in a `BEGIN IMMEDIATE` transaction by writing `claimed_until`, for
   as long as sending it can take plus a minute, so concurrent senders -- two
   sessions, or a session and `vantage push` -- take different runs, and a
-  claim left by a killed sender lapses. An acknowledged run is deleted; one
-  refused with a 4xx other than 408 or 429 is deleted and named in the
-  summary; a 5xx releases it with its attempt counted and moves on, since it
-  may be that run's own problem; no answer, a 408 or 429, a redirect or a
-  stranger's answer releases it and stops, and so does a spent budget,
-  without counting an attempt. A
-  duplicate send is harmless: the server's writes are idempotent.
+  claim left by a killed sender lapses; one interrupted with Ctrl-C gives
+  its run back at once. An acknowledged run is deleted; one refused with a
+  4xx other than 408 or 429 is deleted and named in the summary; a 5xx
+  releases it with its attempt counted and moves on, since it may be that
+  run's own problem; no answer, a 408 or 429, a redirect or a stranger's
+  answer releases it and stops, and so does a spent budget, without counting
+  an attempt. A duplicate send is harmless: the server's writes are
+  idempotent.
 - A session whose own run reached its server sends that server's queue
   within the report timeout and prints one line. It never creates the
   outbox just to find it empty.
