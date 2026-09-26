@@ -58,6 +58,7 @@ _MIRRORED_METADATA_BOUNDS: list[tuple[str, ModuleType, str]] = [
     ("MAX_METADATA_SECTION_BYTES", runs_route, "_MAX_METADATA_SECTION_BYTES"),
     ("MAX_METADATA_ENTRIES", core_metadata, "MAX_METADATA_ENTRIES"),
     ("MAX_DECLARED_KEY_CHARS", core_metadata, "MAX_METADATA_KEY_CHARS"),
+    ("MAX_METADATA_VALUE_BYTES", core_metadata, "MAX_METADATA_VALUE_BYTES"),
 ]
 
 
@@ -89,6 +90,12 @@ def test_the_file_statuses_are_the_servers_but_malformed() -> None:
     give, so a status the plugin gains must land in `_FILE_STATUSES`.
     """
     assert set(metadata._FILE_STATUSES) == core_metadata.FILE_STATUSES - {"malformed"}
+
+
+def test_every_status_a_reported_value_carries_is_one_the_server_stores() -> None:
+    """The plugin decides every reported value's status, `absent` and
+    `value_too_large` included; the server derives none of them."""
+    assert set(metadata.SESSION_VALUE_STATUSES) <= core_metadata.KEY_STATUSES
 
 
 def _declare(root: Path, paths: list[str]) -> None:

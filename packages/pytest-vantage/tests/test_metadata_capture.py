@@ -353,9 +353,9 @@ def test_a_section_that_says_nothing_is_not_sent() -> None:
     assert metadata.wire_section(_section(unread_file_keys=("region",))) is None
 
 
-def test_the_wire_section_leaves_out_empty_keys() -> None:
-    """A report that declares no key has the shape a server that predates
-    `keys` accepts."""
+def test_the_wire_section_leaves_out_empty_keys_and_values() -> None:
+    """A report that declares no key and carries no value has the shape a
+    server that predates both accepts."""
     captured = metadata.CapturedFile("f.json", "json", "captured", ("region",), "{}")
 
     wire = metadata.wire_section(_section(files=(captured,)))
@@ -374,20 +374,37 @@ def test_the_wire_section_leaves_out_empty_keys() -> None:
     }
 
 
-def test_the_wire_section_carries_the_declared_keys_with_their_names() -> None:
+def test_the_wire_section_carries_keys_files_and_values_in_order() -> None:
     section = _section(
-        keys=(
-            metadata.DeclaredKey("fpga.firmware", "FPGA firmware version"),
-            metadata.DeclaredKey("bench"),
-        ),
+        keys=(metadata.DeclaredKey("fpga.firmware", "FPGA firmware version"),),
         unread_file_keys=("region",),
     )
+    values = [
+        metadata.SessionValue("fpga.firmware", "1.1.0", "captured"),
+        metadata.SessionValue("region", "eu-west-1", "captured"),
+    ]
 
-    assert metadata.wire_section(section) == {
+    wire = metadata.wire_section(section, values, named_keys=["region"])
+
+    assert wire == {
         "declaration": metadata.DECLARATION_FILENAME,
         "keys": {
             "fpga.firmware": {"name": "FPGA firmware version"},
-            "bench": {"name": None},
+            "region": {"name": None},
         },
         "files": [],
+        "values": [
+            {"key": "fpga.firmware", "value": "1.1.0", "status": "captured"},
+            {"key": "region", "value": "eu-west-1", "status": "captured"},
+        ],
+    }
+
+
+def test_values_without_a_declaration_are_sent_with_a_null_declaration() -> None:
+    values = [metadata.SessionValue("bench", "lab-3", "captured")]
+
+    assert metadata.wire_section(None, values) == {
+        "declaration": None,
+        "files": [],
+        "values": [{"key": "bench", "value": "lab-3", "status": "captured"}],
     }

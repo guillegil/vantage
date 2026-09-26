@@ -45,6 +45,28 @@ _SAMPLE_TEST = "def test_it():\n    assert True\n"
 _METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
 _ALL_FLAGS = "--vantage --vantage-failure-text --vantage-metadata"
 
+_REPORTS_METADATA = """
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def dut(vantage_metadata):
+    vantage_metadata.update({"fpga": {"firmware": "1.1.0"}})
+    vantage_metadata["bench"] = "lab-3"
+
+
+def test_it():
+    assert True
+"""
+
+# The same report, made only while the plugin is loaded, so that the control
+# run with `-p no:vantage` passes too.
+_REPORTS_METADATA_WHEN_LOADED = """
+def test_it(request):
+    if request.config.pluginmanager.has_plugin("vantage"):
+        request.getfixturevalue("vantage_metadata")["fpga"] = {"firmware": "1.1.0"}
+"""
+
 
 def _tree_snapshot(root: Path) -> dict[str, bytes]:
     """Map every file under ``root`` to its raw bytes, keyed by relative path."""
@@ -73,15 +95,20 @@ def _vantage_warnings(recwarn: pytest.WarningsRecorder) -> list[str]:
     return [str(w.message) for w in recwarn.list if issubclass(w.category, VantageWarning)]
 
 
-@pytest.mark.parametrize("declared", [False, True], ids=["plain", "with-a-declaration"])
+@pytest.mark.parametrize(
+    "sample",
+    [_SAMPLE_TEST, _REPORTS_METADATA_WHEN_LOADED],
+    ids=["plain", "reporting-metadata-with-a-declaration"],
+)
 def test_project_tree_is_byte_identical_with_plugin_absent(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch, declared: bool
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch, sample: str
 ) -> None:
     """No CLI option, ini value or env var present anywhere: a bare run and a
     ``-p no:vantage`` run of the identical project must leave byte-identical
     trees. ``-p no:vantage`` is the control -- it is pytest with the plugin
     definitively absent, so any difference the bare run introduces is
-    something the plugin did. The second project carries a declaration.
+    something the plugin did. The second project also reports metadata
+    through the fixture and carries a declaration.
 
     Two independent, freshly-written directories -- never a copy of one
     run's output directory into the other -- so neither run's own debug
@@ -98,8 +125,8 @@ def test_project_tree_is_byte_identical_with_plugin_absent(
     bare_root = tmp_path_factory.mktemp("vantage-bare")
     control_root = tmp_path_factory.mktemp("vantage-control")
     for root in (bare_root, control_root):
-        (root / "test_sample.py").write_text(_SAMPLE_TEST)
-        if declared:
+        (root / "test_sample.py").write_text(sample)
+        if sample is _REPORTS_METADATA_WHEN_LOADED:
             _declare_one_file(root)
 
     bare = _run_pytest(bare_root)
@@ -623,13 +650,13 @@ def test_the_declared_files_are_opened_only_when_metadata_capture_was_requested(
     assert ("settings.json" in {path.name for path in paths_opened}) is metadata_requested
 
 
-def test_nothing_is_read_without_vantage(
+def test_nothing_is_read_without_vantage_even_when_a_test_reports_metadata(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without `--vantage` neither the declaration nor a file it names is
-    opened, even with `--vantage-metadata` typed, and nothing connects."""
+    opened, however many flags and fixtures ask, and nothing connects."""
     _declare_one_file(pytester.path)
-    pytester.makepyfile(test_sample=_SAMPLE_TEST)
+    pytester.makepyfile(test_sample=_REPORTS_METADATA)
     paths_opened = _patch_path_open_recorder(monkeypatch)
     monkeypatch.setattr(socket, "create_connection", _forbidden_create_connection)
 

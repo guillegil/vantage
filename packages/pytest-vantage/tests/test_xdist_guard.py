@@ -8,7 +8,9 @@ attribute.
 
 A worker is the only process with `item`/`excinfo`, so `EvidenceCollector`
 runs there, and the only one that knows whether Ctrl-C or ``pytest.exit()``
-interrupted it, so `WorkerInterruptRelay` does too. The worker branch reads
+interrupted it, so `WorkerInterruptRelay` does too. Session fixtures run
+there as well, so `WorkerMetadataRelay` holds what the ``vantage_metadata``
+fixture hands them. The worker branch reads
 exactly three options: ``vantage`` and ``vantage_failure_text`` to decide
 what to register, and ``capture``, read once by
 `EvidenceCollector.__init__`. xdist hands each
@@ -33,7 +35,8 @@ import pytest
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.evidence import EvidenceCollector
 from pytest_vantage.plugin import pytest_configure
-from pytest_vantage.recorder import WorkerInterruptRelay
+from pytest_vantage.recorder import WorkerInterruptRelay, WorkerMetadataRelay
+from pytest_vantage.session_metadata import SESSION_METADATA
 
 
 class _RegisterCallDouble:
@@ -69,6 +72,7 @@ class _WorkerConfigDouble:
     def __init__(self, typed: tuple[str, ...]) -> None:
         self.pluginmanager = _RegisterCallDouble()
         self.invocation_params = SimpleNamespace(args=typed)
+        self.stash = pytest.Stash()
 
     def getoption(self, name: str, default: object = None) -> object:
         if name == "vantage":
@@ -92,24 +96,27 @@ class _WorkerConfigDouble:
 @pytest.mark.parametrize(
     ("typed", "expected"),
     [
-        (("--vantage", "-n", "2"), [WorkerInterruptRelay]),
+        (("--vantage", "-n", "2"), [WorkerInterruptRelay, WorkerMetadataRelay]),
         (
             ("--vantage", "--vantage-failure-text", "-n", "2"),
-            [WorkerInterruptRelay, EvidenceCollector],
+            [WorkerInterruptRelay, WorkerMetadataRelay, EvidenceCollector],
         ),
     ],
     ids=["recording", "recording-with-failure-text"],
 )
-def test_a_recording_worker_registers_its_relay_and_collector_and_no_recorder(
+def test_a_recording_worker_registers_its_relays_and_collector_and_no_recorder(
     typed: tuple[str, ...], expected: list[type]
 ) -> None:
-    """A worker's `pytest_configure` registers `WorkerInterruptRelay` when
-    recording, `EvidenceCollector` when failure text was asked for too, and
-    nothing else -- in particular no `Recorder`."""
+    """A worker's `pytest_configure` registers both relays when recording,
+    `EvidenceCollector` when failure text was asked for too, and nothing
+    else -- in particular no `Recorder`. The metadata relay's mapping is the
+    one the fixture finds."""
     config = _WorkerConfigDouble(typed=typed)
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
     assert [type(plugin) for plugin in config.pluginmanager.registered] == expected
+    (relay,) = [p for p in config.pluginmanager.registered if isinstance(p, WorkerMetadataRelay)]
+    assert config.stash[SESSION_METADATA] is relay.session_metadata
 
 
 def test_worker_registers_nothing_when_the_flags_came_from_addopts() -> None:

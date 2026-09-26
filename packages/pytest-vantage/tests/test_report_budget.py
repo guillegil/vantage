@@ -430,6 +430,30 @@ def test_a_session_without_results_still_gets_one_report() -> None:
     assert split_results([], envelope_bytes=_report_bytes([])) == ([[]], 0)
 
 
+@pytest.mark.parametrize(
+    ("last_extra_bytes", "slices"),
+    [(0, [["a", "b"]]), (30, [["a", "b"], []])],
+    ids=["room-left", "no-room-left"],
+)
+def test_what_only_the_last_report_carries_gets_a_report_of_its_own_if_need_be(
+    monkeypatch: pytest.MonkeyPatch, last_extra_bytes: int, slices: list[list[str]]
+) -> None:
+    """The session's metadata values ride in the last report alone. When
+    the last slice leaves no room for them they go out without results,
+    rather than any result being left out on their account."""
+    results: list[dict[str, object]] = [{"node_id": name} for name in ("a", "b")]
+    cost = sum(len(json.dumps(entry)) + len(", ") for entry in results)
+    envelope = _report_bytes([])
+    monkeypatch.setattr(budget_module, "_REPORT_BYTES_CAP", envelope + cost + 10)
+
+    split, left_out = split_results(
+        results, envelope_bytes=envelope, last_extra_bytes=last_extra_bytes
+    )
+
+    assert [[entry["node_id"] for entry in chunk] for chunk in split] == slices
+    assert left_out == 0
+
+
 # --- End to end: what the server stores ------------------------------------
 
 

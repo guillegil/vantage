@@ -71,7 +71,13 @@ distribution. `test_server_contract.py` pins the two values equal."""
 MAX_DECLARED_KEY_CHARS = 1024
 """Mirrors `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS`, pinned the
 same way. An over-long key refuses the whole declaration here, like an
-over-long path."""
+over-long path, and a session key past it is ignored with a warning."""
+
+MAX_METADATA_VALUE_BYTES = 1024
+"""Mirrors `vantage.core.domain.metadata.MAX_METADATA_VALUE_BYTES`, pinned
+the same way. A value the session reports past it is sent as
+`value_too_large` with no value, as the server records an over-long value
+read from a file."""
 
 MAX_KEY_NAME_CHARS = 256
 """Bound on a declared key's display name."""
@@ -90,7 +96,8 @@ Every declared key's entry and every declared file's entry -- its path,
 keys and status -- is charged first, because each reaches the wire
 whatever happens to the file; content is charged from what is left, so the
 section holds fewer than four files of `MAX_DECLARED_FILE_BYTES` raw bytes
-each."""
+each. The values the session reports, sent in the last report only, are
+bounded separately (`budget.MAX_METADATA_VALUES_BYTES`)."""
 
 _ADMISSIBLE_FORMATS = frozenset({"json", "yaml"})
 """`format` is required and explicit, never inferred from the file
@@ -156,6 +163,36 @@ class MetadataSection:
     unread_file_keys: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class SessionValue:
+    """One entry of the wire `metadata.values` array: a key the session
+    reported, or a declared key nothing reported (`absent`). `value` is
+    `None` whenever `status` is not `"captured"`."""
+
+    key: str
+    value: str | None
+    status: str
+
+
+SESSION_VALUE_STATUSES = ("captured", "absent", "value_too_large")
+"""Every status a `SessionValue` can carry."""
+
+
+def session_value(key: str, text: str | None) -> SessionValue:
+    """`text` as the wire carries it: no value is `absent`, and one past
+    `MAX_METADATA_VALUE_BYTES` is `value_too_large`, sent without it.
+
+    Measured with `surrogatepass`, as the budget measures text: a lone
+    surrogate costs the three bytes the server's replacement character
+    will.
+    """
+    if text is None:
+        return SessionValue(key, None, "absent")
+    if len(text.encode("utf-8", errors="surrogatepass")) > MAX_METADATA_VALUE_BYTES:
+        return SessionValue(key, None, "value_too_large")
+    return SessionValue(key, text, "captured")
+
+
 _FILE_STATUSES = (
     "captured",
     "not_found",
@@ -172,10 +209,11 @@ def _section_document(
     declaration: str | None,
     keys: dict[str, str | None],
     files: Sequence[CapturedFile],
+    values: Sequence[SessionValue],
 ) -> dict[str, object]:
-    """The wire `metadata` section. `keys` is left out when empty: the
-    server defaults it, so a report that declares no key is also accepted by
-    a server that predates it."""
+    """The wire `metadata` section. `keys` and `values` are left out when
+    empty: the server defaults both, so a report that uses neither is also
+    accepted by a server that predates them."""
     document: dict[str, object] = {"declaration": declaration}
     if keys:
         document["keys"] = {key: {"name": name} for key, name in keys.items()}
@@ -189,16 +227,33 @@ def _section_document(
         }
         for entry in files
     ]
+    if values:
+        document["values"] = [
+            {"key": entry.key, "value": entry.value, "status": entry.status} for entry in values
+        ]
     return document
 
 
-def wire_section(section: MetadataSection | None) -> dict[str, object] | None:
+def wire_section(
+    section: MetadataSection | None,
+    values: Sequence[SessionValue] = (),
+    named_keys: Sequence[str] = (),
+) -> dict[str, object] | None:
     """The `metadata` section a report carries, or `None` when it would say
-    nothing: no declared key and no file read."""
-    if section is None or not (section.keys or section.files):
+    nothing: no declared key, no file read and no value.
+
+    `named_keys` are keys of files that were not read which the session
+    reported a value for. They are declared in `keys`, with no name, because
+    the server marks a value declared only when its own report declares the
+    key, and the unread files are not in the report to declare it.
+    """
+    if section is None:
+        return _section_document(None, {}, (), values) if values else None
+    if not (section.keys or section.files or values):
         return None
     keys = {entry.key: entry.name for entry in section.keys}
-    return _section_document(section.declaration, keys, section.files)
+    keys.update(dict.fromkeys(named_keys))
+    return _section_document(section.declaration, keys, section.files, values)
 
 
 def _fixed_section_cost(declaration: Declaration) -> int:
@@ -218,7 +273,7 @@ def _fixed_section_cost(declaration: Declaration) -> int:
         for declared in declaration.files
     ]
     keys = {entry.key: entry.name for entry in declaration.keys}
-    return encoded_cost(_section_document(DECLARATION_FILENAME, keys, placeholders))
+    return encoded_cost(_section_document(DECLARATION_FILENAME, keys, placeholders, ()))
 
 
 _IGNORED = "the declaration is ignored"
@@ -643,13 +698,17 @@ __all__ = [
     "MAX_KEY_NAME_CHARS",
     "MAX_METADATA_ENTRIES",
     "MAX_METADATA_SECTION_BYTES",
+    "MAX_METADATA_VALUE_BYTES",
+    "SESSION_VALUE_STATUSES",
     "CapturedFile",
     "Declaration",
     "DeclaredFile",
     "DeclaredKey",
     "MetadataSection",
+    "SessionValue",
     "capture_metadata",
     "read_declaration",
     "resolve_declared_path",
+    "session_value",
     "wire_section",
 ]

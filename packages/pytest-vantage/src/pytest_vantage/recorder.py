@@ -21,8 +21,9 @@ the whole liveness path warns at most once. `pytest_keyboard_interrupt` and
 xdist's `pytest_testnodedown` only record what stopped the session, and
 share `accumulation_isolated`.
 
-`WorkerInterruptRelay` is the one piece that runs on an xdist worker: it
-tells the controller that the worker was interrupted, and why.
+`WorkerInterruptRelay` and `WorkerMetadataRelay` are the pieces that run on
+an xdist worker: they tell the controller that the worker was interrupted,
+and why, and what metadata its session fixtures reported.
 
 Every other hook is wrapped in `fault_isolated`: an error anywhere in the
 reporting path becomes one warning and never changes the suite's exit status.
@@ -54,6 +55,15 @@ from pytest_vantage.capture import (
     isoformat_utc,
 )
 from pytest_vantage.config import resolve_liveness_timeout
+from pytest_vantage.session_metadata import (
+    ReportedValues,
+    SessionMetadata,
+    ValuesPlan,
+    plan_values,
+    plan_warnings,
+    relay,
+    unrelay,
+)
 from pytest_vantage.transport import Capabilities, send, send_heartbeat
 
 # Used only if something escapes `vcs.capture`, which handles its own failures
@@ -118,6 +128,10 @@ _MAX_INTERRUPT_REASON_CHARS = 1024
 # reason under ("" when there is none).
 _WORKER_INTERRUPT_KEY = "vantage_interrupt_reason"
 
+# The `workeroutput` key an xdist worker hands its controller the metadata
+# its session reported under.
+_WORKER_METADATA_KEY = "vantage_metadata"
+
 
 def _interrupted_by_a_person(stop: BaseException) -> bool:
     """Ctrl-C (a bare `KeyboardInterrupt`) or `pytest.exit()`, never one of
@@ -150,6 +164,29 @@ class WorkerInterruptRelay:
         workeroutput = getattr(self._config, "workeroutput", None)
         if _interrupted_by_a_person(stop) and isinstance(workeroutput, dict):
             workeroutput[_WORKER_INTERRUPT_KEY] = _bounded_reason(str(stop))
+
+
+class WorkerMetadataRelay:
+    """Registered on every xdist worker of a recorded session.
+
+    Session fixtures run on each worker, not on the controller, so the
+    `vantage_metadata` fixture there hands out this relay's
+    `session_metadata`. As the worker's session finishes, the values go in
+    `workeroutput`, which xdist hands the controller
+    (`Recorder.pytest_testnodedown`). They already carry their wire status,
+    so an over-long value never crosses the hop.
+    """
+
+    def __init__(self, config: pytest.Config) -> None:
+        self._config = config
+        self._disabled = False
+        self.session_metadata = SessionMetadata(warn=lambda message: warn(config, message))
+
+    @fault_isolated
+    def pytest_sessionfinish(self) -> None:
+        workeroutput = getattr(self._config, "workeroutput", None)
+        if isinstance(workeroutput, dict) and self.session_metadata:
+            workeroutput[_WORKER_METADATA_KEY] = relay(self.session_metadata.entries())
 
 
 class Recorder:
@@ -189,6 +226,9 @@ class Recorder:
       session, the files it names only when `metadata_requested`
       (`--vantage-metadata`); `_metadata` is `None` when the declaration is
       missing or invalid, or reading it failed.
+    - `session_metadata` is what the `vantage_metadata` fixture hands the
+      tests this process runs; `_reported` collects what xdist workers
+      relay. Both are sent only in the run's last report.
     """
 
     def __init__(
@@ -226,6 +266,8 @@ class Recorder:
         self._metadata = _capture_metadata(
             config, Path(str(config.rootpath)), read_files=metadata_requested
         )
+        self.session_metadata = SessionMetadata(warn=lambda message: warn(config, message))
+        self._reported = ReportedValues()
 
     def _vcs_section(self) -> dict[str, object]:
         """Serialises the snapshot captured in `__init__`."""
@@ -237,13 +279,18 @@ class Recorder:
             "root": self._vcs.root,
         }
 
-    def _sections(self) -> dict[str, object]:
-        """The report sections every report of the session carries alike:
-        `vcs`, and `metadata` when it says anything. The `metadata` key is
-        omitted rather than sent as `null`.
+    def _sections(self, plan: ValuesPlan | None = None) -> dict[str, object]:
+        """The report sections: `vcs`, and `metadata` when it says anything.
+        Every report carries the same declared keys and files; only the
+        last carries `plan`'s values. The `metadata` key is omitted rather
+        than sent as `null`.
         """
         sections: dict[str, object] = {"vcs": self._vcs_section()}
-        metadata_section = metadata.wire_section(self._metadata)
+        metadata_section = metadata.wire_section(
+            self._metadata,
+            values=() if plan is None else plan.values,
+            named_keys=() if plan is None else plan.named_keys,
+        )
         if metadata_section is not None:
             sections["metadata"] = metadata_section
         return sections
@@ -335,11 +382,41 @@ class Recorder:
     @accumulation_isolated
     def pytest_testnodedown(self, node: object, error: object) -> None:
         """xdist's hook for a worker whose session has ended: keeps the
-        reason an interrupted worker gave (`WorkerInterruptRelay`). Optional,
-        so the plugin registers without xdist installed."""
+        reason an interrupted worker gave (`WorkerInterruptRelay`) and merges
+        the metadata it reported (`WorkerMetadataRelay`). Optional, so the
+        plugin registers without xdist installed.
+
+        xdist calls it twice for an interrupted worker; merging the same
+        values again changes nothing."""
         workeroutput = getattr(node, "workeroutput", None)
-        if isinstance(workeroutput, dict) and _WORKER_INTERRUPT_KEY in workeroutput:
+        if not isinstance(workeroutput, dict):
+            return
+        if _WORKER_INTERRUPT_KEY in workeroutput:
             self._worker_interruption = _bounded_reason(str(workeroutput[_WORKER_INTERRUPT_KEY]))
+        self._reported.add(unrelay(workeroutput.get(_WORKER_METADATA_KEY)))
+
+    def _plan_values(self) -> ValuesPlan | None:
+        """What the last report sends of the session's values, after the
+        warnings the plan calls for; `None` after one warning on any error.
+
+        The same net as `_capture_metadata`: a failure here costs the run
+        its values, never its finish report. The values of this process's
+        tests follow those xdist workers relayed; a session has one or the
+        other.
+        """
+        try:
+            self._reported.add(self.session_metadata.entries())
+            plan = plan_values(self._reported.entries(), self._metadata)
+            for message in plan_warnings(plan, self._reported.conflicting):
+                warn(self._config, message)
+        except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+            warn(
+                self._config,
+                f"vantage: error while reporting metadata: {exc}, "
+                "the session's values will not be sent",
+            )
+            return None
+        return plan
 
     def _how_it_ended(
         self, exit_status: int, early_stop: object = None
@@ -398,11 +475,17 @@ class Recorder:
         }
         in_progress_run = self._in_progress_run()
         sections = self._sections()
+        last_sections = self._sections(self._plan_values())
         envelope_bytes = max(
             encoded_cost({"run": run, "results": [], **sections})
             for run in (finish_run, in_progress_run)
         )
-        slices, left_out = split_results(results, envelope_bytes=envelope_bytes)
+        last_extra_bytes = encoded_cost(
+            {"run": finish_run, "results": [], **last_sections}
+        ) - encoded_cost({"run": finish_run, "results": [], **sections})
+        slices, left_out = split_results(
+            results, envelope_bytes=envelope_bytes, last_extra_bytes=last_extra_bytes
+        )
         if left_out:
             warn(
                 self._config,
@@ -412,12 +495,13 @@ class Recorder:
         # server stores its results without finishing the run. The run reads
         # as finished only once the last report, carrying the rest, arrives:
         # a report lost on the way leaves an unfinished run, never a finished
-        # one with results silently missing.
+        # one with results silently missing. The session's values are sent
+        # once, in the last report.
         for chunk in slices[:-1]:
             report = {"run": in_progress_run, "results": chunk, **sections}
             send(self._address, report, timeout=self._timeout)
-        report = {"run": finish_run, "results": slices[-1], **sections}
+        report = {"run": finish_run, "results": slices[-1], **last_sections}
         send(self._address, report, timeout=self._timeout)
 
 
-__all__ = ["Recorder", "WorkerInterruptRelay"]
+__all__ = ["Recorder", "WorkerInterruptRelay", "WorkerMetadataRelay"]

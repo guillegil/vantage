@@ -269,7 +269,8 @@ def test_declared_keys_are_sent_under_vantage_alone_and_no_file_is_read(
 ) -> None:
     """`--vantage` alone reads the declaration for the keys it declares,
     and every report carries them; the files it names are neither read nor
-    sent without `--vantage-metadata`."""
+    sent without `--vantage-metadata`. A declared key the session never
+    reported is sent `absent` in the last report."""
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send",
@@ -292,7 +293,8 @@ def test_declared_keys_are_sent_under_vantage_alone_and_no_file_is_read(
 
     result.assert_outcomes(passed=1)
     declared = {"declaration": "vantage-metadata.json", "keys": keys, "files": []}
-    assert [report["metadata"] for report in sent] == [declared, declared]
+    absent = {"key": "fpga.firmware", "value": None, "status": "absent"}
+    assert [report["metadata"] for report in sent] == [declared, {**declared, "values": [absent]}]
 
 
 def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
