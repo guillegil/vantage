@@ -51,8 +51,8 @@ from vantage.service.cli import (
     ensure_database_directory_writable,
     warn_if_bound_wide,
 )
-from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import SqliteExecutionStore
+from vantage.storage.version import SchemaVersionError
 
 # Root ignores directory mode bits; Windows ACLs need a different check.
 _needs_enforced_mode_bits = pytest.mark.skipif(

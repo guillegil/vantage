@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from vantage.storage.connection import SchemaVersionError, open_database
+from vantage.storage.connection import open_database
+from vantage.storage.version import SchemaVersionError
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX file-mode semantics only")
 

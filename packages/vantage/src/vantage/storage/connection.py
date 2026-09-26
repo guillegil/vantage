@@ -28,10 +28,7 @@ import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
-# `SchemaVersionError` is re-exported: `open_database` raises it, so its
-# callers catch it from here.
-from vantage.storage.version import _SCHEMA_VERSION
-from vantage.storage.version import SchemaVersionError as SchemaVersionError
+from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 
 _LOGGER = logging.getLogger(__name__)
 

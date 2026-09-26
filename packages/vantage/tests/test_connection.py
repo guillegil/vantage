@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from vantage.storage.connection import SchemaVersionError, open_database
-from vantage.storage.version import _SCHEMA_VERSION
+from vantage.storage.connection import open_database
+from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCHEMA_SQL = _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"

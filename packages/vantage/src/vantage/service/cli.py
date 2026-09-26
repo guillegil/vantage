@@ -63,8 +63,8 @@ from vantage.core.config.resolution import (
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
-from vantage.storage.connection import SchemaVersionError
 from vantage.storage.sqlite_store import SqliteExecutionStore
+from vantage.storage.version import SchemaVersionError
 
 _LOGGER = logging.getLogger(__name__)
 _LOOPBACK = "127.0.0.1"
