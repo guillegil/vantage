@@ -45,6 +45,43 @@ jobs:
       - name: Run pytest
         run: uv run --no-sync pytest
 
+  # The whole suite once more, against a real PostgreSQL server. The tests
+  # that need one skip wherever VANTAGE_TEST_POSTGRES_URL is unset, as it is
+  # in every other job.
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          # A throwaway container's password, not a secret.
+          POSTGRES_PASSWORD: vantage-ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      # A superuser: the tests create and drop a database of their own each.
+      VANTAGE_TEST_POSTGRES_URL: postgresql://postgres:vantage-ci@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install project (locked, dev extra)
+        run: uv sync --locked --extra dev --python 3.12
+
+      - name: Run pytest
+        run: uv run --no-sync pytest
+
   # On an unsupported interpreter the plugin must refuse to install, via
   # requires-python, rather than install and then break at import time.
   python-3-9-install-refused:

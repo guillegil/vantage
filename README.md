@@ -531,12 +531,20 @@ uv run --extra dev mypy .                          # strict
 uv run --extra dev deptry .                        # undeclared or unused dependencies
 uv run --extra dev pip-audit                       # known vulnerabilities
 uv build --wheel --all-packages -o dist            # both wheels
+
+# The PostgreSQL tests too, against a server you can create databases on:
+VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:secret@127.0.0.1:5432/postgres \
+  uv run --extra dev pytest
 ```
+
+Without `VANTAGE_TEST_POSTGRES_URL` the tests that need PostgreSQL are
+skipped. With it, each creates a database of its own on that server and
+drops it afterwards, so the URL must name a user allowed to do both.
 
 `pre-commit install` (with pre-commit installed separately, for example
 `uv tool install pre-commit`) runs ruff on each commit, and mypy and the
 tests not marked `slow` on each push. CI runs the whole suite on Python 3.10
-to 3.13, with and without pytest-xdist.
+to 3.13, with and without pytest-xdist, and once more against PostgreSQL 17.
 
 How the code is organised, and why: [`docs/architecture.md`](docs/architecture.md).
 

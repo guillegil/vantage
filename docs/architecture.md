@@ -487,12 +487,18 @@ a wheel. deptry's per-rule ignores name each one a test imports with an
 | `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a temporary directory, recording each request's method and path, for the plugin's end-to-end tests |
 
 `slow` marks the tests that measure elapsed time; `-m 'not slow'` skips them
-locally, and CI always runs everything. The `tests/` directory at the root
-checks the CI workflow's shell steps and the pre-commit configuration.
+locally, and CI always runs everything. The tests that need a PostgreSQL
+server run only when `VANTAGE_TEST_POSTGRES_URL` names one, as a superuser
+on any database, and are skipped with a reason naming the variable
+otherwise; each gets a database of its own, created and dropped around it.
+The `tests/` directory at the root checks the CI workflow's shell steps, the
+PostgreSQL job's wiring and the pre-commit configuration.
 
 CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on every pull
-request: the suite on Python 3.10 to 3.13, with and without pytest-xdist; a
-check that Python 3.9 refuses to install the plugin; the whole suite with
-every non-loopback outbound connection rejected and counted; the
-clean-environment install; and ruff, `mypy --strict`, deptry and a build of
-both wheels. `pip-audit` runs weekly (`audit.yml`).
+request: the suite on Python 3.10 to 3.13, with and without pytest-xdist; the
+whole suite on Python 3.12 against a `postgres:17` service container, the
+one job that sets `VANTAGE_TEST_POSTGRES_URL`; a check that Python 3.9
+refuses to install the plugin; the whole suite with every non-loopback
+outbound connection rejected and counted; the clean-environment install; and
+ruff, `mypy --strict`, deptry and a build of both wheels. `pip-audit` runs
+weekly (`audit.yml`).

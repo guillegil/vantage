@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,29 @@ def _run_step(
         timeout=30,
         check=False,
     )
+
+
+def test_one_job_points_the_suite_at_the_postgresql_server_it_starts() -> None:
+    """The PostgreSQL tests skip wherever `VANTAGE_TEST_POSTGRES_URL` is
+    unset, so a job that set it to a server it never started, or never ran
+    the suite, would pass without running one of them."""
+    jobs = _jobs(WORKFLOWS / "ci.yml")
+    setting = [
+        name
+        for name, job in jobs.items()
+        if "VANTAGE_TEST_POSTGRES_URL" in job.get("env", {})
+        or any("VANTAGE_TEST_POSTGRES_URL" in step.get("env", {}) for step in job["steps"])
+    ]
+    assert setting == ["postgres"]
+
+    job = jobs["postgres"]
+    (service,) = job["services"].values()
+    url = urllib.parse.urlsplit(job["env"]["VANTAGE_TEST_POSTGRES_URL"])
+    assert service["image"] == "postgres:17"
+    assert url.hostname == "127.0.0.1"
+    assert f"{url.port}:5432" in service["ports"]
+    assert url.password == service["env"]["POSTGRES_PASSWORD"]
+    assert "uv run --no-sync pytest" in [step.get("run") for step in job["steps"]]
 
 
 def test_no_step_re_syncs_the_locked_environment() -> None:

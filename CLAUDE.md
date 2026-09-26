@@ -81,15 +81,21 @@ uv run --extra dev pytest -m 'not slow'      # skip timing tests; CI runs all
 uv run --extra dev ruff format . && uv run --extra dev ruff check --fix .
 uv run --extra dev mypy .                    # strict
 uv run --extra dev deptry .
+VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/postgres \
+  uv run --extra dev pytest                  # PostgreSQL tests too (skipped when unset)
 vantage --database ./vantage.db              # server on 127.0.0.1:8765
+vantage --database postgresql://user@host/db # the same, storing in PostgreSQL
 ```
 
 ## Before finishing
 
-All green: pytest (full suite), `ruff format --check .`, `ruff check .`,
+All green: pytest (full suite), once without and once with
+`VANTAGE_TEST_POSTGRES_URL`, `ruff format --check .`, `ruff check .`,
 `mypy .`, `deptry .`. CI additionally runs Python 3.10–3.13 with and without
-xdist, the suite with non-loopback networking blocked, the clean-environment
-plugin install, the Python 3.9 install refusal and both wheel builds.
+xdist, the suite against a `postgres:17` service (the only job that sets the
+variable), the suite with non-loopback networking blocked, the
+clean-environment plugin install, the Python 3.9 install refusal and both
+wheel builds.
 
 ## Conventions
 
