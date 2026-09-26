@@ -18,10 +18,12 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest_vantage import budget, capture, metadata, recorder, transport, vcs
 from pytest_vantage.boundary import VantageWarning
+from pytest_vantage.metadata import CapturedFile, DeclaredKey, MetadataSection, session_value
+from pytest_vantage.session_metadata import plan_values
 from vantage.core.config import resolution
 from vantage.core.domain import metadata as core_metadata
 from vantage.core.domain.result import OUTCOMES
-from vantage.core.ports.storage import RunMetadata
+from vantage.core.ports.storage import MetadataEntry, RunMetadata
 from vantage.service import errors, truncation
 from vantage.service.app import create_app
 from vantage.service.routes import runs as runs_route
@@ -59,6 +61,7 @@ _MIRRORED_METADATA_BOUNDS: list[tuple[str, ModuleType, str]] = [
     ("MAX_METADATA_ENTRIES", core_metadata, "MAX_METADATA_ENTRIES"),
     ("MAX_DECLARED_KEY_CHARS", core_metadata, "MAX_METADATA_KEY_CHARS"),
     ("MAX_METADATA_VALUE_BYTES", core_metadata, "MAX_METADATA_VALUE_BYTES"),
+    ("MAX_KEY_NAME_CHARS", core_metadata, "MAX_METADATA_NAME_CHARS"),
 ]
 
 
@@ -94,8 +97,9 @@ def test_the_file_statuses_are_the_servers_but_malformed() -> None:
 
 def test_every_status_a_reported_value_carries_is_one_the_server_stores() -> None:
     """The plugin decides every reported value's status, `absent` and
-    `value_too_large` included; the server derives none of them."""
-    assert set(metadata.SESSION_VALUE_STATUSES) <= core_metadata.KEY_STATUSES
+    `value_too_large` included; the server derives none of them, and drops
+    a reported value whose status it does not take from a session."""
+    assert set(metadata.SESSION_VALUE_STATUSES) <= core_metadata.SESSION_KEY_STATUSES
 
 
 def _declare(root: Path, paths: list[str]) -> None:
@@ -182,6 +186,122 @@ def test_every_path_shape_the_server_drops_is_refused_with_a_warning(
 
     with pytest.warns(VantageWarning, match="the declaration is ignored"):
         assert metadata.capture_metadata(config, root) is None
+
+
+def _stored_values(section: MetadataSection, reported: list[metadata.SessionValue]) -> RunMetadata:
+    """What the server keeps of the last report `Recorder` sends for
+    `reported` against `section`, having checked that it keeps every value
+    sent: the plugin warns about each value it leaves out, and a value the
+    server drops instead is lost without a word."""
+    plan = plan_values(reported, section)
+    wire = metadata.wire_section(section, plan.values, plan.named_keys)
+    assert wire is not None
+    stored = runs_route._to_run_metadata(MetadataReport.model_validate(wire))
+    kept = [
+        (entry.key, entry.value, entry.status)
+        for entry in stored.entries
+        if entry.source == "session"
+    ]
+    assert kept == [(value.key, value.value, value.status) for value in plan.values]
+    return stored
+
+
+_BOARD = CapturedFile(
+    path="board.json",
+    format="json",
+    status="captured",
+    keys=("board.rev", "board.serial"),
+    content='{"board.rev": "b"}',
+)
+_DECLARED_KEYS = (
+    DeclaredKey("fpga.firmware", "FPGA firmware version"),
+    DeclaredKey("fmc.hardware"),
+)
+_REPORTED = [
+    session_value("fpga.firmware", "1.1.0"),
+    session_value("board.rev", "c"),
+    session_value("bench", "lab-3"),
+]
+
+
+def test_every_reported_value_is_stored_declared_as_the_plugin_counts_it() -> None:
+    """The plugin decides which reported keys are declared, and warns about
+    the others; the server sets `declared` from the report alone. With the
+    files unread their keys are not in the report, so the plugin declares a
+    file key it sends a value for itself, or the server would store it as
+    undeclared without a warning."""
+    section = MetadataSection(
+        declaration=metadata.DECLARATION_FILENAME,
+        files=(),
+        keys=_DECLARED_KEYS,
+        unread_file_keys=_BOARD.keys,
+    )
+
+    stored = _stored_values(section, _REPORTED)
+
+    assert stored.files == ()
+    assert stored.entries == (
+        MetadataEntry(
+            key="fpga.firmware",
+            value="1.1.0",
+            source_file=None,
+            status="captured",
+            source="session",
+            name="FPGA firmware version",
+        ),
+        MetadataEntry(
+            key="board.rev", value="c", source_file=None, status="captured", source="session"
+        ),
+        MetadataEntry(
+            key="bench",
+            value="lab-3",
+            source_file=None,
+            status="captured",
+            source="session",
+            declared=False,
+        ),
+        MetadataEntry(
+            key="fmc.hardware", value=None, source_file=None, status="absent", source="session"
+        ),
+    )
+
+
+def test_a_file_read_keeps_its_keys_over_the_values_the_session_reported() -> None:
+    """The plugin sends no value for a key a read file supplies, and the
+    server would drop it if it did: both sides keep the file's row."""
+    section = MetadataSection(
+        declaration=metadata.DECLARATION_FILENAME, files=(_BOARD,), keys=_DECLARED_KEYS
+    )
+
+    stored = _stored_values(section, _REPORTED)
+
+    assert [(entry.key, entry.source, entry.value) for entry in stored.entries] == [
+        ("board.rev", "file", "b"),
+        ("board.serial", "file", None),
+        ("fpga.firmware", "session", "1.1.0"),
+        ("bench", "session", "lab-3"),
+        ("fmc.hardware", "session", None),
+    ]
+
+
+def test_the_entry_bound_is_spent_alike_on_both_sides() -> None:
+    """Files first, then the session's keys in the order set: every value
+    the plugin sends fits under the server's bound, and none is dropped."""
+    file_keys = tuple(f"file.{index}" for index in range(metadata.MAX_METADATA_ENTRIES - 3))
+    section = MetadataSection(
+        declaration=metadata.DECLARATION_FILENAME,
+        files=(CapturedFile("many.json", "json", "captured", file_keys, "{}"),),
+    )
+    reported = [session_value(f"session.{index}", "x") for index in range(10)]
+
+    stored = _stored_values(section, reported)
+
+    assert len(stored.entries) == core_metadata.MAX_METADATA_ENTRIES
+    assert [entry.key for entry in stored.entries if entry.source == "session"] == [
+        "session.0",
+        "session.1",
+        "session.2",
+    ]
 
 
 # --- the acknowledgement ------------------------------------------------------
