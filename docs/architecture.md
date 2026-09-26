@@ -335,11 +335,15 @@ and from several server processes on one database, run in parallel. A
 connection answers a round trip before a call gets it; one the server has
 closed -- a restart or a failover closes them all -- is discarded and the
 next tried at once, rather than through the pool's own check, which waits
-longer after each failure than the one before. A read
-that must describe one moment -- a run page with its metadata horizons, a
-run's metadata with the check that the run exists -- is one statement or
-runs under `REPEATABLE READ`. A write is safe against the same write from
-another process by construction, never by a check first:
+longer after each failure than the one before. Every connection sets its
+session to `READ COMMITTED` first, whatever the database or the role
+defaults to: the locks below rely on it, since a `REPEATABLE READ`
+transaction reads the snapshot its first statement took, before the lock
+that statement waited for. A read that must describe one moment -- a run
+page with its metadata horizons, a run's metadata with the check that the
+run exists -- is one statement or runs under `REPEATABLE READ`. A write is
+safe against the same write from another process by construction, never
+by a check first:
 
 - `record_session` is one transaction. The run is inserted with
   `ON CONFLICT (id) DO UPDATE ... WHERE` the stored run has no exit status

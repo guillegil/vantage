@@ -17,7 +17,9 @@ from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from functools import partial
 
+import psycopg
 import pytest
+from psycopg import sql
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.sections import MAX_SECTIONS
@@ -60,9 +62,44 @@ def _run_concurrently(targets: list[Callable[[], object]]) -> list[BaseException
     return errors
 
 
+def _default_isolation(url: str, isolation: str | None) -> None:
+    """Make `isolation` the default of every session later opened on the
+    database `url` names, as an administrator may have: the stores must
+    work whatever it is."""
+    if isolation is None:
+        return
+    with psycopg.connect(url, autocommit=True) as conn:
+        database = conn.info.dbname
+        conn.execute(
+            sql.SQL("ALTER DATABASE {} SET default_transaction_isolation = {}").format(
+                sql.Identifier(database), sql.Literal(isolation)
+            )
+        )
+
+
+# The database's default isolation level: the server's own, and the two a
+# store must not be misled by.
+_DEFAULT_ISOLATIONS = pytest.mark.parametrize(
+    "default_isolation",
+    [None, "repeatable read", "serializable"],
+    ids=["read-committed", "repeatable-read", "serializable"],
+)
+
+
 @pytest.fixture
-def stores(postgres_url: str) -> Iterator[list[PostgresExecutionStore]]:
-    """Three stores on one database, as three server processes would be."""
+def default_isolation() -> str | None:
+    """The server's own default, unless a test parametrises this name with
+    `_DEFAULT_ISOLATIONS`, which overrides it."""
+    return None
+
+
+@pytest.fixture
+def stores(
+    postgres_url: str, default_isolation: str | None
+) -> Iterator[list[PostgresExecutionStore]]:
+    """Three stores on one database, as three server processes would be,
+    opened once the database defaults to `default_isolation`."""
+    _default_isolation(postgres_url, default_isolation)
     opened = [PostgresExecutionStore(postgres_url, max_connections=4) for _ in range(3)]
     try:
         yield opened
@@ -169,12 +206,17 @@ def test_a_runs_metadata_lands_once_and_its_bound_holds_across_stores(
     assert "board" in keys
 
 
+@_DEFAULT_ISOLATIONS
 def test_section_posts_racing_for_the_last_slot_across_stores_never_pass_the_bound(
-    stores: list[PostgresExecutionStore], monkeypatch: pytest.MonkeyPatch
+    stores: list[PostgresExecutionStore],
+    monkeypatch: pytest.MonkeyPatch,
+    default_isolation: str | None,
 ) -> None:
     """Each store counts and writes in its own transaction; counting what is
     committed and then writing would let a racer on every store see the last
-    slot free. Exactly one racer gets it."""
+    slot free. Exactly one racer gets it -- also where the database defaults
+    to REPEATABLE READ, under which a racer's count would read the snapshot
+    its first statement took, before the lock it waited for."""
     # A count that takes a while after reading its snapshot keeps every
     # racer's count ahead of the first commit, unless the store makes the
     # racers take turns; a racer is otherwise done too fast to overlap.
@@ -254,12 +296,16 @@ def test_the_filtered_page_and_its_horizon_are_read_from_one_snapshot(
     assert reader.count_executions() == 4
 
 
+@_DEFAULT_ISOLATIONS
 def test_stores_opening_one_empty_database_at_once_create_the_schema_once(
-    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch, default_isolation: str | None
 ) -> None:
     """Every store finds the schema missing; only the one holding the lock
     may create it, and the others must then find it stamped rather than
-    create it again or fail on it."""
+    create it again or fail on it -- or, under a REPEATABLE READ default,
+    read the stamp from a snapshot older than its creation, and refuse the
+    database for having none."""
+    _default_isolation(postgres_url, default_isolation)
     creations: list[None] = []
     create = postgres_connection._create_schema
 

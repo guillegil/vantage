@@ -51,6 +51,15 @@ _CONNECT_TIMEOUT_SECONDS = 10
 # call for a free one.
 _POOL_WAIT_SECONDS = 30.0
 
+# Every connection's first statements, whatever the database's or the
+# role's defaults say.
+# - READ COMMITTED, which the locking relies on: a REPEATABLE READ or
+#   SERIALIZABLE transaction reads the snapshot its first statement took,
+#   before the lock that statement waited for, so it would count settings,
+#   or look for the schema stamp, as they were before whoever held the lock
+#   committed.
+_SESSION_SETUP = "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL READ COMMITTED"
+
 # Advisory lock keys are shared by everything that uses the database; a
 # first key of vantage's own ("vsch") keeps this lock from meeting another
 # application's.
@@ -133,6 +142,11 @@ def _secrets(url: str) -> set[str]:
     return {secret for secret in found if secret}
 
 
+def configure_session(conn: PgConnection) -> None:
+    """Set up a new connection's session, before anything else runs on it."""
+    conn.execute(_SESSION_SETUP)
+
+
 def prepare_database(url: str) -> None:
     """Create the `vantage` schema in the database `url` names, or check
     the one there, over a connection of its own.
@@ -142,6 +156,7 @@ def prepare_database(url: str) -> None:
     """
     try:
         with psycopg.connect(url, **connection_kwargs(url)) as conn:
+            configure_session(conn)
             _require_utf8(conn)
             _ensure_schema(conn)
     except psycopg.Error as exc:
@@ -158,6 +173,7 @@ def open_pool(url: str, *, max_connections: int) -> ConnectionPool[PgConnection]
         min_size=1,
         max_size=max_connections,
         open=False,
+        configure=configure_session,
         name="vantage",
         timeout=_POOL_WAIT_SECONDS,
     )
