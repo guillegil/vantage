@@ -77,8 +77,9 @@ numbers — they release independently on prefixed tags.
   a timeout.
 - **xdist.** Every worker re-runs `pytest_configure` as a session of its own and
   every result reaches the controller too. Branch on the config's `workerinput`
-  attribute: workers collect failure evidence only; the `Recorder` exists only on
-  the controller.
+  attribute: workers collect failure evidence and hand the controller, through
+  `workeroutput`, only what they alone know (an interrupt, the metadata their
+  session fixtures reported); the `Recorder` exists only on the controller.
 - **Timestamps** are stored as fixed-width ISO-8601 UTC text so lexicographic
   order is chronological order. The server normalizes everything it receives.
 - **Python 3.10 is the floor.** `StrEnum`, `datetime.UTC` and `tomllib` are

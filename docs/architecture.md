@@ -121,7 +121,11 @@ it signals a bug:
 
 So a new field cannot be added to `run`, `vcs` or `metadata` under `/api/v1`
 without every existing server rejecting reports that carry it. Add an
-optional result key or a new sibling section instead.
+optional result key or a new sibling section instead. The one exception is
+`metadata`'s `keys` and `values`, added before either distribution was first
+released, so no server that rejects them was ever published. The plugin
+leaves both out when they are empty, so a session that uses neither is still
+accepted by a server built before them.
 
 Features the server may lack are negotiated, not assumed. The plugin asks
 `GET /api/v1/capabilities` before recording; only an explicit
@@ -150,12 +154,13 @@ patterns or lengths.
    error. A bare TCP connect checks that something listens at the address;
    if nothing does, one warning and the session runs unrecorded. A capability
    probe asks for `session_lifecycle`, and the `Recorder` is built: a random
-   run id, the start time, one git read (five seconds in total) and, if
-   asked, the metadata files.
+   run id, the start time, one git read (five seconds in total), the
+   metadata declaration and, if asked, the files it names.
 2. **`pytest_sessionstart`: the start report.** A `POST /api/v1/runs` with the
    run's id and start time, `finished_at` and `exit_status` null, the `vcs`
-   section, `metadata` if it was captured, and no results. The row exists
-   from this moment, so a session killed later still leaves a trace.
+   section, `metadata` when the declaration declares keys or files were
+   read, and no results. The row exists from this moment, so a session
+   killed later still leaves a trace.
 3. **`pytest_runtest_logreport`: accumulate and beat.** Every setup, call and
    teardown report is kept in memory, keyed by node id and xdist worker.
    After each one, if 30 seconds have passed since the last beat (or since
@@ -168,7 +173,12 @@ patterns or lengths.
    slice but the last goes in an in-progress report (`exit_status` null), and
    the last goes in the finishing report. A report lost on the way leaves the
    run unfinished, never finished with results missing. A single result too
-   large for any report is left out and counted in a warning.
+   large for any report is left out and counted in a warning. The values the
+   session reported through the `vantage_metadata` fixture go in the
+   finishing report alone, planned against the declaration first (`absent`
+   rows, the entry bound, the warnings); when the last slice leaves no room
+   for them, it goes out in progress and the finishing report carries no
+   results.
 
 How the session ended decides the finish fields. Ctrl-C and `pytest.exit()`
 send no finish time, `interrupted: true` and the reason. pytest's internal
@@ -193,6 +203,19 @@ sends it to the controller. Reports are grouped per worker, so one result is
 never stitched together from two workers, and under `--dist each` the most
 severe execution of a node id is recorded.
 
+Some things only a worker knows, and it tells the controller through
+`workeroutput`, which xdist hands over as the worker's session finishes
+(`Recorder.pytest_testnodedown`). `WorkerInterruptRelay` says whether Ctrl-C
+or `pytest.exit()` interrupted the worker, and why. `WorkerMetadataRelay`
+holds the mapping the `vantage_metadata` fixture hands the worker's session
+fixtures, which run on every worker and never on the controller, and relays
+its values. execnet refuses a `str` subclass and any text holding a lone
+surrogate, and either would crash the worker as it finishes, so keys and
+values are plain `str` from the moment they are set and cross as
+ASCII-escaped JSON text. The controller merges the values in the order it
+receives them, keeping the first value of a key two workers disagree on,
+with one warning.
+
 **Reruns and subtests.** A new setup report starts a new attempt, so a rerun
 plugin's last attempt is the one recorded. Subtest reports are kept apart
 from the call report, and a failed subtest fails its test.
@@ -200,10 +223,13 @@ from the call report, and a failed subtest fails its test.
 ## Failure isolation in the plugin
 
 pytest imports `plugin.py` in every session, recording or not, so it
-implements only `pytest_addoption` and `pytest_configure`. The recording
-modules are imported, and the `Recorder` registered, only once `--vantage` is
-typed; a test checks that an unactivated session loads nothing beyond the
-plugin's entry module and its configuration and warning helpers.
+implements only `pytest_addoption`, `pytest_configure` and the
+`vantage_metadata` fixture, which runs only when a test asks for it. The
+recording modules are imported, and the `Recorder` registered, only once
+`--vantage` is typed; a test checks that an unactivated session loads
+nothing beyond the plugin's entry module and its configuration and warning
+helpers. A session that is not recorded gets a fixture mapping nobody reads,
+so a project's fixtures run the same either way.
 
 Every `Recorder` hook runs behind a decorator from `boundary.py` that catches
 `Exception` (never `BaseException`, so Ctrl-C still stops the run), warns
@@ -223,6 +249,10 @@ switch off another:
   in its own `try`: a `__repr__` that raises costs that one field.
 - The git and metadata reads never raise. Each returns an empty section and
   at most one warning.
+- `SessionMetadata`, the fixture's mapping, never raises into the code that
+  sets a value: a key or value it cannot record is skipped with one warning.
+  Planning what the finishing report sends of the values has its own
+  `try`, so a failure there costs the run its values, never its finish.
 - `pytest_configure` has no decorator; a failure building the `Recorder` is
   caught there and leaves the session unrecorded.
 - Warnings are `VantageWarning`, a `UserWarning` rather than a
@@ -297,7 +327,7 @@ the repository root the plugin sends.
 
 **`schema.sql` is applied whole, once.** On first open, when the `meta` table
 does not exist, the whole file runs in one `BEGIN IMMEDIATE` transaction that
-also stamps `meta.schema_version` (currently 5). Reopening issues no DDL. A
+also stamps `meta.schema_version` (currently 6). Reopening issues no DDL. A
 database carrying any other stamp, older, newer, missing or not a number, is
 refused with `SchemaVersionError` before anything in it changes, and the
 `vantage` command turns that into a one-line refusal. There are no
@@ -309,7 +339,7 @@ bump of `_SCHEMA_VERSION` in `storage/connection.py`.
 | `run` | one row per session: times, exit status, interruption, VCS fields, last contact |
 | `test_case` | the catalogue: one row per node id ever seen, with first and last sighting |
 | `result` | one row per test per run, unique on `(run_id, node_id)` |
-| `run_metadata_file`, `run_metadata` | each declared file's status, and each declared key's status and value |
+| `run_metadata_file`, `run_metadata` | each declared file's status; each key's status and value, whether a file or the session gave it, its display name, and whether the declaration named it |
 | `user_setting` | namespaced JSON values; section definitions live here |
 | `meta` | the schema version, and when and by whom the database was created |
 
@@ -332,7 +362,9 @@ its row: run, catalogue, results, metadata.
 - Whether the report created the run comes from an existence probe inside the
   transaction, since SQLite's row count cannot tell an insert from an update.
 - Results insert with `ON CONFLICT DO NOTHING`, metadata rows likewise, so a
-  replay changes nothing.
+  replay changes nothing. A metadata key is inserted only while the run
+  holds fewer than 200, counted in the same statement, so the bound holds
+  over every report of the run and the metadata route needs no paging.
 
 Booleans are `0`/`1`; `vcs_dirty` is null when unknown, never `0`. The long
 free-text columns (the commit subject, and a result's failure message,
@@ -400,7 +432,7 @@ a wheel. deptry's per-rule ignores name each one a test imports with an
 | `packages/vantage/tests/memory_store.py` | `InMemoryExecutionStore`, a complete second implementation of the port; the server never uses it |
 | `packages/vantage/tests/vantage_port_contract.py` | `ExecutionStoreContract`, the behaviour every store must have; `test_sqlite_store.py` and `test_memory_store.py` subclass it |
 | `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]` and `[sqlite]`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
-| `packages/vantage/tests/sqlite_rows.py` | reads rows the port never returns (metadata) with plain SQL on a separate connection |
+| `packages/vantage/tests/sqlite_rows.py` | reads a run's metadata rows, whose file rows no port method returns, with plain SQL on a separate connection |
 | `packages/vantage/tests/loopback_server.py` | `LoopbackServer`: a real Uvicorn server on a thread, on a `127.0.0.1` port the OS assigns, with bounded start and stop |
 | `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a temporary directory, recording each request's method and path, for the plugin's end-to-end tests |
 

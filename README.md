@@ -131,6 +131,11 @@ results.
   repository root. The server stores the root path but no API response
   returns it. Outside a git repository, or when git cannot be read, these
   are null.
+- **Metadata your tests report:** every value set through the
+  `vantage_metadata` fixture, and the keys and display names declared in the
+  `keys` section of `vantage-metadata.json` (see
+  [Reporting metadata from your tests](#reporting-metadata-from-your-tests)).
+  The files that declaration lists are opened only with `--vantage-metadata`.
 
 ### `--vantage-failure-text`
 
@@ -150,9 +155,9 @@ first; a field that does not fit is dropped and marked as truncated.
 
 ### `--vantage-metadata`
 
-Reads `vantage-metadata.json` in pytest's rootdir and the files it names, and
-records the values of the keys it declares, such as the service version or
-deployment region a run was made against.
+Opens the files that `vantage-metadata.json`, in pytest's rootdir, lists
+under `files`, and records the values of the keys it declares for each, such
+as the service version or deployment region a run was made against.
 
 ```json
 {
@@ -164,22 +169,30 @@ deployment region a run was made against.
 }
 ```
 
-**The declaration:**
+**The declaration** is read in every recorded session, for the keys it
+declares, but only `--vantage-metadata` opens the files it lists. Without
+`--vantage` nothing is read at all.
 
 - `version` is the integer `1`.
-- `files` is a list of at most 16 entries, each with a `path`, a `format`
-  (`"json"` or `"yaml"`; it is never guessed from the extension) and a list
-  of `keys`.
+- `files` is optional: a list of at most 16 entries, each with a `path`, a
+  `format` (`"json"` or `"yaml"`; it is never guessed from the extension) and
+  a list of `keys`.
+- `keys` is optional too: the keys your tests report themselves, each with a
+  display name (see [Declaring keys](#declaring-keys)).
 - A `path` is relative to the rootdir and uses forward slashes. It may not
   be absolute or contain a `..` component, a backslash, a drive letter or a
   NUL character, may not exceed 1,024 characters, and may appear only once.
-- A key may appear only once in the whole declaration and may not exceed
-  1,024 characters. At most 200 keys in total.
+- A key may appear only once across `files`, and only once in `keys`; a key
+  in both is a file's key that `keys` gives a display name. No key may
+  exceed 1,024 characters, and at most 200 keys are declared in total.
 - The declaration itself must be a JSON object in UTF-8, at most 1 MiB, and
-  its paths and keys together must fit the 32 KiB metadata budget.
+  its paths, keys and display names together must fit the 32 KiB metadata
+  budget.
 
-A declaration that breaks any of these rules, or is missing, produces one
-warning; the session is still recorded, without metadata.
+A declaration that breaks any of these rules produces one warning ending
+`the declaration is ignored`: none of its keys counts as declared and none of
+its files is read, and the session is still recorded. A missing declaration
+is warned about only under `--vantage-metadata`.
 
 **The declared files:**
 
@@ -189,9 +202,9 @@ warning; the session is still recorded, without metadata.
   as `not_found` when nothing exists there.
 - A file larger than 8 KiB is recorded as `too_large`, one that is not UTF-8
   as `not_text`, and one that cannot be read as `unreadable`; none is sent.
-  The whole metadata section of a report, file contents included, is capped
-  at 32 KiB and filled in declaration order; a file whose contents no longer
-  fit is `over_budget`.
+  What a report carries of the declaration, file contents included, is
+  capped at 32 KiB and filled in declaration order; a file whose contents no
+  longer fit is `over_budget`.
 - Only top-level keys are read. A key whose value is a scalar is stored as
   text, as the file spells it (`2.10` stays `2.10`), up to 1,024 bytes. A key
   that is missing, holds a list or mapping, or whose value is too long is
@@ -203,8 +216,157 @@ passes these checks**, not only the declared keys; the server keeps only the
 declared values and each file's status. Declare only files you are content to
 upload. Every declared path is recorded with the run, with its status.
 
-Runs can be filtered by a recorded value:
-`GET /api/v1/runs?metadata_key=region&metadata_value=eu-west-1`.
+A key read from a file reads back like one the session reported, and
+filters the run list the same way; see
+[Reading it back](#reading-it-back).
+
+## Reporting metadata from your tests
+
+Some of what a run was made against is known only once the session has
+looked: the firmware a board is running, the revision of a card plugged
+into it. The `vantage_metadata` fixture takes such values from your own
+fixtures and records them with the run. It needs `--vantage` and nothing
+else.
+
+```python
+import pytest
+
+
+@pytest.fixture(scope="session", autouse=True)
+def dut(vantage_metadata):
+    fpga = connect_fpga()
+    vantage_metadata.update({
+        "fpga": {"firmware": fpga.read_fw_version(), "hardware": "v0.5.3"},
+        "fmc": {"hardware": "5.2.0", "pic": {"firmware": "2.0.0"}},
+    })
+    vantage_metadata["bench"] = "lab-3"
+    yield fpga
+```
+
+`vantage_metadata` is a session-scoped mapping of flat, dotted keys to text.
+Setting a dict, with `[]=` or `update`, flattens it under its key, so the
+example records `fpga.firmware`, `fpga.hardware`, `fmc.hardware`,
+`fmc.pic.firmware` and `bench`. Setting a key again replaces its value, and
+`vantage_metadata["fpga.firmware"]` reads it back.
+
+**Values become text as they are set:**
+
+| You set | Recorded as |
+| --- | --- |
+| a `str` | itself |
+| `True`, `False` | `"true"`, `"false"` |
+| an `int` or `float` | what `str()` gives: `1.10` becomes `"1.1"`, so pass a string when the spelling matters |
+| a `list` or `tuple` | compact JSON: `["a", 2, None]` becomes `["a",2,null]` |
+| `None` | no value, with status `absent` |
+| anything else | what `str()` gives, so a version object records as it prints |
+
+**Setting never raises.** A key that is not a string, is empty, is longer
+than 1,024 characters or contains a control character, or a value that
+cannot be turned into text, is skipped with one warning naming it. Without
+`--vantage` the fixture takes everything silently and sends nothing, and a
+session that is not recorded (the server was unreachable, say) sends
+nothing either, so the same fixtures run either way.
+
+**When it is sent.** The values go to the server in the session's last
+report only, once every test has run. A session that is killed loses them,
+and so can a value set in a fixture's teardown when the session stops early
+(`-x`, `--maxfail`): set values in the fixture's setup, before its `yield`.
+A value longer than 1,024 bytes of UTF-8 is recorded as `value_too_large`,
+without the value.
+
+**Under pytest-xdist**, session fixtures run in every worker. Each worker
+hands its values to the controller as it finishes, and the controller sends
+them all in the run's one last report. A key two workers report alike is
+recorded once. A key they report with different values keeps the first
+value the controller received, with one warning.
+
+### Declaring keys
+
+`vantage-metadata.json`, the declaration whose files `--vantage-metadata`
+reads, can also list the keys your tests report, with a name to show each
+under:
+
+```json
+{
+  "version": 1,
+  "keys": {
+    "fpga.firmware":    {"name": "FPGA firmware version"},
+    "fpga.hardware":    {"name": "FPGA hardware version"},
+    "fmc.hardware":     {"name": "FMC hardware version"},
+    "fmc.pic.firmware": {"name": "FMC PIC firmware version"}
+  }
+}
+```
+
+- Each entry is an object with an optional `name` of at most 256
+  characters. Any other field, a key that is empty or longer than 1,024
+  characters, or a key listed twice refuses the whole declaration, with one
+  warning.
+- The declared keys are the ones in `keys` and every key a declared file
+  lists. The declaration is read under `--vantage` alone; its files are
+  still opened only with `--vantage-metadata`.
+- Declaring is optional. With no declared keys, every key the session
+  reports is recorded as it comes, marked undeclared, without a warning.
+
+Once keys are declared:
+
+- **A key the declaration does not list is still recorded**, marked
+  undeclared, and named at the end of the session in one warning, with the
+  closest declared key when there is one:
+  `vantage: undeclared metadata keys: 'fpga.firmwre' (did you mean 'fpga.firmware'?), 'bench'`.
+- **A key in `keys` that nothing gave a value** is recorded with status
+  `absent`, so "not reported" reads differently from "never declared".
+- **A key read from a declared file** under `--vantage-metadata` keeps the
+  file's value when the session reports it too, with one warning.
+
+**Bounds.** A run records at most 200 keys: the keys of the files read
+first, then the keys the session reported, in the order first set, then the
+declared keys recorded `absent`. All the values together may take up to
+512 KiB of the last report. Keys past either bound are left out, with one
+warning for each bound.
+
+### Reading it back
+
+`GET /api/v1/runs/{run_id}/metadata` returns every key of one run, sorted by
+key, whether it was read from a file or reported by the session:
+
+```json
+{"items": [
+  {"key": "bench", "name": null, "value": "lab-3", "status": "captured",
+   "source": "session", "source_file": null, "declared": false},
+  {"key": "fmc.hardware", "name": "FMC hardware version", "value": "5.2.0",
+   "status": "captured", "source": "session", "source_file": null, "declared": true}
+]}
+```
+
+- `source` is `file` or `session`; `source_file` is the declared path of a
+  `file` key and null otherwise.
+- `value` is null unless `status` is `captured`. The other statuses are
+  `absent`, `value_too_large`, and, for a file's key only, `not_scalar` and
+  `source_unavailable`.
+- A run that recorded no metadata has no items; a run id never recorded
+  answers `404`. The list is not paged.
+
+The run list filters by up to 16 keys at once. Repeat `metadata_key` and
+`metadata_value` once per key; each value pairs with the key in the same
+position, and a run must hold every pair to be listed:
+
+```
+GET /api/v1/runs?metadata_key=fpga.firmware&metadata_value=1.1.0&metadata_key=fmc.hardware&metadata_value=5.2.0
+```
+
+A pair matches a `captured` value spelt exactly the same, from a file or
+the session. Giving the two parameters a different number of times, or more
+than 16 pairs, answers `422`. A run recorded before any run held a key
+cannot match it, so the answer's `metadata_horizon` says, for each filtered
+key in the order given, how many runs predate it:
+
+```json
+"metadata_horizon": [{"key": "fpga.firmware", "predating": 12},
+                     {"key": "fmc.hardware", "predating": 30}]
+```
+
+Without a metadata filter, `metadata_horizon` is null.
 
 ## When something goes wrong
 
@@ -242,10 +404,14 @@ depends on when it is raised:
   lists nor counts it in its warnings summary, so in a long CI log the line
   saying a session is not being recorded is at the top.
 - **At the end of the session** (the final report failed, results left
-  out): in pytest's warnings summary.
+  out, metadata keys undeclared, left out or reported twice): in pytest's
+  warnings summary.
 - **While tests run** (a heartbeat failed, a test report of an unexpected
   shape): in the warnings summary, listed under whichever test was running
   at the time; under pytest-xdist, printed to stderr when it happens.
+- **When a metadata key or value is skipped:** in the warnings summary,
+  under the test whose fixture set it, and under pytest-xdist once for each
+  worker that set it.
 
 If your warning filters turn warnings into errors, the message is written to
 the terminal instead.
@@ -296,6 +462,7 @@ side:
 | --- | --- |
 | `GET /api/v1/runs` | Runs, newest first, each `running`, `finished`, `interrupted` or `abandoned` |
 | `GET /api/v1/runs/{run_id}` | One run |
+| `GET /api/v1/runs/{run_id}/metadata` | One run's metadata, from declared files and from the session |
 | `GET /api/v1/runs/{run_id}/results` | One run's results, with a short failure summary |
 | `GET /api/v1/runs/{run_id}/result?node_id=...` | One result in full, failure text included |
 | `GET /api/v1/tests/history?node_id=...` | One test across runs, newest first |
@@ -304,7 +471,9 @@ side:
 
 The run list, a run's results and a test's history are paged: they take
 `limit` (at most 200 per page) and `offset`, and say in `has_more` whether
-more items exist. The section lists are returned whole.
+more items exist. The section lists and a run's metadata are returned
+whole. The run list also filters by metadata values; see
+[Reading it back](#reading-it-back).
 
 ## Development
 
