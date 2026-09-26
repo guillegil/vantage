@@ -68,8 +68,9 @@ value, because it is a short, indexed, client-supplied string. Not
 no query value."""
 
 MAX_METADATA_KEY_CHARS = 1024
-"""Bound on one declared key's length: `MAX_IDENTITY_CHARS`'s value, since a
-declared key is the same class of short, client-supplied, indexed string."""
+"""Bound on one key's length, declared or reported by the session:
+`MAX_IDENTITY_CHARS`'s value, since a key is the same class of short,
+client-supplied, indexed string."""
 
 MAX_METADATA_NAME_CHARS = 256
 """Bound on the display name a declaration gives a key. The plugin refuses a

@@ -180,7 +180,7 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 -- `result(test_case_id)`: one test's history.
 -- `test_case(node_id)`: the catalogue upsert's conflict target and every
 -- lookup by node id.
--- `run_metadata(key, value)`: filtering runs by a declared key/value pair,
+-- `run_metadata(key, value)`: filtering runs by metadata key/value pairs,
 -- a full scan without it.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_started_at
