@@ -14,7 +14,7 @@ import json
 
 import pytest
 import pytest_vantage.budget as budget_module
-from pytest_vantage import transport
+from pytest_vantage import recorder, transport
 from pytest_vantage.budget import (
     _FIELD_BYTES_CAP,
     encoded_cost,
@@ -386,7 +386,10 @@ def wire_sizes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[dict[str, object],
         sent.append((report, len(json.dumps(report).encode("utf-8"))))
         transport.send(address, report, timeout=timeout)
 
-    monkeypatch.setattr("pytest_vantage.recorder.send", _measure_then_send)
+    # The module imported at collection, not a dotted path: `pytester`
+    # restores `sys.modules` after each test, and the path would resolve to
+    # a copy an earlier session imported and the plugin no longer uses.
+    monkeypatch.setattr(recorder, "send", _measure_then_send)
     return sent
 
 

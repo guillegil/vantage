@@ -35,6 +35,12 @@ from pytest_vantage.boundary import (
     warn,
 )
 from pytest_vantage.plugin import _preflight_reachable
+
+# At collection, not inside the tests that use it: `pytester` restores
+# `sys.modules` after each test, dropping a module a test imported first,
+# and a later `monkeypatch.setattr("pytest_vantage.recorder....")` would then
+# patch that dropped copy while the plugin imports a fresh one.
+from pytest_vantage.recorder import Recorder
 from pytest_vantage.transport import Capabilities, fetch_capabilities, send
 from vantage.service.errors import RejectionError
 from vantage_test_server import VantageTestServer, wait_for_file
@@ -497,8 +503,6 @@ def test_unresolvable_host_warns_naming_the_address_and_runs_unrecorded(
 def test_recorder_is_not_registered_when_the_preflight_fails(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from pytest_vantage.recorder import Recorder
-
     monkeypatch.delenv("VANTAGE_SERVER", raising=False)
     # `pytest.warns` rather than a bare call: the preflight failing here is
     # the whole point of the test, so asserting the warning is part of
@@ -1299,8 +1303,6 @@ def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
     `lifecycle_available=False`, without ever calling `send` or
     `send_heartbeat`.
     """
-    from pytest_vantage.recorder import Recorder
-
     calls: list[str] = []
     monkeypatch.setattr("pytest_vantage.recorder.send", lambda *a, **k: calls.append("send"))
     monkeypatch.setattr(
@@ -1348,8 +1350,6 @@ def test_git_failure_disables_nothing_else(
     survive with nulls, not merely without a crash: every result and the
     run row itself must still land.
     """
-    from pytest_vantage.recorder import Recorder
-
     original_init = Recorder.__init__
     created: list[Recorder] = []
 
@@ -1450,8 +1450,6 @@ def test_every_recorder_hook_is_under_the_isolation_meant_for_it() -> None:
     report can switch the finish-write off. The hooks are enumerated, so one
     added later without a decorator, or under the wrong one, fails here.
     """
-    from pytest_vantage.recorder import Recorder
-
     isolation = {
         name: getattr(getattr(Recorder, name), "isolation_flag", None)
         for name in dir(Recorder)
@@ -1475,8 +1473,6 @@ def test_an_unrecordable_test_report_never_disables_the_finish_write(
     all -- warns once and costs that report alone: later reports are still
     recorded, and the finish-write still goes out with them.
     """
-    from pytest_vantage.recorder import Recorder
-
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send", lambda address, report, *, timeout: sent.append(report)
@@ -1521,8 +1517,6 @@ def test_a_result_that_cannot_be_built_warns_once_and_costs_only_itself(
     still carries every other result, and one warning says how many were
     lost, so the gap in the recorded run is never silent.
     """
-    from pytest_vantage.recorder import Recorder
-
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send", lambda address, report, *, timeout: sent.append(report)
