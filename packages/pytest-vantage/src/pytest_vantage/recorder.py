@@ -95,7 +95,10 @@ def _capture_metadata(config: pytest.Config, rootpath: Path) -> metadata.Metadat
 
 # Beats are activity-driven, not a timer thread: one is only attempted from
 # `pytest_runtest_logreport`, at most this often. A suite of 1,000 ~10 ms
-# tests finishes well inside one interval and sends none.
+# tests finishes well inside one interval and sends none. The limit that
+# comes with it: nothing is sent while one test, fixture or collection runs,
+# so a stretch without a report longer than the server's grace period reads
+# as abandoned until the next report arrives.
 _BEAT_INTERVAL_SECONDS = 30.0
 
 # `pytest.ExitCode.INTERNAL_ERROR`: pytest itself broke, so the session has
