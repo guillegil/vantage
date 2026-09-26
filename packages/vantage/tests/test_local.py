@@ -332,6 +332,18 @@ def test_a_report_that_cannot_be_encoded_is_refused(tmp_path: Path) -> None:
     assert message.startswith(f"the report of run {_RUN_ID} cannot be encoded as JSON: ")
 
 
+def test_a_report_nested_deeper_than_the_encoder_recurses_is_refused(tmp_path: Path) -> None:
+    # Deeper than any interpreter's recursion limit, Python's or C's.
+    nested: list[Any] = []
+    for _ in range(100_000):
+        nested = [nested]
+    report = {"run": _run(finished=True), "results": nested}
+
+    message = _refusal(tmp_path / "vantage.db", [report])
+
+    assert message.startswith(f"the report of run {_RUN_ID} cannot be encoded as JSON: ")
+
+
 def test_a_write_the_database_refuses_is_one_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

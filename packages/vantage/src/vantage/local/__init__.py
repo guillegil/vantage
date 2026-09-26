@@ -117,7 +117,9 @@ def _store(store: SqliteExecutionStore, database: Path, report: Mapping[str, obj
     try:
         # The bytes the plugin's HTTP client would send.
         body = json.dumps(report).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
+        # A value JSON has no form for, a cycle, or nesting deeper than the
+        # encoder recurses.
         raise LocalStoreError(
             _line(f"the report of run {run_id} cannot be encoded as JSON: {_said(exc)}")
         ) from exc
