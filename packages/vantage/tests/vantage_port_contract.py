@@ -1594,4 +1594,3 @@ class ExecutionStoreContract:
         assert [entry.execution.identity.value for entry in page.items] == ["c" * 32]
         assert page.has_more is True
         assert predating == 2
-        assert page == store.list_runs(limit=1, offset=0, metadata_key="fw", metadata_value="2.1")

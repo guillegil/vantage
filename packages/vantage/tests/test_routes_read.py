@@ -116,8 +116,8 @@ def _captured_metadata(
     key: str, value: str, *, source_file: str = "config/firmware.yaml"
 ) -> RunMetadata:
     """One declared, captured `key=value` pair plus the file row that
-    accompanies it -- what `store.list_runs`' `metadata_key`/`metadata_value`
-    filter and its horizon count read."""
+    accompanies it -- what `store.list_runs_with_metadata_horizon`'s filter
+    and its horizon count read."""
     return RunMetadata(
         files=(MetadataFile(source_file=source_file, content_type="yaml", status="captured"),),
         entries=(MetadataEntry(key=key, value=value, source_file=source_file, status="captured"),),

@@ -852,22 +852,9 @@ class SqliteExecutionStore:
         row = self._fetchone(_SELECT_TEST_CASE, (node_id,))
         return None if row is None else _row_to_catalogue_entry(row)
 
-    def list_runs(
-        self,
-        *,
-        limit: int,
-        offset: int,
-        metadata_key: str | None = None,
-        metadata_value: str | None = None,
-    ) -> Page[RunListEntry]:
+    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        if metadata_key is not None and metadata_value is not None:
-            rows = self._fetchall(
-                _LIST_RUNS_BY_METADATA,
-                (_LIST_SUBJECT_PREFIX_BYTES, metadata_key, metadata_value, page_limit + 1, offset),
-            )
-        else:
-            rows = self._fetchall(_LIST_RUNS, (_LIST_SUBJECT_PREFIX_BYTES, page_limit + 1, offset))
+        rows = self._fetchall(_LIST_RUNS, (_LIST_SUBJECT_PREFIX_BYTES, page_limit + 1, offset))
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def list_runs_with_metadata_horizon(

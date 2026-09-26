@@ -285,14 +285,7 @@ class ExecutionStore(Protocol):
         """Return the catalogue entry for `node_id`, or None if never observed."""
         ...
 
-    def list_runs(
-        self,
-        *,
-        limit: int,
-        offset: int,
-        metadata_key: str | None = None,
-        metadata_value: str | None = None,
-    ) -> Page[RunListEntry]:
+    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
         """Return a page of runs, newest first.
 
         Ordered `started_at DESC, id DESC` -- the `id` tiebreak makes the
@@ -300,22 +293,20 @@ class ExecutionStore(Protocol):
         share a `started_at`. `limit` is clamped at `MAX_PAGE_ITEMS`, never
         rejected; `has_more` is true when more rows exist beyond the
         returned page. Each entry's VCS data is a lean `VcsProjection` --
-        the entry's own `execution.vcs` is always `None`.
-
-        When both `metadata_key` and `metadata_value` are given, the page is
-        narrowed to runs holding that exact declared `(key, value)` pair --
-        a key declared but not captured has no value, so it never matches;
-        otherwise both are ignored."""
+        the entry's own `execution.vcs` is always `None`."""
         ...
 
     def list_runs_with_metadata_horizon(
         self, *, key: str, value: str, limit: int, offset: int
     ) -> tuple[Page[RunListEntry], int]:
-        """`list_runs` narrowed to runs holding `(key, value)`, together with
-        how many runs were recorded before `key` was first declared, both
-        read from one snapshot of the store. Two separate reads can straddle
-        a session another process records, and then describe two different
-        sets of runs.
+        """`list_runs` narrowed to runs holding the exact declared
+        `(key, value)` pair, together with how many runs were recorded
+        before `key` was first declared, both read from one snapshot of the
+        store. Two separate reads can straddle a session another process
+        records, and then describe two different sets of runs. This is the
+        only filtered read of the run list.
+
+        A key declared but not captured has no value, so it never matches.
 
         `first_seen` is `MIN(run.started_at)` over runs holding **any**
         `run_metadata` row for `key`, regardless of status -- a

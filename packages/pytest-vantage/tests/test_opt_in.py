@@ -365,9 +365,10 @@ def test_capture_is_enabled_only_by_its_typed_flag(
 
     result.assert_outcomes(failed=1)
     (stored,) = vantage_server.results()
-    runs_storing_the_declared_secret = vantage_server.store.list_runs(
-        limit=1, offset=0, metadata_key="db_password", metadata_value="s3cr3t-db"
-    ).items
+    page, _predating = vantage_server.store.list_runs_with_metadata_horizon(
+        key="db_password", value="s3cr3t-db", limit=1, offset=0
+    )
+    runs_storing_the_declared_secret = page.items
     if kind == "typed":
         assert stored.failure is not None
         assert "hunter2" in (stored.failure.traceback or "")

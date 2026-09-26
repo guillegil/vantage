@@ -84,9 +84,8 @@ class InMemoryExecutionStore:
     """Implements `vantage.core.ports.storage.ExecutionStore` with dicts."""
 
     def __init__(self) -> None:
-        # Re-entrant: `list_runs_with_metadata_horizon` reads through
-        # `list_runs`, and both hold it.
-        self._lock = threading.RLock()
+        # Not re-entrant: no locked method calls another.
+        self._lock = threading.Lock()
         self._executions: dict[str, Execution] = {}
         self._catalogue: dict[str, CatalogueEntry] = {}
         self._results: dict[tuple[str, str], Result] = {}
@@ -201,34 +200,15 @@ class InMemoryExecutionStore:
     def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         return self._catalogue.get(node_id)
 
-    @_locked
-    def list_runs(
-        self,
-        *,
-        limit: int,
-        offset: int,
-        metadata_key: str | None = None,
-        metadata_value: str | None = None,
+    def _run_page(
+        self, candidates: Iterable[Execution], *, limit: int, offset: int
     ) -> Page[RunListEntry]:
-        # Mirrors the SQLite adapter's `ORDER BY started_at DESC, id DESC` /
-        # `LIMIT min(limit, 200) + 1 OFFSET`: fetching one extra row is what
-        # sets `has_more` without a second query.
+        """One page of `candidates`, for a caller already holding the lock.
+
+        Mirrors the SQLite adapter's `ORDER BY started_at DESC, id DESC` /
+        `LIMIT min(limit, 200) + 1 OFFSET`: fetching one extra row is what
+        sets `has_more` without a second query."""
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        candidates: Iterable[Execution] = self._executions.values()
-        if metadata_key is not None and metadata_value is not None:
-            # Mirrors `rm.key = ? AND rm.value = ?`: `entry.value` is `None`
-            # for a declared-but-uncaptured key, so it never matches, just as
-            # SQL NULL never equals a bound string.
-            matching_run_ids = {
-                run_id
-                for (run_id, entry_key), entry in self._metadata_entries.items()
-                if entry_key == metadata_key and entry.value == metadata_value
-            }
-            candidates = [
-                execution
-                for execution in candidates
-                if execution.identity.value in matching_run_ids
-            ]
         ordered = sorted(
             candidates,
             key=lambda execution: (execution.started_at, execution.identity.value),
@@ -245,12 +225,33 @@ class InMemoryExecutionStore:
         return Page(items=items, has_more=has_more)
 
     @_locked
+    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+        return self._run_page(self._executions.values(), limit=limit, offset=offset)
+
+    @_locked
     def list_runs_with_metadata_horizon(
         self, *, key: str, value: str, limit: int, offset: int
     ) -> tuple[Page[RunListEntry], int]:
         # Both reads happen under one hold of the lock, so they describe one
         # state.
-        page = self.list_runs(limit=limit, offset=offset, metadata_key=key, metadata_value=value)
+        #
+        # Mirrors `rm.key = ? AND rm.value = ?`: `entry.value` is `None` for
+        # a declared-but-uncaptured key, so it never matches, just as SQL
+        # NULL never equals a bound string.
+        matching_run_ids = {
+            run_id
+            for (run_id, entry_key), entry in self._metadata_entries.items()
+            if entry_key == key and entry.value == value
+        }
+        page = self._run_page(
+            (
+                execution
+                for execution in self._executions.values()
+                if execution.identity.value in matching_run_ids
+            ),
+            limit=limit,
+            offset=offset,
+        )
         # A row for `key` of any status counts towards `first_seen`,
         # mirroring the SQLite adapter's `run_metadata` join, which does not
         # filter on `value` either.
