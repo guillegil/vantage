@@ -938,6 +938,50 @@ def test_under_xdist_only_the_controller_stores_the_run(
     assert _queued(database) == []
 
 
+@pytest.mark.parametrize("verbosity", [[], ["-v"], ["-q"]])
+def test_under_xdist_the_queue_summary_is_a_line_of_its_own(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, verbosity: list[str]
+) -> None:
+    """xdist leaves the progress line open until the terminal summary, so a
+    line written as the session finishes would be glued to its end."""
+    pytest.importorskip("xdist")
+    database = _stand_in(pytester)
+    _queue_directly(database, vantage_server.address, "c" * 32)
+    pytester.makepyfile(test_four=_FOUR_TESTS)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage",
+        "--vantage-mode=server+backup",
+        f"--vantage-server={vantage_server.address}",
+        "-n",
+        "2",
+        *verbosity,
+    )
+
+    result.assert_outcomes(passed=4)
+    result.stdout.fnmatch_lines([f"vantage: sent 1 queued run to {vantage_server.address} *"])
+
+
+@pytest.mark.parametrize("hidden", [["--no-summary"], ["-p", "no:terminal"]])
+def test_the_queue_summary_is_printed_without_a_terminal_summary(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, hidden: list[str]
+) -> None:
+    database = _stand_in(pytester)
+    _queue_directly(database, vantage_server.address, "d" * 32)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage",
+        "--vantage-mode=server+backup",
+        f"--vantage-server={vantage_server.address}",
+        *hidden,
+    )
+
+    assert result.ret == 0
+    assert _output(result).count(f"vantage: sent 1 queued run to {vantage_server.address} ") == 1
+    assert _queued(database) == []
+
+
 def test_under_xdist_an_unreachable_server_queues_the_run_once(pytester: pytest.Pytester) -> None:
     pytest.importorskip("xdist")
     address = _closed_port_address()

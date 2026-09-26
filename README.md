@@ -214,7 +214,7 @@ vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.
 
 **Sending the queue.** After a session whose own run reached a server, the
 plugin sends the runs queued for that server, oldest first, within the
-report timeout, and prints one line:
+report timeout, and prints one line with the test summary:
 `vantage: sent 3 queued runs to http://ci-vantage:8765 (0 waiting)`. It stops
 when the server is unreachable again, answers a 408 or 429, or the time is
 spent, and says why. A run the server answers with a 5xx stays queued and

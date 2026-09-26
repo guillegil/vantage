@@ -307,6 +307,7 @@ class Recorder:
         self._disabled = False
         self._liveness_disabled = False
         self._accumulation_warned = False
+        self._summary: list[str] = []
         self._results: dict[str, PendingResult] = {}
         self._stop: BaseException | None = None
         self._worker_interruption: str | None = None
@@ -747,7 +748,25 @@ class Recorder:
         )
         if summary.stopped is not None:
             line = f"{line}; stopped: {summary.stopped}"
-        _say(self._config, line)
+        self._summary.append(line)
+
+    @fault_isolated
+    def pytest_terminal_summary(self, terminalreporter: pytest.TerminalReporter) -> None:
+        """What the finish had to say, printed where pytest prints what
+        plugins report at the end: under xdist the progress line is still
+        open as the session finishes, and a line written then would be glued
+        to its end."""
+        lines, self._summary = self._summary, []
+        for line in lines:
+            terminalreporter.write_line(line)
+
+    @fault_isolated
+    def pytest_unconfigure(self) -> None:
+        """Whatever no terminal summary printed: `--no-summary`, an internal
+        error, or no terminal reporter at all."""
+        lines, self._summary = self._summary, []
+        for line in lines:
+            _say(self._config, line)
 
 
 def _runs(count: int) -> str:

@@ -352,8 +352,10 @@ order as JSON text, when it was queued, attempts and the last error.
   an attempt. A duplicate send is harmless: the server's writes are
   idempotent.
 - A session whose own run reached its server sends that server's queue
-  within the report timeout and prints one line. It never creates the
-  outbox just to find it empty.
+  within the report timeout and prints one line in `pytest_terminal_summary`
+  (or at unconfigure when there is no summary): under xdist the progress
+  line is still open as the session finishes. It never creates the outbox
+  just to find it empty.
 
 **`vantage push`** (`service/push.py`) is the same `send_queued` on demand,
 with no budget beyond each report's timeout, for every server in the outbox

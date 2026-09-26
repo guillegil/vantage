@@ -1486,9 +1486,10 @@ def test_hung_git_does_not_delay_session(
 
 def test_every_recorder_hook_is_under_the_isolation_meant_for_it() -> None:
     """Every `pytest_*` hook on `Recorder` is wrapped by an isolation
-    decorator, and by the right one: only the hooks that talk to the server
-    about the report share `_disabled`, so neither liveness nor an odd test
-    report can switch the finish-write off. The hooks are enumerated, so one
+    decorator, and by the right one: only the hooks that report the run --
+    to the server, and what the finish did at the end of the terminal output
+    -- share `_disabled`, so neither liveness nor an odd test report can
+    switch the finish-write off. The hooks are enumerated, so one
     added later without a decorator, or under the wrong one, fails here.
     """
     isolation = {
@@ -1504,7 +1505,9 @@ def test_every_recorder_hook_is_under_the_isolation_meant_for_it() -> None:
         "pytest_runtest_logreport": "_accumulation_warned",
         "pytest_sessionfinish": "_disabled",
         "pytest_sessionstart": "_liveness_disabled",
+        "pytest_terminal_summary": "_disabled",
         "pytest_testnodedown": "_accumulation_warned",
+        "pytest_unconfigure": "_disabled",
     }
     assert getattr(Recorder._maybe_beat, "isolation_flag", None) == "_liveness_disabled"
 
