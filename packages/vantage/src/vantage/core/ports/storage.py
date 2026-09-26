@@ -240,7 +240,12 @@ class ExecutionStore(Protocol):
     """Persists `Execution` rows. Implementations live in `vantage.storage`.
 
     The service calls one store from several worker threads at once, so an
-    implementation must be safe to share between them."""
+    implementation must be safe to share between them.
+
+    `count_executions`, `get_results`, `count_results` and
+    `get_catalogue_entry` are called by no route: they are how the tests,
+    the plugin's included, check what a write stored, through the same port
+    on either adapter."""
 
     def record_session(
         self,

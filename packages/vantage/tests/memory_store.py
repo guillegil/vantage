@@ -61,6 +61,25 @@ def _normalized_vcs(vcs: VcsContext | None) -> VcsContext | None:
     return None if vcs is None or vcs.is_empty() else vcs
 
 
+def _merged_vcs(incoming: VcsContext, previous: VcsContext | None) -> VcsContext:
+    """Per-FIELD coalesce, the mirror of the SQLite adapter's per-column
+    `COALESCE(excluded.vcs_*, run.vcs_*)`: null -> value only, never value
+    -> null. The truncation flag follows whichever subject is kept."""
+    if previous is None:
+        return incoming
+    keeps_subject = incoming.commit_subject is not None
+    return VcsContext(
+        commit=incoming.commit if incoming.commit is not None else previous.commit,
+        branch=incoming.branch if incoming.branch is not None else previous.branch,
+        commit_subject=incoming.commit_subject if keeps_subject else previous.commit_subject,
+        commit_subject_truncated=incoming.commit_subject_truncated
+        if keeps_subject
+        else previous.commit_subject_truncated,
+        dirty=incoming.dirty if incoming.dirty is not None else previous.dirty,
+        root=incoming.root if incoming.root is not None else previous.root,
+    )
+
+
 def _normalized_result(result: Result) -> Result:
     if result.failure is not None and result.failure.is_empty():
         return replace(result, failure=None)
@@ -122,7 +141,7 @@ class InMemoryExecutionStore:
             # SQLite adapter's per-column `COALESCE`, so a partial snapshot
             # never nulls a stored value.
             merged_vcs = _normalized_vcs(
-                stored.vcs if execution.vcs is None else execution.vcs.merged_over(stored.vcs)
+                stored.vcs if execution.vcs is None else _merged_vcs(execution.vcs, stored.vcs)
             )
             self._executions[identity] = Execution(
                 identity=stored.identity,

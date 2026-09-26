@@ -596,7 +596,7 @@ class ExecutionStoreContract:
     ) -> None:
         """A start-write carries a vcs snapshot; the finish-write that follows
         carries no `vcs` section at all (`vcs=None`). The conflict branch's
-        per-column `COALESCE` (SQL) / `merged_over` (memory) must leave the
+        per-column `COALESCE` (SQL) / field-by-field merge (memory) must leave the
         previously-recorded vcs values untouched -- a report with no vcs data
         is not a report that nulls the vcs it does not carry."""
         identity = "2" + "1" * 31
@@ -650,6 +650,51 @@ class ExecutionStoreContract:
         assert stored.vcs.dirty == full.dirty
         assert stored.vcs.root == full.root
         assert stored.vcs.commit == full.commit
+
+    @pytest.mark.parametrize(
+        ("finish_subject", "expected_subject", "expected_flag"),
+        [(None, "A long subject that was cut", True), ("Short", "Short", False)],
+        ids=["no-subject-keeps-the-flag", "a-new-subject-brings-its-own"],
+    )
+    def test_the_truncation_flag_travels_with_the_subject_it_describes(
+        self,
+        store: ExecutionStore,
+        finish_subject: str | None,
+        expected_subject: str,
+        expected_flag: bool,
+    ) -> None:
+        """The flag describes a subject, so it is kept or replaced with the
+        subject, not by its own null-coalesce."""
+        identity = "2" + "7" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start_vcs = _vcs(
+            commit_subject="A long subject that was cut", commit_subject_truncated=True
+        )
+        store.record_session(
+            _start_only_execution(identity, started=started, vcs=start_vcs),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+        finish_vcs = _vcs(
+            commit=None,
+            branch=None,
+            commit_subject=finish_subject,
+            commit_subject_truncated=False,
+            dirty=None,
+            root=None,
+        )
+        store.record_session(
+            _execution(identity, finished=True, started=started, vcs=finish_vcs),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        stored = store.get_execution(identity)
+
+        assert stored is not None
+        assert stored.vcs == replace(
+            start_vcs, commit_subject=expected_subject, commit_subject_truncated=expected_flag
+        )
 
     def test_identical_vcs_snapshots_across_start_and_finish_apply_once(
         self, store: ExecutionStore

@@ -17,6 +17,14 @@
 -- Foreign keys are declared here but only enforced when a connection turns
 -- on `PRAGMA foreign_keys=ON` (vantage/storage/connection.py, every
 -- connection) -- SQLite ignores unenforced foreign keys by default.
+--
+-- A few values are recorded for whoever reads the database directly and
+-- are returned by no route: `meta.created_at`/`created_by`,
+-- `run.received_at`, `test_case.first_seen_at`/`last_seen_run_id`, and the
+-- status and source file of each declared metadata file and key
+-- (`run_metadata_file`, `run_metadata.source_file`/`status`), which say why
+-- a declared key has no value. The tests read them to check what a write
+-- stored.
 
 -- ---------------------------------------------------------------------------
 -- meta -- `schema_version`, plus the best-effort `created_at`/`created_by`
@@ -50,7 +58,9 @@ CREATE TABLE IF NOT EXISTS run (
 -- ---------------------------------------------------------------------------
 -- test_case -- the catalogue: one row per test ever seen, keyed by pytest
 -- node id. `node_id`'s uniqueness comes from `idx_test_case_node_id` below,
--- the catalogue upsert's conflict target.
+-- the catalogue upsert's conflict target. Every result of a node id reads
+-- its file, class, function and parameter from here, as the newest run
+-- reported them; `last_seen_at` decides which run that is.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS test_case (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,

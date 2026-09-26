@@ -59,31 +59,6 @@ class VcsContext:
             and self.root is None
         )
 
-    def merged_over(self, previous: VcsContext | None) -> VcsContext:
-        """Per-FIELD coalesce: null -> value only, never value -> null.
-
-        `self` is the incoming (just-reported) snapshot, `previous` is what
-        is already stored -- the in-memory mirror of the SQLite adapter's
-        per-column `COALESCE(excluded.vcs_*, run.vcs_*)`. A partial incoming
-        snapshot -- a detached HEAD, a repository with no commits -- must not
-        null a fuller previous one field by field, which a whole-object
-        coalesce cannot express.
-        """
-        if previous is None:
-            return self
-        return VcsContext(
-            commit=self.commit if self.commit is not None else previous.commit,
-            branch=self.branch if self.branch is not None else previous.branch,
-            commit_subject=self.commit_subject
-            if self.commit_subject is not None
-            else previous.commit_subject,
-            commit_subject_truncated=self.commit_subject_truncated
-            if self.commit_subject is not None
-            else previous.commit_subject_truncated,
-            dirty=self.dirty if self.dirty is not None else previous.dirty,
-            root=self.root if self.root is not None else previous.root,
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class Execution:
