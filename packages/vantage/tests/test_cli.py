@@ -533,6 +533,8 @@ _PASSWORD = "s3cr%3Ft"  # noqa: S105
 _DECODED_PASSWORD = "s3cr?t"  # noqa: S105
 _URL = f"postgresql://vantage:{_PASSWORD}@db.example:5432/vantage"
 _SHOWN = "postgresql://vantage:***@db.example:5432/vantage"
+# The loggers of psycopg and of its pool, which `main` silences.
+_DRIVER_LOGGERS = ("psycopg", "psycopg_pool")
 
 
 class _StandInAdapter:
@@ -555,12 +557,17 @@ class _StandInAdapter:
 
 
 @pytest.fixture
-def postgres_adapter(monkeypatch: pytest.MonkeyPatch) -> _StandInAdapter:
+def postgres_adapter(monkeypatch: pytest.MonkeyPatch) -> Iterator[_StandInAdapter]:
+    """The stand-in adapter; the driver's loggers, which a refused start
+    leaves silenced, are put back afterwards."""
     adapter = _StandInAdapter()
     module = types.ModuleType(_ADAPTER)
     setattr(module, "PostgresExecutionStore", adapter.open)
     monkeypatch.setitem(sys.modules, _ADAPTER, module)
-    return adapter
+    levels = {name: logging.getLogger(name).level for name in _DRIVER_LOGGERS}
+    yield adapter
+    for name, level in levels.items():
+        logging.getLogger(name).setLevel(level)
 
 
 def test_a_postgresql_url_opens_the_postgresql_adapter_and_serves_it(
@@ -738,3 +745,69 @@ def test_the_drivers_own_message_is_quoted_on_one_line_without_the_password(
     for piece in re.split("[@:]", password):
         assert piece not in err
     assert said in err
+
+
+_OPENED_BY_A_POOL = """
+import sys
+import types
+
+from psycopg_pool import ConnectionPool
+from vantage.service import cli
+
+
+def PostgresExecutionStore(url, *, max_connections=10):
+    pool = ConnectionPool(url, min_size=1, max_size=max_connections, open=False)
+    pool.open(wait=True, timeout=1.0)
+    return pool
+
+
+adapter = types.ModuleType("vantage.storage.postgres")
+adapter.PostgresExecutionStore = PostgresExecutionStore
+sys.modules[adapter.__name__] = adapter
+cli.main(sys.argv[1:])
+"""
+
+
+def test_the_pools_own_logging_adds_nothing_to_a_refusal() -> None:
+    """psycopg's pool logs every failed attempt to connect, and with no
+    logging configured yet Python prints that on stderr, quoting libpq --
+    here, the password it cannot decode. A real pool, run where nothing
+    else configures logging, as the command runs."""
+    port = _free_loopback_port()
+    password = "s3cr%zzt"  # noqa: S105
+    url = f"postgresql://vantage:{password}@127.0.0.1:{port}/vantage"
+    listen = ["--port", str(_free_loopback_port())]
+
+    completed = subprocess.run(  # noqa: S603 -- the interpreter running this test
+        [sys.executable, "-c", _OPENED_BY_A_POOL, "--database", url, *listen],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 1, completed.stderr
+    assert completed.stderr.startswith(
+        f"vantage: cannot open the database at postgresql://vantage:***@127.0.0.1:{port}/vantage: "
+    )
+    assert completed.stderr.count("\n") == 1, completed.stderr
+    assert password not in completed.stderr
+
+
+def test_a_start_that_goes_on_hears_from_the_driver_again(
+    caplog: pytest.LogCaptureFixture, served: dict[str, Any], postgres_adapter: _StandInAdapter
+) -> None:
+    """Silenced only while the store opens: a connection the pool loses
+    later is still reported."""
+
+    def _warn(url: str) -> None:
+        logging.getLogger("psycopg.pool").warning("while opening")
+
+    postgres_adapter.during_open = _warn
+
+    cli.main(["--database", _URL])
+    logging.getLogger("psycopg.pool").warning("while serving")
+
+    assert [r.getMessage() for r in caplog.records if r.name.startswith("psycopg")] == [
+        "while serving"
+    ]

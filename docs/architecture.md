@@ -512,7 +512,9 @@ on one line with the URL's password taken out by `redact_message`, as
 written and percent-decoded: libpq quotes a percent-escape it cannot
 decode, and splits a password holding an unencoded `@` or `/` into fields
 -- a host, a port, a database -- that it names one at a time, so each piece
-of such a password is taken out as well.
+of such a password is taken out as well. The driver's loggers are silenced
+while the store opens, because psycopg's pool logs every failed attempt to
+connect, quoting libpq, on stderr before any logging is configured.
 Credentials beyond the URL are libpq's own (`PGPASSWORD`, `~/.pgpass`, the
 other `PG*` variables); the command adds no flag for them.
 

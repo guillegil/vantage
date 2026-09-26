@@ -20,8 +20,8 @@ exit status 3.
 **PostgreSQL is optional.** Its adapter is imported only when a PostgreSQL
 URL is given, since the driver it needs comes with the `postgres` extra and
 a SQLite server must start without it. A URL is only ever shown redacted,
-and every message quoted from the driver has the URL's password taken out
-first.
+every message quoted from the driver has the URL's password taken out
+first, and the driver's own logging is silenced while the store opens.
 
 **The store is closed by the app's shutdown** (`create_app`'s
 `close_store_on_shutdown`). On SIGTERM uvicorn shuts the app down and then
@@ -84,6 +84,9 @@ _MAX_REQUEST_HEAD_BYTES = 3 * MAX_REPORT_BYTES + 64 * 1024
 _POSTGRES_ADAPTER = "vantage.storage.postgres"
 _POSTGRES_DRIVER_MODULES = frozenset({"psycopg", "psycopg_pool"})
 _POSTGRES_DRIVER_MISSING = "PostgreSQL needs the postgres extra: pip install 'vantage[postgres]'"
+
+# Above every level, so the driver's loggers pass nothing on.
+_SILENT = logging.CRITICAL + 1
 
 
 class DatabaseDirectoryNotWritableError(RuntimeError):
@@ -200,6 +203,16 @@ def _open_postgres(url: str) -> ExecutionStore:
         if not _is_driver_missing(exc):
             raise
         _refuse(_POSTGRES_DRIVER_MISSING)
+    # The pool logs each failed connection attempt itself, on stderr before
+    # any logging is configured, quoting libpq -- which quotes a URL it
+    # cannot parse, password and all. Its loggers are silenced while the
+    # store opens, so a refusal stays one line, and stay silenced after a
+    # refusal, in case a pool still winding down logs once more.
+    driver_loggers = {
+        logger: logger.level for logger in map(logging.getLogger, sorted(_POSTGRES_DRIVER_MODULES))
+    }
+    for logger in driver_loggers:
+        logger.setLevel(_SILENT)
     try:
         store: ExecutionStore = adapter.PostgresExecutionStore(url)
     except SchemaVersionError as exc:
@@ -209,6 +222,8 @@ def _open_postgres(url: str) -> ExecutionStore:
         # The driver's own errors cannot be named here without importing it
         # into the service; every one of them is a start that cannot go on.
         _refuse(f"cannot open the database at {shown}: {_driver_detail(exc, url)}")
+    for logger, level in driver_loggers.items():
+        logger.setLevel(level)
     return store
 
 

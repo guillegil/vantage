@@ -84,7 +84,8 @@ One uv workspace, one lockfile, two distributions:
   or column exists before code writes it.
 - **Passwords never printed.** A PostgreSQL URL is shown only through
   `redacted`, and a driver message only through `redact_message`
-  (`core/config/database.py`).
+  (`core/config/database.py`); the driver's loggers are silenced while the
+  store opens.
 - **Python 3.10 floor:** no `StrEnum`, `datetime.UTC`, `tomllib`. Vocabularies
   are `frozenset`s of `str`, never enums.
 - No domain class name starts with `Test` (pytest would collect it).
