@@ -30,15 +30,15 @@ paths:
       operationId: list_runs
       tags: [read]
       summary: Page through recorded runs, newest first.
-      description: metadata_key and metadata_value together filter to runs holding that declared key=value pair -- both or neither, one without the other is 422. A run recorded before the key was ever declared has no value for it and is excluded; metadata_horizon in the response reports how many runs predate it (null when no metadata filter was given).
+      description: "metadata_key and metadata_value filter the list by key=value pairs, the n-th value pairing with the n-th key, so each is repeated once per pair -- ?metadata_key=a&metadata_value=1&metadata_key=b&metadata_value=2. A run matches when it holds every pair: a captured value exactly equal, read from a declared file or reported by the session. A run recorded before a key ever appeared has no value for it and is excluded; metadata_horizon in the response reports, for each distinct filtered key in the order first given, how many runs predate it (null when no metadata filter was given)."
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
-        - {name: metadata_key, in: query, required: false, schema: {type: string}}
-        - {name: metadata_value, in: query, required: false, schema: {type: string}}
+        - {name: metadata_key, in: query, required: false, schema: {type: array, items: {type: string}, maxItems: 16}}
+        - {name: metadata_value, in: query, required: false, schema: {type: array, items: {type: string}, maxItems: 16}}
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
-        "422": {description: "limit below 1 or offset out of range -- not a page (invalid_parameter); or metadata_key/metadata_value supplied without its pair (invalid_metadata_filter).", content: *rejection}
+        "422": {description: "limit below 1 or offset out of range -- not a page; or metadata_key and metadata_value repeated a different number of times, or more than 16 pairs (invalid_parameter).", content: *rejection}
   /runs/{run_id}:
     get:
       operationId: get_run_detail
@@ -290,8 +290,8 @@ components:
       type: object
       required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs]
       properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
-    # `predating` equals the total run count when `key` was never declared.
-    # Populated only when a metadata filter was given.
+    # One per distinct filtered key, in the order first given. `predating`
+    # equals the total run count when no run ever carried `key`.
     MetadataHorizon:
       type: object
       required: [key, predating]
@@ -299,7 +299,7 @@ components:
     RunListResponse:
       type: object
       required: [items, has_more, metadata_horizon]
-      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}, metadata_horizon: {oneOf: [{$ref: '#/components/schemas/MetadataHorizon'}, {type: "null"}]}}
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}, metadata_horizon: {type: [array, "null"], items: {$ref: '#/components/schemas/MetadataHorizon'}}}
     # Carries `interrupt_reason` and an untruncated `commit_subject`, which
     # the lean list entry omits -- the detail path keeps the full record
     # reachable.

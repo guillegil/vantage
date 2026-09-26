@@ -30,13 +30,14 @@ report can carry (`cli.py`). A missing value is shaped by
 failure evidence or captured output; `get_result` returns every field of one
 stored `Result`, unbounded.
 
-`GET /runs` filters by `metadata_key` and `metadata_value`: two parameters
-rather than one `key=value` string because a value may itself contain `=`,
-and both or neither. A run recorded before the key was ever declared has no
-value for it and is excluded, so `metadata_horizon` reports how many runs
-predate the key -- otherwise "not asked yet" would read as "did not match".
-The page and the count come from one store call, so they describe the same
-set of runs. `metadata_horizon` is `None` when no filter was given.
+`GET /runs` filters by pairs of `metadata_key` and `metadata_value`: two
+parameters rather than one `key=value` string because a value may itself
+contain `=`, repeated once per pair, and a run must hold every pair to
+match. A run recorded before a key ever appeared has no value for it and is
+excluded, so `metadata_horizon` reports, per filtered key, how many runs
+predate it -- otherwise "not asked yet" would read as "did not match". The
+page and the counts come from one store call, so they describe the same set
+of runs. `metadata_horizon` is `None` when no filter was given.
 """
 
 from __future__ import annotations
@@ -82,6 +83,10 @@ router = APIRouter()
 # SQLite binds an integer as signed 64-bit and raises past it, so a larger
 # offset is refused here as a shaped 422 rather than failing in the query.
 _MAX_OFFSET = 2**63 - 1
+
+# Each metadata pair is one more index seek in the store's query, so the
+# number a caller may ask for is bounded like any other parameter.
+MAX_METADATA_FILTERS = 16
 
 # Read once at import time -- the bytes never change while the process runs.
 # Loaded from inside the installed distribution through the
@@ -257,8 +262,8 @@ def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
 def list_runs(
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
-    metadata_key: str | None = Query(default=None),
-    metadata_value: str | None = Query(default=None),
+    metadata_key: list[str] | None = Query(default=None),
+    metadata_value: list[str] | None = Query(default=None),
     store: ExecutionStore = Depends(get_store),
     grace: timedelta = Depends(get_grace_period),
 ) -> RunListResponse:
@@ -266,19 +271,28 @@ def list_runs(
     200-item cap is enforced by the store, not re-clamped here; the default
     `limit` keeps it holding when a caller sends none.
 
-    `metadata_key`/`metadata_value` are both-or-neither, checked here
-    because FastAPI's parameter binding cannot express a cross-field rule.
-    `metadata_horizon` is populated only when a filter was given."""
-    if (metadata_key is None) != (metadata_value is None):
-        raise InvalidMetadataFilterError(
-            "metadata_value" if metadata_key is not None else "metadata_key"
+    The n-th `metadata_value` pairs with the n-th `metadata_key`, so the two
+    must be repeated the same number of times, checked here because
+    FastAPI's parameter binding cannot express a cross-field rule.
+    `metadata_horizon` has one entry per distinct filtered key, in the order
+    first given, and is `None` when no filter was given."""
+    keys = metadata_key or []
+    values = metadata_value or []
+    if len(keys) != len(values):
+        raise InvalidMetadataFilterError.unpaired(
+            "metadata_value" if len(keys) > len(values) else "metadata_key"
         )
-    horizon: MetadataHorizonResponse | None = None
-    if metadata_key is not None and metadata_value is not None:
+    if len(keys) > MAX_METADATA_FILTERS:
+        raise InvalidMetadataFilterError.too_many(MAX_METADATA_FILTERS)
+    horizon: list[MetadataHorizonResponse] | None = None
+    if keys:
         page, predating = store.list_runs_with_metadata_horizon(
-            key=metadata_key, value=metadata_value, limit=limit, offset=offset
+            filters=list(zip(keys, values)), limit=limit, offset=offset
         )
-        horizon = MetadataHorizonResponse(key=metadata_key, predating=predating)
+        horizon = [
+            MetadataHorizonResponse(key=key, predating=count)
+            for key, count in zip(dict.fromkeys(keys), predating, strict=True)
+        ]
     else:
         page = store.list_runs(limit=limit, offset=offset)
     now = datetime.now(timezone.utc)

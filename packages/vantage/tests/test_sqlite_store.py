@@ -21,9 +21,9 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.storage.sqlite_store import (
-    _LIST_RUNS_BY_METADATA,
     _LIST_SUBJECT_PREFIX_BYTES,
     SqliteExecutionStore,
+    _list_runs_by_metadata,
 )
 from vantage_port_contract import (
     ExecutionStoreContract,
@@ -162,9 +162,10 @@ def test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository(
         store.close()
 
 
-def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
-    """`_LIST_RUNS_BY_METADATA` uses `idx_run_metadata_key_value` rather than
-    scanning `run` with one correlated subquery per row.
+@pytest.mark.parametrize("pair_count", [1, 3])
+def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path, pair_count: int) -> None:
+    """`_list_runs_by_metadata` seeks `idx_run_metadata_key_value` once per
+    pair rather than scanning `run` with one correlated subquery per row.
 
     A correlated `EXISTS` form returns the same rows but makes SQLite prefer
     `run_metadata`'s primary-key autoindex, so cost grows with the total run
@@ -177,12 +178,12 @@ def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     try:
         plan_rows = store._conn.execute(  # noqa: SLF001
-            f"EXPLAIN QUERY PLAN {_LIST_RUNS_BY_METADATA}",
-            (_LIST_SUBJECT_PREFIX_BYTES, "firmware_version", "2.1", 21, 0),
+            f"EXPLAIN QUERY PLAN {_list_runs_by_metadata(pair_count)}",
+            (_LIST_SUBJECT_PREFIX_BYTES, *["firmware_version", "2.1"] * pair_count, 21, 0),
         ).fetchall()
         plan_text = "\n".join(str(row[-1]) for row in plan_rows)
 
-        assert "idx_run_metadata_key_value" in plan_text
+        assert plan_text.count("USING INDEX idx_run_metadata_key_value") == pair_count
         assert "sqlite_autoindex_run_metadata_1" not in plan_text
     finally:
         store.close()
@@ -317,11 +318,11 @@ def test_the_filtered_page_and_its_horizon_are_read_from_one_snapshot(tmp_path: 
         store._conn.set_trace_callback(_commit_a_keyed_run_during_the_horizon_read)  # noqa: SLF001
 
         page, predating = store.list_runs_with_metadata_horizon(
-            key="fw", value="2.1", limit=10, offset=0
+            filters=[("fw", "2.1")], limit=10, offset=0
         )
 
         assert fired, "the horizon statement never ran"
-        assert (len(page.items), predating) in {(0, 3), (1, 0)}
+        assert (len(page.items), predating) in {(0, (3,)), (1, (0,))}
     finally:
         store._conn.set_trace_callback(None)  # noqa: SLF001
         other_process.close()

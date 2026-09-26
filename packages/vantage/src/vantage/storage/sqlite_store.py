@@ -180,29 +180,37 @@ _LIST_RUNS = f"""
     LIMIT ? OFFSET ?
 """
 
-# `_LIST_RUNS` filtered to runs holding one `(key, value)` metadata pair.
-#
-# `id IN (subquery)`, not a correlated `EXISTS`: with `EXISTS`, SQLite anchors
-# on `rm.run_id = run.id` and probes the primary-key autoindex once per `run`
-# row, so cost grows with the total run count. The uncorrelated `IN` seeks
-# `idx_run_metadata_key_value` once, then looks each `run` up by primary key.
-# `value` is NULL for any non-captured row, and NULL never equals a bound
-# string, so a declared-but-dropped entry never matches.
-# `test_list_runs_by_metadata_uses_the_key_value_index` pins the plan.
-_LIST_RUNS_BY_METADATA = f"""
-    {_SELECT_RUN_LIST}
-    WHERE run.id IN (
-        SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value = ?
-    )
-    ORDER BY run.started_at DESC, run.id DESC
-    LIMIT ? OFFSET ?
-"""  # noqa: S608
+# The runs holding one `(key, value)` metadata pair. `value` is NULL for any
+# row without a captured value, and NULL never equals a bound string, so a
+# key whose value was dropped never matches.
+_RUNS_HOLDING_PAIR = "SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value = ?"
 
-# How many runs started before `key` was first declared, as one statement so
-# it reads one state of the database. `first_seen` is the earliest
-# `started_at` among runs holding any `run_metadata` row for `key`, whatever
-# its status, found through `idx_run_metadata_key_value`; the count is served
-# by `idx_run_started_at`. A key never declared has no `first_seen`, and
+
+def _list_runs_by_metadata(pair_count: int) -> str:
+    """`_LIST_RUNS` narrowed to the runs holding each of `pair_count`
+    `(key, value)` pairs, bound after the subject prefix width.
+
+    `id IN (subquery)`, not a correlated `EXISTS`: with `EXISTS`, SQLite
+    anchors on `rm.run_id = run.id` and probes the primary-key autoindex
+    once per `run` row, so cost grows with the total run count. Each pair's
+    uncorrelated `SELECT` seeks `idx_run_metadata_key_value` once, the
+    `INTERSECT` keeps the runs every pair found, and each is then looked up
+    by primary key. `test_list_runs_by_metadata_uses_the_key_value_index`
+    pins the plan. Only the module's own constants are interpolated."""
+    holding_every_pair = " INTERSECT ".join([_RUNS_HOLDING_PAIR] * pair_count)
+    return f"""
+        {_SELECT_RUN_LIST}
+        WHERE run.id IN ({holding_every_pair})
+        ORDER BY run.started_at DESC, run.id DESC
+        LIMIT ? OFFSET ?
+    """  # noqa: S608
+
+
+# How many runs started before `key` first appeared, as one statement so it
+# reads one state of the database. `first_seen` is the earliest `started_at`
+# among runs holding any `run_metadata` row for `key`, whatever its status or
+# source, found through `idx_run_metadata_key_value`; the count is served by
+# `idx_run_started_at`. A key no run ever carried has no `first_seen`, and
 # every run predates it.
 _COUNT_RUNS_PREDATING_KEY = """
     SELECT CASE WHEN first_seen.started_at IS NULL
@@ -907,16 +915,26 @@ class SqliteExecutionStore:
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def list_runs_with_metadata_horizon(
-        self, *, key: str, value: str, limit: int, offset: int
-    ) -> tuple[Page[RunListEntry], int]:
+        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
+        # A repeated pair narrows nothing further; dropping it keeps the query
+        # one seek per distinct pair.
+        pairs = list(dict.fromkeys(filters))
+        sql = _list_runs_by_metadata(len(pairs)) if pairs else _LIST_RUNS
+        params = [
+            _LIST_SUBJECT_PREFIX_BYTES,
+            *(part for pair in pairs for part in pair),
+            page_limit + 1,
+            offset,
+        ]
         with self._read_snapshot() as conn:
-            rows = conn.execute(
-                _LIST_RUNS_BY_METADATA,
-                (_LIST_SUBJECT_PREFIX_BYTES, key, value, page_limit + 1, offset),
-            ).fetchall()
-            (predating,) = conn.execute(_COUNT_RUNS_PREDATING_KEY, (key,)).fetchone()
-        return _page(rows, page_limit, _row_to_run_list_entry), int(predating)
+            rows = conn.execute(sql, params).fetchall()
+            predating = tuple(
+                int(conn.execute(_COUNT_RUNS_PREDATING_KEY, (key,)).fetchone()[0])
+                for key in dict.fromkeys(key for key, _value in pairs)
+            )
+        return _page(rows, page_limit, _row_to_run_list_entry), predating
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         row = self._fetchone(_SELECT_RUN, (execution_id,))

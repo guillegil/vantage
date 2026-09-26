@@ -335,23 +335,27 @@ class ExecutionStore(Protocol):
         ...
 
     def list_runs_with_metadata_horizon(
-        self, *, key: str, value: str, limit: int, offset: int
-    ) -> tuple[Page[RunListEntry], int]:
-        """`list_runs` narrowed to runs holding the exact declared
-        `(key, value)` pair, together with how many runs were recorded
-        before `key` was first declared, both read from one snapshot of the
-        store. Two separate reads can straddle a session another process
-        records, and then describe two different sets of runs. This is the
-        only filtered read of the run list.
+        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
+        """`list_runs` narrowed to runs holding every `(key, value)` pair of
+        `filters` -- a captured value exactly equal to it, from a file or
+        the session alike -- together with, for each distinct key of
+        `filters` in the order it first appears, how many runs were recorded
+        before that key first appeared. The page and the counts are read
+        from one snapshot of the store: separate reads can straddle a
+        session another process records, and then describe two different
+        sets of runs. This is the only filtered read of the run list.
 
-        A key declared but not captured has no value, so it never matches.
+        A key without a captured value has no value, so it never matches,
+        and two pairs giving one key different values match no run. An
+        empty `filters` narrows nothing and counts nothing.
 
-        `first_seen` is `MIN(run.started_at)` over runs holding **any**
-        `run_metadata` row for `key`, regardless of status -- a
-        declared-but-dropped row still counts, since without it a run whose
+        A key's `first_seen` is `MIN(run.started_at)` over runs holding
+        **any** `run_metadata` row for it, whatever its status or source --
+        a row without a value still counts, since without it a run whose
         value was too large to capture would be miscounted as predating the
-        declaration. When no run has ever carried `key`, every run predates
-        it and the count is the total run count."""
+        key. When no run has ever carried the key, every run predates it and
+        its count is the total run count."""
         ...
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:

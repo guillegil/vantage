@@ -396,7 +396,7 @@ def test_capture_is_enabled_only_by_its_typed_flag(
     result.assert_outcomes(failed=1)
     (stored,) = vantage_server.results()
     page, _predating = vantage_server.store.list_runs_with_metadata_horizon(
-        key="db_password", value="s3cr3t-db", limit=1, offset=0
+        filters=[("db_password", "s3cr3t-db")], limit=1, offset=0
     )
     runs_storing_the_declared_secret = page.items
     if kind == "typed":

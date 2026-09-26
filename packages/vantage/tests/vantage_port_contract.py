@@ -1768,12 +1768,12 @@ class ExecutionStoreContract:
             )
 
         page, predating = store.list_runs_with_metadata_horizon(
-            key="fw", value="2.1", limit=10, offset=0
+            filters=[("fw", "2.1")], limit=10, offset=0
         )
 
         assert page.items == ()
         assert page.has_more is False
-        assert predating == 3
+        assert predating == (3,)
 
     def test_the_horizon_counts_the_runs_started_before_the_key_was_first_declared(
         self, store: ExecutionStore
@@ -1817,12 +1817,91 @@ class ExecutionStoreContract:
         )
 
         page, predating = store.list_runs_with_metadata_horizon(
-            key="fw", value="2.1", limit=1, offset=0
+            filters=[("fw", "2.1")], limit=1, offset=0
         )
 
         assert [entry.execution.identity.value for entry in page.items] == ["c" * 32]
         assert page.has_more is True
-        assert predating == 2
+        assert predating == (2,)
+
+    def test_several_pairs_match_the_runs_holding_every_one_from_either_source(
+        self, store: ExecutionStore
+    ) -> None:
+        """A run matches only when it holds each pair, whether the value was
+        read from a file or reported by the session; each distinct key gets
+        its own horizon, in the order the filter first names it."""
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+        def _holding(**values: str) -> RunMetadata:
+            return RunMetadata(
+                files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+                entries=tuple(
+                    MetadataEntry(key=key, value=value, source_file="m.json", status="captured")
+                    if key == "fw"
+                    else MetadataEntry(
+                        key=key, value=value, source_file=None, status="captured", source="session"
+                    )
+                    for key, value in values.items()
+                ),
+            )
+
+        runs = {
+            "0" * 32: RunMetadata(),
+            "1" * 32: _holding(fmc="5.2.0"),
+            "2" * 32: _holding(fw="1.1.0", fmc="5.2.0"),
+            "3" * 32: _holding(fw="1.1.0", fmc="5.3.0"),
+            "4" * 32: _holding(fw="1.1.0", fmc="5.2.0", bench="lab-3"),
+            "5" * 32: _holding(fw="1.0.0", fmc="5.2.0"),
+        }
+        for minute, (run_id, metadata) in enumerate(runs.items()):
+            store.record_session(
+                _execution(run_id, started=base + timedelta(minutes=minute)),
+                results=(),
+                received_at=base,
+                metadata=metadata,
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "1.1.0"), ("fmc", "5.2.0"), ("fw", "1.1.0")], limit=10, offset=0
+        )
+
+        assert [entry.execution.identity.value for entry in page.items] == ["4" * 32, "2" * 32]
+        assert page.has_more is False
+        assert predating == (2, 1)
+
+    def test_two_values_for_one_key_match_no_run(self, store: ExecutionStore) -> None:
+        store.record_session(
+            _execution("a" * 32),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(
+                files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+                entries=(
+                    MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured"),
+                ),
+            ),
+        )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "2.1"), ("fw", "2.2")], limit=10, offset=0
+        )
+
+        assert page.items == ()
+        assert predating == (0,)
+
+    def test_no_pairs_narrow_nothing_and_count_nothing(self, store: ExecutionStore) -> None:
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+        for i in range(2):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
+                results=(),
+                received_at=base,
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(filters=[], limit=10, offset=0)
+
+        assert page == store.list_runs(limit=10, offset=0)
+        assert predating == ()
 
     # -- get_run_metadata --
 

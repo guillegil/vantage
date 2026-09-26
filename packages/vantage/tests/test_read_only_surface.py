@@ -161,7 +161,7 @@ def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...
         ("GET", "/runs"): (
             lambda: client.get("/api/v1/runs"),
             lambda: client.get("/api/v1/runs", params={"limit": 0}),  # 422
-            # The metadata filter, and its both-or-neither rejection branch.
+            # The metadata filter, and its unpaired-parameter rejection branch.
             lambda: client.get(
                 "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
             ),

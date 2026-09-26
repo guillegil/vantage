@@ -355,10 +355,9 @@ class RunListItemResponse(BaseModel):
 
 
 class MetadataHorizonResponse(BaseModel):
-    """`RunListResponse.metadata_horizon`'s populated shape -- present only
-    when a metadata filter was supplied. `predating` is the count of runs
-    recorded before `key` was ever declared, which equals the total run
-    count when `key` was never declared at all."""
+    """One entry of `RunListResponse.metadata_horizon`, for one filtered
+    key. `predating` is the count of runs recorded before any run carried
+    `key`, which equals the total run count when none ever has."""
 
     key: str
     predating: int
@@ -366,12 +365,13 @@ class MetadataHorizonResponse(BaseModel):
 
 class RunListResponse(BaseModel):
     """The response body for `GET /api/v1/runs`. No `total`, which would cost
-    a `COUNT(*)` on every page. `metadata_horizon` is `None` when no metadata
-    filter was given: there is no horizon to report."""
+    a `COUNT(*)` on every page. `metadata_horizon` holds one entry per
+    distinct filtered key, in the order first given, and is `None` when no
+    metadata filter was given: there is no horizon to report."""
 
     items: list[RunListItemResponse]
     has_more: bool
-    metadata_horizon: MetadataHorizonResponse | None
+    metadata_horizon: list[MetadataHorizonResponse] | None
 
 
 class RunDetailResponse(BaseModel):

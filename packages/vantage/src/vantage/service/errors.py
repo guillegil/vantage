@@ -220,21 +220,30 @@ class InvalidIdentityError(RejectionError):
         return cls("The node_id query parameter is missing.", _fields_from_errors(errors))
 
 
-class InvalidMetadataFilterError(RejectionError):
-    """`metadata_key` and `metadata_value` were not both supplied on
-    `GET /api/v1/runs`.
+class InvalidMetadataFilterError(InvalidParameterError):
+    """The `metadata_key` and `metadata_value` parameters of
+    `GET /api/v1/runs` do not make a filter: they are repeated a different
+    number of times, or give more pairs than the route takes.
 
-    They are two parameters rather than one `key=value` string because a
-    value may itself contain `=`. `fields` names whichever of the pair the
-    caller omitted."""
+    A pair is two parameters rather than one `key=value` string because a
+    value may itself contain `=`; each value pairs with the key in the same
+    position. It is an `invalid_parameter` like any other malformed query
+    parameter, and `fields` names the parameters at fault."""
 
-    status_code = 422
-    error = "invalid_metadata_filter"
+    @classmethod
+    def unpaired(cls, short_field: str) -> InvalidMetadataFilterError:
+        """`short_field`, one of the two, was given fewer times."""
+        return cls(
+            "metadata_key and metadata_value must be repeated the same number of times; "
+            "each value pairs with the key in the same position.",
+            [f"query.{short_field}"],
+        )
 
-    def __init__(self, missing_field: str) -> None:
-        super().__init__(
-            "metadata_key and metadata_value must be supplied together, or neither.",
-            [missing_field],
+    @classmethod
+    def too_many(cls, limit: int) -> InvalidMetadataFilterError:
+        return cls(
+            f"At most {limit} metadata_key and metadata_value pairs may be given.",
+            ["query.metadata_key", "query.metadata_value"],
         )
 
 
