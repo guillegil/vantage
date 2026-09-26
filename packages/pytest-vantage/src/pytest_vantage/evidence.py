@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from pytest_vantage.boundary import warn
-from pytest_vantage.capture import is_subtest
+from pytest_vantage.capture import is_crash_report, is_subtest
 
 
 class EvidenceCollector:
@@ -56,17 +56,31 @@ class EvidenceCollector:
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
-        """Reads a subtest's captured output again, from the finished report.
+        """Completes the evidence of two reports `pytest_runtest_makereport`
+        never saw whole.
 
-        pytest's `subtests` fixture captures each subtest block on its own
-        and attaches that output to the subtest report only after
-        `pytest_runtest_makereport` has returned, so the value read there is
-        always empty. `tryfirst` so a worker updates the report before xdist
-        serialises it for the controller.
+        - A subtest's captured output, read again from the finished report.
+          pytest's `subtests` fixture captures each subtest block on its own
+          and attaches that output to the subtest report only after
+          `pytest_runtest_makereport` has returned, so the value read there
+          is always empty. `tryfirst` so a worker updates the report before
+          xdist serialises it for the controller.
+        - A crash report, which xdist builds on the controller for a test
+          whose worker died, without making it: its text, naming the worker
+          and the test, is the only statement of what happened. Its
+          `longrepr` alone, not `longreprtext`, which adds a line naming the
+          worker's interpreter and its path.
         """
-        if self._disabled or not is_subtest(report):
+        if self._disabled:
             return
         try:
+            if is_crash_report(report):
+                if getattr(report, "vantage_evidence", None) is None:
+                    text = "" if report.longrepr is None else str(report.longrepr)
+                    report.vantage_evidence = {"failure_message": text or None}  # type: ignore[attr-defined]
+                return
+            if not is_subtest(report):
+                return
             evidence = getattr(report, "vantage_evidence", None)
             if isinstance(evidence, dict):
                 evidence.update(_captured_fields(report, self._capture_disabled))

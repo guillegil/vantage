@@ -467,28 +467,91 @@ def test_executions_with_the_same_verdict_keep_the_first_one_seen() -> None:
     assert result["worker_id"] == "gw1"
 
 
-def test_a_crashed_worker_report_is_ignored_and_the_rest_still_recorded() -> None:
+def _crash(nodeid: str) -> pytest.TestReport:
+    """The report xdist logs on the controller for a test whose worker died
+    while running it: no phase, outcome failed, and the worker on `node`."""
+    report = pytest.TestReport(
+        nodeid=nodeid,
+        location=(nodeid.split("::", 1)[0], None, nodeid.split("::", 1)[0]),
+        keywords={},
+        outcome="failed",
+        longrepr=f"worker 'gw1' crashed while running {nodeid!r}",
+        when="???",  # type: ignore[arg-type]  # exactly what xdist sends
+    )
+    report.node = SimpleNamespace(gateway=SimpleNamespace(id="gw1"))  # type: ignore[attr-defined]
+    return report
+
+
+@pytest.mark.parametrize(
+    ("seen_before", "setup_outcome", "call_outcome"),
+    [
+        pytest.param((), None, None, id="before-setup"),
+        pytest.param((("setup", "passed"),), "passed", None, id="during-call"),
+        pytest.param((("setup", "passed"), ("call", "passed")), "passed", "passed", id="teardown"),
+    ],
+)
+def test_a_test_whose_worker_crashed_is_recorded_as_failed(
+    seen_before: tuple[tuple[_Phase, _ReportOutcome], ...],
+    setup_outcome: str | None,
+    call_outcome: str | None,
+) -> None:
     """When an xdist worker dies mid-test, xdist logs that test on the
-    controller with a synthetic report whose phase is `"???"`. It is not a
-    phase of a result: it must neither raise (which would disable recording
-    for the whole session) nor count as one, and every other test is still
-    recorded."""
+    controller with a report whose phase is `"???"`, and pytest counts it as
+    failed. It is recorded as failed, with the phases seen before the crash
+    and none after it, next to every other test."""
     pending: dict[str, PendingResult] = {}
     for when, outcome in _ALL_PHASES_PASSING:
         accumulate(pending, _report(when, outcome, nodeid="t.py::test_ok"))
-    accumulate(pending, _report("setup", "passed", nodeid="t.py::test_crashed"))
-    crash = pytest.TestReport(
-        nodeid="t.py::test_crashed",
-        location=("t.py", None, "t.py"),
-        keywords={},
-        outcome="failed",
-        longrepr="worker 'gw0' crashed while running 't.py::test_crashed'",
-        when="???",  # type: ignore[arg-type]  # exactly what xdist sends
+    for when, outcome in seen_before:
+        report = _report(when, outcome, nodeid="t.py::test_crashed", duration=0.5, start=10.0)
+        accumulate(pending, _on_worker(report, "gw1"))
+
+    accumulate(pending, _crash("t.py::test_crashed"))
+
+    results = assemble_results(pending)
+    assert results.dropped == 0
+    ok, crashed = results
+    assert ok["node_id"] == "t.py::test_ok"
+    assert crashed["node_id"] == "t.py::test_crashed"
+    assert crashed["outcome"] == "failed"
+    assert crashed["setup_outcome"] == setup_outcome
+    assert crashed["call_outcome"] == call_outcome
+    assert crashed["teardown_outcome"] is None
+    assert crashed["finished_at"] is None
+    assert crashed["duration"] == (0.5 * len(seen_before) if seen_before else None)
+    assert crashed["started_at"] == ("1970-01-01T00:00:10.000000+00:00" if seen_before else None)
+    assert crashed["worker_id"] == "gw1"
+    # Without `--vantage-failure-text` nothing attaches evidence to it.
+    assert "failure_message" not in crashed
+
+
+def test_a_crash_report_carries_the_evidence_attached_to_it() -> None:
+    """The crash report's own evidence -- its text, attached on the
+    controller when failure text was asked for -- is the result's."""
+    crash = _crash("t.py::test_crashed")
+    crash.vantage_evidence = {"failure_message": str(crash.longrepr)}  # type: ignore[attr-defined]
+    setup = _on_worker(_report("setup", "passed", nodeid="t.py::test_crashed"), "gw1")
+
+    result = build_result("t.py::test_crashed", _pending(setup, crash))
+
+    assert result is not None
+    assert result["failure_message"] == "worker 'gw1' crashed while running 't.py::test_crashed'"
+
+
+def test_a_new_setup_report_after_a_crash_starts_a_fresh_attempt() -> None:
+    """A crash ends one attempt, not the test: a later attempt that runs
+    whole is what is recorded."""
+    pending = _pending(
+        _on_worker(_report("setup", "passed"), "gw1"),
+        _crash("test_nid.py::test_it"),
+        *(_on_worker(_report(when, outcome), "gw1") for when, outcome in _ALL_PHASES_PASSING),
     )
 
-    accumulate(pending, crash)
+    result = build_result("test_nid.py::test_it", pending)
 
-    assert [result["node_id"] for result in assemble_results(pending)] == ["t.py::test_ok"]
+    assert result is not None
+    assert result["outcome"] == "passed"
+    assert result["teardown_outcome"] == "passed"
 
 
 def _rerun(when: _Phase, *, duration: float) -> pytest.TestReport:

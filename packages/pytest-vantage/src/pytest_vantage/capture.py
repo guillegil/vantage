@@ -117,6 +117,8 @@ def isoformat_utc(moment: datetime) -> str:
 # rejects any phase outcome outside its vocabulary.
 _REPORT_OUTCOMES = frozenset({"passed", "failed", "skipped"})
 
+_PHASES = frozenset({"setup", "call", "teardown"})
+
 
 # How much each verdict says went wrong, for choosing between several
 # complete executions of one node id.
@@ -133,6 +135,17 @@ def is_subtest(report: pytest.TestReport) -> bool:
     return report.when == "call" and getattr(report, "context", None) is not None
 
 
+def is_crash_report(report: pytest.TestReport) -> bool:
+    """Whether `report` says the test's process died while running it.
+
+    xdist logs a test whose worker crashed (a segfault, an OOM kill,
+    `os._exit`) once, on the controller, with `when="???"` and outcome
+    `failed`, then replaces the worker. It is no phase of the test, but it
+    is pytest's verdict on it: pytest counts the test as failed.
+    """
+    return report.when not in _PHASES and report.outcome == "failed"
+
+
 class _Execution:
     """The reports pytest emits for one execution of a test: one attempt, on
     one worker. A duplicate report for the same phase overwrites rather than
@@ -140,28 +153,32 @@ class _Execution:
 
     Subtest reports are kept apart, in arrival order. They arrive before the
     parent's own call report, so storing them as `call` would let the
-    parent's report overwrite every subtest verdict.
+    parent's report overwrite every subtest verdict. So is a crash report
+    (`is_crash_report`), which ends the execution whatever phases were seen.
     """
 
-    __slots__ = ("setup", "call", "teardown", "subtests")
+    __slots__ = ("setup", "call", "teardown", "subtests", "crash")
 
     def __init__(self) -> None:
         self.setup: pytest.TestReport | None = None
         self.call: pytest.TestReport | None = None
         self.teardown: pytest.TestReport | None = None
         self.subtests: list[pytest.TestReport] = []
+        self.crash: pytest.TestReport | None = None
 
     def record(self, report: pytest.TestReport) -> None:
-        """Explicit dispatch on the three phases. Any other `when` is ignored:
-        xdist logs a test whose worker crashed with `when="???"`, and that
-        report is no phase of a result.
+        """Explicit dispatch on the three phases, plus the crash report.
+        Any other report of no known phase is ignored.
         """
         when = report.when
         if when == "setup":
             # A setup report starts a new attempt at the test (a rerun plugin
             # retrying it), so nothing from an earlier attempt may survive.
-            self.setup = self.call = self.teardown = None
+            self.setup = self.call = self.teardown = self.crash = None
             self.subtests = []
+        if is_crash_report(report):
+            self.crash = report
+            return
         if report.outcome not in _REPORT_OUTCOMES:
             return
         if when == "setup":
@@ -247,10 +264,11 @@ def _phase_duration(report: pytest.TestReport | None) -> float | None:
     return report.duration
 
 
-def _phase_timestamp(report: pytest.TestReport, attribute: str) -> str | None:
+def _phase_timestamp(report: pytest.TestReport | None, attribute: str) -> str | None:
     """`getattr(report, "start"/"stop", None)` -- epoch floats on pytest
     >= 8 -- via `datetime.fromtimestamp(..., timezone.utc)`. Never
     `datetime.UTC`, which needs 3.11 and this project supports 3.10.
+    `None` when the phase never ran.
     """
     epoch = getattr(report, attribute, None)
     if epoch is None:
@@ -258,10 +276,10 @@ def _phase_timestamp(report: pytest.TestReport, attribute: str) -> str | None:
     return isoformat_utc(datetime.fromtimestamp(epoch, timezone.utc))
 
 
-def _worker_id(report: pytest.TestReport) -> str | None:
+def _worker_id(report: pytest.TestReport | None) -> str | None:
     """A `getattr` chain, never an xdist import, so the plugin works with
-    xdist absent: `report.worker_id` first, then `report.node.gateway.id`.
-    `None` when neither is present.
+    xdist absent: `report.worker_id` first, then `report.node.gateway.id`
+    (the only one a crash report carries). `None` when neither is present.
     """
     worker_id = getattr(report, "worker_id", None)
     if worker_id is not None:
@@ -351,7 +369,9 @@ def build_result(node_id: str, pending: PendingResult) -> dict[str, object] | No
     """Build one wire-shape `results[]` entry from an accumulated
     `PendingResult`. Returns `None` -- dropped, never invented -- when no
     execution of the test was observed whole: a half-observed test (e.g. one
-    interrupted mid-call) is worse reported as whole than not at all.
+    interrupted mid-call) is worse reported as whole than not at all. The
+    exception is a test whose process died under it, which pytest itself
+    reports as failed (`is_crash_report`).
 
     Several complete executions of one node id come from xdist's `--dist
     each`. The server keeps one result per node id, so the most severe one
@@ -370,29 +390,40 @@ def build_result(node_id: str, pending: PendingResult) -> dict[str, object] | No
 
 
 def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] | None:
-    """One execution's `results[]` entry, or `None` when its teardown report
-    was never seen, or when setup passed and the test itself never ran
-    (`--setup-only`, `--setup-plan`): there is no verdict to record."""
-    if execution.teardown is None:
-        return None
+    """One execution's `results[]` entry, or `None` when there is no verdict
+    to record: its teardown report was never seen, or setup passed and the
+    test itself never ran (`--setup-only`, `--setup-plan`).
+
+    A crash report is a verdict on its own: the test failed, whatever phases
+    were seen before its process died, and the crash report carries its
+    evidence. A phase never seen is recorded as never run.
+    """
     setup = execution.setup
-    if setup is None:
-        raise AssertionError("a teardown report implies a setup report was seen first")
     call = execution.call
-    if call is None and setup.outcome == "passed":
-        return None
     teardown = execution.teardown
+    crash = execution.crash
+    failed_subtests = [report for report in execution.subtests if report.outcome == "failed"]
+    evidence_report: pytest.TestReport | None
+    if crash is not None:
+        outcome = "failed"
+        evidence_report = crash
+    else:
+        if teardown is None:
+            return None
+        if setup is None:
+            raise AssertionError("a teardown report implies a setup report was seen first")
+        if call is None and setup.outcome == "passed":
+            return None
+        outcome = derive_outcome(setup, call, teardown)
+        if outcome == "passed" and failed_subtests:
+            # pytest's own rule: a test that passed but contains a failed
+            # subtest is failed. pytest applies it to the report for the
+            # `subtests` fixture but not for unittest's `subTest`, whose
+            # failures still fail the session, so it is applied here to both.
+            outcome = "failed"
+        evidence_report = _select_evidence_phase(setup, call, teardown, outcome)
 
     identity = decompose(node_id)
-    outcome = derive_outcome(setup, call, teardown)
-    failed_subtests = [report for report in execution.subtests if report.outcome == "failed"]
-    if outcome == "passed" and failed_subtests:
-        # pytest's own rule: a test that passed but contains a failed subtest
-        # is failed. pytest applies it to the report for the `subtests`
-        # fixture but not for unittest's `subTest`, whose failures still fail
-        # the session, so it is applied here to both.
-        outcome = "failed"
-
     setup_duration = _phase_duration(setup)
     call_duration = _phase_duration(call)
     teardown_duration = _phase_duration(teardown)
@@ -409,19 +440,18 @@ def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] |
         "duration": duration,
         "started_at": _phase_timestamp(setup, "start"),
         "finished_at": _phase_timestamp(teardown, "stop"),
-        "setup_outcome": setup.outcome,
+        "setup_outcome": setup.outcome if setup is not None else None,
         "call_outcome": call.outcome if call is not None else None,
-        "teardown_outcome": teardown.outcome,
+        "teardown_outcome": teardown.outcome if teardown is not None else None,
         "setup_duration": setup_duration,
         "call_duration": call_duration,
         "teardown_duration": teardown_duration,
-        "worker_id": _worker_id(setup),
+        "worker_id": _worker_id(setup if setup is not None else crash),
     }
 
-    # The evidence `EvidenceCollector` attached to the selected phase report,
-    # merged in -- absent entirely (never a dict of nulls) when that phase
+    # The evidence `EvidenceCollector` attached to the selected report,
+    # merged in -- absent entirely (never a dict of nulls) when that report
     # carries none, e.g. without `--vantage-failure-text`.
-    evidence_report = _select_evidence_phase(setup, call, teardown, outcome)
     evidence = getattr(evidence_report, "vantage_evidence", None)
     if outcome == "failed" and failed_subtests and not _describes_a_failure(evidence):
         # Failed through its subtests: their exceptions were caught, so the
@@ -434,7 +464,7 @@ def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] |
     # Captured output spans ALL phases, not just the one selected above --
     # applied after the evidence merge so it overrides the single-phase
     # captured_stdout/captured_stderr that merge carried in.
-    phase_reports = [setup, *execution.subtests, call, teardown]
+    phase_reports = [setup, *execution.subtests, call, teardown, crash]
     result.update(_captured_output([report for report in phase_reports if report is not None]))
 
     return result
@@ -479,6 +509,7 @@ __all__ = [
     "build_result",
     "decompose",
     "derive_outcome",
+    "is_crash_report",
     "is_subtest",
     "isoformat_utc",
 ]

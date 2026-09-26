@@ -6,6 +6,8 @@ is present).
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from vantage_test_server import VantageTestServer
 
@@ -76,28 +78,50 @@ def test_crashes_its_worker():
 """
 
 
-def test_a_crashed_worker_leaves_every_other_result_recorded(
+@pytest.mark.parametrize("failure_text", [False, True], ids=["plain", "failure-text"])
+def test_a_test_whose_worker_crashed_is_recorded_as_failed(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,
+    failure_text: bool,
 ) -> None:
     """A worker that dies mid-test (a segfault, an OOM kill) makes xdist log
-    that test with a report of no known phase and replace the worker. The
-    session still finishes and every test that completed is recorded; only
-    the test that never finished is missing."""
+    that test once, with a report of no known phase, and replace the worker.
+    pytest counts the test as failed, so the run records it as failed rather
+    than leaving it out and every recorded result passing on a failed run.
+    The crash text is its failure message, and only when failure text was
+    asked for.
+    """
     pytest.importorskip("xdist")
     pytester.makepyfile(test_six=_SIX_TESTS, test_crash=_CRASHES_ITS_WORKER)
+    options = ["--vantage-failure-text"] if failure_text else []
 
     run = pytester.runpytest_subprocess(
-        "--vantage", f"--vantage-server={vantage_server.address}", "-n", "2"
+        "--vantage", f"--vantage-server={vantage_server.address}", *options, "-n", "2"
     )
 
     assert run.ret == pytest.ExitCode.TESTS_FAILED
-    assert "error while reporting" not in run.stdout.str() + run.stderr.str()
+    assert "VantageWarning" not in run.stdout.str() + run.stderr.str()
     (execution,) = vantage_server.executions()
     assert execution.finished_at is not None
     assert execution.exit_status == 1
-    recorded = {result.identity.function_name for result in vantage_server.results()}
-    assert recorded == {f"test_{n}" for n in range(1, 7)}
+    results = {result.identity.function_name: result for result in vantage_server.results()}
+    assert set(results) == {f"test_{n}" for n in range(1, 7)} | {"test_crashes_its_worker"}
+    crashed = results.pop("test_crashes_its_worker")
+    assert all(result.outcome == "passed" for result in results.values())
+    assert crashed.outcome == "failed"
+    assert crashed.setup_outcome == "passed"
+    assert crashed.call_outcome is None
+    assert crashed.teardown_outcome is None
+    assert crashed.finished_at is None
+    assert crashed.worker_id is not None
+    if failure_text:
+        assert crashed.failure is not None
+        assert re.fullmatch(
+            r"worker 'gw\d' crashed while running 'test_crash.py::test_crashes_its_worker'",
+            crashed.failure.failure_message or "",
+        )
+    else:
+        assert crashed.failure is None
 
 
 # Fails on gw0 only. gw1 passes after a short sleep, so its passing call
