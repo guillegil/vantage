@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
-from pytest_vantage.outbox import (  # type: ignore[import-untyped, unused-ignore]
+from pytest_vantage.outbox import (
     Outbox,
     SendSummary,
     outbox_path,

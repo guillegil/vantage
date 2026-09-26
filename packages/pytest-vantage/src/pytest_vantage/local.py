@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from types import ModuleType
 
 
 class LocalStorageUnavailableError(Exception):
@@ -23,18 +22,11 @@ class LocalStoreFailedError(Exception):
     """The run could not be stored; the message is one line."""
 
 
-def _vantage_local() -> ModuleType:
-    import vantage.local as vantage_local  # type: ignore[import-not-found,import-untyped,unused-ignore]
-
-    module: ModuleType = vantage_local
-    return module
-
-
 def require(mode: str) -> None:
     """Raise `LocalStorageUnavailableError` unless `vantage.local` imports,
     naming `mode`, the setting that needs it."""
     try:
-        _vantage_local()
+        import vantage.local  # noqa: F401 -- importing it is the whole check
     except ModuleNotFoundError as exc:
         if exc.name in ("vantage", "vantage.local"):
             raise LocalStorageUnavailableError(
@@ -54,16 +46,20 @@ def require(mode: str) -> None:
 
 def default_database_path() -> Path:
     """The `vantage` command's own default database path."""
-    return Path(_vantage_local().default_database_path())
+    from vantage.local import default_database_path as vantage_default
+
+    return Path(vantage_default())
 
 
 def store_reports(database: Path, reports: Sequence[Mapping[str, object]]) -> None:
     """Store `reports`, one session's in send order, in the SQLite database
     at `database`, or raise `LocalStoreFailedError`."""
-    module = _vantage_local()
+    from vantage.local import LocalStoreError
+    from vantage.local import store_reports as vantage_store
+
     try:
-        module.store_reports(database, reports)
-    except module.LocalStoreError as exc:
+        vantage_store(database, reports)
+    except LocalStoreError as exc:
         raise LocalStoreFailedError(str(exc)) from None
     except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
         raise LocalStoreFailedError(f"{type(exc).__name__}: {exc}") from None
