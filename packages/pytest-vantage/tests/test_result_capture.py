@@ -280,7 +280,9 @@ def test_failure_evidence_is_stored_end_to_end(
     """Every failure field the plugin extracts reaches storage under the
     name the server reads it by -- the server ignores unknown fields, so a
     name drifting on either side would otherwise drop it silently. The path
-    is stored relative to the rootdir."""
+    is stored relative to the rootdir. Captured stderr arrives as the empty
+    string, not null: the test wrote nothing there, but capture was on, so
+    the field was observed."""
     pytester.makepyfile(test_evidence_e2e=_FAILS_IN_A_HELPER)
 
     pytester.runpytest_subprocess(
@@ -299,6 +301,7 @@ def test_failure_evidence_is_stored_end_to_end(
     assert failure.traceback is not None
     assert "def helper():" in failure.traceback
     assert result.captured.stdout == "before the failure\n"
+    assert result.captured.stderr == ""
 
 
 # --- captured output, end to end --------------------------------------------
