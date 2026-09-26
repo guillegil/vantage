@@ -5,6 +5,7 @@ the answer matters, so every run sent from it is checked as stored.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -98,7 +99,7 @@ def box(tmp_path: Path) -> Iterator[Outbox]:
 
 
 def _column(path: Path, column: str) -> list[Any]:
-    with sqlite3.connect(path) as conn:
+    with contextlib.closing(sqlite3.connect(path)) as conn, conn:
         return [row[0] for row in conn.execute(f"SELECT {column} FROM entry ORDER BY id")]  # noqa: S608
 
 
@@ -137,14 +138,14 @@ def test_an_existing_directory_keeps_the_mode_its_owner_chose(tmp_path: Path) ->
 
 def test_a_sqlite_file_that_is_not_an_outbox_is_refused_and_left_alone(tmp_path: Path) -> None:
     path = tmp_path / "vantage.db-outbox"
-    with sqlite3.connect(path) as conn:
+    with contextlib.closing(sqlite3.connect(path)) as conn, conn:
         conn.execute("CREATE TABLE run (id TEXT)")
     conn.close()
 
     with pytest.raises(OutboxError, match="not a vantage outbox"):
         Outbox(path)
 
-    with sqlite3.connect(path) as conn:
+    with contextlib.closing(sqlite3.connect(path)) as conn, conn:
         tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master")]
     conn.close()
     assert tables == ["run"]
@@ -330,7 +331,7 @@ def test_a_run_whose_reports_cannot_be_read_back_is_dropped_and_the_rest_sent(
     damaged, accepted = _run_reports(), _run_reports()
     box.enqueue(vantage_server.address, _run_id(damaged), damaged)
     box.enqueue(vantage_server.address, _run_id(accepted), accepted)
-    with sqlite3.connect(box.path) as conn:
+    with contextlib.closing(sqlite3.connect(box.path)) as conn, conn:
         conn.execute(
             "UPDATE entry SET reports = ? WHERE run_id = ?", (stored_text, _run_id(damaged))
         )
@@ -569,7 +570,7 @@ def test_a_claim_is_respected_until_it_lapses(
     held, abandoned = _run_reports(), _run_reports()
     box.enqueue(vantage_server.address, _run_id(held), held)
     box.enqueue(vantage_server.address, _run_id(abandoned), abandoned)
-    with sqlite3.connect(box.path) as conn:
+    with contextlib.closing(sqlite3.connect(box.path)) as conn, conn:
         conn.execute(
             "UPDATE entry SET claimed_until = ? WHERE run_id = ?",
             (time.time() + 600, _run_id(held)),
