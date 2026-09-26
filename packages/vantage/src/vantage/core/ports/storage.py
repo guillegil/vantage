@@ -274,6 +274,11 @@ class ExecutionStore(Protocol):
     The service calls one store from several worker threads at once, so an
     implementation must be safe to share between them.
 
+    Strings reaching a store contain no U+0000: PostgreSQL text cannot hold
+    it, so the service replaces it with U+FFFD in everything it decodes, and
+    every adapter stores the same text. A lookup by a value holding one
+    therefore matches nothing, on every adapter.
+
     `count_executions`, `get_results`, `count_results` and
     `get_catalogue_entry` are called by no route: they are how the tests,
     the plugin's included, check what a write stored, through the same port
