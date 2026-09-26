@@ -1,7 +1,8 @@
 """`VantageTestServer` -- a real `vantage` server for `pytest-vantage`'s own
-end-to-end tests, and the `vantage_server` fixture that wraps it. Also
-`git_confined_to_basetemp`, for the tests that need git to find no
-repository above their temp directory.
+end-to-end tests, and the `vantage_server` fixture that wraps it; `ServerGate` and its
+`server_gate` fixture, one address for a server that goes away and comes
+back; and `git_confined_to_basetemp`, for the tests that need git to find
+no repository above their temp directory.
 
 A separate, non-`test_*` module rather than a `conftest.py`: a package-level
 `conftest.py` alongside the workspace-root one both resolve to the bare
@@ -15,6 +16,9 @@ Dev-only and never packaged, so it may import the server and `uvicorn`.
 
 from __future__ import annotations
 
+import socket
+import struct
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -135,6 +139,95 @@ def vantage_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Vantage
         yield server
     finally:
         server.close()
+
+
+class ServerGate:
+    """A loopback address that refuses every connection until `open`, then
+    forwards each to a real server: one address for a server that is down
+    and then back. Bound but not listening is what makes a connect fail
+    with "connection refused".
+
+    Let through a number of `connections`, it resets every connection after
+    those: a server that went away in the middle of a session.
+    `let_through(None)` brings it back for good."""
+
+    def __init__(self) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self.address = f"http://127.0.0.1:{self._sock.getsockname()[1]}"
+        self._stopped = threading.Event()
+        self._target: tuple[str, int] | None = None
+        self._forwarding: int | None = None
+
+    def open(self, target: VantageTestServer, *, connections: int | None = None) -> None:
+        self._target = ("127.0.0.1", target.port)
+        self._forwarding = connections
+        self._sock.listen(16)
+        self._sock.settimeout(0.1)
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def let_through(self, connections: int | None) -> None:
+        """Forward the next `connections` and reset the rest; `None` for
+        every one."""
+        self._forwarding = connections
+
+    def _accept(self) -> None:
+        while not self._stopped.is_set():
+            try:
+                client, _ = self._sock.accept()
+            except OSError:
+                continue
+            if self._forwarding is not None:
+                if self._forwarding == 0:
+                    # A zero linger makes close send a reset, not a clean end.
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    client.close()
+                    continue
+                self._forwarding -= 1
+            threading.Thread(target=self._forward, args=(client,), daemon=True).start()
+
+    def _forward(self, client: socket.socket) -> None:
+        assert self._target is not None
+        try:
+            upstream = socket.create_connection(self._target, timeout=10)
+        except OSError:
+            client.close()
+            return
+        pumps = [
+            threading.Thread(target=_pump, args=(client, upstream), daemon=True),
+            threading.Thread(target=_pump, args=(upstream, client), daemon=True),
+        ]
+        for pump in pumps:
+            pump.start()
+        for pump in pumps:
+            pump.join(timeout=30)
+        client.close()
+        upstream.close()
+
+    def close(self) -> None:
+        self._stopped.set()
+        self._sock.close()
+
+
+def _pump(source: socket.socket, sink: socket.socket) -> None:
+    try:
+        while data := source.recv(65536):
+            sink.sendall(data)
+    except OSError:
+        pass
+    try:
+        sink.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+
+@pytest.fixture
+def server_gate() -> Iterator[ServerGate]:
+    gate = ServerGate()
+    try:
+        yield gate
+    finally:
+        gate.close()
 
 
 @pytest.fixture

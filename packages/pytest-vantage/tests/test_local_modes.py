@@ -16,10 +16,8 @@ import json
 import re
 import socket
 import sqlite3
-import struct
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -31,7 +29,7 @@ from pytest_vantage.outbox import Outbox, outbox_path
 from pytest_vantage.transport import send
 from vantage.core.domain.execution import Execution
 from vantage.service.errors import RejectionError
-from vantage_test_server import VantageTestServer
+from vantage_test_server import ServerGate, VantageTestServer
 
 _STAND_IN = """
 import json
@@ -138,89 +136,6 @@ def _closed_port_address() -> str:
     port = probe.getsockname()[1]
     probe.close()
     return f"http://127.0.0.1:{port}"
-
-
-class _Gate:
-    """A loopback address that refuses every connection until `open`, then
-    forwards each to a real server: one address for a server that is down
-    and then back. Bound but not listening is what makes a connect fail
-    with "connection refused".
-
-    Opened for a number of `connections`, it resets every connection after
-    those: a server that went away in the middle of a session."""
-
-    def __init__(self) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.bind(("127.0.0.1", 0))
-        self.address = f"http://127.0.0.1:{self._sock.getsockname()[1]}"
-        self._stopped = threading.Event()
-        self._target: tuple[str, int] | None = None
-        self._forwarding: int | None = None
-
-    def open(self, target: VantageTestServer, *, connections: int | None = None) -> None:
-        self._target = ("127.0.0.1", target.port)
-        self._forwarding = connections
-        self._sock.listen(16)
-        self._sock.settimeout(0.1)
-        threading.Thread(target=self._accept, daemon=True).start()
-
-    def _accept(self) -> None:
-        while not self._stopped.is_set():
-            try:
-                client, _ = self._sock.accept()
-            except OSError:
-                continue
-            if self._forwarding is not None:
-                if self._forwarding == 0:
-                    # A zero linger makes close send a reset, not a clean end.
-                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
-                    client.close()
-                    continue
-                self._forwarding -= 1
-            threading.Thread(target=self._forward, args=(client,), daemon=True).start()
-
-    def _forward(self, client: socket.socket) -> None:
-        assert self._target is not None
-        try:
-            upstream = socket.create_connection(self._target, timeout=10)
-        except OSError:
-            client.close()
-            return
-        pumps = [
-            threading.Thread(target=_pump, args=(client, upstream), daemon=True),
-            threading.Thread(target=_pump, args=(upstream, client), daemon=True),
-        ]
-        for pump in pumps:
-            pump.start()
-        for pump in pumps:
-            pump.join(timeout=30)
-        client.close()
-        upstream.close()
-
-    def close(self) -> None:
-        self._stopped.set()
-        self._sock.close()
-
-
-def _pump(source: socket.socket, sink: socket.socket) -> None:
-    try:
-        while data := source.recv(65536):
-            sink.sendall(data)
-    except OSError:
-        pass
-    try:
-        sink.shutdown(socket.SHUT_WR)
-    except OSError:
-        pass
-
-
-@pytest.fixture
-def gate() -> Iterator[_Gate]:
-    opened = _Gate()
-    try:
-        yield opened
-    finally:
-        opened.close()
 
 
 @pytest.fixture
@@ -628,7 +543,7 @@ def test_a_server_unreachable_at_the_start_leaves_the_run_stored_and_queued(
 
 def test_the_next_session_that_reaches_the_server_sends_the_queue(
     pytester: pytest.Pytester,
-    gate: _Gate,
+    server_gate: ServerGate,
     vantage_server: VantageTestServer,
     second_server: VantageTestServer,
 ) -> None:
@@ -639,14 +554,14 @@ def test_the_next_session_that_reaches_the_server_sends_the_queue(
     pytester.makepyfile(test_session=_A_SESSION)
     args = ("--vantage", "--vantage-failure-text", "--vantage-mode=server+backup")
 
-    down = pytester.runpytest_subprocess(*args, f"--vantage-server={gate.address}")
-    gate.open(vantage_server)
-    back = pytester.runpytest_subprocess(*args, f"--vantage-server={gate.address}")
+    down = pytester.runpytest_subprocess(*args, f"--vantage-server={server_gate.address}")
+    server_gate.open(vantage_server)
+    back = pytester.runpytest_subprocess(*args, f"--vantage-server={server_gate.address}")
 
     assert "is unreachable" in _output(down)
     (queued_run,) = _stored_sessions(database)
     queued_id = _run_id_of(queued_run)
-    back.stdout.fnmatch_lines([f"vantage: sent 1 queued run to {gate.address} (0 waiting)"])
+    back.stdout.fnmatch_lines([f"vantage: sent 1 queued run to {server_gate.address} (0 waiting)"])
     assert _output(back).count("VantageWarning:") == 0
     assert _queued(database) == []
     run_ids = [execution.identity.value for execution in vantage_server.executions()]
@@ -679,28 +594,28 @@ def test_a_5xx_at_the_finish_leaves_the_run_stored_and_queued(
 
 
 def test_a_server_gone_by_the_finish_leaves_the_run_stored_and_queued(
-    pytester: pytest.Pytester, gate: _Gate, vantage_server: VantageTestServer
+    pytester: pytest.Pytester, server_gate: ServerGate, vantage_server: VantageTestServer
 ) -> None:
     """It answered the preflight, the probe and the start report, and then
     went away before the run's finish report."""
-    gate.open(vantage_server, connections=3)
+    server_gate.open(vantage_server, connections=3)
     database = _stand_in(pytester)
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
     result = pytester.runpytest_subprocess(
-        "--vantage", "--vantage-mode=server+backup", f"--vantage-server={gate.address}"
+        "--vantage", "--vantage-mode=server+backup", f"--vantage-server={server_gate.address}"
     )
 
     assert result.ret == 0
     output = _output(result)
     assert output.count("VantageWarning:") == 1, output
-    assert f"vantage: {gate.address} is unreachable (" in output
+    assert f"vantage: {server_gate.address} is unreachable (" in output
     assert f"this run was stored in {database} and queued (1 run waiting to be sent)" in output
     (execution,) = vantage_server.executions()
     assert execution.exit_status is None
     (stored,) = _stored_sessions(database)
     ((server, run_id, reports),) = _queued(database)
-    assert (server, run_id, reports) == (gate.address, execution.identity.value, stored)
+    assert (server, run_id, reports) == (server_gate.address, execution.identity.value, stored)
 
 
 def test_only_the_reports_the_server_did_not_take_are_queued(
