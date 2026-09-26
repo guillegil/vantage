@@ -68,7 +68,12 @@ from vantage.core.ports.storage import (
     RunMetadata,
     UserSetting,
 )
-from vantage.storage.postgres.connection import PgConnection, open_pool, prepare_database
+from vantage.storage.postgres.connection import (
+    PgConnection,
+    live_connection,
+    open_pool,
+    prepare_database,
+)
 
 T = TypeVar("T")
 Row = tuple[object, ...]
@@ -770,7 +775,7 @@ class PostgresExecutionStore:
         attempt = 1
         while True:
             try:
-                with self._pool.connection() as conn, conn.transaction():
+                with live_connection(self._pool) as conn, conn.transaction():
                     if snapshot:
                         conn.execute(_SNAPSHOT)
                     return work(conn)
@@ -781,11 +786,11 @@ class PostgresExecutionStore:
 
     def _fetchone(self, sql: str, params: Sequence[object] = ()) -> Row | None:
         """One statement, its own transaction on an autocommit connection."""
-        with self._pool.connection() as conn:
+        with live_connection(self._pool) as conn:
             return conn.execute(sql, params).fetchone()
 
     def _fetchall(self, sql: str, params: Sequence[object]) -> list[Row]:
-        with self._pool.connection() as conn:
+        with live_connection(self._pool) as conn:
             return conn.execute(sql, params).fetchall()
 
     def _count(self, sql: str) -> int:
@@ -847,7 +852,7 @@ class PostgresExecutionStore:
     def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
         if _unmatchable(execution_id):
             return False
-        with self._pool.connection() as conn:
+        with live_connection(self._pool) as conn:
             cursor = conn.execute(_TOUCH_LAST_CONTACT, (contacted_at, execution_id, contacted_at))
             return cursor.rowcount == 1
 
@@ -976,7 +981,7 @@ class PostgresExecutionStore:
     def delete_setting(self, namespace: str, key: str) -> bool:
         if _unmatchable(namespace, key):
             return False
-        with self._pool.connection() as conn:
+        with live_connection(self._pool) as conn:
             return conn.execute(_DELETE_SETTING, (namespace, key)).rowcount == 1
 
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:

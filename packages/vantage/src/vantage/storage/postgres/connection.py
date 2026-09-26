@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import getpass
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -148,17 +150,14 @@ def prepare_database(url: str) -> None:
 
 
 def open_pool(url: str, *, max_connections: int) -> ConnectionPool[PgConnection]:
-    """The pool store calls borrow from, holding at least one connection
-    before it is returned. `check` replaces a connection the server has
-    dropped -- after a restart, say -- before a store call is handed it,
-    instead of failing that call."""
+    """The pool store calls borrow from, through `live_connection`, holding
+    at least one connection before it is returned."""
     pool = ConnectionPool(
         url,
         kwargs=connection_kwargs(url),
         min_size=1,
         max_size=max_connections,
         open=False,
-        check=ConnectionPool.check_connection,
         name="vantage",
         timeout=_POOL_WAIT_SECONDS,
     )
@@ -170,6 +169,37 @@ def open_pool(url: str, *, max_connections: int) -> ConnectionPool[PgConnection]
             f"no connection to the database within {_POOL_WAIT_SECONDS:g} seconds"
         ) from None
     return pool
+
+
+@contextmanager
+def live_connection(pool: ConnectionPool[PgConnection]) -> Iterator[PgConnection]:
+    """A connection from `pool` that has just answered a round trip, given
+    back afterwards as `pool.connection()` gives it back.
+
+    A connection the server has closed -- a restart, a failover, an idle
+    timeout close all of them at once -- is handed back, which discards it
+    and has the pool open a replacement, and the next one is tried at once.
+    psycopg_pool's own `check` would wait between two failed connections,
+    a second and then twice as long each time, so a pool full of closed
+    connections would hold the next call past the pool wait and fail it.
+    """
+    # Every connection the pool held may be closed; one opened after them
+    # is not, short of the server going away again.
+    for attempt in range(pool.max_size + 1):
+        conn = pool.getconn()
+        try:
+            ConnectionPool.check_connection(conn)
+        except psycopg.Error:
+            pool.putconn(conn)
+            if attempt == pool.max_size:
+                raise
+            continue
+        break
+    try:
+        with conn:
+            yield conn
+    finally:
+        pool.putconn(conn)
 
 
 def _require_utf8(conn: PgConnection) -> None:

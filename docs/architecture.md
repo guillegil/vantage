@@ -331,7 +331,11 @@ process on the same file, which no in-process lock can reach.
 own: it keeps a `psycopg_pool.ConnectionPool` (one connection at least, 10
 at most, opened when the store is built), and every store call takes a
 connection and runs as its own transaction, so calls from several threads,
-and from several server processes on one database, run in parallel. A read
+and from several server processes on one database, run in parallel. A
+connection answers a round trip before a call gets it; one the server has
+closed -- a restart or a failover closes them all -- is discarded and the
+next tried at once, rather than through the pool's own check, which waits
+longer after each failure than the one before. A read
 that must describe one moment -- a run page with its metadata horizons, a
 run's metadata with the check that the run exists -- is one statement or
 runs under `REPEATABLE READ`. A write is safe against the same write from

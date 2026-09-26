@@ -14,8 +14,10 @@ from __future__ import annotations
 import importlib.resources
 import re
 import socket
+import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -305,6 +307,38 @@ def test_close_returns_every_connection(postgres_url: str, postgres_admin_url: s
     while _query(postgres_admin_url, connected) != [(0,)] and time.monotonic() < deadline:
         time.sleep(0.05)
     assert _query(postgres_admin_url, connected) == [(0,)]
+
+
+def test_connections_the_server_closed_are_replaced_at_once(
+    postgres_url: str, postgres_admin_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restart or a failover closes every connection a pool holds at
+    once. The next call gets a new connection, rather than waiting while
+    the dead ones are tried one by one -- which psycopg_pool's own check
+    spaces out by a doubling interval, a second and up, until the pool
+    wait, here shortened, runs out."""
+    monkeypatch.setattr(postgres_connection, "_POOL_WAIT_SECONDS", 5.0)
+    store = PostgresExecutionStore(postgres_url, max_connections=6)
+    try:
+        # Six calls holding a connection each at the same time fill the pool.
+        everyone_connected = threading.Barrier(6)
+        with ThreadPoolExecutor(6) as pool:
+            held = pool.map(
+                lambda _: store._transaction(lambda conn: everyone_connected.wait()), range(6)
+            )
+            assert len(list(held)) == 6
+        database = urlsplit(postgres_url).path.lstrip("/")
+        backends = f"FROM pg_stat_activity WHERE datname = '{database}'"
+        assert _query(postgres_admin_url, f"SELECT count(*) {backends}") == [(6,)]  # noqa: S608
+        _query(postgres_admin_url, f"SELECT pg_terminate_backend(pid) {backends}")  # noqa: S608
+        deadline = time.monotonic() + 10
+        while _query(postgres_admin_url, f"SELECT count(*) {backends}") != [(0,)]:  # noqa: S608
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+
+        assert store.count_executions() == 0
+    finally:
+        store.close()
 
 
 # -- transactions the server aborts --
