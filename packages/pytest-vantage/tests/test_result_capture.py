@@ -625,6 +625,7 @@ def test_reads_the_report():
 def test_names_that_are_not_utf8_are_recorded_not_lost(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A POSIX file name need not be UTF-8. Python decodes one with
     `surrogateescape`, so a test under a directory named `caf\\xe9` carries a
@@ -642,6 +643,10 @@ def test_names_that_are_not_utf8_are_recorded_not_lost(
     with open(directory + b"/test_non_utf8.py", "w") as handle:
         handle.write(_FAILS_NAMING_A_NON_UTF8_FILE)
 
+    # Pytester decodes the child's output as strict UTF-8. Under a C locale,
+    # or in UTF-8 mode, the child prints the name's raw byte and the harness
+    # fails before any assertion; escaped, the output decodes everywhere.
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8:backslashreplace")
     # pytest's own cache cannot write such a node id to disk and fails the
     # session in `pytest_sessionfinish`; that is pytest's to fix, not ours.
     run = pytester.runpytest_subprocess(
