@@ -26,6 +26,8 @@ dev = [
     # `types-PyYAML` is the stub `mypy --strict` needs for `yaml`.
     "pyyaml>=6.0",
     "types-PyYAML>=6.0",
+    # The PostgreSQL adapter's driver, so its tests can run.
+    "vantage[postgres]",
 ]
 
 # This root pyproject.toml is the uv workspace root, not a published
