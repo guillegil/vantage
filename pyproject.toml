@@ -88,15 +88,15 @@ mypy_path = [
 ignore_notebooks = true
 
 # deptry reads exactly one pyproject.toml (this one) and has no notion of a
-# uv workspace, so it cannot see that fastapi/pydantic/starlette/uvicorn are
-# declared in packages/vantage/pyproject.toml, and psycopg/psycopg_pool by
-# its `postgres` extra, or that importwalk,
-# loopback_server, memory_store, sqlite_rows, vantage_port_contract and
-# vantage_test_server are real local test-support modules reached through
-# the root `pythonpath` rather than missing packages. Per-module, per-rule
-# ignores name exactly those known cases so a genuinely new undeclared import
-# is still caught (verified: an ad hoc `import requests` probe was flagged
-# even with this config in place).
+# uv workspace, so it cannot see that pydantic is declared in
+# packages/vantage/pyproject.toml, fastapi/starlette/uvicorn by its `server`
+# extra and psycopg/psycopg_pool by its `postgres` extra, or that
+# importwalk, loopback_server, memory_store, sqlite_rows,
+# vantage_port_contract and vantage_test_server are real local test-support
+# modules reached through the root `pythonpath` rather than missing
+# packages. Per-module, per-rule ignores name exactly those known cases so a
+# genuinely new undeclared import is still caught (verified: an ad hoc
+# `import requests` probe was flagged even with this config in place).
 # DEP002 additionally covers CLI-only dev tools (ruff, mypy, deptry,
 # pip-audit) that are invoked via `uv run <tool>` and never imported as
 # Python modules, plus pytest-xdist and httpx2, which are exercised through
