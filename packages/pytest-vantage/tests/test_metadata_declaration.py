@@ -433,6 +433,37 @@ def test_a_windows_shaped_path_captures_nothing_and_warns_naming_it(
     assert repr(path) in str(warned.message)
 
 
+@pytest.mark.parametrize(
+    "path",
+    ["/etc/hostname", "../shared/settings.json", "config/../app.json", ".."],
+    ids=["absolute", "parent", "parent-inside", "parent-alone"],
+)
+def test_an_absolute_or_climbing_path_captures_nothing_and_warns_naming_it(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, path: str
+) -> None:
+    """The server drops an absolute path or one with a `..` component, keys
+    and all, so the plugin refuses the declaration instead of sending an
+    entry that would vanish without a word. A monorepo package declaring
+    `../shared/...` learns why its keys are missing.
+    """
+    root = tmp_path / "mono" / "project"
+    (root / "config").mkdir(parents=True)
+    (root / "app.json").write_text("{}")
+    (tmp_path / "mono" / "shared").mkdir()
+    (tmp_path / "mono" / "shared" / "settings.json").write_text("{}")
+    entries = [
+        {"path": "app.json", "format": "json", "keys": ["version"]},
+        {"path": path, "format": "json", "keys": ["region"]},
+    ]
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": entries}))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    (warned,) = _metadata_warnings(recwarn)
+    assert repr(path) in str(warned.message)
+
+
 def test_a_key_longer_than_the_bound_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:

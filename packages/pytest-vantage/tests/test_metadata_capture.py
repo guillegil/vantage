@@ -217,13 +217,14 @@ def test_a_missing_declared_file_is_marked_not_found(tmp_path: Path) -> None:
 
 
 def test_a_rejected_path_that_exists_is_marked_path_rejected_not_not_found(tmp_path: Path) -> None:
-    # An absolute path that exists on disk (outside rootpath) is
+    # A committed symlink to a file that exists outside rootpath is
     # `path_rejected`, never `not_found`, and is never opened.
     root = tmp_path / "project"
     root.mkdir()
     outside = tmp_path / "outside.json"
     outside.write_text('{"k": "v"}')
-    _declare(root, [{"path": str(outside), "format": "json", "keys": ["k"]}])
+    (root / "link.json").symlink_to(outside)
+    _declare(root, [{"path": "link.json", "format": "json", "keys": ["k"]}])
 
     section = metadata.capture_metadata(_config(), root)
 

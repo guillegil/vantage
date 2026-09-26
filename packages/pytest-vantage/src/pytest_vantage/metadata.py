@@ -22,9 +22,10 @@ on 3.10-3.13, and winning it needs write access to the checkout, which could
 commit the secret directly), and a committer declaring a sensitive file that
 genuinely lives inside the repository -- that is a code-review matter, and
 every file the plugin reads is recorded on the run under its declared path.
-A declared path the plugin refuses to read for its shape -- absolute, or
-holding a `..` component -- is sent as `path_rejected`, and the server drops
-that entry together with its keys, so the run carries no trace of it.
+A declared path the server would drop for its shape, together with its keys
+-- absolute, holding a `..` component, or read differently on Windows --
+refuses the whole declaration with one warning instead, so no declared key
+ever vanishes without a word.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ import json
 import stat
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path, PurePath, PureWindowsPath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -314,6 +315,15 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
                 "Windows drive, metadata will not be captured",
             )
             return None
+        if _leaves_the_root(path):
+            # The server drops these too, keys and all; `resolve_declared_path`
+            # would refuse to read them anyway.
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares the path {path!r}, which is absolute or "
+                "holds a '..' component, metadata will not be captured",
+            )
+            return None
         # The server keeps one file entry per path, so a repeat would lose
         # its status there. Compared as paths, so `./a.json` repeats `a.json`.
         if PurePath(path) in seen_paths:
@@ -359,6 +369,16 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
         )
         return None
     return tuple(declared)
+
+
+def _leaves_the_root(path: str) -> bool:
+    """Whether `path`, read as a POSIX or as a Windows path, is absolute or
+    holds a `..` component: the shape check the server applies, which cannot
+    know the declaring platform."""
+    return any(
+        candidate.is_absolute() or bool(candidate.anchor) or ".." in candidate.parts
+        for candidate in (PurePosixPath(path), PureWindowsPath(path))
+    )
 
 
 def _rejected_file_status(rootpath: Path, declared_path: str) -> str:
