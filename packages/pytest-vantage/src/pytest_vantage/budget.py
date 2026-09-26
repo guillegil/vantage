@@ -29,9 +29,14 @@ Each field is first cut the way the server cuts it, to `_FIELD_BYTES_CAP`
 bytes of UTF-8 at a character boundary, with its `<field>_truncated` flag
 set: the server would discard the rest on arrival, so it is never sent or
 charged. A field that still does not fit the remaining budget is dropped
-whole and flagged. `failure_type`, `failure_path`, `failure_lineno`,
-`skip_reason` and `xfail_reason` are never charged or dropped: they are
-short, and failures are grouped by source line.
+whole and flagged. A field that is `None` (nothing captured) or empty
+(nothing printed) has nothing to charge or drop, and is left alone.
+
+`failure_type`, `failure_path`, `failure_lineno`, `skip_reason` and
+`xfail_reason` are never charged or dropped: they are short, and failures
+are grouped by source line. The two reasons are still cut to the field
+bound, like the budgeted fields, so an unusually long one never costs its
+result a place in any report.
 """
 
 from __future__ import annotations
@@ -51,6 +56,9 @@ _BUDGETED_FIELDS = (
     "captured_stdout",
     "captured_stderr",
 )
+
+# Cut to the field bound, never charged or dropped.
+_CUT_ONLY_FIELDS = ("skip_reason", "xfail_reason")
 
 # The outcomes whose failure text explains something that went wrong.
 _FAILING_OUTCOMES = frozenset({"failed", "error"})
@@ -86,6 +94,18 @@ def _cut_to_field_cap(value: str) -> tuple[str, bool]:
     return encoded[:_FIELD_BYTES_CAP].decode("utf-8", errors="ignore"), True
 
 
+def _cut_field(entry: dict[str, object], field: str) -> object:
+    """Cut `entry[field]` to the field bound in place, flagging a cut, and
+    return what is left."""
+    value = entry[field]
+    if isinstance(value, str):
+        value, cut = _cut_to_field_cap(value)
+        if cut:
+            entry[field] = value
+            entry[f"{field}_truncated"] = True
+    return value
+
+
 def spend_failure_text_budget(entries: list[dict[str, object]]) -> None:
     """Spend `MAX_FAILURE_TEXT_BYTES` across `entries` in place, failures
     first and field by field (see the module docstring for the order).
@@ -95,26 +115,25 @@ def spend_failure_text_budget(entries: list[dict[str, object]]) -> None:
     cost fits the remaining budget, the field is kept. Otherwise it is
     dropped whole -- set to `None` -- and flagged, giving the wire shape
     `{"traceback": null, "traceback_truncated": true}`. A field absent
-    from an entry (e.g. a skipped result, which carries no failure fields)
-    is neither charged nor dropped.
+    from an entry (e.g. a skipped result, which carries no failure fields),
+    `None` or empty is neither charged nor dropped.
 
     Reads `MAX_FAILURE_TEXT_BYTES` from this module's own namespace at call
     time, not a bound default, so a test can `monkeypatch` it directly.
     """
+    for entry in entries:
+        for field in _CUT_ONLY_FIELDS:
+            if field in entry:
+                _cut_field(entry, field)
     remaining = MAX_FAILURE_TEXT_BYTES
     failing = [entry for entry in entries if entry.get("outcome") in _FAILING_OUTCOMES]
     others = [entry for entry in entries if entry.get("outcome") not in _FAILING_OUTCOMES]
     for group in (failing, others):
         for field in _BUDGETED_FIELDS:
             for entry in group:
-                if field not in entry:
+                if entry.get(field) is None or entry[field] == "":
                     continue
-                value = entry[field]
-                if isinstance(value, str):
-                    value, cut = _cut_to_field_cap(value)
-                    if cut:
-                        entry[field] = value
-                        entry[f"{field}_truncated"] = True
+                value = _cut_field(entry, field)
                 cost = encoded_cost(value)
                 if cost <= remaining:
                     remaining -= cost

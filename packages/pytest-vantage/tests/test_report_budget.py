@@ -215,7 +215,7 @@ def test_text_carrying_a_lone_surrogate_is_measured_without_raising() -> None:
 def test_short_fields_are_never_charged_or_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
     """`failure_type`, `failure_path`, `failure_lineno`, `skip_reason` and
     `xfail_reason` are never charged: a budget of zero leaves every one of
-    them untouched.
+    them within the field bound untouched.
     """
     monkeypatch.setattr(budget_module, "MAX_FAILURE_TEXT_BYTES", 0)
     entries: list[dict[str, object]] = [
@@ -236,6 +236,63 @@ def test_short_fields_are_never_charged_or_dropped(monkeypatch: pytest.MonkeyPat
     assert entries[0]["skip_reason"] == "not ready"
     assert entries[0]["xfail_reason"] == "known bug"
     assert not any(key.endswith("_truncated") for key in entries[0])
+
+
+def test_a_null_or_empty_field_is_never_charged_or_flagged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`None` means nothing was captured (`-s`) and `""` that a phase
+    printed nothing: neither has anything to drop, so neither costs the
+    budget or claims it was cut, however many results carry one. The budget
+    left over is exactly what the one non-empty field needs.
+    """
+    output = "x" * 10
+    monkeypatch.setattr(budget_module, "MAX_FAILURE_TEXT_BYTES", encoded_cost(output))
+    quiet: list[dict[str, object]] = [
+        {"outcome": "passed", "captured_stdout": "", "captured_stderr": None} for _ in range(100)
+    ]
+    entries: list[dict[str, object]] = [
+        {"outcome": "failed", "failure_message": None, "failure_repr": ""},
+        *quiet,
+        {"outcome": "passed", "captured_stdout": output, "captured_stderr": ""},
+    ]
+
+    spend_failure_text_budget(entries)
+
+    assert entries[0] == {"outcome": "failed", "failure_message": None, "failure_repr": ""}
+    assert all(
+        entry == {"outcome": "passed", "captured_stdout": "", "captured_stderr": None}
+        for entry in entries[1:-1]
+    )
+    assert entries[-1] == {"outcome": "passed", "captured_stdout": output, "captured_stderr": ""}
+
+
+@pytest.mark.parametrize("field", ["skip_reason", "xfail_reason"])
+def test_a_long_reason_is_cut_to_the_field_bound_but_never_charged(
+    monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    """The server keeps at most `_FIELD_BYTES_CAP` bytes of a skip or xfail
+    reason too, so the rest is never sent: a reason long enough to crowd its
+    result out of every report would otherwise cost the whole result. It is
+    cut and flagged, but charged nothing, so the budget is still whole for a
+    failure's message.
+    """
+    reason = "missing: " + ",".join(f"dependency-{i}" for i in range(80_000))
+    message = "M" * 50
+    monkeypatch.setattr(budget_module, "MAX_FAILURE_TEXT_BYTES", encoded_cost(message))
+    entries: list[dict[str, object]] = [
+        {"outcome": "skipped", field: reason},
+        {"outcome": "failed", "failure_message": message},
+    ]
+
+    spend_failure_text_budget(entries)
+
+    assert entries[0] == {
+        "outcome": "skipped",
+        field: reason[:_FIELD_BYTES_CAP],
+        f"{field}_truncated": True,
+    }
+    assert entries[1] == {"outcome": "failed", "failure_message": message}
 
 
 def test_a_dropped_field_is_null_with_its_truncated_flag_set(
@@ -430,10 +487,43 @@ def test_a_result_too_large_for_any_report_costs_only_itself_and_one_warning(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,
 ) -> None:
-    """A skip reason is never charged against the failure-text budget, so
-    one of over a megabyte makes a result no report can carry. That result
-    is left out with one warning; the rest of the session is recorded and
-    the run finishes, instead of the whole report being refused.
+    """An exception's type name is neither charged against the failure-text
+    budget nor cut, so one of over a megabyte makes a result no report can
+    carry. That result is left out with one warning; the rest of the
+    session is recorded and the run finishes, instead of the whole report
+    being refused.
+    """
+    pytester.makepyfile(
+        test_sample="def test_kept():\n    assert True\n\n\n"
+        "def test_huge_type():\n    raise type('E' * 1_100_000, (Exception,), {})()\n"
+    )
+
+    result = pytester.runpytest(
+        "--vantage",
+        f"--vantage-server={vantage_server.address}",
+        "--vantage-failure-text",
+        "--tb=no",
+        "-rN",
+    )
+
+    result.assert_outcomes(passed=1, failed=1)
+    output = result.stdout.str()
+    assert output.count("VantageWarning:") == 1
+    assert "1 test result(s) too large for any report were left out" in output
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is not None
+    assert [stored.identity.node_id for stored in vantage_server.results()] == [
+        "test_sample.py::test_kept"
+    ]
+
+
+def test_a_skip_reason_of_over_a_megabyte_is_stored_cut_to_the_field_bound(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+) -> None:
+    """The server keeps the first `_FIELD_BYTES_CAP` bytes of a skip reason,
+    so the plugin sends no more than that, and the skipped test is recorded
+    with its reason cut and flagged rather than left out of the run.
     """
     pytester.makepyfile(
         test_sample="import pytest\n\n\n"
@@ -446,14 +536,13 @@ def test_a_result_too_large_for_any_report_costs_only_itself_and_one_warning(
     )
 
     result.assert_outcomes(passed=1, skipped=1)
-    output = result.stdout.str()
-    assert output.count("VantageWarning:") == 1
-    assert "1 test result(s) too large for any report were left out" in output
-    (execution,) = vantage_server.executions()
-    assert execution.finished_at is not None
-    assert [stored.identity.node_id for stored in vantage_server.results()] == [
-        "test_sample.py::test_kept"
-    ]
+    assert "VantageWarning" not in result.stdout.str()
+    stored = {entry.identity.function_name: entry for entry in vantage_server.results()}
+    assert set(stored) == {"test_kept", "test_huge_skip"}
+    evidence = stored["test_huge_skip"].failure
+    assert evidence is not None
+    assert evidence.skip_reason == ("Skipped: " + "s" * _FIELD_BYTES_CAP)[:_FIELD_BYTES_CAP]
+    assert evidence.skip_reason_truncated is True
 
 
 def test_a_long_session_with_failure_text_keeps_every_result_and_failure_message(
