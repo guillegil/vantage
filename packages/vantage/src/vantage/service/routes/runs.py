@@ -45,7 +45,10 @@ from vantage.core.domain.metadata import (
     FILE_STATUSES,
     MAX_METADATA_ENTRIES,
     MAX_METADATA_KEY_CHARS,
+    MAX_METADATA_NAME_CHARS,
+    MAX_METADATA_VALUE_BYTES,
     METADATA_CONTENT_TYPES,
+    SESSION_KEY_STATUSES,
 )
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.core.ports.storage import (
@@ -68,6 +71,7 @@ from vantage.service.schemas import (
     Acknowledgement,
     HeartbeatAcknowledgement,
     MetadataReport,
+    MetadataValueReport,
     ResultReport,
     RunReport,
     SessionReport,
@@ -138,28 +142,58 @@ def _declared_path_shape_is_valid(path: str) -> bool:
     return True
 
 
+def _display_name(metadata: MetadataReport, key: str) -> str | None:
+    """The display name `metadata`'s declaration gives `key`, or `None`: a
+    name past `MAX_METADATA_NAME_CHARS` is dropped and the key kept."""
+    declared = metadata.keys.get(key)
+    if declared is None or declared.name is None:
+        return None
+    return declared.name if len(declared.name) <= MAX_METADATA_NAME_CHARS else None
+
+
+def _session_value(report: MetadataValueReport) -> tuple[str | None, str]:
+    """The `(value, status)` to store for a session value whose status is in
+    `SESSION_KEY_STATUSES`. An entry whose value and status contradict each
+    other stores no value, as `absent`; a captured value over
+    `MAX_METADATA_VALUE_BYTES` is `value_too_large`, as a file's would be."""
+    if (report.status == "captured") != (report.value is not None):
+        return None, "absent"
+    value = report.value
+    if value is not None and len(value.encode("utf-8", "surrogatepass")) > MAX_METADATA_VALUE_BYTES:
+        return None, "value_too_large"
+    return value, report.status
+
+
 def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
     """Normalise the `metadata` section; `EMPTY_RUN_METADATA` when absent.
 
     Every declared file becomes one `MetadataFile` row and each of its
-    declared keys one `MetadataEntry` row, captured or not. Values are never
-    truncated, and this function never raises, so bad metadata cannot block
-    the run from being stored. A file whose path fails the shape re-check,
-    repeats an earlier file's path, or has a `status` or `format` this
-    server cannot store is dropped with all its keys; a well-behaved plugin
-    never sends one. A repeated path is dropped rather than merged because
-    the store keeps one file row per path, and the later file's keys would
-    be stored under a status that describes a different document.
+    declared keys one `MetadataEntry` row, captured or not. Then each value
+    the session reported becomes a session row, with no file. Every row
+    carries the display name the declaration gives its key, and whether the
+    declaration names the key at all, in `keys` or in any file's `keys`.
+    Values are never truncated, and this function never raises, so bad
+    metadata cannot block the run from being stored.
+
+    A file whose path fails the shape re-check, repeats an earlier file's
+    path, or has a `status` or `format` this server cannot store is dropped
+    with all its keys; a well-behaved plugin never sends one. A repeated
+    path is dropped rather than merged because the store keeps one file row
+    per path, and the later file's keys would be stored under a status that
+    describes a different document.
 
     The plugin's bounds are applied again, by dropping rather than
-    rejecting: a key over `MAX_METADATA_KEY_CHARS`, a key already declared
-    by an earlier file, and every key past `MAX_METADATA_ENTRIES` are left
-    out, and a captured document over the per-file bound or past the section
+    rejecting: a key over `MAX_METADATA_KEY_CHARS`, a key already produced
+    by an earlier file or value -- so a file's value beats the session's --
+    and every key past `MAX_METADATA_ENTRIES`, files first, are left out; a
+    session value with a status outside `SESSION_KEY_STATUSES` is left out
+    too. A captured document over the per-file bound or past the section
     budget is recorded `too_large` or `over_budget` without being parsed.
     """
     if metadata is None:
         return EMPTY_RUN_METADATA
 
+    declared_keys = set(metadata.keys).union(*(report.keys for report in metadata.files))
     files: list[MetadataFile] = []
     entries: list[MetadataEntry] = []
     accepted_paths: set[str] = set()
@@ -214,20 +248,44 @@ def _to_run_metadata(metadata: MetadataReport | None) -> RunMetadata:
                 source_file=file_report.path, content_type=file_report.format, status=status
             )
         )
-        if parsed is None:
-            entries.extend(
-                MetadataEntry(
-                    key=key, value=None, source_file=file_report.path, status="source_unavailable"
-                )
-                for key in keys
+        outcomes = (
+            {key: metadata_parse.KeyResult(status="source_unavailable", value=None) for key in keys}
+            if parsed is None
+            else parsed
+        )
+        entries.extend(
+            MetadataEntry(
+                key=key,
+                value=outcome.value,
+                source_file=file_report.path,
+                status=outcome.status,
+                name=_display_name(metadata, key),
             )
-        else:
-            entries.extend(
-                MetadataEntry(
-                    key=key, value=result.value, source_file=file_report.path, status=result.status
-                )
-                for key, result in parsed.items()
+            for key, outcome in outcomes.items()
+        )
+
+    for value_report in metadata.values:
+        key = value_report.key
+        if (
+            len(key) > MAX_METADATA_KEY_CHARS
+            or value_report.status not in SESSION_KEY_STATUSES
+            or key in accepted_keys
+            or len(accepted_keys) >= MAX_METADATA_ENTRIES
+        ):
+            continue
+        accepted_keys.add(key)
+        value, status = _session_value(value_report)
+        entries.append(
+            MetadataEntry(
+                key=key,
+                value=value,
+                source_file=None,
+                status=status,
+                source="session",
+                name=_display_name(metadata, key),
+                declared=key in declared_keys,
             )
+        )
 
     return RunMetadata(files=tuple(files), entries=tuple(entries))
 

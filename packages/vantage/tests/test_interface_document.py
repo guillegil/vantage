@@ -44,7 +44,9 @@ from vantage.service.schemas import (
     HistoryResponse,
     MetadataFileReport,
     MetadataHorizonResponse,
+    MetadataKeyReport,
     MetadataReport,
+    MetadataValueReport,
     RejectionResponse,
     ResultDetailResponse,
     ResultListItemResponse,
@@ -494,7 +496,9 @@ _REQUEST_SCHEMAS: dict[str, type[BaseModel]] = {
     "ResultReport": ResultReport,
     "VcsReport": VcsReport,
     "MetadataReport": MetadataReport,
+    "MetadataKeyReport": MetadataKeyReport,
     "MetadataFileReport": MetadataFileReport,
+    "MetadataValueReport": MetadataValueReport,
     "SectionUpsertRequest": SectionUpsertRequest,
 }
 _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {

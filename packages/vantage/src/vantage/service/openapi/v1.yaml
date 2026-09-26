@@ -17,7 +17,7 @@ paths:
       operationId: create_run
       tags: [write]
       summary: Report a session's run and its results.
-      description: Declared metadata never rejects a report. The server bounds it the way the plugin does -- it drops a file repeating an earlier file's path, over-long and repeated keys and every key past the per-run entry bound, and records a document past the per-file or per-report size as too_large or over_budget without parsing it.
+      description: Metadata values never reject a report. The server bounds them the way the plugin does -- it drops a file repeating an earlier file's path, over-long and repeated keys, a session value with a status it cannot have, and every key past the per-run entry bound, files first; it records a document past the per-file or per-report size as too_large or over_budget without parsing it, and a value past the per-value size as value_too_large. Each key is stored once, by the first report carrying it.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReport'}}}}
       responses:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
@@ -219,11 +219,30 @@ components:
       required: [commit, branch, commit_subject, dirty, root]
       additionalProperties: false
       properties: {commit: {type: [string, "null"], maxLength: 64}, branch: {type: [string, "null"]}, commit_subject: {type: [string, "null"]}, dirty: {type: [boolean, "null"]}, root: {type: [string, "null"]}}
+    # `declaration` is null when the session had no declaration file. `keys`
+    # maps a declared key to what the declaration says about it; `values` are
+    # the keys the session reported itself, and only a session's last report
+    # carries them.
     MetadataReport:
       type: object
-      required: [declaration, files]
+      required: [declaration]
       additionalProperties: false
-      properties: {declaration: {type: string}, files: {type: array, items: {$ref: '#/components/schemas/MetadataFileReport'}}}
+      properties: {declaration: {type: [string, "null"]}, keys: {type: object, additionalProperties: {$ref: '#/components/schemas/MetadataKeyReport'}, default: {}}, files: {type: array, items: {$ref: '#/components/schemas/MetadataFileReport'}, default: []}, values: {type: array, items: {$ref: '#/components/schemas/MetadataValueReport'}, default: []}}
+    # A name over 256 characters is stored as no name; the key is kept.
+    MetadataKeyReport:
+      type: object
+      additionalProperties: false
+      properties: {name: {type: [string, "null"], default: null}}
+    # No constraint on any field, as for a file. `status` is captured, absent
+    # or value_too_large, and `value` is null unless it is captured: an entry
+    # with any other status is dropped, and one whose value contradicts its
+    # status is stored as absent. A key a file already gave, or an earlier
+    # entry, keeps that value.
+    MetadataValueReport:
+      type: object
+      required: [key, value, status]
+      additionalProperties: false
+      properties: {key: {type: string}, value: {type: [string, "null"]}, status: {type: string}}
     # No constraint on any field: a declared value is text this project does
     # not control, so the server drops what it cannot store rather than
     # rejecting the report. `content` is null unless `status` is `captured`.

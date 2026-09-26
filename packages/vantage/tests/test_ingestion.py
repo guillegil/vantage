@@ -471,6 +471,11 @@ def _surrogate_report(field: str) -> dict[str, Any]:
         )
     elif field == "metadata.key":
         report["metadata"] = _metadata_section(_metadata_file(content="{}", keys=[_LONE]))
+    elif field == "metadata.value":
+        report["metadata"] = {
+            "declaration": None,
+            "values": [{"key": "k", "value": _LONE, "status": "captured"}],
+        }
     else:
         result[field] = _LONE
     report["results"] = [result]
@@ -491,6 +496,8 @@ def _stored_surrogate_field(store: Any, stored_metadata: StoredMetadata, field: 
         return {file.source_file for file in stored_metadata(run_id).files}
     if field == "metadata.key":
         return {entry.key for entry in stored_metadata(run_id).entries}
+    if field == "metadata.value":
+        return {entry.value for entry in stored_metadata(run_id).entries}
     if field == "worker_id":
         return result.worker_id
     if field == "captured_stdout":
@@ -510,6 +517,7 @@ _SURROGATE_CASES: dict[str, object] = {
     "vcs.commit_subject": _REPLACED,
     "metadata.path": {f"{_REPLACED}.json"},
     "metadata.key": {_REPLACED},
+    "metadata.value": {_REPLACED},
 }
 
 
@@ -1115,6 +1123,128 @@ def test_a_json_integer_past_the_digit_limit_still_records_the_run(
     assert response.status_code == 201
     [entry] = store.metadata(run_id).entries
     assert (entry.value, entry.status) == (None, "value_too_large")
+
+
+def test_a_sessions_own_values_are_stored_beside_its_files_keys_across_both_reports(
+    any_store: Any, any_stored_metadata: StoredMetadata
+) -> None:
+    """The start report carries the declaration and its files, and the
+    finish report all of that again plus the values the session reported.
+    Each key is stored once, with its source, display name and whether it
+    was declared; a key both a file and the session gave keeps the file's
+    value."""
+    run_id = "6" + "6" * 31
+    keys = {
+        "firmware_version": {"name": "Firmware version"},
+        "fpga.firmware": {"name": "FPGA firmware version"},
+        "fmc.hardware": {},
+    }
+    firmware_file = _metadata_file(
+        content=json.dumps({"firmware_version": "2.1"}), keys=["firmware_version"]
+    )
+    start = _well_formed_report(run_id)
+    start["run"].update(finished_at=None, exit_status=None)
+    start["metadata"] = {
+        "declaration": "vantage-metadata.json",
+        "keys": keys,
+        "files": [firmware_file],
+    }
+    finish = _well_formed_report(run_id)
+    finish["metadata"] = {
+        **start["metadata"],
+        "values": [
+            {"key": "fpga.firmware", "value": "1.1.0", "status": "captured"},
+            {"key": "firmware_version", "value": "9.9", "status": "captured"},
+            {"key": "bench", "value": "lab-3", "status": "captured"},
+            {"key": "fmc.hardware", "value": None, "status": "absent"},
+        ],
+    }
+    client = TestClient(create_app(any_store))
+
+    assert client.post("/api/v1/runs", json=start).status_code == 201
+    assert client.post("/api/v1/runs", json=finish).status_code == 200
+
+    stored = any_stored_metadata(run_id)
+    assert stored.files == (
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="captured"),
+    )
+    assert set(stored.entries) == {
+        MetadataEntry(
+            key="firmware_version",
+            value="2.1",
+            source_file="config/firmware.json",
+            status="captured",
+            name="Firmware version",
+        ),
+        MetadataEntry(
+            key="fpga.firmware",
+            value="1.1.0",
+            source_file=None,
+            status="captured",
+            source="session",
+            name="FPGA firmware version",
+            declared=True,
+        ),
+        MetadataEntry(
+            key="bench",
+            value="lab-3",
+            source_file=None,
+            status="captured",
+            source="session",
+            declared=False,
+        ),
+        MetadataEntry(
+            key="fmc.hardware",
+            value=None,
+            source_file=None,
+            status="absent",
+            source="session",
+            declared=True,
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("metadata", "field"),
+    [
+        (
+            {"declaration": None, "values": [{"key": "k", "value": "v", "status": "captured"}]},
+            None,
+        ),
+        (
+            {
+                "declaration": None,
+                "values": [{"key": "k", "value": "v", "status": "captured", "unit": "V"}],
+            },
+            "metadata.values.0.unit",
+        ),
+        (
+            {"declaration": None, "keys": {"fpga": {"name": "FPGA", "unit": "V"}}},
+            "metadata.keys.fpga.unit",
+        ),
+        (
+            {"declaration": None, "values": [{"key": "k", "status": "captured"}]},
+            "metadata.values.0.value",
+        ),
+    ],
+    ids=["well-formed", "unknown-value-field", "unknown-key-field", "value-left-out"],
+)
+def test_a_session_value_or_key_entry_is_held_to_its_exact_shape(
+    client: TestClient, metadata: dict[str, Any], field: str | None
+) -> None:
+    """Like the rest of the section, an entry with a field the server does
+    not know, or without one it needs, means the two sides disagree about
+    the section, and the report is refused naming the field."""
+    report = _well_formed_report("6" + "7" * 31)
+    report["metadata"] = metadata
+
+    response = client.post("/api/v1/runs", json=report)
+
+    if field is None:
+        assert response.status_code == 201
+        return
+    assert response.status_code == 422
+    assert response.json()["fields"] == [field]
 
 
 # --- hostile client-chosen text -----------------------------------------------
