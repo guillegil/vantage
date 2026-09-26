@@ -253,8 +253,9 @@ switch off another:
 - The git and metadata reads never raise. Each returns an empty section and
   at most one warning.
 - `SessionMetadata`, the fixture's mapping, never raises into the code that
-  sets a value: a key or value it cannot record is skipped with one warning.
-  Planning what the finishing report sends of the values has its own
+  sets a value: a key or value it cannot record is skipped with one warning,
+  located at the first frame outside the plugin, the project's line that
+  set it. Planning what the finishing report sends of the values has its own
   `try`, so a failure there costs the run its values, never its finish.
 - `pytest_configure` has no decorator; a failure building the `Recorder` is
   caught there and leaves the session unrecorded.

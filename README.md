@@ -410,8 +410,8 @@ depends on when it is raised:
   shape): in the warnings summary, listed under whichever test was running
   at the time; under pytest-xdist, printed to stderr when it happens.
 - **When a metadata key or value is skipped:** in the warnings summary,
-  under the test whose fixture set it, and under pytest-xdist once for each
-  worker that set it.
+  under the test whose fixture set it and pointing at the line that set it,
+  and under pytest-xdist once for each worker that set it.
 
 If your warning filters turn warnings into errors, the message is written to
 the terminal instead.

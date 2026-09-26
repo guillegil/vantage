@@ -137,6 +137,38 @@ def test_it(vantage_metadata):
     ]
 
 
+@pytest.mark.parametrize("workers", [(), ("-n", "1")], ids=["in-process", "xdist"])
+def test_a_skipped_key_is_warned_about_at_the_line_that_set_it(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    sent: list[dict[str, object]],
+    workers: tuple[str, ...],
+) -> None:
+    """The warning names the project's own line, however deep in the plugin
+    the key was refused, so it reads as the project's mistake to fix rather
+    than as a fault in the plugin."""
+    if workers:
+        pytest.importorskip("xdist")
+    pytester.makepyfile(
+        test_bench="""
+def test_it(vantage_metadata):
+    vantage_metadata[""] = "no key"
+    vantage_metadata.update({"fpga": {"bad\\nkey": 1}})
+"""
+    )
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}", *workers)
+
+    result.assert_outcomes(passed=1)
+    result.stdout.fnmatch_lines(
+        [
+            "*/test_bench.py:2: VantageWarning: vantage: ignoring the metadata key '': *",
+            "*/test_bench.py:3: VantageWarning: vantage: ignoring the metadata key 'fpga.bad*",
+        ]
+    )
+    assert "pytest_vantage" not in result.stdout.str()
+
+
 def test_a_failure_planning_the_values_costs_the_run_only_its_values(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,

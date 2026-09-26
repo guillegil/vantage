@@ -156,6 +156,13 @@ def _bounded_reason(text: str) -> str:
     return text[:_MAX_INTERRUPT_REASON_CHARS]
 
 
+def _fixture_mapping(config: pytest.Config) -> SessionMetadata:
+    """The mapping the `vantage_metadata` fixture hands out in a recorded
+    session. A key it skips is the project's mistake, so the warning
+    points at the project's line that set it."""
+    return SessionMetadata(warn=lambda message: warn(config, message, at_project_line=True))
+
+
 class WorkerInterruptRelay:
     """Registered on every xdist worker of a recorded session.
 
@@ -194,7 +201,7 @@ class WorkerMetadataRelay:
     def __init__(self, config: pytest.Config) -> None:
         self._config = config
         self._disabled = False
-        self.session_metadata = SessionMetadata(warn=lambda message: warn(config, message))
+        self.session_metadata = _fixture_mapping(config)
 
     @fault_isolated
     def pytest_sessionfinish(self) -> None:
@@ -280,7 +287,7 @@ class Recorder:
         self._metadata = _capture_metadata(
             config, Path(str(config.rootpath)), read_files=metadata_requested
         )
-        self.session_metadata = SessionMetadata(warn=lambda message: warn(config, message))
+        self.session_metadata = _fixture_mapping(config)
         self._reported = ReportedValues()
 
     def _vcs_section(self) -> dict[str, object]:
