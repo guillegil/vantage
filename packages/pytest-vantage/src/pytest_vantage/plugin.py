@@ -73,7 +73,7 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         help=(
             "Record this session's run to a vantage server. "
             "This is the ONLY thing that activates recording, and only when typed "
-            "on the command line: addopts and PYTEST_ADDOPTS cannot give it."
+            "on the command line: addopts, PYTEST_ADDOPTS and an @file cannot give it."
         ),
     )
     group.addoption(
@@ -225,7 +225,8 @@ def _metadata_capture_requested(config: pytest.Config) -> bool:
 def _warn_about_untyped_flags(config: pytest.Config) -> None:
     """One warning naming any opt-in flag that parsed as set but was not
     typed, so a committed ``addopts`` is visibly ignored rather than
-    silently doing nothing."""
+    silently doing nothing. It names every place such a flag can come from,
+    not one: which of them gave it is not known here."""
     ignored = [
         flag
         for name, flag in _OPT_IN_FLAGS.items()
@@ -234,8 +235,9 @@ def _warn_about_untyped_flags(config: pytest.Config) -> None:
     if ignored:
         warn(
             config,
-            f"vantage: ignoring {', '.join(ignored)} from addopts or PYTEST_ADDOPTS; "
-            "recording and capture are enabled only by flags typed on the command line",
+            f"vantage: ignoring {', '.join(ignored)}: not typed on the command line "
+            "(addopts, PYTEST_ADDOPTS or an @file); "
+            "recording and capture are enabled only by flags typed there",
         )
 
 

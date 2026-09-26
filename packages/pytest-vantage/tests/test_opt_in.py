@@ -296,10 +296,40 @@ def test_nothing_but_a_typed_vantage_records(
     assert vantage_server.executions() == []
     warned = _vantage_warnings(recwarn)
     if source in _ADDOPTS_SOURCES:
-        assert len(warned) == 1, warned
-        assert "ignoring --vantage, --vantage-failure-text, --vantage-metadata" in warned[0]
+        assert warned == [
+            "vantage: ignoring --vantage, --vantage-failure-text, --vantage-metadata: "
+            "not typed on the command line (addopts, PYTEST_ADDOPTS or an @file); "
+            "recording and capture are enabled only by flags typed there"
+        ]
     else:
         assert warned == []
+
+
+def test_flags_from_an_argument_file_enable_nothing_and_the_warning_does_not_blame_addopts(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    recwarn: pytest.WarningsRecorder,
+    vantage_server: VantageTestServer,
+) -> None:
+    """An ``@file`` of arguments is not typing either, so its flags enable
+    nothing. The warning says what is known -- the flag was not typed --
+    rather than sending the user to look in ``addopts``, which is empty."""
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    _make_capturable_project(pytester)
+    (pytester.path / "args.txt").write_text(
+        f"--vantage\n--vantage-server\n{vantage_server.address}\n"
+    )
+    attempts = _spy_on_connections(monkeypatch)
+
+    result = pytester.runpytest("@args.txt")
+
+    result.assert_outcomes(failed=1)
+    assert attempts == []
+    assert vantage_server.executions() == []
+    (warned,) = _vantage_warnings(recwarn)
+    assert warned.startswith("vantage: ignoring --vantage: not typed on the command line ")
+    assert "@file" in warned
 
 
 def test_a_typed_vantage_records_to_the_ini_address(
