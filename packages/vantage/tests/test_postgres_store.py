@@ -424,8 +424,13 @@ def test_a_store_serves_again_as_soon_as_the_server_is_back_from_an_outage(
     which psycopg_pool spaces out by a doubling interval for five minutes
     unless told otherwise: after eight seconds down, its next attempt comes
     about seven seconds after the server is back, and every call until then
-    waits for it and fails."""
-    monkeypatch.setattr(postgres_connection, "_POOL_WAIT_SECONDS", 2.0)
+    waits for it and fails.
+
+    The call after the outage may wait five seconds: an attempt that lands
+    just before the server is back is followed by the next one a second or
+    two later, which a loaded machine stretches further. Five seconds still
+    fails the unbounded retry, which leaves the server unused for seven."""
+    monkeypatch.setattr(postgres_connection, "_POOL_WAIT_SECONDS", 5.0)
     server, url = relay
     store = PostgresExecutionStore(url)
     try:
