@@ -12,8 +12,10 @@ imports and serves SQLite.
 `vantage.ingestion` turns a report into rows for the server and for the
 local store alike, so it takes Pydantic and PyYAML, which every install
 has, and never the web framework, which only the `server` extra brings, nor
-a storage adapter: the store is handed in. `vantage.service` is the only
-package that imports the web framework.
+a storage adapter: the store is handed in. `vantage.local` stores runs on
+the test machine through ingestion and the SQLite adapter, and never
+reaches the PostgreSQL one. `vantage.service` is the only package that
+imports the web framework.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ _SRC_ROOT = _REPO_ROOT / "packages" / "vantage" / "src"
 _CORE_DIR = _SRC_ROOT / "vantage" / "core"
 _STORAGE_DIR = _SRC_ROOT / "vantage" / "storage"
 _INGESTION_DIR = _SRC_ROOT / "vantage" / "ingestion"
+_LOCAL_DIR = _SRC_ROOT / "vantage" / "local"
 _STDLIB = frozenset(sys.stdlib_module_names)
 
 # Standard-library modules that open a database, a socket or a process.
@@ -61,6 +64,15 @@ _CORE_ALLOWED = _STDLIB - _IO_MODULES
 
 _POSTGRES_ADAPTER = "vantage.storage.postgres"
 _POSTGRES_DRIVER = frozenset({"psycopg", "psycopg_pool"})
+
+# The SQLite adapter and the modules it is built from: what the local store
+# may use of storage.
+_SQLITE_ADAPTER = (
+    "vantage.storage.sqlite_store",
+    "vantage.storage.connection",
+    "vantage.storage.version",
+)
+_LOCAL_INTERNAL = ("vantage.core", "vantage.ingestion", "vantage.local", *_SQLITE_ADAPTER)
 
 # What the `server` extra brings: FastAPI, the Starlette it is built on, and
 # the ASGI server.
@@ -95,6 +107,15 @@ def _walk_ingestion() -> WalkResult:
     )
 
 
+def _walk_local() -> WalkResult:
+    return walk_package(
+        _LOCAL_DIR,
+        src_root=_SRC_ROOT,
+        allowed_top_levels=_STDLIB,
+        allowed_internal_prefixes=_LOCAL_INTERNAL,
+    )
+
+
 def _examined(result: WalkResult) -> set[str]:
     return {p.relative_to(_SRC_ROOT).as_posix() for p in result.modules_examined}
 
@@ -123,6 +144,52 @@ def test_every_ingestion_import_resolves_to_the_standard_library_the_core_or_val
 
     assert result.is_clean, [
         f"{v.file}:{v.lineno} imports {v.imported!r}" for v in result.violations
+    ]
+
+
+def test_every_local_import_resolves_to_ingestion_or_the_sqlite_adapter() -> None:
+    result = _walk_local()
+
+    assert result.is_clean, [
+        f"{v.file}:{v.lineno} imports {v.imported!r}" for v in result.violations
+    ]
+
+
+def test_the_local_walk_admits_the_sqlite_adapter_and_nothing_else_of_storage(
+    tmp_path: Path,
+) -> None:
+    """The rule itself, on a stand-in `vantage.local`: listing the SQLite
+    adapter's modules must not admit the PostgreSQL adapter beside them, the
+    storage package as a whole, the service, or a third-party package."""
+    local_dir = tmp_path / "src" / "vantage" / "local"
+    local_dir.mkdir(parents=True)
+    (local_dir.parent / "__init__.py").write_text("")
+    (local_dir / "__init__.py").write_text(
+        textwrap.dedent(
+            """
+            from vantage.storage.sqlite_store import SqliteExecutionStore
+            from vantage.storage.version import SchemaVersionError
+            from vantage.ingestion import ingest
+            from vantage.storage.postgres import PostgresExecutionStore
+            from vantage.storage import sqlite_store
+            from vantage.service.app import create_app
+            import pydantic
+            """
+        )
+    )
+
+    result = walk_package(
+        local_dir,
+        src_root=tmp_path / "src",
+        allowed_top_levels=_STDLIB,
+        allowed_internal_prefixes=_LOCAL_INTERNAL,
+    )
+
+    assert [v.imported for v in result.violations] == [
+        "vantage.storage.postgres",
+        "vantage.storage",
+        "vantage.service.app",
+        "pydantic",
     ]
 
 
@@ -175,6 +242,10 @@ def test_the_ingestion_walk_is_not_vacuous() -> None:
     assert "vantage/ingestion/conversion.py" in examined
     assert "vantage/ingestion/metadata_parse.py" in examined
     assert "vantage/ingestion/schemas.py" in examined
+
+
+def test_the_local_walk_is_not_vacuous() -> None:
+    assert "vantage/local/__init__.py" in _examined(_walk_local())
 
 
 def test_every_io_module_kept_out_of_the_core_is_a_real_stdlib_module() -> None:
@@ -347,11 +418,14 @@ def test_storage_and_the_command_import_without_the_postgresql_driver() -> None:
 _WITHOUT_THE_WEB_FRAMEWORK = """
 import sys
 
-for name in ("fastapi", "starlette", "uvicorn"):
+for name in ("fastapi", "starlette", "uvicorn", "psycopg", "psycopg_pool"):
     sys.modules[name] = None
 
 import vantage.ingestion
 import vantage.ingestion.decode
+import vantage.local
+
+assert "vantage.storage.postgres" not in sys.modules, "the PostgreSQL adapter was loaded"
 
 try:
     import vantage.service.app
@@ -360,9 +434,10 @@ except ImportError as exc:
 """
 
 
-def test_ingestion_imports_without_the_web_framework() -> None:
-    """An install without the `server` extra has no FastAPI: ingestion must
-    import there, and the app, asked for, fails on the missing framework."""
+def test_ingestion_and_the_local_store_import_without_either_extra() -> None:
+    """An install without the `server` or `postgres` extra stores runs
+    locally: ingestion and the local store must import there, and the app,
+    asked for, fails on the missing framework."""
     completed = subprocess.run(  # noqa: S603 -- the interpreter running this test
         [sys.executable, "-c", _WITHOUT_THE_WEB_FRAMEWORK],
         capture_output=True,

@@ -10,6 +10,9 @@ Internal packages, with the dependency arrow pointing inwards:
 ``vantage.ingestion``
     A session report validated, converted and recorded in a store it is
     handed. The core, Pydantic and PyYAML; never the web framework.
+``vantage.local``
+    Runs stored on the test machine in a SQLite database, through the same
+    ingestion: what the plugin calls when it records without a server.
 ``vantage.service``
     HTTP surface: the ingestion endpoint the plugin reports to, the read API
     the interface consumes, and the `vantage` command. The only package that

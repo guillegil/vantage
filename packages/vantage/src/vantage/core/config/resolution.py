@@ -145,17 +145,32 @@ def _resolve_database(
         return database_target(cli_database)
     if env_database:
         return database_target(env_database)
-    # The XDG Base Directory spec says a relative XDG_DATA_HOME is invalid and
-    # must be ignored; used as-is it would move the database with the cwd.
-    xdg = Path(xdg_data_home) if xdg_data_home else None
-    if xdg is not None and xdg.is_absolute():
-        return SqliteTarget(xdg / "vantage" / "vantage.db")
-    if home is None:
+    default = default_sqlite_path(home=home, xdg_data_home=xdg_data_home)
+    if default is None:
         raise ServerConfigError(
             "there is no home directory to put the default database under; "
             "pass --database or set VANTAGE_DATABASE"
         )
-    return SqliteTarget(home / ".local" / "share" / "vantage" / "vantage.db")
+    return SqliteTarget(default)
+
+
+def default_sqlite_path(*, home: Path | None, xdg_data_home: str | None) -> Path | None:
+    """The default SQLite database: ``$XDG_DATA_HOME/vantage/vantage.db``,
+    else ``~/.local/share/vantage/vantage.db`` under `home`, else `None`
+    when there is no home directory to put it under.
+
+    The one statement of the default, so the server and the plugin's local
+    store agree on it: `vantage` run with no options serves what the tests
+    stored locally. An empty ``XDG_DATA_HOME`` counts as unset.
+    """
+    # The XDG Base Directory spec says a relative XDG_DATA_HOME is invalid and
+    # must be ignored; used as-is it would move the database with the cwd.
+    xdg = Path(xdg_data_home) if xdg_data_home else None
+    if xdg is not None and xdg.is_absolute():
+        return xdg / "vantage" / "vantage.db"
+    if home is None:
+        return None
+    return home / ".local" / "share" / "vantage" / "vantage.db"
 
 
 DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_PERIOD_SECONDS
@@ -166,5 +181,6 @@ __all__ = [
     "DEFAULT_GRACE_PERIOD_SECONDS",
     "ServerConfig",
     "ServerConfigError",
+    "default_sqlite_path",
     "resolve_server_config",
 ]
