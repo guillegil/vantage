@@ -1000,13 +1000,14 @@ def test_send_is_bounded_by_its_timeout_as_a_whole() -> None:
     an answer trickled one byte at a time is bounded by nothing. The
     timeout is a deadline on the whole exchange instead.
     """
-    with _StubServer(_drip_response(interval=0.25, byte_count=40)) as server:
+    # Every byte arrives well inside the timeout; the whole answer takes 4s.
+    with _StubServer(_drip_response(interval=0.05, byte_count=80)) as server:
         started = time.monotonic()
         with pytest.raises(TimeoutError):
-            send(server.address, _A_REPORT, timeout=1.0)
+            send(server.address, _A_REPORT, timeout=0.3)
         elapsed = time.monotonic() - started
 
-    assert elapsed < 2.5
+    assert elapsed < 2.0
 
 
 def test_a_refused_report_releases_its_connection() -> None:
@@ -1039,25 +1040,26 @@ def test_a_refused_report_releases_its_connection() -> None:
 def test_a_server_that_trickles_its_answers_cannot_hold_the_session(
     pytester: pytest.Pytester,
 ) -> None:
-    """Every request of the session is trickled: the probe and the
-    finish-write are each abandoned at their one-second deadline, and the
-    abandoned finish-write is a warning, not a silent delay.
+    """Every request of the session is trickled, each byte well inside the
+    socket timeout: the probe and the finish-write are each abandoned at
+    their deadline, and the abandoned finish-write is a warning, not a
+    silent delay.
     """
-    with _StubServer(_drip_response(interval=0.25, byte_count=40)) as server:
+    with _StubServer(_drip_response(interval=0.05, byte_count=80)) as server:
         pytester.makepyfile(test_sample=_PASSING_TEST)
         started = time.monotonic()
         result = pytester.runpytest_subprocess(
             "--vantage",
             f"--vantage-server={server.address}",
-            "--vantage-timeout=1.0",
+            "--vantage-timeout=0.3",
             timeout=30,
         )
         elapsed = time.monotonic() - started
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    assert elapsed < 2 * 1.0 + 5.0
-    assert "error while reporting: no complete answer within 1s" in _combined_output(result)
+    assert elapsed < 2 * 0.3 + 5.0
+    assert "error while reporting: no complete answer within 0.3s" in _combined_output(result)
 
 
 # --- Activity-driven heartbeats --------------------------------------------
@@ -1067,14 +1069,14 @@ def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,
 ) -> None:
-    """`_last_beat_at` is assigned before the send, so a failing send is not
-    retried on the very next report -- and `_maybe_beat` is
-    `@liveness_isolated`, which latches after its first failure. Across
-    five tests (five beat opportunities, forced by a zero
+    """`_maybe_beat` is `@liveness_isolated`, which latches after its first
+    failure, so a failing heartbeat is never attempted again. Across five
+    tests (a beat due on every report, forced by a zero
     `_BEAT_INTERVAL_SECONDS`), that is exactly one warning, never one per
     beat -- and `accumulate` running first means every test's result
     still reaches the finish-write, whose own `send` is unpatched, so the
-    real `vantage_server` ends up with all five.
+    real `vantage_server` ends up with all five. Beat spacing is
+    `test_run_report.py::test_heartbeats_are_one_interval_apart`.
 
     A `conftest.py` written into the pytester's own directory, not
     `monkeypatch`: this test needs `runpytest_subprocess` (an in-process
@@ -1230,18 +1232,25 @@ def test_capability_probe_404_sends_no_start_write_and_no_heartbeat(
     pytester: pytest.Pytester,
 ) -> None:
     """A server that answers the capability probe `404` (an older `vantage`)
-    records the session with no start-write and no heartbeat. Exactly three
-    connections are opened -- the bare preflight, the capability probe, and
-    the finish-write -- never a fourth for a start-write. The finish-write's
-    JSON body has exactly the ordinary report shape, with no lifecycle field
-    added by the degraded path.
+    records the session with no start-write and no heartbeat. A heartbeat is
+    made due on every report, across three tests, so one would be sent if
+    the gate failed. Exactly three connections are opened -- the bare
+    preflight, the capability probe, and the finish-write -- never a fourth
+    for a start-write or a heartbeat. The finish-write's JSON body has
+    exactly the ordinary report shape, with no lifecycle field added by the
+    degraded path.
     """
     requests_seen: list[tuple[str, bytes]] = []
+    pytester.makeconftest(
+        "import pytest_vantage.recorder as recorder\nrecorder._BEAT_INTERVAL_SECONDS = 0.0\n"
+    )
     with _StubServer(_capturing_handler(requests_seen)) as server:
-        pytester.makepyfile(test_sample=_PASSING_TEST)
+        pytester.makepyfile(
+            test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
+        )
         result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}")
 
-    result.assert_outcomes(passed=1)
+    result.assert_outcomes(passed=3)
     assert result.ret == 0
     assert [request_line for request_line, _body in requests_seen] == [
         "",
@@ -1289,12 +1298,16 @@ def test_capability_probe_404_warns_once_and_still_records_the_result(
 def test_capability_probe_is_bounded_by_the_liveness_timeout_not_the_report_timeout(
     pytester: pytest.Pytester,
 ) -> None:
-    """The capability probe is bounded by `resolve_liveness_timeout` (at most
-    2.0s), never the larger report timeout: a probe that hung until the
-    report timeout would put that cost in front of every session. The
-    finish-write answers normally, so only a probe wrongly bounded by the
-    10-second report timeout would make this run long.
+    """The capability probe is bounded by `resolve_liveness_timeout`, never
+    the larger report timeout: a probe that hung until the report timeout
+    would put that cost in front of every session. The finish-write answers
+    normally, so only a probe wrongly bounded by the 10-second report
+    timeout would make this run long. The child's liveness cap is cut from
+    2.0 to 0.3 seconds, so the right bound is not waited out in full.
     """
+    pytester.makeconftest(
+        "import pytest_vantage.config as config\nconfig._MAX_SHORT_TIMEOUT = 0.3\n"
+    )
     connections_seen = itertools.count(1)
 
     def _hang_the_capability_probe_only(conn: socket.socket) -> None:
@@ -1320,7 +1333,7 @@ def test_capability_probe_is_bounded_by_the_liveness_timeout_not_the_report_time
 
     result.assert_outcomes(passed=1)
     assert result.ret == 0
-    assert elapsed < 2.0 + 5.0
+    assert elapsed < 0.3 + 5.0
 
 
 def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(

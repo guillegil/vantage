@@ -891,14 +891,16 @@ def test_captured_output_is_null_only_when_no_phase_was_read(
     assert result["captured_stderr"] == expected
 
 
-# --- exactly one HTTP request per session ----------------------------------
+# --- the finish report carries the assembled results -------------------------
 
 
-def test_recorder_sends_the_assembled_results_in_the_one_session_post(
+def test_the_finish_report_carries_the_assembled_results_in_execution_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`pytest_runtest_logreport` only accumulates; `pytest_sessionfinish`
-    sends once, carrying the assembled `results` array."""
+    """`pytest_runtest_logreport` only accumulates, sending nothing;
+    `pytest_sessionfinish` sends the finish report carrying the assembled
+    `results` array, in execution order. No session start is driven here,
+    so the finish report is the only report sent."""
     from pytest_vantage.recorder import Recorder
 
     sent: list[dict[str, object]] = []

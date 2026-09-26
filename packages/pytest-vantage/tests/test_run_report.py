@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pytest_vantage.recorder as recorder_module
 from pytest_vantage import transport, vcs
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.recorder import _WORKER_INTERRUPT_KEY, Recorder, WorkerInterruptRelay
@@ -156,8 +157,9 @@ def test_recorder_registered_only_when_vantage_flag_is_present(
 
 def _corrupt_git_repo(rootpath: Path) -> None:
     """A `.git` directory with a truncated `HEAD` and no objects: not a mock,
-    a real repository `git` itself cannot read (it exits 128). Same shape as
-    `test_vcs.py::test_corrupt_git_entry_records_nulls_and_warns_once`."""
+    a real repository `git` itself cannot read (it exits 128). The
+    `truncated-head` kind of
+    `test_vcs.py::test_corrupt_repository_records_nulls_and_warns_once`."""
     (rootpath / ".git").mkdir(parents=True)
     (rootpath / ".git" / "HEAD").write_text("ref: ")
 
@@ -889,6 +891,29 @@ def test_a_fast_suite_emits_no_heartbeat(
         recorder._maybe_beat()
 
     assert beats == []
+    assert len(recwarn) == 0, [str(w.message) for w in recwarn.list]
+
+
+def test_heartbeats_are_one_interval_apart(
+    monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+) -> None:
+    """A beat is due one `_BEAT_INTERVAL_SECONDS` after the start-write and
+    one after each beat, however many reports arrive in between: offered a
+    beat every second for 100 seconds of a fake clock, the recorder sends
+    one at 30, 60 and 90. A long suite never sends one per test report.
+    """
+    clock = [0.0]
+    monkeypatch.setattr(recorder_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    beats: list[float] = []
+    monkeypatch.setattr(
+        "pytest_vantage.recorder.send_heartbeat", lambda *args, **kwargs: beats.append(clock[0])
+    )
+    recorder, _sent = _offline_recorder(monkeypatch)
+    for second in range(1, 101):
+        clock[0] = float(second)
+        recorder._maybe_beat()
+
+    assert beats == [30.0, 60.0, 90.0]
     assert len(recwarn) == 0, [str(w.message) for w in recwarn.list]
 
 
