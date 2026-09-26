@@ -226,7 +226,9 @@ Some of what a run was made against is known only once the session has
 looked: the firmware a board is running, the revision of a card plugged
 into it. The `vantage_metadata` fixture takes such values from your own
 fixtures and records them with the run. It needs `--vantage` and nothing
-else.
+else. The fixture comes with the plugin, so a project that asks for it
+needs `pytest-vantage` installed wherever its tests run, and its tests
+error under `-p no:vantage`.
 
 ```python
 import pytest
