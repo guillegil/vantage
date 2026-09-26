@@ -21,7 +21,7 @@ new one.
 
 ```
 pytest + pytest-vantage  ──HTTP /api/v1──>  vantage server  ──>  SQLite file
-                                                  │
+                                                  │              or PostgreSQL
                           any HTTP client  <──────┘  read API (JSON)
 ```
 
@@ -29,7 +29,8 @@ pytest + pytest-vantage  ──HTTP /api/v1──>  vantage server  ──>  SQL
   memory and reports it to the server over HTTP. It depends on pytest and the
   standard library only, and never opens a database.
 - **`vantage`** is the server. It validates each report and performs every
-  write, to one SQLite database, and serves the recorded history.
+  write, to one SQLite or PostgreSQL database, and serves the recorded
+  history.
 
 Recording therefore needs a running server that the test machine can reach,
 in CI as much as on a laptop.
@@ -46,6 +47,8 @@ pip install ./vantage/packages/pytest-vantage
 
 # Wherever the server runs (brings FastAPI, Uvicorn and PyYAML):
 pip install ./vantage/packages/vantage
+# ...or, to store in PostgreSQL, with psycopg and its connection pool:
+pip install './vantage/packages/vantage[postgres]'
 ```
 
 The plugin needs pytest 8.0 or later. It registers itself through pytest's
@@ -430,12 +433,12 @@ for the grace period, provided the server received its start report.
 ## Running the server
 
 ```
-vantage [--database PATH] [--host HOST] [--port PORT] [--grace-period SECONDS]
+vantage [--database PATH-OR-URL] [--host HOST] [--port PORT] [--grace-period SECONDS]
 ```
 
 | Setting | Flag | Environment | Default |
 | --- | --- | --- | --- |
-| Database file | `--database` | `VANTAGE_DATABASE` | `$XDG_DATA_HOME/vantage/vantage.db`, or `~/.local/share/vantage/vantage.db` |
+| Database: a SQLite file, or a PostgreSQL URL | `--database` | `VANTAGE_DATABASE` | `$XDG_DATA_HOME/vantage/vantage.db`, or `~/.local/share/vantage/vantage.db` |
 | Bind address | `--host` | none | `127.0.0.1` |
 | Port | `--port` | none | `8765` |
 | Grace period before an unfinished run reads as abandoned | `--grace-period` | none | `900` seconds |
@@ -444,9 +447,9 @@ vantage [--database PATH] [--host HOST] [--port PORT] [--grace-period SECONDS]
   `--database`, `VANTAGE_DATABASE` or `XDG_DATA_HOME` counts as unset, and a
   relative `XDG_DATA_HOME` is ignored. An empty `--host` is refused rather
   than taken to mean every interface.
-- A missing database directory is created with mode 0700 and a new database
-  file with mode 0600. An existing database file open to its group or to
-  others is used as it is, with a warning.
+- A missing SQLite database directory is created with mode 0700 and a new
+  database file with mode 0600. An existing database file open to its group
+  or to others is used as it is, with a warning.
 - **There is no authentication.** Anyone who can reach the port can record
   runs, change the section definitions and read everything recorded, failure
   text included. Any `--host` other than `127.0.0.1` logs a warning saying so
@@ -454,9 +457,9 @@ vantage [--database PATH] [--host HOST] [--port PORT] [--grace-period SECONDS]
 - The server refuses to start, with one `vantage: ...` line on stderr and
   exit status 1, when a setting is unusable (an empty host, a port outside 1
   to 65535, a grace period that is not positive or exceeds 365 days), the
-  database cannot be created or opened, or the database was made by a build
-  with a different schema. There are no migrations: move the old file aside
-  and start again.
+  database cannot be created, opened or connected to, or the database was
+  made by a build with a different schema. There are no migrations: move the
+  old file aside and start again.
 - A `--port` or `--grace-period` that is not a number never gets that far:
   the argument parser refuses it with its usage message and exit status 2.
 
@@ -482,6 +485,45 @@ more items exist. The section lists and a run's metadata are returned
 whole. The run list also filters by metadata values; see
 [Reading it back](#reading-it-back).
 
+### Storing in PostgreSQL
+
+A `--database` or `VANTAGE_DATABASE` whose scheme is `postgresql://` or
+`postgres://` names a PostgreSQL database instead of a file:
+
+```bash
+vantage --database postgresql://vantage@db.example:5432/vantage
+VANTAGE_DATABASE=postgresql://vantage@db.example/vantage vantage
+```
+
+- The driver comes with the `postgres` extra (see [Install](#install)).
+  Without it, a PostgreSQL URL is refused with one line naming the extra; a
+  server storing in SQLite never needs it.
+- The password goes wherever libpq looks for one: in the URL
+  (`postgresql://user:password@host/db`, with special characters
+  percent-encoded), or in `PGPASSWORD`, `~/.pgpass` or libpq's other `PG*`
+  environment variables, which apply to the rest of the connection too. A
+  password in `--database` is shown to every user of the machine in the
+  process list; `VANTAGE_DATABASE`, `PGPASSWORD` or `~/.pgpass` keep it out.
+  The server prints the URL only with its passwords replaced by `***`.
+- Everything the server stores lives in a schema named `vantage`, so its
+  tables never collide with anything else in the database. The first server
+  to start on a database creates the schema and all its tables in one
+  transaction; the user it connects as needs the right to do so then, and to
+  read and write them afterwards. The database must be encoded in UTF-8,
+  PostgreSQL's usual default; any other is refused with one line.
+- Several servers can share one database, each with its own pool of at most
+  10 connections. Each write is one transaction that locks what a
+  concurrent write to the same run or setting would change, so every run,
+  result and metadata value is stored exactly once, and a bound such as the
+  number of sections holds across all the servers.
+- A server rides out a database restart or failover: while the database is
+  gone a request waits up to 30 seconds for it and then fails with a 500,
+  and the server reconnects by itself, serving again as soon as the
+  database is back.
+- There are no migrations here either. A `vantage` schema made by a build
+  with a different schema version, or one holding tables but no version, is
+  refused with one line and left as it is.
+
 ## Development
 
 A uv workspace with both distributions. The tools are in the `dev` extra.
@@ -496,12 +538,20 @@ uv run --extra dev mypy .                          # strict
 uv run --extra dev deptry .                        # undeclared or unused dependencies
 uv run --extra dev pip-audit                       # known vulnerabilities
 uv build --wheel --all-packages -o dist            # both wheels
+
+# The PostgreSQL tests too, against a server you can create databases on:
+VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:secret@127.0.0.1:5432/postgres \
+  uv run --extra dev pytest
 ```
+
+Without `VANTAGE_TEST_POSTGRES_URL` the tests that need PostgreSQL are
+skipped. With it, each creates a database of its own on that server and
+drops it afterwards, so the URL must name a user allowed to do both.
 
 `pre-commit install` (with pre-commit installed separately, for example
 `uv tool install pre-commit`) runs ruff on each commit, and mypy and the
 tests not marked `slow` on each push. CI runs the whole suite on Python 3.10
-to 3.13, with and without pytest-xdist.
+to 3.13, with and without pytest-xdist, and once more against PostgreSQL 17.
 
 How the code is organised, and why: [`docs/architecture.md`](docs/architecture.md).
 

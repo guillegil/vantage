@@ -10,6 +10,7 @@ never ship in a wheel. Reached through the root
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,10 +77,7 @@ def _is_allowed(
     allowed_top_levels: frozenset[str],
     allowed_internal_prefixes: tuple[str, ...],
 ) -> bool:
-    if any(
-        resolved == prefix or resolved.startswith(prefix + ".")
-        for prefix in allowed_internal_prefixes
-    ):
+    if any(_within(resolved, prefix) for prefix in allowed_internal_prefixes):
         return True
     if is_relative:
         # A relative import that lands outside every internal prefix reaches a
@@ -89,12 +87,17 @@ def _is_allowed(
     return top_level in allowed_top_levels
 
 
+def _within(dotted_name: str, prefix: str) -> bool:
+    return dotted_name == prefix or dotted_name.startswith(prefix + ".")
+
+
 def walk_package(
     package_dir: Path,
     *,
     src_root: Path,
     allowed_top_levels: frozenset[str],
     allowed_internal_prefixes: tuple[str, ...] = (),
+    allowed_top_levels_within: Mapping[str, frozenset[str]] | None = None,
 ) -> WalkResult:
     """Walk every ``.py`` file under ``package_dir`` and report disallowed imports.
 
@@ -102,6 +105,9 @@ def walk_package(
     optionally plus ``pytest``). ``allowed_internal_prefixes`` gates both
     absolute and relative imports that resolve inside the package's own
     dependency-inward tree (e.g. ``("vantage.core", "vantage.storage")``).
+    ``allowed_top_levels_within`` maps a module's dotted name to the further
+    top levels it, and every module under it, may import: one adapter's
+    driver, allowed to that adapter alone.
     """
     modules_examined: list[Path] = []
     violations: list[ImportViolation] = []
@@ -110,6 +116,13 @@ def walk_package(
         modules_examined.append(file)
         dotted_name = _module_dotted_name(file, src_root)
         containing_package = _containing_package(dotted_name, is_init=file.name == "__init__.py")
+        allowed_here = allowed_top_levels.union(
+            *(
+                extra
+                for prefix, extra in (allowed_top_levels_within or {}).items()
+                if _within(dotted_name, prefix)
+            )
+        )
         tree = ast.parse(file.read_text(encoding="utf-8"), filename=str(file))
 
         for node in ast.walk(tree):
@@ -118,7 +131,7 @@ def walk_package(
                     if not _is_allowed(
                         alias.name,
                         is_relative=False,
-                        allowed_top_levels=allowed_top_levels,
+                        allowed_top_levels=allowed_here,
                         allowed_internal_prefixes=allowed_internal_prefixes,
                     ):
                         violations.append(ImportViolation(file, alias.name, node.lineno))
@@ -132,7 +145,7 @@ def walk_package(
                 if not _is_allowed(
                     resolved,
                     is_relative=is_relative,
-                    allowed_top_levels=allowed_top_levels,
+                    allowed_top_levels=allowed_here,
                     allowed_internal_prefixes=allowed_internal_prefixes,
                 ):
                     violations.append(ImportViolation(file, resolved, node.lineno))

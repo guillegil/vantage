@@ -14,7 +14,7 @@ packages/
 └── vantage/                       published as `vantage`
     ├── src/vantage/
     │   ├── core/                  domain model, storage port, config resolution
-    │   ├── storage/               schema.sql and the SQLite adapter
+    │   ├── storage/               the SQLite adapter, the PostgreSQL one in postgres/
     │   └── service/               FastAPI app, `vantage` command, OpenAPI document
     └── tests/
 ```
@@ -28,6 +28,7 @@ mechanically:
 | `pytest_vantage` | `pytest-vantage` | the standard library and pytest | AST import walk, deptry, clean-environment install job |
 | `vantage.core` | `vantage` | the standard library, minus modules that open a database, socket or process (`sqlite3`, `socket`, `http`, `urllib`, `subprocess`, `asyncio`, ...) | AST import walk |
 | `vantage.storage` | `vantage` | the standard library and `vantage.core` | AST import walk |
+| `vantage.storage.postgres` | `vantage` | the same, and the PostgreSQL driver (`psycopg`, `psycopg_pool`) from the `postgres` extra | AST import walk, an import of the command with the driver unavailable |
 | `vantage.service` | `vantage` | anything; it declares FastAPI, Uvicorn and PyYAML | none needed |
 
 The three checks catch different failures:
@@ -37,7 +38,12 @@ The three checks catch different failures:
   imports, so `from ..service import x` inside the core is caught.
   `packages/vantage/tests/test_architecture.py` applies it to the core and
   storage, and `packages/pytest-vantage/tests/test_plugin_imports.py` to the
-  plugin.
+  plugin. The storage walk allows the driver's two top-level modules to
+  `vantage.storage.postgres` and the modules under it, and to nothing else.
+  Because the extra is optional, the same test also imports storage, the app
+  and the `vantage` command in a fresh interpreter where `psycopg` and
+  `psycopg_pool` cannot be imported, and checks that the adapter was not
+  loaded: nothing a SQLite server runs may reach it.
 - **deptry**, run over the whole workspace, flags an import of a third-party
   package the workspace does not declare.
 - **The `clean-environment-install` CI job** builds the plugin wheel, installs
@@ -65,14 +71,15 @@ storage on the core, and the core on nothing but the standard library.
   subclassing the protocol itself. It does import the core's domain and
   value types (`Execution`, `Result`, `Page`, `RunListEntry` and the like),
   which it takes and returns; the core imports nothing from any adapter.
-- **`vantage.storage`** holds `SqliteExecutionStore`, the one adapter the
-  server ships.
+- **`vantage.storage`** holds the two adapters the server ships:
+  `SqliteExecutionStore`, and `PostgresExecutionStore` in
+  `vantage.storage.postgres`, which needs the optional `postgres` extra.
 - **`vantage.service`** is the HTTP edge. Pydantic models (`schemas.py`)
   validate what arrives; the routes convert a validated report into core
   dataclasses before calling the store, so no Pydantic type reaches the core
   or storage. `create_app(store)` takes the store as a parameter: `cli.py` is
-  the one place that builds a `SqliteExecutionStore`, and tests pass their
-  own.
+  the one place that builds one, a `SqliteExecutionStore` or a
+  `PostgresExecutionStore`, and tests pass their own.
 
 Two conventions follow from Python and pytest rather than from the design.
 Vocabularies are `frozenset`s of plain `str`, never an `Enum`: a `str` enum
@@ -90,9 +97,11 @@ The plugin reports over HTTP and the server performs every write.
   plugin would.
 - **No schema in the plugin.** Storage can change without a plugin release;
   the plugin and the server only have to agree on the HTTP contract.
-- **One writer.** CI jobs, xdist sessions and developers all report to one
-  server process, which serialises writes on one connection. Nobody shares a
-  database file across machines or network filesystems.
+- **One writer per database.** CI jobs, xdist sessions and developers all
+  report to a server, never to the database. With SQLite one server process
+  serialises writes on one connection, and nobody shares a database file
+  across machines or network filesystems. With PostgreSQL several servers
+  may share one database, and its transactions keep their writes apart.
 - **Liveness needs a listener.** Because the server is told when a session
   starts and hears from it while it runs, it can tell a running session from
   one that was killed.
@@ -318,6 +327,62 @@ where it would see rows not yet committed. Multi-statement writes open with
 `BEGIN IMMEDIATE`. WAL mode and a five-second busy timeout cover a second
 process on the same file, which no in-process lock can reach.
 
+**PostgreSQL's transactions.** `PostgresExecutionStore` holds no lock of its
+own: it keeps a `psycopg_pool.ConnectionPool` (one connection at least, 10
+at most, opened when the store is built), and every store call takes a
+connection and runs as its own transaction, so calls from several threads,
+and from several server processes on one database, run in parallel. A
+connection answers a round trip before a call gets it; one the server has
+closed -- a restart or a failover closes them all -- is discarded and the
+next tried at once, rather than through the pool's own check, which waits
+longer after each failure than the one before. For the same reason the
+pool gives up retrying a connection it cannot open after five seconds, not
+psycopg_pool's five minutes: a call made once the server is back has a new
+connection opened at once, rather than waiting for a retry that a long
+outage has spaced out by a minute or more. The pool opens a connection
+only as a call starts waiting, so when it gives up and a call is still
+waiting, it is asked to open another (`pool.check()`): the calls that
+began while the server was down, which by then hold every worker thread,
+are served as soon as it is back, in the order they came, not when they
+time out. Every connection sets its session to `READ COMMITTED` first,
+whatever the database or the role defaults to: the locks below rely on it,
+since a `REPEATABLE READ` transaction reads the snapshot its first
+statement took, before the lock that statement waited for. A read that
+must describe one moment -- a run page with its metadata horizons, a run's
+metadata with the check that the run exists -- is one statement or runs
+under `REPEATABLE READ`. A write is safe against the same write from
+another process by construction, never by a check first:
+
+- `record_session` is one transaction. The run is inserted with
+  `ON CONFLICT (id) DO UPDATE ... WHERE` the stored run has no exit status
+  and the report has one, and whether it was created comes from that
+  statement's own result. The run row is then locked (`SELECT ... FOR
+  UPDATE`), so concurrent reports of one run take their turn at the
+  per-run metadata bound and the results. Catalogue rows are upserted in
+  sorted node id order, so two reports lock them in the same order and
+  cannot deadlock; results and metadata insert with `ON CONFLICT DO
+  NOTHING`.
+- `upsert_setting` counts and inserts under a transaction-scoped advisory
+  lock keyed on the namespace, so the section bound holds across servers.
+- `touch_last_contact` is one conditional `UPDATE`, and never moves the
+  contact backwards.
+- A transaction that fails with a serialization failure or a deadlock is
+  retried a bounded number of times; any other error propagates.
+
+**No store is ever handed U+0000.** PostgreSQL's `text` cannot hold it,
+and no UTF-8 encoder takes a lone surrogate, so `decode_json`
+(`service/text.py`) replaces every U+0000 in a key or string value of a body
+with U+FFFD, and every lone surrogate too for `POST /runs`;
+`POST /config/sections` refuses a lone surrogate instead. `metadata_parse`
+replaces a U+0000 that a declared document spells as an escape the same
+way. Every adapter therefore stores the same text. A value that is only
+looked up with -- a node id, a metadata filter, a section name to delete --
+is not rewritten into something else to find: holding U+0000, it matches
+nothing, and the route answers without asking the store, even where an
+older SQLite database holds that very text. The run list still asks the
+store for the `metadata_horizon` of a filtered key holding U+0000, as the
+key with U+FFFD in its place: the text a report carrying it stored.
+
 **Rejections have one shape**, built in `service/errors.py`: an error code, a
 fixed sentence and dotted field paths. Pydantic's own error details, which
 echo the submitted value, are never forwarded, and a client-chosen key name
@@ -340,7 +405,10 @@ database carrying any other stamp, older, newer, missing or not a number, is
 refused with `SchemaVersionError` before anything in it changes, and the
 `vantage` command turns that into a one-line refusal. There are no
 migrations: a table or column is added when code writes it, together with a
-bump of `_SCHEMA_VERSION` in `storage/connection.py`.
+bump of `_SCHEMA_VERSION`. Both adapters take the version, and
+`SchemaVersionError`, from one neutral module, `storage/version.py`, which
+holds the only literal: the SQLite file and the PostgreSQL schema are one
+logical schema, and change together.
 
 | Table | Holds |
 | --- | --- |
@@ -387,11 +455,49 @@ modes are never rewritten, and a database open to others is reported. List
 queries read a byte prefix of the commit subject and failure message, never
 the whole text.
 
+### PostgreSQL
+
+`vantage.storage.postgres` keeps the same tables, columns, constraints and
+meaning in a schema of its own, named `vantage`, so they never collide with
+anything else in the database. The types are PostgreSQL's own: `timestamptz`
+for every timestamp, `boolean` for the flags, `bigint` for integers and for
+the identity keys, `double precision` for durations and `text` for text,
+`user_setting.value` included, which must come back byte for byte. The
+vocabularies are the same `CHECK` constraints, and the unique keys and
+foreign keys are the same. A btree entry holds at most about 2.7 kB, and a
+node id, a metadata key or value or a declared file path has no bound, so
+their uniqueness and lookups go through `vantage.text_key`, a SHA-256 of
+the text, with the text itself compared as well. `text_key` is an index
+expression, and so must be immutable, which converting to UTF-8 is only in
+a UTF-8 database: the adapter refuses any other with `PostgresOpenError`,
+and speaks UTF-8 on the wire whatever `PGCLIENTENCODING` says.
+
+- **Creation is guarded.** Opening takes a transaction-scoped advisory lock,
+  so two servers starting on an empty database at once cannot both create
+  it. If `vantage` has no `meta` table, everything is created and stamped in
+  one transaction, which PostgreSQL's transactional DDL makes all or
+  nothing. A different stamp, or tables with no stamp, is refused with
+  `SchemaVersionError` and nothing is changed.
+- **Parity with SQLite is the contract.** The port contract runs against
+  this adapter too, so what differs underneath must not show: text is
+  ordered and compared with `COLLATE "C"`, code point order as in SQLite;
+  timestamps come back aware, in UTC, because every connection sets its
+  session to UTC and the ISO date style whatever the database says: psycopg
+  parses no other style, and in a local zone either end of the years
+  1-9999 falls outside what a `datetime` holds; every connection
+  asks for doubles with all their digits (`extra_float_digits`), which a
+  database set to 0 would cut to 15; paging and `has_more` are computed
+  the same way.
+- **U+0000 never reaches it** from the service (see *Request handling and
+  concurrency*). The adapter still replaces it with U+FFFD in anything it
+  writes, and treats a lookup value holding it as matching nothing, so a
+  caller other than the service cannot make it fail either.
+
 ## Server configuration
 
 | Setting | Flag | Environment | Default |
 | --- | --- | --- | --- |
-| Database | `--database` | `VANTAGE_DATABASE` | `$XDG_DATA_HOME/vantage/vantage.db`, else `~/.local/share/vantage/vantage.db` |
+| Database: a SQLite path or a PostgreSQL URL | `--database` | `VANTAGE_DATABASE` | `$XDG_DATA_HOME/vantage/vantage.db`, else `~/.local/share/vantage/vantage.db` |
 | Host | `--host` | none | `127.0.0.1` |
 | Port | `--port` | none | `8765` |
 | Grace period | `--grace-period` | none | 900 seconds |
@@ -400,16 +506,44 @@ A flag beats the environment, which beats the default. An empty
 `--database`, `VANTAGE_DATABASE` or `XDG_DATA_HOME` is unset and a relative
 `XDG_DATA_HOME` is ignored; an empty `--host` is refused instead, because
 the event loop would bind `""` as every interface. Resolution
-(`core/config/resolution.py`) is a pure function with no filesystem access,
-so asking where the database would go never creates it, and it rejects an
-unusable value (an empty host, a port outside 1 to 65535, a grace period
-that is not positive or exceeds 365 days) before anything opens. A port or
-grace period that is not a number never reaches it: `argparse` refuses it
-with its usage message and exit status 2. `service/cli.py` acts on the
-result: it checks that an existing database directory is writable, opens the
-store, refuses any failure with one `vantage: ...` line and exit status 1,
-warns about a bind other than `127.0.0.1` once the database is open, and
-closes the store on shutdown.
+(`core/config/resolution.py`) is a pure function with no filesystem or
+network access, so asking where the database would go never creates it, and
+it rejects an unusable value (an empty host, a port outside 1 to 65535, a
+grace period that is not positive or exceeds 365 days) before anything
+opens. A port or grace period that is not a number never reaches it:
+`argparse` refuses it with its usage message and exit status 2.
+
+Resolution names the database as a target (`core/config/database.py`): a
+`PostgresTarget` for a value whose scheme is `postgresql://` or
+`postgres://`, in any case, and a `SqliteTarget` for any other value and for
+the default. The scheme is lower-cased, because libpq recognises no other
+spelling and reads anything else as a `key=value` string, whose parse error
+quotes it whole. A URL is shown only through `redacted`, which replaces the
+password in the user part, and any `password`, `sslpassword` or
+`oauth_client_secret` query parameter, with `***`. Since an unencoded
+password may hold `@`, `/`, `?` or `#`, everything between the first `:`
+and the last `@` counts as the password, and a query parameter's value runs
+on over any `&` piece without an `=`. A `PostgresTarget`'s `repr` is
+redacted too.
+
+`service/cli.py` acts on the result. For SQLite it checks that an existing
+database directory is writable. For PostgreSQL it imports
+`vantage.storage.postgres` by name, so no other start loads the adapter or
+its driver, and a driver that is not installed (psycopg or psycopg-pool
+absent, or psycopg without a libpq) is refused with one line naming the
+`postgres` extra. It then opens the store, refuses any failure with one
+`vantage: ...` line and exit status 1, warns about a bind other than
+`127.0.0.1` once the database is open, and closes the store on shutdown. A
+PostgreSQL refusal names the redacted URL, and quotes the driver's message
+on one line with the URL's password taken out by `redact_message`, as
+written and percent-decoded: libpq quotes a percent-escape it cannot
+decode, and splits a password holding an unencoded `@` or `/` into fields
+-- a host, a port, a database -- that it names one at a time, so each piece
+of such a password is taken out as well. The driver's loggers are silenced
+while the store opens, because psycopg's pool logs every failed attempt to
+connect, quoting libpq, on stderr before any logging is configured.
+Credentials beyond the URL are libpq's own (`PGPASSWORD`, `~/.pgpass`, the
+other `PG*` variables); the command adds no flag for them.
 
 The server takes configuration from the environment while the plugin's
 switches refuse it, because the two are started differently: the server is
@@ -432,25 +566,33 @@ every test; a test module that needs `store_fixtures` loads it with its own
 `pythonpath` puts both `tests/` directories on the import path, so the support
 modules import by bare name. None lives under a `src/` tree, so none ships in
 a wheel. deptry's per-rule ignores name each one a test imports with an
-`import` statement; `store_fixtures`, loaded only as a plugin, needs none.
+`import` statement; `store_fixtures` and `postgres_fixtures`, loaded only as
+plugins, need none.
 
 | Module | Purpose |
 | --- | --- |
 | `packages/vantage/tests/importwalk.py` | the AST import walker behind the dependency checks of both distributions |
 | `packages/vantage/tests/memory_store.py` | `InMemoryExecutionStore`, a complete second implementation of the port; the server never uses it |
-| `packages/vantage/tests/vantage_port_contract.py` | `ExecutionStoreContract`, the behaviour every store must have; `test_sqlite_store.py` and `test_memory_store.py` subclass it |
-| `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]` and `[sqlite]`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
+| `packages/vantage/tests/vantage_port_contract.py` | `ExecutionStoreContract`, the behaviour every store must have; `test_sqlite_store.py`, `test_postgres_store.py` and `test_memory_store.py` subclass it |
+| `packages/vantage/tests/postgres_fixtures.py` | `postgres_url`, `create_postgres_database`, `postgres_store` and `postgres_metadata`: a fresh database per test on the server `VANTAGE_TEST_POSTGRES_URL` names, dropped afterwards, skipping the test when it names none. Each database sorts text with ICU's `en-US` by default, so a text key missing `COLLATE "C"` shows even on a server whose C library sorts every locale by code point; the server needs ICU, as the official images have |
+| `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]`, `[sqlite]` and `[postgres]`, the last skipped without `VANTAGE_TEST_POSTGRES_URL`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
 | `packages/vantage/tests/sqlite_rows.py` | reads a run's metadata rows, whose file rows no port method returns, with plain SQL on a separate connection |
 | `packages/vantage/tests/loopback_server.py` | `LoopbackServer`: a real Uvicorn server on a thread, on a `127.0.0.1` port the OS assigns, with bounded start and stop |
 | `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a temporary directory, recording each request's method and path, for the plugin's end-to-end tests |
 
 `slow` marks the tests that measure elapsed time; `-m 'not slow'` skips them
-locally, and CI always runs everything. The `tests/` directory at the root
-checks the CI workflow's shell steps and the pre-commit configuration.
+locally, and CI always runs everything. The tests that need a PostgreSQL
+server run only when `VANTAGE_TEST_POSTGRES_URL` names one, as a superuser
+on any database, and are skipped with a reason naming the variable
+otherwise; each gets a database of its own, created and dropped around it.
+The `tests/` directory at the root checks the CI workflow's shell steps, the
+PostgreSQL job's wiring and the pre-commit configuration.
 
 CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on every pull
-request: the suite on Python 3.10 to 3.13, with and without pytest-xdist; a
-check that Python 3.9 refuses to install the plugin; the whole suite with
-every non-loopback outbound connection rejected and counted; the
-clean-environment install; and ruff, `mypy --strict`, deptry and a build of
-both wheels. `pip-audit` runs weekly (`audit.yml`).
+request: the suite on Python 3.10 to 3.13, with and without pytest-xdist; the
+whole suite on Python 3.12 against a `postgres:17` service container, the
+one job that sets `VANTAGE_TEST_POSTGRES_URL`; a check that Python 3.9
+refuses to install the plugin; the whole suite with every non-loopback
+outbound connection rejected and counted; the clean-environment install; and
+ruff, `mypy --strict`, deptry and a build of both wheels. `pip-audit` runs
+weekly (`audit.yml`).

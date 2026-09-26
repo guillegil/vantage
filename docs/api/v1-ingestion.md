@@ -43,7 +43,12 @@ A `\uXXXX` escape for a lone surrogate (half of a UTF-16 pair with no
 partner) is valid JSON but cannot be stored as UTF-8. pytest produces such
 text itself, from file names that were not valid UTF-8. The server replaces
 every lone surrogate, in keys and values alike, with U+FFFD before
-validating, rather than rejecting the session over one character.
+validating, rather than rejecting the session over one character. It does
+the same with every U+0000 (`\u0000`), which a PostgreSQL database cannot
+store, and with every U+0000 a declared metadata document spells as an
+escape, so every database stores the same text. A key, value or node id
+that held one reads back with U+FFFD in its place, and looking it up with
+the original U+0000 finds nothing.
 
 Nothing is stored unless the whole report is accepted, and an accepted report
 is stored in one transaction.

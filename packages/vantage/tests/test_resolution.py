@@ -1,4 +1,6 @@
-"""`resolve_server_config`: precedence, and the values it refuses.
+"""`resolve_server_config`: precedence, the values it refuses, and which
+database a value names -- with the redaction that shows a PostgreSQL URL
+without its password.
 
 Plain function calls throughout -- no server, no pytest session, and no
 filesystem I/O: resolving a path answers a question and must never act on
@@ -10,6 +12,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from vantage.core.config.database import (
+    PostgresTarget,
+    SqliteTarget,
+    database_target,
+    redact_message,
+    redacted,
+)
 from vantage.core.config.resolution import (
     ServerConfig,
     ServerConfigError,
@@ -41,25 +50,25 @@ def _resolve(
 def test_cli_database_takes_precedence_over_env_and_default() -> None:
     config = _resolve(cli_database="/explicit/vantage.db", env_database="/env/vantage.db")
 
-    assert config.database_path == Path("/explicit/vantage.db")
+    assert config.database == SqliteTarget(Path("/explicit/vantage.db"))
 
 
 def test_env_database_used_when_no_cli_value() -> None:
     config = _resolve(env_database="/env/vantage.db")
 
-    assert config.database_path == Path("/env/vantage.db")
+    assert config.database == SqliteTarget(Path("/env/vantage.db"))
 
 
 def test_default_database_uses_xdg_data_home_when_set() -> None:
     config = _resolve(xdg_data_home="/xdg/data")
 
-    assert config.database_path == Path("/xdg/data/vantage/vantage.db")
+    assert config.database == SqliteTarget(Path("/xdg/data/vantage/vantage.db"))
 
 
 def test_default_database_falls_back_to_home_when_xdg_data_home_unset() -> None:
     config = _resolve(home=Path("/home/nobody"), xdg_data_home=None)
 
-    assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
+    assert config.database == SqliteTarget(Path("/home/nobody/.local/share/vantage/vantage.db"))
 
 
 @pytest.mark.parametrize(
@@ -77,13 +86,76 @@ def test_an_empty_database_setting_counts_as_unset(
     """
     config = _resolve(cli_database=cli_database, env_database=env_database)
 
-    assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
+    assert config.database == SqliteTarget(Path("/home/nobody/.local/share/vantage/vantage.db"))
 
 
 def test_an_empty_database_flag_falls_through_to_the_environment() -> None:
     config = _resolve(cli_database="", env_database="/env/vantage.db")
 
-    assert config.database_path == Path("/env/vantage.db")
+    assert config.database == SqliteTarget(Path("/env/vantage.db"))
+
+
+_URL = "postgresql://vantage:s3cret@db.example:5432/vantage?sslmode=require"
+
+
+@pytest.mark.parametrize(
+    ("cli_database", "env_database"),
+    [(_URL, None), (None, _URL), (_URL, "/env/vantage.db")],
+    ids=["flag", "environment", "flag-over-environment"],
+)
+def test_a_postgresql_url_names_a_postgresql_database(
+    cli_database: str | None, env_database: str | None
+) -> None:
+    """Taken as given, never as a path: a path would create a directory
+    named `postgresql:` in the working directory."""
+    config = _resolve(cli_database=cli_database, env_database=env_database, home=None)
+
+    assert config.database == PostgresTarget(_URL)
+
+
+def test_a_path_flag_beats_a_url_in_the_environment() -> None:
+    config = _resolve(cli_database="/explicit/vantage.db", env_database=_URL)
+
+    assert config.database == SqliteTarget(Path("/explicit/vantage.db"))
+
+
+@pytest.mark.parametrize(
+    ("value", "url"),
+    [
+        ("postgres://h/db", "postgres://h/db"),
+        ("POSTGRESQL://u:pw@h/db", "postgresql://u:pw@h/db"),
+        ("Postgres://u:PW@H/DB", "postgres://u:PW@H/DB"),
+        ("postgresql:///vantage", "postgresql:///vantage"),
+    ],
+)
+def test_the_scheme_is_matched_in_any_case_and_lower_cased(value: str, url: str) -> None:
+    """libpq recognises a URL by the lower-case scheme only, and reads
+    anything else as a `key=value` string whose parse error quotes the
+    whole value, password included. Only the scheme is changed."""
+    assert database_target(value) == PostgresTarget(url)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "vantage.db",
+        "postgresql:/one-slash",
+        "postgresqlx://h/db",
+        "mysql://h/db",
+        "sqlite:///vantage.db",
+        "./postgresql://h/db",
+    ],
+)
+def test_any_other_value_is_a_sqlite_path(value: str) -> None:
+    assert database_target(value) == SqliteTarget(Path(value))
+
+
+def test_a_postgresql_target_shows_its_url_redacted() -> None:
+    """So printing a resolved configuration never prints the password."""
+    shown = repr(_resolve(cli_database=_URL))
+
+    assert "s3cret" not in shown
+    assert "postgresql://vantage:***@db.example:5432/vantage?sslmode=require" in shown
 
 
 @pytest.mark.parametrize(
@@ -107,7 +179,7 @@ def test_no_home_directory_is_needed_unless_the_default_path_is(
         home=None,
     )
 
-    assert config.database_path == Path(expected)
+    assert config.database == SqliteTarget(Path(expected))
 
 
 def test_the_default_path_without_a_home_directory_is_refused() -> None:
@@ -123,7 +195,7 @@ def test_default_database_ignores_a_relative_xdg_data_home(xdg_data_home: str) -
     """
     config = _resolve(home=Path("/home/nobody"), xdg_data_home=xdg_data_home)
 
-    assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
+    assert config.database == SqliteTarget(Path("/home/nobody/.local/share/vantage/vantage.db"))
 
 
 def test_default_host_and_port() -> None:
@@ -234,5 +306,155 @@ def test_resolution_creates_no_directory(tmp_path: Path) -> None:
         xdg_data_home=str(xdg_data_home),
     )
 
-    assert config.database_path == xdg_data_home / "vantage" / "vantage.db"
+    assert config.database == SqliteTarget(xdg_data_home / "vantage" / "vantage.db")
     assert not xdg_data_home.exists()
+
+
+# --- redaction ----------------------------------------------------------------
+
+_REDACTIONS = {
+    "user-password": (
+        "postgresql://vantage:s3cret@db.example:5432/vantage",
+        "postgresql://vantage:***@db.example:5432/vantage",
+    ),
+    "percent-encoded": (
+        "postgresql://vantage:s3%40cr%2Fet@db.example/vantage",
+        "postgresql://vantage:***@db.example/vantage",
+    ),
+    "unencoded-at": (
+        "postgresql://vantage:s3@cret@db.example/vantage",
+        "postgresql://vantage:***@db.example/vantage",
+    ),
+    "unencoded-slash-question-hash": (
+        "postgresql://vantage:s3/c?r#et@db.example/vantage",
+        "postgresql://vantage:***@db.example/vantage",
+    ),
+    "query-password": (
+        "postgresql://db.example/vantage?sslmode=require&password=s3cret&connect_timeout=5",
+        "postgresql://db.example/vantage?sslmode=require&password=***&connect_timeout=5",
+    ),
+    "query-password-first": (
+        "postgresql://db.example/vantage?password=s3cret",
+        "postgresql://db.example/vantage?password=***",
+    ),
+    "query-password-any-case": (
+        "postgresql://db.example/vantage?PassWord=s3cret",
+        "postgresql://db.example/vantage?PassWord=***",
+    ),
+    "query-password-encoded-name": (
+        "postgresql://db.example/vantage?pass%77ord=s3cret",
+        "postgresql://db.example/vantage?pass%77ord=***",
+    ),
+    "query-password-unencoded-at": (
+        "postgresql://db.example/vantage?password=s3@cret",
+        "postgresql://db.example/vantage?password=***",
+    ),
+    "query-password-unencoded-ampersand": (
+        "postgresql://db.example/vantage?password=s3&cr&et&sslmode=require",
+        "postgresql://db.example/vantage?password=***&sslmode=require",
+    ),
+    "query-sslpassword": (
+        "postgresql://db.example/vantage?sslpassword=s3cret&sslmode=verify-full",
+        "postgresql://db.example/vantage?sslpassword=***&sslmode=verify-full",
+    ),
+    "both": (
+        "postgresql://vantage:s3cret@db.example/vantage?password=s3cret",
+        "postgresql://vantage:***@db.example/vantage?password=***",
+    ),
+    "ipv6-and-several-hosts": (
+        "postgresql://vantage:s3cret@[::1]:5432,db.example:5433/vantage",
+        "postgresql://vantage:***@[::1]:5432,db.example:5433/vantage",
+    ),
+}
+
+
+@pytest.mark.parametrize(("url", "expected"), _REDACTIONS.values(), ids=_REDACTIONS)
+def test_redacted_hides_every_password_a_url_carries(url: str, expected: str) -> None:
+    assert redacted(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "postgresql://db.example:5432/vantage",
+        "postgresql://vantage@db.example/vantage",
+        "postgresql://vantage:@db.example/vantage",
+        "postgresql:///vantage?host=/run/postgresql",
+        "postgresql://[::1]:5432/vantage",
+        "postgresql://",
+    ],
+)
+def test_redacted_leaves_a_url_without_a_password_as_it_is(url: str) -> None:
+    assert redacted(url) == url
+
+
+def test_an_at_sign_after_the_host_can_hide_more_than_the_password() -> None:
+    """Everything between the first `:` and the last `@` is taken for the
+    password, since an unencoded one may hold `@`: a URL with an `@` in its
+    query then loses its port too, and never shows the password."""
+    shown = redacted("postgresql://db.example:5432/vantage?password=s3@cret")
+
+    assert "s3" not in shown
+    assert "cret" not in shown
+    assert shown.startswith("postgresql://db.example:")
+
+
+def test_redact_message_hides_the_password_as_written_and_decoded() -> None:
+    url = "postgresql://vantage:s3%23cret@db.example/vantage?password=an%20other"
+    message = (
+        f"connecting to {url} failed: invalid percent-encoded token: "
+        '"s3%23cret"; the password s3#cret or "an other" was refused'
+    )
+
+    shown = redact_message(message, url)
+
+    for secret in ("s3%23cret", "s3#cret", "an%20other", "an other"):
+        assert secret not in shown
+    assert shown.startswith("connecting to postgresql://vantage:***@db.example/vantage")
+
+
+# What libpq says of a URL whose password holds an unencoded `@` or `/`
+# (or `&`, in a query parameter): it splits the password into other fields
+# and quotes any one of them alone.
+_SPLIT_PASSWORDS = {
+    "host-after-an-at": (
+        "postgresql://vantage:s3@cr3t@db.example/vantage",
+        "failed to resolve host 'cr3t@db.example'",
+        "cr3t",
+    ),
+    "password-before-an-at": (
+        "postgresql://vantage:s3cr%zz@h0st@db.example/vantage",
+        'invalid percent-encoded token: "s3cr%zz"',
+        "s3cr%zz",
+    ),
+    "host-between-an-at-and-a-colon": (
+        "postgresql://vantage:s3cr@h0st:p0rt@db.example/vantage",
+        "failed to resolve host 'h0st': [Errno -8] Servname not supported",
+        "h0st",
+    ),
+    "database-after-a-slash": (
+        "postgresql://localhost:5432/cr3t@db.example/vantage",
+        'FATAL: database "cr3t@db.example/vantage" does not exist',
+        "cr3t",
+    ),
+    "parameter-after-an-ampersand": (
+        "postgresql://db.example/vantage?password=s3&cr3t",
+        'missing key/value separator "=" in URI query parameter: "cr3t"',
+        "cr3t",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("url", "message", "piece"), _SPLIT_PASSWORDS.values(), ids=_SPLIT_PASSWORDS
+)
+def test_redact_message_hides_each_field_libpq_splits_a_password_into(
+    url: str, message: str, piece: str
+) -> None:
+    assert piece not in redact_message(message, url)
+
+
+def test_redact_message_leaves_a_message_without_the_password_alone() -> None:
+    message = 'connection to server at "127.0.0.1", port 5432 failed: Connection refused'
+
+    assert redact_message(message, "postgresql://vantage:s3cret@127.0.0.1/db") == message

@@ -16,6 +16,10 @@ parameter instead, the body would be read with no bound and parsed on the
 event loop, stalling every other request -- heartbeats included -- for as
 long as a large body takes.
 
+**A name is stored as the body decoder leaves it**, U+0000 replaced by
+U+FFFD (`service/text.py`), so a delete naming U+0000 matches no section and
+is answered without asking the store.
+
 **Section definitions are read fresh on every request, never cached.** No
 `app.state` field remembers them between requests, so an edit takes effect
 on the very next read, with no restart and no invalidation logic.
@@ -67,6 +71,7 @@ from vantage.service.schemas import (
     SectionUpsertRequest,
     SectionValue,
 )
+from vantage.service.text import NUL
 
 router = APIRouter()
 
@@ -170,7 +175,8 @@ async def upsert_section(request: Request, store: ExecutionStore = Depends(get_s
 
 @router.delete("/config/sections", status_code=204)
 def delete_section(name: str = Query(...), store: ExecutionStore = Depends(get_store)) -> Response:
-    if not store.delete_setting(TEST_SECTIONS_NAMESPACE, _stored_name(name)):
+    stored_name = _stored_name(name)
+    if NUL in stored_name or not store.delete_setting(TEST_SECTIONS_NAMESPACE, stored_name):
         raise UnknownSectionError()
     return Response(status_code=204)
 

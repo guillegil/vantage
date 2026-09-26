@@ -14,11 +14,16 @@ authors = [{ name = "Guillermo Gil" }]
 # distribution may take third-party dependencies: it is installed
 # deliberately by someone who wants to run a server. Only `vantage.service`
 # imports them; `vantage.core` and `vantage.storage` use the standard library,
-# SQLite included.
+# SQLite included -- except `vantage.storage.postgres`, which alone imports
+# the optional PostgreSQL driver.
 #
 # `PyYAML` is imported only by `vantage.service.metadata_parse`, to parse
 # YAML metadata documents.
 dependencies = ["fastapi>=0.115", "pyyaml>=6.0", "uvicorn>=0.30"]
+
+[project.optional-dependencies]
+# The PostgreSQL adapter: psycopg 3 with its bundled libpq, and its pool.
+postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 
 [project.scripts]
 vantage = "vantage.service.cli:main"

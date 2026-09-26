@@ -4,11 +4,15 @@
 the standard library's database, network or process modules, because the
 core describes the domain and talking to the outside world is an adapter's
 job. `vantage.storage` imports the standard library and the core, so it can
-never reach the service or a third-party package.
+never reach the service or a third-party package -- except
+`vantage.storage.postgres`, which alone may import the PostgreSQL driver the
+optional `postgres` extra installs, so that an install without it still
+imports and serves SQLite.
 """
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import textwrap
 from pathlib import Path
@@ -47,6 +51,9 @@ _IO_MODULES = frozenset(
 )
 _CORE_ALLOWED = _STDLIB - _IO_MODULES
 
+_POSTGRES_ADAPTER = "vantage.storage.postgres"
+_POSTGRES_DRIVER = frozenset({"psycopg", "psycopg_pool"})
+
 
 def _walk_core() -> WalkResult:
     return walk_package(
@@ -63,6 +70,7 @@ def _walk_storage() -> WalkResult:
         src_root=_SRC_ROOT,
         allowed_top_levels=_STDLIB,
         allowed_internal_prefixes=("vantage.core", "vantage.storage"),
+        allowed_top_levels_within={_POSTGRES_ADAPTER: _POSTGRES_DRIVER},
     )
 
 
@@ -79,6 +87,8 @@ def test_every_core_import_resolves_to_the_standard_library_without_io() -> None
 
 
 def test_every_storage_import_resolves_to_the_standard_library_or_the_core() -> None:
+    """The PostgreSQL adapter may import its driver as well, and nothing
+    else in storage may."""
     result = _walk_storage()
 
     assert result.is_clean, [
@@ -99,6 +109,9 @@ def test_the_storage_walk_is_not_vacuous() -> None:
 
     assert "vantage/storage/connection.py" in examined
     assert "vantage/storage/sqlite_store.py" in examined
+    assert "vantage/storage/version.py" in examined
+    assert "vantage/storage/postgres/connection.py" in examined
+    assert "vantage/storage/postgres/store.py" in examined
 
 
 def test_every_io_module_kept_out_of_the_core_is_a_real_stdlib_module() -> None:
@@ -196,3 +209,73 @@ def test_the_walk_allows_each_listed_prefix_and_nothing_beside_them(tmp_path: Pa
     )
 
     assert [v.imported for v in result.violations] == ["fakepkg.service", "fakepkg.service.app"]
+
+
+def test_the_driver_is_allowed_to_the_adapter_given_it_and_nothing_beside_it(
+    tmp_path: Path,
+) -> None:
+    """The storage shape with a PostgreSQL adapter: its package and modules
+    may import the driver; a sibling module, one whose name merely starts
+    the same, and the storage package itself may not."""
+    src_root = tmp_path / "src"
+    storage_dir = src_root / "fakepkg" / "storage"
+    adapter_dir = storage_dir / "postgres"
+    adapter_dir.mkdir(parents=True)
+    driver_imports = "import psycopg\nfrom psycopg_pool import ConnectionPool\n"
+    (src_root / "fakepkg" / "__init__.py").write_text("")
+    (storage_dir / "__init__.py").write_text("import psycopg\n")
+    (storage_dir / "sqlite_store.py").write_text(driver_imports)
+    (storage_dir / "postgres_notes.py").write_text("import psycopg\n")
+    (adapter_dir / "__init__.py").write_text(driver_imports)
+    (adapter_dir / "store.py").write_text(driver_imports)
+
+    result = walk_package(
+        storage_dir,
+        src_root=src_root,
+        allowed_top_levels=_STDLIB,
+        allowed_internal_prefixes=("fakepkg.core", "fakepkg.storage"),
+        allowed_top_levels_within={"fakepkg.storage.postgres": _POSTGRES_DRIVER},
+    )
+
+    assert sorted((v.file.name, v.imported) for v in result.violations) == [
+        ("__init__.py", "psycopg"),
+        ("postgres_notes.py", "psycopg"),
+        ("sqlite_store.py", "psycopg"),
+        ("sqlite_store.py", "psycopg_pool"),
+    ]
+
+
+_WITHOUT_THE_DRIVER = """
+import sys
+
+for name in ("psycopg", "psycopg_pool"):
+    sys.modules[name] = None
+
+import vantage.service.app
+import vantage.service.cli
+import vantage.storage
+import vantage.storage.sqlite_store
+
+assert "vantage.storage.postgres" not in sys.modules, "the PostgreSQL adapter was loaded"
+
+try:
+    import vantage.storage.postgres
+except ImportError as exc:
+    print(exc.name)
+"""
+
+
+def test_storage_and_the_command_import_without_the_postgresql_driver() -> None:
+    """A SQLite-only installation has no psycopg: nothing a SQLite server
+    loads may import the adapter, which is where the driver is imported, and
+    asking for the adapter there fails on the missing driver, by name."""
+    completed = subprocess.run(  # noqa: S603 -- the interpreter running this test
+        [sys.executable, "-c", _WITHOUT_THE_DRIVER],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["psycopg"]

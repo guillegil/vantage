@@ -1661,3 +1661,102 @@ def test_run_list_takes_as_many_metadata_pairs_as_the_document_states_and_no_mor
     assert past_bound.status_code == 422
     assert past_bound.json()["error"] == "invalid_parameter"
     assert past_bound.json()["fields"] == ["query.metadata_key", "query.metadata_value"]
+
+
+# --- U+0000 in a lookup ---------------------------------------------------------
+#
+# Nothing a report stores holds U+0000, and PostgreSQL cannot even be asked
+# about one, so a lookup value holding it matches nothing -- never a 500 --
+# even in a database an earlier server wrote, where SQLite kept the text as
+# it came. Those rows are written straight to the store here; PostgreSQL
+# stores U+FFFD in place of U+0000.
+
+_NUL_NODE_ID = "tests/test_nul.py::test_\x00one"
+
+
+def _record_nul_node_id(store: ExecutionStore, run_id: str) -> None:
+    now = datetime.now(timezone.utc)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(minutes=1), finished_at=now),
+        results=[_result(_NUL_NODE_ID)],
+        received_at=now,
+    )
+
+
+def test_a_node_id_holding_nul_names_no_result(client: TestClient, store: ExecutionStore) -> None:
+    run_id = _run_id(170)
+    _record_nul_node_id(store, run_id)
+
+    response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": _NUL_NODE_ID})
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_result"
+
+
+def test_a_node_id_holding_nul_has_no_history(client: TestClient, store: ExecutionStore) -> None:
+    _record_nul_node_id(store, _run_id(171))
+
+    response = client.get("/api/v1/tests/history", params={"node_id": _NUL_NODE_ID})
+
+    assert response.status_code == 200
+    assert response.json() == {"items": [], "has_more": False}
+
+
+def test_a_metadata_value_holding_nul_matches_no_run(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    store.record_session(
+        _execution(_run_id(172), started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now,
+        metadata=_session_metadata(fw="1.1\x00"),
+    )
+
+    response = client.get(
+        "/api/v1/runs", params={"metadata_key": "fw", "metadata_value": "1.1\x00"}
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["items"], body["has_more"]) == ([], False)
+    assert body["metadata_horizon"] == [{"key": "fw", "predating": 0}]
+
+
+def test_a_metadata_key_holding_nul_matches_no_run_and_counts_as_stored(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """The horizon of a key holding U+0000 is that of the text a report
+    carrying the key stored, U+0000 replaced by U+FFFD: the runs before that
+    one predate it. A key given both ways is one key to the store and two
+    in the answer."""
+    now = datetime.now(timezone.utc)
+    runs = {
+        _run_id(173): RunMetadata(),
+        _run_id(174): _session_metadata(**{"fw�": "1.1�"}),
+    }
+    for age, (run_id, metadata) in enumerate(reversed(runs.items())):
+        store.record_session(
+            _execution(run_id, started_at=now - timedelta(hours=age + 1), finished_at=now),
+            results=[],
+            received_at=now,
+            metadata=metadata,
+        )
+
+    response = client.get(
+        "/api/v1/runs",
+        params=[
+            ("metadata_key", "fw\x00"),
+            ("metadata_value", "1.1\x00"),
+            ("metadata_key", "fw�"),
+            ("metadata_value", "1.1�"),
+        ],
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["items"], body["has_more"]) == ([], False)
+    assert body["metadata_horizon"] == [
+        {"key": "fw\x00", "predating": 1},
+        {"key": "fw�", "predating": 1},
+    ]

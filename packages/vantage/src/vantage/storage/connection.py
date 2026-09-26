@@ -28,6 +28,8 @@ import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
+from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
+
 _LOGGER = logging.getLogger(__name__)
 
 _SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
@@ -36,11 +38,6 @@ _SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
 # reopen issues no DDL statement at all, not merely a harmless one thanks to
 # schema.sql's own `IF NOT EXISTS`.
 _SCHEMA_SENTINEL_TABLE = "meta"
-
-# Bumped whenever `schema.sql` changes shape. The only statement of the
-# version: `_apply_schema` stamps it and `_check_schema_version` compares
-# against it.
-_SCHEMA_VERSION = 6
 
 # `OR IGNORE` keeps a second process racing to create the same fresh
 # database from failing on the row the first one stamped.
@@ -58,15 +55,6 @@ def isoformat_utc(moment: datetime) -> str:
     below 1000 on every platform.
     """
     return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
-
-
-class SchemaVersionError(RuntimeError):
-    """`meta.schema_version` does not match what this build requires, or the
-    file holds another schema and no stamp at all.
-
-    Raised by `open_database` before anything in the refused database is
-    changed, and after the connection that read it is closed.
-    """
 
 
 def open_database(path: Path) -> sqlite3.Connection:

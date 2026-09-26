@@ -11,8 +11,9 @@ Instead:
 2. `read_bounded_body` streams the body and stops the moment the running
    total passes the route's cap; `Content-Length` is never trusted. A
    client disconnect mid-transfer becomes `IncompleteBodyError`.
-3. `decode_json` parses the complete, capped body. It blocks for as long as
-   the body is large, so the routes call it in the threadpool.
+3. `decode_json` parses the complete, capped body and makes its text
+   storable (`service/text.py`). It blocks for as long as the body is
+   large, so the routes call it in the threadpool.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from vantage.service.errors import (
     PayloadTooLargeError,
     UnsupportedMediaTypeError,
 )
+from vantage.service.text import storable_json
 
 _JSON_MEDIA_TYPE = "application/json"
 
@@ -68,8 +70,12 @@ def _refuse_constant(name: str) -> NoReturn:
     raise ValueError(f"{name} is not JSON")
 
 
-def decode_json(body: bytes) -> Any:
+def decode_json(body: bytes, *, replace_lone_surrogates: bool = False) -> Any:
     """Parse `body` as strict UTF-8 JSON, or raise `InvalidJsonError`.
+
+    Every U+0000 in a key or string value comes back as U+FFFD, and so does
+    every lone surrogate when `replace_lone_surrogates` is set; a route that
+    leaves them refuses the text they are in itself.
 
     Decoding first, strictly, refuses UTF-8-encoded surrogates, which
     `json.loads(bytes)` would accept. One leading byte order mark is
@@ -82,9 +88,10 @@ def decode_json(body: bytes) -> Any:
     nesting.
     """
     try:
-        return json.loads(body.decode("utf-8-sig"), parse_constant=_refuse_constant)
+        payload = json.loads(body.decode("utf-8-sig"), parse_constant=_refuse_constant)
     except (ValueError, RecursionError) as exc:
         raise InvalidJsonError() from exc
+    return storable_json(payload, replace_lone_surrogates=replace_lone_surrogates)
 
 
 __all__ = ["decode_json", "read_bounded_body", "require_json_media_type"]

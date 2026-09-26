@@ -26,6 +26,8 @@ dev = [
     # `types-PyYAML` is the stub `mypy --strict` needs for `yaml`.
     "pyyaml>=6.0",
     "types-PyYAML>=6.0",
+    # The PostgreSQL adapter's driver, so its tests can run.
+    "vantage[postgres]",
 ]
 
 # This root pyproject.toml is the uv workspace root, not a published
@@ -51,6 +53,8 @@ markers = [
     # complete one, so a slow test cannot quietly stop running because some
     # config drifted -- the same reason --strict-markers is on.
     "slow: measures real elapsed time and cannot be made fast without ceasing to measure",
+    # Skipped, not failed, when VANTAGE_TEST_POSTGRES_URL is unset.
+    "postgres: needs the PostgreSQL server VANTAGE_TEST_POSTGRES_URL names",
 ]
 addopts = "--strict-markers"
 pythonpath = ["packages/vantage/tests", "packages/pytest-vantage/tests"]
@@ -85,7 +89,8 @@ ignore_notebooks = true
 
 # deptry reads exactly one pyproject.toml (this one) and has no notion of a
 # uv workspace, so it cannot see that fastapi/pydantic/starlette/uvicorn are
-# declared in packages/vantage/pyproject.toml, or that importwalk,
+# declared in packages/vantage/pyproject.toml, and psycopg/psycopg_pool by
+# its `postgres` extra, or that importwalk,
 # loopback_server, memory_store, sqlite_rows, vantage_port_contract and
 # vantage_test_server are real local test-support modules reached through
 # the root `pythonpath` rather than missing packages. Per-module, per-rule
@@ -109,4 +114,4 @@ DEP001 = [
 # `types-PyYAML` is a stub package mypy reads, never itself imported --
 # same category as the CLI-only tools below.
 DEP002 = ["ruff", "mypy", "deptry", "pip-audit", "httpx2", "pytest-xdist", "types-PyYAML"]
-DEP003 = ["fastapi", "pydantic", "starlette", "uvicorn"]
+DEP003 = ["fastapi", "pydantic", "starlette", "uvicorn", "psycopg", "psycopg_pool"]

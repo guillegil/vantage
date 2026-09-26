@@ -946,16 +946,17 @@ class ExecutionStoreContract:
         assert entry.vcs.commit_subject == "short"
         assert entry.vcs.commit_subject_truncated is True
 
-    def test_list_views_bound_text_holding_a_nul_like_any_other_text(
+    def test_list_views_bound_text_holding_control_characters_like_any_other_text(
         self, store: ExecutionStore
     ) -> None:
-        """A failure message can hold U+0000 -- a test of a binary protocol
-        that puts raw bytes in its exception -- and a hand-written report
-        can put one in a commit subject. SQLite's text `substr` and `length`
-        stop at the first NUL; the list must still show the display width
-        and flag the rest, not a prefix that claims to be the whole value."""
-        message = "ValueError: bad frame header \x00\x01\x02" + "x" * 300
-        subject = "Fix\x00" + "y" * 200
+        """A failure message can hold control characters -- a test of a
+        binary protocol that puts raw bytes in its exception -- and a
+        hand-written report can put one in a commit subject. The list must
+        show the display width and flag the rest, not a prefix cut at a
+        control character that claims to be the whole value. (U+0000 never
+        reaches a store; the service replaces it.)"""
+        message = "ValueError: bad frame header \x01\x02\x7f" + "x" * 300
+        subject = "Fix\x1b" + "y" * 200
         vcs = _vcs(commit_subject=subject, commit_subject_truncated=False)
         failure = _failure(failure_message=message)
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)

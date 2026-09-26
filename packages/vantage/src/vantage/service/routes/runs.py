@@ -18,9 +18,9 @@ store write run in the threadpool, off the event loop every request shares.
 partner is valid JSON, and pytest produces such text itself from file names
 decoded with `surrogateescape`. It cannot be encoded as UTF-8, so it would
 fail the first encode on the way to storage; rejecting the report instead
-would lose the whole session over one character. `_without_any_lone_surrogate`
-replaces
-every one, in keys and values alike, with U+FFFD before validation.
+would lose the whole session over one character. `decode_json` replaces
+every one, in keys and values alike, with U+FFFD before validation, together
+with every U+0000, which PostgreSQL cannot store.
 
 **`results` is optional.** `None` (section absent) and `[]` both mean zero
 result rows, not a rejection; the route always passes a list to
@@ -29,11 +29,9 @@ result rows, not a rejection; the route always passes a list to
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import PurePosixPath, PureWindowsPath
-from typing import Any
 
 from fastapi import APIRouter, Depends, Path, Request
 from fastapi.concurrency import run_in_threadpool
@@ -80,8 +78,6 @@ from vantage.service.schemas import (
 from vantage.service.truncation import truncate
 
 router = APIRouter()
-
-_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 # The three bounds below mirror `pytest_vantage.metadata`. The two
 # distributions cannot import each other, so each carries its own copy;
@@ -399,47 +395,11 @@ def _ignored_result_keys(results: Sequence[ResultReport]) -> list[str]:
     return list(seen)
 
 
-def _without_lone_surrogates(text: str) -> str:
-    return text if text.isascii() else _LONE_SURROGATE.sub("\ufffd", text)
-
-
-def _without_any_lone_surrogate(payload: Any) -> Any:
-    """`payload`, parsed JSON, with every lone surrogate in its keys and
-    string values replaced by U+FFFD.
-
-    The walk is iterative because `json.loads` accepts nesting deeper than
-    Python's recursion limit. Valid surrogate pairs were already combined by
-    `json.loads`, so any surrogate left is a lone one.
-    """
-    if isinstance(payload, str):
-        return _without_lone_surrogates(payload)
-    pending: list[Any] = [payload]
-    while pending:
-        node = pending.pop()
-        if isinstance(node, dict):
-            if not all(key.isascii() for key in node):
-                cleaned = {_without_lone_surrogates(key): value for key, value in node.items()}
-                node.clear()
-                node.update(cleaned)
-            for key, value in node.items():
-                if isinstance(value, str):
-                    node[key] = _without_lone_surrogates(value)
-                elif isinstance(value, (dict, list)):
-                    pending.append(value)
-        elif isinstance(node, list):
-            for index, value in enumerate(node):
-                if isinstance(value, str):
-                    node[index] = _without_lone_surrogates(value)
-                elif isinstance(value, (dict, list)):
-                    pending.append(value)
-    return payload
-
-
 def _record(store: ExecutionStore, body: bytes) -> tuple[bool, Acknowledgement]:
     """Parse, validate, convert and store one complete report body, and
     return whether the run was new with the acknowledgement to send. Every
     step blocks, so `create_run` calls this in the threadpool."""
-    payload_dict = _without_any_lone_surrogate(decode_json(body))
+    payload_dict = decode_json(body, replace_lone_surrogates=True)
 
     try:
         payload = SessionReport.model_validate(payload_dict)

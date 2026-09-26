@@ -446,38 +446,39 @@ def test_integers_at_the_signed_64_bit_bounds_are_stored(
     assert result.failure.failure_lineno == bound
 
 
-# --- lone surrogates ----------------------------------------------------------
+# --- lone surrogates and U+0000 ---------------------------------------------
 
 # pytest builds node ids and exception text from `surrogateescape`-decoded
 # file names, and `json.dumps` escapes the resulting lone surrogate into valid
-# JSON, so a real plugin sends these.
+# JSON, so a real plugin sends these. U+0000 is valid JSON too, and
+# PostgreSQL's text cannot hold it. Both are stored as U+FFFD.
 _LONE = "caf\udce9"
+_NUL = "caf\x00"
 _REPLACED = "caf\ufffd"
-_NODE_ID = f"tests/{_LONE}/test_a.py::test_one"
 
 
-def _surrogate_report(field: str) -> dict[str, Any]:
+def _surrogate_report(field: str, unstorable: str = _LONE) -> dict[str, Any]:
     report = _well_formed_report("5" + "e" * 31)
     result = _result_entry("tests/test_a.py::test_one")
     if field == "node_id":
-        result = _result_entry(_NODE_ID)
+        result = _result_entry(f"tests/{unstorable}/test_a.py::test_one")
     elif field == "run.interrupt_reason":
-        report["run"]["interrupt_reason"] = _LONE
+        report["run"]["interrupt_reason"] = unstorable
     elif field.startswith("vcs."):
-        report["vcs"] = _vcs_section(**{field.removeprefix("vcs."): _LONE})
+        report["vcs"] = _vcs_section(**{field.removeprefix("vcs."): unstorable})
     elif field == "metadata.path":
         report["metadata"] = _metadata_section(
-            _metadata_file(path=f"{_LONE}.json", content="{}", keys=["k"])
+            _metadata_file(path=f"{unstorable}.json", content="{}", keys=["k"])
         )
     elif field == "metadata.key":
-        report["metadata"] = _metadata_section(_metadata_file(content="{}", keys=[_LONE]))
+        report["metadata"] = _metadata_section(_metadata_file(content="{}", keys=[unstorable]))
     elif field == "metadata.value":
         report["metadata"] = {
             "declaration": None,
-            "values": [{"key": "k", "value": _LONE, "status": "captured"}],
+            "values": [{"key": "k", "value": unstorable, "status": "captured"}],
         }
     else:
-        result[field] = _LONE
+        result[field] = unstorable
     report["results"] = [result]
     return report
 
@@ -538,18 +539,24 @@ def test_a_body_starting_with_a_byte_order_mark_is_accepted(
     assert store.get_execution("a" * 32) is not None
 
 
+@pytest.mark.parametrize("unstorable", [_LONE, _NUL], ids=["lone-surrogate", "nul"])
 @pytest.mark.parametrize(("field", "expected"), _SURROGATE_CASES.items(), ids=_SURROGATE_CASES)
-def test_a_lone_surrogate_in_any_string_is_stored_as_the_replacement_character(
-    any_store: Any, any_stored_metadata: StoredMetadata, field: str, expected: object
+def test_a_lone_surrogate_or_nul_in_any_string_is_stored_as_the_replacement_character(
+    any_store: Any,
+    any_stored_metadata: StoredMetadata,
+    field: str,
+    expected: object,
+    unstorable: str,
 ) -> None:
-    """A lone surrogate cannot be encoded as UTF-8, so the server replaces it
-    with U+FFFD before validation instead of failing the whole session at
-    the first encode. Both adapters store the same text."""
+    """A lone surrogate cannot be encoded as UTF-8, and PostgreSQL cannot
+    store U+0000, so the server replaces both with U+FFFD before validation
+    instead of failing the whole session at the first write. Every adapter
+    stores the same text."""
     client = TestClient(create_app(any_store))
 
     response = client.post(
         "/api/v1/runs",
-        content=json.dumps(_surrogate_report(field)).encode(),
+        content=json.dumps(_surrogate_report(field, unstorable)).encode(),
         headers={"content-type": "application/json"},
     )
 
@@ -1015,6 +1022,39 @@ _UNUSABLE_DOCUMENTS = {
     "json_lone_surrogate_escape": ("json", '{"firmware_version": "x\\ud800"}'),
     "yaml_lone_surrogate_escape": ("yaml", 'firmware_version: "x\\udc80"\n'),
 }
+
+_NUL_ESCAPING_DOCUMENTS = {
+    "json": '{"firmware_version": "2.1\\u0000rc", "board\\u0000id": "C"}',
+    "yaml": 'firmware_version: "2.1\\0rc"\n"board\\0id": C\n',
+}
+
+
+@pytest.mark.parametrize(
+    ("content_type", "content"),
+    _NUL_ESCAPING_DOCUMENTS.items(),
+    ids=_NUL_ESCAPING_DOCUMENTS.keys(),
+)
+def test_a_nul_a_declared_document_escapes_is_stored_as_the_replacement_character(
+    any_store: Any, any_stored_metadata: StoredMetadata, content_type: str, content: str
+) -> None:
+    """The report's own text holds no U+0000 by then, but a document can
+    spell one as an escape, in a value or in a key the declaration names
+    with U+0000 itself."""
+    run_id = "6" + "2" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(
+            format=content_type, content=content, keys=["firmware_version", "board\x00id"]
+        )
+    )
+
+    response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert {(entry.key, entry.value) for entry in any_stored_metadata(run_id).entries} == {
+        ("firmware_version", "2.1\ufffdrc"),
+        ("board\ufffdid", "C"),
+    }
 
 
 @pytest.mark.parametrize(
