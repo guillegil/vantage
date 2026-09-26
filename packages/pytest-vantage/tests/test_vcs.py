@@ -341,6 +341,39 @@ def test_a_hook_in_a_linked_worktree_still_records_the_worktree_from_a_subdirect
     assert snapshot.dirty is False
 
 
+@pytest.mark.parametrize("repository", ["intact", "corrupt"])
+def test_a_repository_beyond_the_ceiling_is_neither_recorded_nor_warned_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repository: str
+) -> None:
+    # GIT_CEILING_DIRECTORIES is set deliberately, typically to keep a
+    # dotfiles repository in $HOME out of every project below it. git itself
+    # finds no repository here, so the run records none, and one git could
+    # not read up there is not a reason to warn.
+    home = tmp_path / "home"
+    if repository == "intact":
+        _repo_with_one_commit(home)
+    else:
+        _break_repository(home, "truncated-head")
+    project = home / "project"
+    project.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(home))
+
+    snapshot = vcs.capture(project)
+
+    _assert_all_null(snapshot)
+    assert snapshot.warning is None
+
+
+def test_the_ceiling_never_hides_the_repository_at_rootpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # git always looks in the directory it starts from, ceiling or not.
+    repo = _repo_with_one_commit(tmp_path / "repo")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", f"{tmp_path}{os.pathsep}{repo}")
+
+    assert vcs.capture(repo).commit == _independent_head(repo)
+
+
 def test_the_git_environment_drops_repository_selection_but_keeps_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -352,10 +385,13 @@ def test_the_git_environment_drops_repository_selection_but_keeps_config(
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", "/home")
 
     env = vcs._build_env()
 
     assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} & env.keys()
+    # Only a user sets the ceiling, git never exports it: it is kept.
+    assert env["GIT_CEILING_DIRECTORIES"] == "/home"
     assert env["GIT_CONFIG_COUNT"] == "1"
     assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
     assert env["GIT_CONFIG_VALUE_0"] == "*"

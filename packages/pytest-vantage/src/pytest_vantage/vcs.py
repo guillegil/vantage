@@ -57,7 +57,12 @@ _ENV_OVERRIDES: dict[str, str] = {
 # would point every read at another repository, or make `rootpath` the top
 # of the work tree. These are git's `rev-parse --local-env-vars` minus the
 # config entries (they can carry `safe.directory`), plus the variables that
-# scope the refs or stop the upward search.
+# scope the refs.
+#
+# GIT_CEILING_DIRECTORIES is kept: git never exports it, so it is always
+# someone's deliberate limit on the upward search -- typically to keep a
+# dotfiles repository in $HOME out of every project below it -- and a run
+# must not record a repository git itself refuses to find.
 _REPOSITORY_SELECTING_ENV = (
     "GIT_DIR",
     "GIT_WORK_TREE",
@@ -72,7 +77,6 @@ _REPOSITORY_SELECTING_ENV = (
     "GIT_NO_REPLACE_OBJECTS",
     "GIT_PREFIX",
     "GIT_NAMESPACE",
-    "GIT_CEILING_DIRECTORIES",
 )
 
 _BRANCH_REF_PREFIX = "refs/heads/"
@@ -165,17 +169,40 @@ def _run(
     )
 
 
+def _ceiling_directories() -> set[Path]:
+    """The directories `GIT_CEILING_DIRECTORIES` stops git's upward search
+    at, read as git reads them: absolute entries only, each resolved unless
+    it follows an empty entry."""
+    ceilings: set[Path] = set()
+    resolve = True
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            resolve = False
+        elif os.path.isabs(entry):
+            ceilings.add(Path(entry).resolve() if resolve else Path(entry))
+    return ceilings
+
+
 def _inside_a_repository(rootpath: Path) -> bool:
-    """Whether a `.git` entry exists at `rootpath` or any directory above it.
+    """Whether a `.git` entry exists where git looks for one: at `rootpath`,
+    then in each directory above it up to, not including, the first ceiling
+    directory.
 
     git searches upward, so a broken or hung repository whose top is above
-    `rootpath` (a sub-package with its own pytest config) must still warn.
-    Resolved first because git walks the physical path. A failed check stays
-    silent, as if there were no repository.
+    `rootpath` (a sub-package with its own pytest config) must still warn;
+    one beyond the ceiling git never looks at must not. Resolved first
+    because git walks the physical path. A failed check stays silent, as if
+    there were no repository.
     """
     try:
         start = rootpath.resolve()
-        return any((directory / ".git").exists() for directory in (start, *start.parents))
+        ceilings = _ceiling_directories()
+        for directory in (start, *start.parents):
+            if directory != start and directory in ceilings:
+                return False
+            if (directory / ".git").exists():
+                return True
+        return False
     except Exception:  # `capture` never raises, and this only chooses a warning
         return False
 
