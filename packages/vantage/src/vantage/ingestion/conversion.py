@@ -45,7 +45,7 @@ from vantage.ingestion.schemas import (
 from vantage.ingestion.truncation import truncate
 
 # The three bounds below mirror `pytest_vantage.metadata`. The plugin
-# imports nothing from `vantage`, so each side carries its own copy;
+# never depends on `vantage`, so each side carries its own copy;
 # `packages/pytest-vantage/tests/test_server_contract.py` pins them equal,
 # with every other value the two sides share. The plugin never exceeds them,
 # so they only ever bind on another HTTP client.

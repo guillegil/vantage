@@ -19,6 +19,7 @@ Internal packages, with the dependency arrow pointing inwards:
     imports the web framework, which the `server` extra installs.
 
 The pytest plugin is *not* here. It ships as its own distribution
-(``pytest-vantage``) and imports nothing from this one, so installing it
-never brings a server along.
+(``pytest-vantage``) that never depends on this one, so installing it
+never brings a server along; only its local modes, where this package is
+installed, hand runs to ``vantage.local``.
 """
