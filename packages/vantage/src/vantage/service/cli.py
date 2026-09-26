@@ -82,6 +82,12 @@ _UVICORN_LOGGER = logging.getLogger("uvicorn.error")
 _SERVER_EXTRA_MODULES = frozenset({"fastapi", "starlette", "uvicorn"})
 _SERVER_EXTRA_MISSING = "serving needs the server extra: pip install 'vantage[server]'"
 
+_PLUGIN_MODULES = frozenset({"pytest_vantage"})
+_PLUGIN_OUTBOX_MISSING = (
+    "push sends pytest-vantage's outbox, and the pytest-vantage installed here has none: "
+    "pip install --upgrade pytest-vantage"
+)
+
 _POSTGRES_ADAPTER = "vantage.storage.postgres"
 _POSTGRES_DRIVER_MODULES = frozenset({"psycopg", "psycopg_pool"})
 _POSTGRES_DRIVER_MISSING = "PostgreSQL needs the postgres extra: pip install 'vantage[postgres]'"
@@ -310,8 +316,14 @@ def main(argv: list[str] | None = None) -> None:
     serve, then close."""
     arguments = sys.argv[1:] if argv is None else argv
     if arguments[:1] == ["push"]:
-        from vantage.service.push import push
-
+        try:
+            from vantage.service.push import push
+        except ImportError as exc:
+            # The outbox is the plugin's: a pytest-vantage older than this
+            # vantage, installed beside it, has none to send.
+            if not _is_missing(exc, _PLUGIN_MODULES):
+                raise
+            _refuse(_PLUGIN_OUTBOX_MISSING)
         raise SystemExit(push(arguments[1:]))
 
     args = _parse_args(arguments)

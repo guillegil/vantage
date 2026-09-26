@@ -355,6 +355,41 @@ def test_no_home_directory_asks_for_database(
     assert "--database" in err
 
 
+@pytest.fixture
+def push_imported_afresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`vantage.service.push` imported again by the next `vantage push`, so
+    what it imports is looked up again."""
+    monkeypatch.delitem(sys.modules, _PUSH_MODULE, raising=False)
+    monkeypatch.delattr(vantage.service, "push", raising=False)
+
+
+@pytest.mark.usefixtures("push_imported_afresh")
+def test_a_plugin_without_an_outbox_is_one_line_naming_the_upgrade(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pytest-vantage older than this vantage, installed beside it."""
+    monkeypatch.setitem(sys.modules, _OUTBOX_MODULE, None)
+
+    code, out, err = _push(capsys)
+
+    assert (code, out) == (1, [])
+    assert err == (
+        "vantage: push sends pytest-vantage's outbox, and the pytest-vantage installed "
+        "here has none: pip install --upgrade pytest-vantage\n"
+    )
+
+
+@pytest.mark.usefixtures("push_imported_afresh")
+def test_any_other_import_failure_is_raised_as_it_is(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken installation, not an older plugin."""
+    monkeypatch.setitem(sys.modules, "vantage.local", None)
+
+    with pytest.raises(ImportError) as raised:
+        cli.main(["push"])
+
+    assert raised.value.name == "vantage.local"
+
+
 # --- Without the server extra ----------------------------------------------------
 
 _WITHOUT_THE_SERVER_EXTRA = textwrap.dedent(
