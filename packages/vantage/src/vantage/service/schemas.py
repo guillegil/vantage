@@ -10,10 +10,6 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
-# Re-exported for the plugin's contract tests, which validate what the
-# plugin sends against the model the server applies.
-from vantage.ingestion.schemas import MetadataReport as MetadataReport
-
 
 class RejectionResponse(BaseModel):
     """The one body every rejection has, built only by `service/errors.py`:

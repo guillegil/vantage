@@ -33,7 +33,7 @@ from fastapi.responses import JSONResponse
 
 from vantage.core.domain.execution import IDENTITY_PATTERN
 from vantage.core.ports.storage import ExecutionStore
-from vantage.ingestion import Ingested, conversion, ingest
+from vantage.ingestion import Ingested, ingest
 from vantage.ingestion.decode import decode_json
 from vantage.service.body import read_bounded_body, require_json_media_type
 from vantage.service.dependencies import get_store
@@ -41,13 +41,6 @@ from vantage.service.errors import MAX_REPORT_BYTES, UnknownRunError
 from vantage.service.schemas import Acknowledgement, HeartbeatAcknowledgement
 
 router = APIRouter()
-
-# The plugin's contract tests read the server's metadata bounds and
-# normalisation from this module.
-_MAX_DECLARED_PATH_CHARS = conversion._MAX_DECLARED_PATH_CHARS
-_MAX_DECLARED_FILE_BYTES = conversion._MAX_DECLARED_FILE_BYTES
-_MAX_METADATA_SECTION_BYTES = conversion._MAX_METADATA_SECTION_BYTES
-_to_run_metadata = conversion.to_run_metadata
 
 
 def _record(store: ExecutionStore, body: bytes) -> Ingested:

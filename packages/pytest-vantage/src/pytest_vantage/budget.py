@@ -45,7 +45,7 @@ import json
 
 _REPORT_BYTES_CAP = 1024 * 1024  # mirrors vantage.service.errors.MAX_REPORT_BYTES
 MAX_FAILURE_TEXT_BYTES = _REPORT_BYTES_CAP // 2
-_FIELD_BYTES_CAP = 64 * 1024  # mirrors vantage.service.truncation.MAX_TEXT_FIELD_BYTES
+_FIELD_BYTES_CAP = 64 * 1024  # mirrors vantage.ingestion.truncation.MAX_TEXT_FIELD_BYTES
 
 MAX_METADATA_VALUES_BYTES = _REPORT_BYTES_CAP // 2
 """Room for the metadata values the session reports, all of which ride in

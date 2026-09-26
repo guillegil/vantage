@@ -24,10 +24,10 @@ from vantage.core.config import resolution
 from vantage.core.domain import metadata as core_metadata
 from vantage.core.domain.result import OUTCOMES
 from vantage.core.ports.storage import MetadataEntry, RunMetadata
-from vantage.service import errors, truncation
+from vantage.ingestion import conversion, truncation
+from vantage.ingestion.schemas import MetadataReport
+from vantage.service import errors
 from vantage.service.app import create_app
-from vantage.service.routes import runs as runs_route
-from vantage.service.schemas import MetadataReport
 from vantage.storage.connection import isoformat_utc as server_isoformat_utc
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
@@ -55,9 +55,9 @@ def test_the_commit_subject_cap_stays_above_the_servers_text_field_bound() -> No
 # --- metadata -----------------------------------------------------------------
 
 _MIRRORED_METADATA_BOUNDS: list[tuple[str, ModuleType, str]] = [
-    ("MAX_DECLARED_PATH_CHARS", runs_route, "_MAX_DECLARED_PATH_CHARS"),
-    ("MAX_DECLARED_FILE_BYTES", runs_route, "_MAX_DECLARED_FILE_BYTES"),
-    ("MAX_METADATA_SECTION_BYTES", runs_route, "_MAX_METADATA_SECTION_BYTES"),
+    ("MAX_DECLARED_PATH_CHARS", conversion, "_MAX_DECLARED_PATH_CHARS"),
+    ("MAX_DECLARED_FILE_BYTES", conversion, "_MAX_DECLARED_FILE_BYTES"),
+    ("MAX_METADATA_SECTION_BYTES", conversion, "_MAX_METADATA_SECTION_BYTES"),
     ("MAX_METADATA_ENTRIES", core_metadata, "MAX_METADATA_ENTRIES"),
     ("MAX_DECLARED_KEY_CHARS", core_metadata, "MAX_METADATA_KEY_CHARS"),
     ("MAX_METADATA_VALUE_BYTES", core_metadata, "MAX_METADATA_VALUE_BYTES"),
@@ -118,7 +118,7 @@ def _declare(root: Path, paths: list[str]) -> None:
 
 def _stored_metadata(section: metadata.MetadataSection) -> RunMetadata:
     """What the server keeps of `section`, sent as `Recorder` sends it."""
-    return runs_route._to_run_metadata(
+    return conversion.to_run_metadata(
         MetadataReport.model_validate(
             {
                 "declaration": section.declaration,
@@ -196,7 +196,7 @@ def _stored_values(section: MetadataSection, reported: list[metadata.SessionValu
     plan = plan_values(reported, section)
     wire = metadata.wire_section(section, plan.values, plan.named_keys)
     assert wire is not None
-    stored = runs_route._to_run_metadata(MetadataReport.model_validate(wire))
+    stored = conversion.to_run_metadata(MetadataReport.model_validate(wire))
     kept = [
         (entry.key, entry.value, entry.status)
         for entry in stored.entries
