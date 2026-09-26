@@ -44,7 +44,7 @@ class _Queue:
     entries: dict[str, list[str]] = field(default_factory=dict)
     unreachable: set[str] = field(default_factory=set)
     refused: set[str] = field(default_factory=set)
-    failing: dict[str, Exception] = field(default_factory=dict)
+    failing: dict[str, BaseException] = field(default_factory=dict)
     fails_to_open: Exception | None = None
     databases: list[Path] = field(default_factory=list)
     opened: list[Path] = field(default_factory=list)
@@ -250,6 +250,26 @@ def test_a_sender_that_fails_costs_its_server_one_line_and_not_the_rest(
         "vantage: could not send the runs queued for http://alpha:8765: "
         "disk I/O error while claiming (2 waiting)",
         "vantage: sent 1 queued run to http://beta:8765 (0 waiting)",
+    ]
+    assert queue.closed == 1
+
+
+def test_ctrl_c_stops_sending_in_one_line_with_the_interrupted_status(
+    queue: _Queue, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No traceback: the run being sent is back in the queue, and what was
+    sent before is already off it."""
+    _queued(queue, _default_database(tmp_path), alpha=["r1"], beta=["r2"], gamma=["r3"])
+    queue.failing["http://beta:8765"] = KeyboardInterrupt()
+
+    code, lines, err = _push(capsys)
+
+    assert code == 130
+    assert lines == ["vantage: sent 1 queued run to http://alpha:8765 (0 waiting)"]
+    assert err == "vantage: interrupted; the runs not sent are still queued\n"
+    assert [server for server, _timeout, _budget in queue.sends] == [
+        "http://alpha:8765",
+        "http://beta:8765",
     ]
     assert queue.closed == 1
 

@@ -35,6 +35,8 @@ from vantage.core.config.database import PostgresTarget, database_target
 from vantage.local import LocalStoreError, default_database_path
 
 _DEFAULT_TIMEOUT_SECONDS = 10.0
+# The status a shell reports for a command Ctrl-C stopped: 128 + SIGINT.
+_INTERRUPTED = 130
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -111,8 +113,8 @@ def _summary_line(summary: SendSummary) -> str:
 def push(argv: Sequence[str]) -> int:
     """Send the queued runs `argv` selects and print one line per server.
     The exit status: 0 when none is left waiting for the servers sent to,
-    1 otherwise, and 1 with one line on stderr when nothing could be
-    tried."""
+    1 otherwise, 1 with one line on stderr when nothing could be tried, and
+    130 with one line on stderr when Ctrl-C stopped it."""
     args = _parse_args(argv)
     timeout: float = args.timeout
     if not 0 < timeout < math.inf:
@@ -136,7 +138,13 @@ def push(argv: Sequence[str]) -> int:
         if not queued:
             print("vantage: nothing queued" + ("" if args.to is None else f" for {args.to}"))
             return 0
-        left = sum(_send(outbox, server, timeout) for server in servers)
+        try:
+            left = sum(_send(outbox, server, timeout) for server in servers)
+        except KeyboardInterrupt:
+            # `send_queued` has put the run it was sending back in the queue,
+            # and deleted every run acknowledged before it.
+            print("vantage: interrupted; the runs not sent are still queued", file=sys.stderr)
+            return _INTERRUPTED
     finally:
         # Every acknowledged run is already deleted, one by one, so a close
         # that fails loses nothing.

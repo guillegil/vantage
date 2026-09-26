@@ -261,7 +261,8 @@ those queued for `--to`, written exactly as it was configured. It needs
   `vantage: sent 2 queued runs to http://ci-vantage:8765, dropped 1 it refused (<run id>) (0 waiting)`,
   with `then stopped: <why>` when the server could not be reached. It exits
   0 when nothing is left waiting for the servers it sent to, and 1
-  otherwise.
+  otherwise. Ctrl-C stops it in one line, with exit status 130; the run it
+  was sending stays queued.
 - With nothing queued it says `vantage: nothing queued`, and creates
   nothing. Beside a `pytest-vantage` too old to have an outbox, it refuses
   in one line naming the upgrade.
