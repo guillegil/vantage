@@ -28,6 +28,7 @@ One uv workspace, one lockfile, two distributions:
 | `pytest_vantage` | `packages/pytest-vantage/src` | stdlib + pytest | `test_plugin_imports.py`, deptry, CI clean-environment install |
 | `vantage.core` | `packages/vantage/src/vantage/core` | stdlib, minus I/O modules (`sqlite3`, `socket`, `http`, `urllib`, `subprocess`, `asyncio`, ...) | `test_architecture.py` |
 | `vantage.storage` | `packages/vantage/src/vantage/storage` | stdlib + `vantage.core` | `test_architecture.py` |
+| `vantage.storage.postgres` | `packages/vantage/src/vantage/storage/postgres` | the above + `psycopg`, `psycopg_pool` (the optional `postgres` extra); the only place the driver is imported | `test_architecture.py` (walk, and an import with the driver blocked) |
 | `vantage.service` | `packages/vantage/src/vantage/service` | anything (FastAPI, Pydantic, uvicorn, PyYAML) | — |
 
 - Ports are `typing.Protocol` (`core/ports/storage.py`); adapters satisfy them

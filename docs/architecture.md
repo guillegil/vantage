@@ -28,6 +28,7 @@ mechanically:
 | `pytest_vantage` | `pytest-vantage` | the standard library and pytest | AST import walk, deptry, clean-environment install job |
 | `vantage.core` | `vantage` | the standard library, minus modules that open a database, socket or process (`sqlite3`, `socket`, `http`, `urllib`, `subprocess`, `asyncio`, ...) | AST import walk |
 | `vantage.storage` | `vantage` | the standard library and `vantage.core` | AST import walk |
+| `vantage.storage.postgres` | `vantage` | the same, and the PostgreSQL driver (`psycopg`, `psycopg_pool`) from the `postgres` extra | AST import walk, an import of the command with the driver unavailable |
 | `vantage.service` | `vantage` | anything; it declares FastAPI, Uvicorn and PyYAML | none needed |
 
 The three checks catch different failures:
@@ -37,7 +38,12 @@ The three checks catch different failures:
   imports, so `from ..service import x` inside the core is caught.
   `packages/vantage/tests/test_architecture.py` applies it to the core and
   storage, and `packages/pytest-vantage/tests/test_plugin_imports.py` to the
-  plugin.
+  plugin. The storage walk allows the driver's two top-level modules to
+  `vantage.storage.postgres` and the modules under it, and to nothing else.
+  Because the extra is optional, the same test also imports storage, the app
+  and the `vantage` command in a fresh interpreter where `psycopg` and
+  `psycopg_pool` cannot be imported, and checks that the adapter was not
+  loaded: nothing a SQLite server runs may reach it.
 - **deptry**, run over the whole workspace, flags an import of a third-party
   package the workspace does not declare.
 - **The `clean-environment-install` CI job** builds the plugin wheel, installs
