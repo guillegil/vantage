@@ -100,8 +100,13 @@ def test_reopening_keeps_what_was_stored(postgres_url: str) -> None:
 
 @pytest.mark.parametrize(
     ("stamp", "shown"),
-    [(str(_SCHEMA_VERSION - 1), str(_SCHEMA_VERSION - 1)), ("7x", "absent"), (None, "absent")],
-    ids=["older", "not-a-number", "no-stamp"],
+    [
+        (str(_SCHEMA_VERSION - 1), str(_SCHEMA_VERSION - 1)),
+        (str(_SCHEMA_VERSION + 1), str(_SCHEMA_VERSION + 1)),
+        ("7x", "absent"),
+        (None, "absent"),
+    ],
+    ids=["older", "newer", "not-a-number", "no-stamp"],
 )
 def test_a_schema_stamped_with_another_version_is_refused_and_left_as_it_was(
     postgres_url: str, stamp: str | None, shown: str
@@ -124,16 +129,21 @@ def test_a_schema_stamped_with_another_version_is_refused_and_left_as_it_was(
     assert _vantage_objects(postgres_url) == before
 
 
+@pytest.mark.parametrize(
+    ("table", "definition"),
+    [("run", "(anything text)"), ("meta", "(name text, setting integer)")],
+    ids=["no-meta", "someone-elses-meta"],
+)
 def test_a_vantage_schema_holding_something_else_is_refused_and_left_as_it_was(
-    postgres_url: str,
+    postgres_url: str, table: str, definition: str
 ) -> None:
     _query(postgres_url, "CREATE SCHEMA vantage")
-    _query(postgres_url, "CREATE TABLE vantage.run (anything text)")
+    _query(postgres_url, f"CREATE TABLE vantage.{table} {definition}")
 
     with pytest.raises(SchemaVersionError, match="not a vantage schema"):
         PostgresExecutionStore(postgres_url)
 
-    assert _vantage_objects(postgres_url) == [("run",)]
+    assert _vantage_objects(postgres_url) == [(table,)]
 
 
 def test_tables_outside_the_vantage_schema_are_neither_refused_nor_touched(

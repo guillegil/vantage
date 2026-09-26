@@ -31,6 +31,7 @@ from typing import Any
 from urllib.parse import unquote
 
 import psycopg
+from psycopg import errors
 from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import TupleRow
 from psycopg_pool import ConnectionPool, PoolTimeout
@@ -62,6 +63,11 @@ _SCHEMA_OBJECTS = """
         WHERE pronamespace = pg_catalog.to_regnamespace('vantage')
     )
 """
+
+_NOT_A_VANTAGE_SCHEMA = (
+    "the vantage schema holds objects but no schema_version stamp, so it is not a "
+    "vantage schema; nothing was added to it. Choose another database."
+)
 
 PgConnection = psycopg.Connection[TupleRow]
 
@@ -184,10 +190,7 @@ def _ensure_schema(conn: PgConnection) -> None:
         if _fetch(conn, "SELECT pg_catalog.to_regclass('vantage.meta')") is not None:
             _check_schema_version(conn)
         elif _fetch(conn, _SCHEMA_OBJECTS):
-            raise SchemaVersionError(
-                "the vantage schema holds objects but no schema_version stamp, so it is "
-                "not a vantage schema; nothing was added to it. Choose another database."
-            )
+            raise SchemaVersionError(_NOT_A_VANTAGE_SCHEMA)
         else:
             _create_schema(conn)
 
@@ -202,7 +205,14 @@ def _check_schema_version(conn: PgConnection) -> None:
     """Refuse a stamp other than `_SCHEMA_VERSION`, older and newer alike:
     a build that does not know a column cannot honour what the build that
     added it assumed."""
-    raw = _fetch(conn, "SELECT value FROM vantage.meta WHERE key = 'schema_version'")
+    # Cast, so a `meta` of some other shape is refused below for lacking a
+    # column rather than failing on a type.
+    try:
+        raw = _fetch(
+            conn, "SELECT value::text FROM vantage.meta WHERE key::text = 'schema_version'"
+        )
+    except errors.UndefinedColumn:
+        raise SchemaVersionError(_NOT_A_VANTAGE_SCHEMA) from None
     found = _parse_schema_version(raw)
     if found == _SCHEMA_VERSION:
         return
