@@ -456,7 +456,13 @@ for every timestamp, `boolean` for the flags, `bigint` for integers and for
 the identity keys, `double precision` for durations and `text` for text,
 `user_setting.value` included, which must come back byte for byte. The
 vocabularies are the same `CHECK` constraints, and the unique keys and
-foreign keys are the same.
+foreign keys are the same. A btree entry holds at most about 2.7 kB, and a
+node id, a metadata key or value or a declared file path has no bound, so
+their uniqueness and lookups go through `vantage.text_key`, a SHA-256 of
+the text, with the text itself compared as well. `text_key` is an index
+expression, and so must be immutable, which converting to UTF-8 is only in
+a UTF-8 database: the adapter refuses any other with `PostgresOpenError`,
+and speaks UTF-8 on the wire whatever `PGCLIENTENCODING` says.
 
 - **Creation is guarded.** Opening takes a transaction-scoped advisory lock,
   so two servers starting on an empty database at once cannot both create
@@ -549,13 +555,15 @@ every test; a test module that needs `store_fixtures` loads it with its own
 `pythonpath` puts both `tests/` directories on the import path, so the support
 modules import by bare name. None lives under a `src/` tree, so none ships in
 a wheel. deptry's per-rule ignores name each one a test imports with an
-`import` statement; `store_fixtures`, loaded only as a plugin, needs none.
+`import` statement; `store_fixtures` and `postgres_fixtures`, loaded only as
+plugins, need none.
 
 | Module | Purpose |
 | --- | --- |
 | `packages/vantage/tests/importwalk.py` | the AST import walker behind the dependency checks of both distributions |
 | `packages/vantage/tests/memory_store.py` | `InMemoryExecutionStore`, a complete second implementation of the port; the server never uses it |
-| `packages/vantage/tests/vantage_port_contract.py` | `ExecutionStoreContract`, the behaviour every store must have; `test_sqlite_store.py` and `test_memory_store.py` subclass it |
+| `packages/vantage/tests/vantage_port_contract.py` | `ExecutionStoreContract`, the behaviour every store must have; `test_sqlite_store.py`, `test_postgres_store.py` and `test_memory_store.py` subclass it |
+| `packages/vantage/tests/postgres_fixtures.py` | `postgres_url`, `create_postgres_database`, `postgres_store` and `postgres_metadata`: a fresh database per test on the server `VANTAGE_TEST_POSTGRES_URL` names, dropped afterwards, skipping the test when it names none. Each database sorts text with ICU's `en-US` by default, so a text key missing `COLLATE "C"` shows even on a server whose C library sorts every locale by code point; the server needs ICU, as the official images have |
 | `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]`, `[sqlite]` and `[postgres]`, the last skipped without `VANTAGE_TEST_POSTGRES_URL`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
 | `packages/vantage/tests/sqlite_rows.py` | reads a run's metadata rows, whose file rows no port method returns, with plain SQL on a separate connection |
 | `packages/vantage/tests/loopback_server.py` | `LoopbackServer`: a real Uvicorn server on a thread, on a `127.0.0.1` port the OS assigns, with bounded start and stop |

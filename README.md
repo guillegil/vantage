@@ -509,7 +509,8 @@ VANTAGE_DATABASE=postgresql://vantage@db.example/vantage vantage
   tables never collide with anything else in the database. The first server
   to start on a database creates the schema and all its tables in one
   transaction; the user it connects as needs the right to do so then, and to
-  read and write them afterwards.
+  read and write them afterwards. The database must be encoded in UTF-8,
+  PostgreSQL's usual default; any other is refused with one line.
 - Several servers can share one database, each with its own pool of at most
   10 connections. Each write is one transaction that locks what a
   concurrent write to the same run or setting would change, so every run,
