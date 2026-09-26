@@ -5,34 +5,28 @@ build-backend = "hatchling.build"
 [project]
 name = "vantage"
 version = "0.1.0"
-description = "Vantage server: records test runs reported over HTTP and serves their history."
+description = "Vantage: stores the test runs pytest-vantage records, locally or on a server, and serves their history."
 license = "MIT"
 requires-python = ">=3.10,<3.14"
 authors = [{ name = "Guillermo Gil" }]
 
-# The repository's first third-party dependencies (design.md D12). SQLite
-# comes from the standard library (ADR-6), so both are needed only from the
-# ingestion endpoint and the `vantage` CLI onward. `vantage` is the one
-# package RQ-24 does not constrain: it is installed deliberately by someone
-# who wants to run a server.
-#
-# `PyYAML` (design.md D97, task 8.5) is declared here, and ONLY here: it is
-# imported exactly once, by `vantage.service.metadata_parse`, to parse a
-# YAML-encoded declared configuration document with `yaml.compose()`. It
-# must never be reachable from `pytest-vantage` (RQ-24 -- the plugin takes
-# pytest and the standard library, nothing else) or from `vantage.core`
-# (RQ-26). A real user installing the published `vantage` wheel alone --
-# not this workspace's dev extras -- needs this import to resolve, which is
-# exactly what the clean-environment install check (CLAUDE.md) proves.
-dependencies = ["fastapi>=0.115", "pyyaml>=6.0", "uvicorn>=0.30"]
+# `vantage` is what a test machine installs to store runs locally as well
+# as what a server machine installs: the base brings the plugin, the storage
+# and the ingestion that turns a report into stored rows (Pydantic validates
+# it, PyYAML parses declared YAML metadata). The HTTP server is the `server`
+# extra, the PostgreSQL driver the `postgres` extra. `vantage.core` and
+# `vantage.storage` use the standard library only, SQLite included -- except
+# `vantage.storage.postgres`, which alone imports the PostgreSQL driver.
+dependencies = ["pytest-vantage", "pydantic>=2", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+# `vantage` serving HTTP: the FastAPI app under uvicorn.
+server = ["fastapi>=0.115", "uvicorn>=0.30"]
+# The PostgreSQL adapter: psycopg 3 with its bundled libpq, and its pool.
+postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 
 [project.scripts]
 vantage = "vantage.service.cli:main"
-
-[project.optional-dependencies]
-# The extra names the wire protocol, not the vendor: Supabase, Neon, RDS and
-# CockroachDB all speak PostgreSQL and all arrive through this one.
-postgres = ["psycopg[binary]>=3.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vantage"]

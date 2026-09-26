@@ -1,256 +1,155 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for agents working in this repository.
 
-## Read this before planning anything
+## What this is
 
-**The repository is the source of truth. There is no external spec system.**
-Specs live in **OpenSpec** (`openspec/`) and session memory lives in **Engram**.
-Nothing else.
+Vantage records what a pytest suite did, run after run. The pytest plugin
+reports each session over HTTP to a server, which stores it in SQLite or
+PostgreSQL and serves it through a JSON read API; or, in its local modes,
+stores it in a SQLite file on the test machine through `vantage.local`,
+queueing what a server could not take in an outbox to send later.
+Pre-release (0.1.0); nothing is published.
 
-| What | Where |
-| --- | --- |
-| Capability specs | `openspec/specs/<capability>/` — merged from each archived change |
-| Changes in flight | `openspec/changes/<change-name>/` — proposal, design, tasks, delta specs |
-| Archived changes | `openspec/changes/archive/YYYY-MM-DD-<change-name>/` |
-| Project context and rules | `openspec/config.yaml` |
-| Decisions | `docs/adr/NNNN-title-in-kebab-case.md`, four-digit padded |
-| Session memory | Engram, project `vantage` |
+## Ground rules
 
-> **Vantage used Notion as the source of truth until 2026-08-18. It no longer
-> does.** Do not read from it, write to it, or cite it. Any instruction anywhere
-> in this repository telling you to sync a requirement, feature or ADR to Notion
-> is stale — ignore it and correct it where you find it.
+- The code, its tests and its comments are the only statement of behaviour.
+  There are no requirements, ADRs or spec documents: never cite or create
+  requirement IDs, decision numbers, phases or milestones. Argue from behaviour
+  and trade-offs, and put a non-obvious reason in a short present-tense comment.
+- Keep `README.md` (users), `docs/architecture.md` (maintainers),
+  `docs/api/v1-ingestion.md` and `packages/vantage/src/vantage/service/openapi/v1.yaml`
+  (the HTTP contract) true in the same change that alters behaviour.
+- Every behaviour change ships with a test that fails without it.
 
-**The requirement corpus is not migrated, and will not be. Decided 2026-08-28.**
-Notion held 43 requirements (`RQ-1`…`RQ-44`; there is no `RQ-43`). They were
-dumped on the way out to `docs/legacy/notion-2026-08-18/`, and that directory
-has now been **deleted** — the migration was abandoned rather than finished,
-because OpenSpec already carries every obligation this project acts on, as a
-capability and a scenario, and a second corpus in a second notation was one
-copy too many. The dump is recoverable from git history if a rejected
-alternative is ever worth re-reading; nothing in the working tree depends on it.
+## Layout and dependency rules
 
-**The `RQ-xx` identifiers that already exist stay** — see *No new `RQ-xx`
-identifiers are minted* under Conventions for why. What the deletion changes is
-what an ID resolves to: the capability spec carrying it is now the only
-statement of it. Do not go looking for a normative source behind the ID. There
-isn't one any more, and the spec is not a pointer to it — the spec **is** it.
+One uv workspace, one lockfile, two distributions. `pytest-vantage`
+declares only pytest; `vantage` depends on it, plus Pydantic and PyYAML,
+with FastAPI and Uvicorn in its `server` extra and the PostgreSQL driver in
+its `postgres` extra.
 
-### ADRs
+| Package | Path | May import | Enforced by |
+| --- | --- | --- | --- |
+| `pytest_vantage` | `packages/pytest-vantage/src` | stdlib + pytest; `vantage.local` from `pytest_vantage/local.py` alone, inside functions | `test_plugin_imports.py`, deptry, CI clean-environment install |
+| `vantage.core` | `packages/vantage/src/vantage/core` | stdlib, minus I/O modules (`sqlite3`, `socket`, `http`, `urllib`, `subprocess`, `asyncio`, ...) | `test_architecture.py` |
+| `vantage.storage` | `packages/vantage/src/vantage/storage` | stdlib + `vantage.core` | `test_architecture.py` |
+| `vantage.storage.postgres` | `packages/vantage/src/vantage/storage/postgres` | the above + `psycopg`, `psycopg_pool` (the optional `postgres` extra); the only place the driver is imported | `test_architecture.py` (walk, and an import with the driver blocked) |
+| `vantage.ingestion` | `packages/vantage/src/vantage/ingestion` | stdlib + `vantage.core` + Pydantic + PyYAML; never a web framework or a storage adapter | `test_architecture.py` (walk, and an import with the web framework and the driver blocked) |
+| `vantage.local` | `packages/vantage/src/vantage/local` | stdlib + `vantage.core` + `vantage.ingestion` + the SQLite adapter's modules | `test_architecture.py` |
+| `vantage.service` | `packages/vantage/src/vantage/service` | anything; the only importer of FastAPI, Starlette and uvicorn, and only once it is to serve | `test_architecture.py` (an AST scan), `test_cli.py`, `test_push.py` |
 
-`docs/adr/NNNN-title-in-kebab-case.md` is now the only copy — nothing mirrors it.
+- Ports are `typing.Protocol` (`core/ports/storage.py`); adapters satisfy them
+  by shape. The server ships two adapters, `SqliteExecutionStore` and
+  `PostgresExecutionStore` (`vantage.storage.postgres`, the optional
+  `postgres` extra, imported by the `vantage` command only for a
+  `postgresql://` URL). `InMemoryExecutionStore` is a test double
+  (`packages/vantage/tests/memory_store.py`); `vantage_port_contract.py` runs
+  the same contract against all three, and they must stay in parity.
+- A report becomes rows one way: `vantage.ingestion.ingest` validates,
+  converts and records it, for `POST /api/v1/runs` and for `vantage.local`
+  alike. Its rejections are plain exceptions; `service/errors.py` maps them
+  to responses.
+- Pydantic lives in `vantage.ingestion` and `vantage.service` only;
+  everything else uses stdlib `dataclasses` and hand-written validation.
+- Test-support modules sit in `packages/*/tests` on the root `pythonpath` and
+  never ship. The only pytest config is `[tool.pytest.ini_options]` in the root
+  `pyproject.toml`.
 
-- Format is **Nygard** (Status / Context / Decision / Consequences) by default; MADR
-  with drivers, options and pros-and-cons when the decision was contentious or
-  expensive.
-- `Status` is `Proposed` while in the PR, `Accepted` on merge, and immutable from
-  then on. Rejected ADRs are kept, never deleted. Supersede rather than edit.
-- Title is the decision in imperative mood, not the problem: *Use PostgreSQL as
-  primary store*, not *Database evaluation*.
-- **`Reversal cost` is the filter.** Anything cheaper than a sprint to revert
-  probably does not need an ADR at all. Use it before writing one.
-- One ADR, one PR. Link it to the `Requirements` and `Features` it binds.
+## Invariants
 
-## State of the tree
-
-The reset is done. `src/vantage` and the old `tests/` tree — written for live run
-supervision, which is Phase 3 — no longer exist; the tree is `packages/pytest-vantage`
-and `packages/vantage` under one uv workspace, and `pyproject.toml` and
-`docs/architecture.md` were rewritten for it. Anything you read describing a
-`src/` layout, four distributions, or a plugin that opens a database predates
-ADR-4 and ADR-9 and is history, not instruction.
-
-Milestone 1 (`milestone-1-write-one-row`) is complete: the plugin records a
-session over HTTP and the server writes the row. CI runs the 3.10–3.13 × xdist
-matrix on `main` and every `milestone-*` branch.
-
-## Architecture
-
-**Clean architecture**, not hexagonal — hexagonal was considered and rejected as
-more ceremony than this earns. Ports are `typing.Protocol`, not abstract base
-classes, so an adapter satisfies a port without importing the core and the
-dependency arrow points inwards at the type level too.
-
-**Two published distributions in one uv workspace (ADR-4), not four packages.** An
-earlier decision split this four ways and one slice of it landed as four empty
-`pyproject.toml` files; ADR-4 rejected that by name and collapsed it before any of
-them carried code. Anything still saying `vantage-core`, `vantage-storage`,
-`vantage-pytest` or `vantage-service` predates ADR-4 and describes a layout that no
-longer exists.
-
-| Distribution | Contains | May depend on |
-| --- | --- | --- |
-| `pytest-vantage` | the plugin | pytest and the standard library, nothing else (RQ-24) |
-| `vantage` | `vantage.core`, `vantage.storage`, `vantage.service` | see below |
-
-The dependency rule is enforced per **internal package** inside `vantage`, by an AST
-architecture test rather than by distribution boundaries:
-
-| Internal package | May depend on | Why |
-| --- | --- | --- |
-| `vantage.core` | nothing at all | RQ-26 forbids it importing any pytest, database or web module |
-| `vantage.storage` | the core only | `sqlite3` is standard library, so the adapter needs nothing else |
-| `vantage.service` | anything | the only one allowed a third-party dependency — a server someone installs deliberately |
-
-**The plugin never opens a database (ADR-9).** It reports a finished session over
-HTTP to `POST /api/v1/runs` and the server performs every write. That is what keeps
-the plugin dependency-free, and it is why the SQLite adapter lives in `vantage` and
-the question of it living in the plugin no longer arises at all.
-
-Layout is `packages/pytest-vantage` and `packages/vantage`, with `openspec/` and
-`docs/` at the root. The root-level `specs/` directory is gone — it was a partial
-one-way mirror of Notion holding 16 of the 43 requirements, and OpenSpec is the
-home now.
-
-## Requirement traps
-
-Five requirements have a subtlety that costs a rewrite if missed:
-
-- **RQ-2 (opt-in recording).** "Absent from the invocation" means **the flag, not a
-  configuration file.** A config file committed by one person silently enables
-  recording for everyone who checks the repository out — the exact failure the
-  requirement exists to prevent. Its acceptance criterion is *differential*: run
-  the suite once with the flag absent and once with `-p no:vantage`, and assert the
-  two trees are identical. The absolute form ("no file created in the project
-  tree") is unsatisfiable, because pytest writes `.pytest_cache` and `__pycache__`
-  itself.
-- **RQ-24 (zero runtime dependencies).** The rule is no **third-party**
-  distribution; Vantage's own are fine. Note what this does *not* license under
-  ADR-4 and ADR-9: `pytest-vantage` depends on pytest and the standard library
-  and nothing else. It does not pull `vantage`, because it never opens a database
-  — it speaks HTTP with `urllib`. If installing the plugin ever drags the server
-  in, the boundary has been broken, not merely bent.
-- **RQ-12 (xdist).** Under xdist every result is emitted twice, once by the worker
-  and once by the controller. The filter is whether the config object carries a
-  worker input attribute.
-- **RQ-29 (complete schema).** The full schema, including columns nothing populates
-  until a later phase, is created at first use. No migration framework in Phase 1 —
-  having one available is exactly what makes casual schema changes feel affordable.
-- **RQ-44 (abandoned run is observable)** was added on 2026-08-16, after Milestone 1
-  closed, and nothing in this repository implements it yet. It requires a run with a
-  start time and no end time to read back as *abandoned* once a grace period lapses,
-  and as *interrupted* when a Ctrl-C report did arrive. Today the plugin sends
-  nothing until `pytest_sessionfinish`, so a killed session leaves no row at all and
-  there is nothing to present. Satisfying it needs a write at the **start** of a
-  session, which changes the ingestion contract. Decide that before Milestone 2
-  rather than during it.
-
-## Conventions
-
-**Requirement traceability, for the identifiers that already exist.** Every test
-that verifies one carries its ID: `@pytest.mark.req(id="RQ-12")`. Where verification
-is not a test — a CI matrix, a benchmark script — the ID goes in a comment on the
-relevant block. The invariant is that `grep -r "RQ-12"` finds the thing that
-proves it.
-
-**The `id=` keyword is load-bearing, not style.** pytest matches marker arguments
-in a `-m` expression only when they were applied as keywords. With the marker
-applied positionally, `-m 'req("RQ-12")'` **selects the entire suite** — 197 of
-197, nothing deselected — and so does an identifier that cannot exist. The filter
-fails open, which makes it worse than no filter: it reports green over a set it
-never narrowed. Applied as `req(id=...)`, selection works and an unknown ID
-correctly collects nothing. Verified on pytest 9.1.1, 2026-08-19.
-
-**No new `RQ-xx` identifiers are minted.** Decided 2026-08-18. The existing ones
-stay because they are executable — 161 markers, `--strict-markers` is on, and CI
-and `docs/schema-manifest.md` both cite them — and removing them would break the
-traceability of work already delivered. But they were Notion's numbering scheme,
-Notion is gone, and OpenSpec already carries identity in a form this project
-uses: a **capability** and a **scenario**. New obligations get those, not a
-number. Reference an existing `RQ-xx` when you are working on it; do not invent
-`RQ-45`.
-
-**Verification methods are not all tests.** Each requirement declares one of Test,
-Analysis, Inspection or Demonstration. RQ-11 and RQ-29 are Inspection, RQ-25 is
-Analysis, RQ-18/19/20 are Demonstration. Do not write an assertion where the
-requirement asks for a measurement with a method.
-
-**No domain class name starts with `Test`.** pytest collects them as test classes and
-warns on every run. The aggregate is `Execution`, its identity is `Identity` — not
-`TestExecution` or `TestIdentity`. The domain vocabulary and pytest's collection
-convention collide, and the domain gives way.
-
-**Branches** are `ft/FT-03-execution-context` or `rq/RQ-12-xdist-dedup`. The
-requirement or feature ID goes in the **commit body, not the subject**. Commits are
-signed with the 1Password SSH key, from the first commit.
-
-**All project documentation is in English**, regardless of the language the design
-conversation happened in.
-
-**Spec-driven development runs the full cycle now.** Milestone 1 entered at
-`sdd-tasks` because explore, propose, spec and design had been done by hand in
-Notion and regenerating them would have produced a worse second copy. That
-shortcut is spent: the hand-written originals are gone with the legacy dump.
-New work starts at the phase the change actually needs.
-
-## Constraints
-
-These came out of the employment situation, not out of the design. They are
-operative rules, not history, and they were previously recorded only in Notion.
-
-- **Intellectual-property ownership — resolved**, imposed by the TMC employment
-  contract and answered before any code was written.
-- **Synthetic data only.** Every fixture and every example is generated. No test
-  suite, log, trace or artefact from ASML or TMC ever touches this repository.
-- **Nothing in the semiconductor, EDA or RTL domain.** Keeps "unrelated to my
-  employer's work" a true statement rather than an arguable one.
-- **Personal equipment, outside TMC hours.**
-- **The repository is public.** Nothing confidential, personal or regulated is
-  committed to it. Licence is MIT, chosen for adoption.
-
-## Validation and dependencies
-
-Pydantic v2 belongs at system boundaries — APIs, configs, payloads — because static
-types do not protect against malformed JSON. **It lives in `vantage.service` only.**
-RQ-24 forbids it, and `attrs`, and every other third-party package, from
-`vantage.core`, `vantage.storage` and the whole of `pytest-vantage`. Those use
-`dataclasses` from the standard library and hand-written validation over stdlib
-`json`.
+- **The plugin's own code never opens the vantage database.** It talks to
+  `/api/v1` with `urllib`; local modes hand reports to `vantage.local`, which
+  runs the server's ingestion in-process. `pytest-vantage` never declares
+  `vantage`: it is imported from `pytest_vantage/local.py` alone, inside
+  functions, and only when a local mode is configured, so a server-mode
+  session never loads it. The versioned API is the compatibility boundary
+  between plugin and server.
+- **The outbox is the plugin's, not a vantage database**
+  (`pytest_vantage/outbox.py`, stdlib `sqlite3`, `<local database>-outbox`,
+  0600). A queued run is sent only to the address it was queued for,
+  compared exactly; senders claim an entry before sending it; bounds are
+  1,000 runs and 256 MiB. `vantage push` sends it with the plugin's own code
+  and never needs the `server` extra.
+- **Opt-in only by typed flag.** `--vantage`, `--vantage-failure-text` and
+  `--vantage-metadata` count only when present in `config.invocation_params.args`;
+  from `addopts`, `PYTEST_ADDOPTS` or an `@file` they are ignored with a warning.
+  Ini, env and config may set *where* (server, timeout, mode, local
+  database), never *whether*.
+  Without `--vantage` the plugin reads nothing and sends nothing.
+- **The suite's exit status is never changed by the plugin**, except that an
+  invalid vantage setting raises `pytest.UsageError` (exit 4) in
+  `pytest_configure`. Everything else is at most one `VantageWarning` per kind;
+  every recorder hook is fault-isolated and every request has a deadline.
+- **xdist:** branch on `workerinput`. Only the controller builds a `Recorder`,
+  so only it stores locally or touches the outbox; workers attach failure
+  evidence to reports and hand interrupts and `vantage_metadata` values to
+  the controller through `workeroutput`.
+- **No store call on the event loop.** Store-calling routes are plain `def`;
+  `POST /runs` streams its body async, then uses `run_in_threadpool`.
+- **Concurrency, per adapter.** `SqliteExecutionStore` serialises every
+  statement behind one lock, in one process. `PostgresExecutionStore` must
+  stay safe with several server processes on one database: each call is its
+  own pooled transaction; writes are single conditional statements, row
+  locks (`FOR UPDATE`, catalogue rows in sorted order) or advisory locks,
+  never check-then-act; snapshot reads use `REPEATABLE READ` or one
+  statement; serialization failures and deadlocks are retried, bounded.
+  Every connection sets its session to `READ COMMITTED` (and full float
+  digits, ISO dates, UTC) first, since the locks and the readers assume it
+  whatever the database defaults to, and a connection the server closed is
+  replaced at once (`live_connection`), not through the pool's own
+  backing-off check.
+- **No U+0000 reaches a store.** The body decoder replaces it (and a lone
+  surrogate in reports) with U+FFFD; a lookup value holding it matches
+  nothing without asking the store.
+- **Timestamps** are stored as fixed-width UTC text in SQLite
+  (`isoformat_utc`), so text order is time order, and as `timestamptz` in
+  PostgreSQL, read back as UTC.
+- **Schema:** each adapter applies its whole schema at first use and stamps
+  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 6,
+  one version for both). Any other stamp is refused; there are no
+  migrations. Changing either schema means bumping that literal. No table
+  or column exists before code writes it.
+- **Passwords never printed.** A PostgreSQL URL is shown only through
+  `redacted`, and a driver message only through `redact_message`
+  (`core/config/database.py`); the driver's loggers are silenced while the
+  store opens.
+- **Python 3.10 floor:** no `StrEnum`, `datetime.UTC`, `tomllib`. Vocabularies
+  are `frozenset`s of `str`, never enums.
+- No domain class name starts with `Test` (pytest would collect it).
 
 ## Commands
 
-The uv workspace has landed; these commands work today.
-
 ```bash
-uv sync                                  # whole workspace, one lockfile
-uv run pytest                            # every package
-uv run pytest packages/pytest-vantage    # one distribution
-uv run pytest -k test_name               # one test
-uv run pytest -m 'req(id="RQ-2")'        # everything verifying one requirement
-uv run pytest -m 'not slow'              # the fast local loop; CI always runs everything
-uv run ruff format . && uv run ruff check --fix .
-uv run mypy .                            # strict
-uv run deptry .                          # undeclared / unused dependencies
-uv run pip-audit                         # CVEs
+uv sync --extra dev                          # once; hooks use `uv run --no-sync`
+uv run --extra dev pytest                    # everything (-n 8 with xdist)
+uv run --extra dev pytest -m 'not slow'      # skip timing tests; CI runs all
+uv run --extra dev ruff format . && uv run --extra dev ruff check --fix .
+uv run --extra dev mypy .                    # strict
+uv run --extra dev deptry .
+VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/postgres \
+  uv run --extra dev pytest                  # PostgreSQL tests too (skipped when unset)
+vantage --database ./vantage.db              # server on 127.0.0.1:8765
+vantage --database postgresql://user@host/db # the same, storing in PostgreSQL
+vantage push                                 # send the runs the plugin queued
+pytest --vantage --vantage-mode local        # record into the local database
 ```
 
-## Quality gates
+## Before finishing
 
-Each check sits in the layer whose time budget it fits. A check slower than people
-will wait for is a check skipped with `--no-verify`.
+All green: pytest (full suite), once without and once with
+`VANTAGE_TEST_POSTGRES_URL`, `ruff format --check .`, `ruff check .`,
+`mypy .`, `deptry .`. CI additionally runs Python 3.10–3.13 with and without
+xdist, the suite against a `postgres:17` service (the only job that sets the
+variable), the suite with non-loopback networking blocked, the
+clean-environment installs (the plugin alone; `vantage` without its extra,
+serving refused, `vantage push` and a local-mode session there;
+`vantage[server]` serving), the Python 3.9 install refusal and both wheel
+builds.
 
-| Layer | Contents |
-| --- | --- |
-| Editor / LSP | `ruff format`, `ruff check --fix` on save; type checker as a language server |
-| pre-commit (< 2–3 s) | `ruff format`, `ruff check --fix`, and hygiene hooks; modified files only |
-| pre-push | `mypy --strict` over the whole project; fast unit tests |
-| CI | everything again in verification mode, the 3.10–3.13 × xdist matrix, a networking-disabled job for RQ-28, `deptry`, the clean-environment install check for RQ-24, a Python-3.9-install-refused job, and a build of both wheels |
-| Weekly | `pip-audit`, plus dependency updates |
+## Conventions
 
-**Coverage is not measured.** It was planned for CI and never landed: there is no
-`pytest-cov` in the dev extra or the lockfile, and `openspec/config.yaml` sets
-`coverage_threshold: 0` deliberately. Do not write it up as if it ran.
-
-**`pip-audit` runs weekly, not per pull request.** CVEs appear without anyone
-touching the code, so a PR-only check never sees them.
-
-`mypy` goes at pre-push, not pre-commit: pre-commit passes only modified files and a
-type checker needs the whole project to be correct. Everything in pre-commit is
-duplicated in CI, because pre-commit is skipped with `--no-verify` and never runs on
-the server. `ruff`'s `S` rules cover what bandit did; bandit is not used.
-
-Three guards protect RQ-24 and RQ-26 and they are not redundant: the AST
-architecture test catches the core reaching an infrastructure module, `deptry`
-catches an undeclared third-party import in source, and the clean-environment
-install check catches what actually lands in a user's environment.
+- Short descriptive branch names (`fix/xdist-dedup`, `feat/run-filter`).
+- Commits: imperative subject ≤ 72 characters, a body saying why, signed with
+  the 1Password SSH key.
+- All documentation in English.

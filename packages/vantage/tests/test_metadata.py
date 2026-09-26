@@ -1,84 +1,126 @@
-"""`FILE_STATUSES`/`KEY_STATUSES` vocabulary and the three bounds
-`core/domain/metadata.py` carries (design.md D91, D94, D95).
+"""The metadata vocabularies agree with the `CHECK` constraints in
+`schema.sql`, and a metadata row outside them, or contradicting itself,
+cannot be constructed.
 
-Stdlib only, no I/O -- this module is pure vocabulary, matching
-`liveness.py`'s and `result.py`'s precedent: a vocabulary is a module-level
-`frozenset` of plain `str`, never an `Enum`. `class X(str, Enum)` changes
-`__format__` between Python 3.10 and 3.13 on this project's own supported
-range (measured, `liveness.py`'s module docstring), and a third shape for
-the same kind of value is one shape too many.
+The constraints are parsed out of the schema file rather than restated here,
+so a value added on one side only fails this test instead of being refused
+by the database at runtime.
 """
 
 from __future__ import annotations
 
+import importlib.resources
+import re
+
+import pytest
 from vantage.core.domain.metadata import (
     FILE_STATUSES,
     KEY_STATUSES,
-    MAX_METADATA_ENTRIES,
-    MAX_METADATA_KEY_CHARS,
-    MAX_METADATA_VALUE_BYTES,
+    METADATA_CONTENT_TYPES,
+    METADATA_SOURCES,
+    SESSION_KEY_STATUSES,
 )
+from vantage.core.ports.storage import MetadataEntry, MetadataFile
+
+_SCHEMA_SQL = importlib.resources.files("vantage.storage").joinpath("schema.sql").read_text("utf-8")
 
 
-def test_file_statuses_match_run_metadata_files_check_constraint_exactly() -> None:
-    """`design.md` D91: `run_metadata_file.status`'s SQL `CHECK` names exactly
-    these eight values, in `schema.sql`'s own order."""
-    assert FILE_STATUSES == {
-        "captured",
-        "not_found",
-        "path_rejected",
-        "too_large",
-        "not_text",
-        "unreadable",
-        "over_budget",
-        "malformed",
-    }
+def _check_values(table: str, column: str) -> frozenset[str]:
+    """The quoted values of `CHECK (<column> IN (...))` inside `table`'s
+    `CREATE TABLE` statement."""
+    table_match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\n\);", _SCHEMA_SQL, re.DOTALL
+    )
+    assert table_match is not None, f"no CREATE TABLE for {table}"
+    check_match = re.search(rf"CHECK \({column} IN \(([^)]+)\)\)", table_match.group(1))
+    assert check_match is not None, f"no CHECK on {table}.{column}"
+    return frozenset(re.findall(r"'([^']+)'", check_match.group(1)))
 
 
-def test_key_statuses_match_run_metadata_check_constraint_exactly() -> None:
-    """`design.md` D91: `run_metadata.status`'s SQL `CHECK` names exactly
-    these five values, in `schema.sql`'s own order."""
-    assert KEY_STATUSES == {
-        "captured",
-        "absent",
-        "not_scalar",
-        "value_too_large",
-        "source_unavailable",
-    }
+def test_file_statuses_match_the_run_metadata_file_status_check() -> None:
+    assert _check_values("run_metadata_file", "status") == FILE_STATUSES
 
 
-def test_file_statuses_is_a_plain_str_frozenset_never_an_enum() -> None:
-    """`liveness.PRESENTATIONS`'s measured 3.10-vs-3.13 `__format__` reason,
-    applied to this module's own vocabulary."""
-    assert type(FILE_STATUSES) is frozenset
-    for status in FILE_STATUSES:
-        assert type(status) is str
+def test_key_statuses_match_the_run_metadata_status_check() -> None:
+    assert _check_values("run_metadata", "status") == KEY_STATUSES
 
 
-def test_key_statuses_is_a_plain_str_frozenset_never_an_enum() -> None:
-    assert type(KEY_STATUSES) is frozenset
-    for status in KEY_STATUSES:
-        assert type(status) is str
+def test_sources_match_the_run_metadata_source_check() -> None:
+    assert _check_values("run_metadata", "source") == METADATA_SOURCES
 
 
-def test_max_metadata_value_bytes_is_max_identity_chars_value() -> None:
-    """design.md D94: bounded at `MAX_IDENTITY_CHARS`'s value (1024) for
-    D89's reason -- a short, indexed, client-supplied string, not
-    `MAX_TEXT_FIELD_BYTES` (P-2)."""
-    assert MAX_METADATA_VALUE_BYTES == 1024
+def test_a_session_keys_statuses_are_a_subset_of_every_keys() -> None:
+    assert SESSION_KEY_STATUSES < KEY_STATUSES
 
 
-def test_max_metadata_key_chars_is_max_identity_chars_value() -> None:
-    """design.md's file-changes table names `MAX_METADATA_KEY_CHARS` beside
-    `MAX_METADATA_VALUE_BYTES` and `MAX_METADATA_ENTRIES` (D94, D95) without
-    a separate derivation row of its own; a declared key is the same class of
-    short, client-supplied, indexed string D89 already bounds at
-    `MAX_IDENTITY_CHARS`, so it carries the identical value the sibling
-    bounds in the same table both use."""
-    assert MAX_METADATA_KEY_CHARS == 1024
+def test_content_types_match_the_run_metadata_file_content_type_check() -> None:
+    assert _check_values("run_metadata_file", "content_type") == METADATA_CONTENT_TYPES
 
 
-def test_max_metadata_entries_is_max_page_items_value() -> None:
-    """design.md D94: bounded at `MAX_PAGE_ITEMS` (200) -- a run's metadata
-    is presented unpaginated, so the stored-entry cap is the response bound."""
-    assert MAX_METADATA_ENTRIES == 200
+@pytest.mark.parametrize(
+    ("content_type", "status"), [("xml", "captured"), ("json", "bogus")], ids=["format", "status"]
+)
+def test_a_metadata_file_outside_the_vocabulary_is_refused(content_type: str, status: str) -> None:
+    with pytest.raises(ValueError, match="must be one of"):
+        MetadataFile(source_file="m.json", content_type=content_type, status=status)
+
+
+@pytest.mark.parametrize(
+    ("status", "source"), [("bogus", "file"), ("absent", "bogus")], ids=["status", "source"]
+)
+def test_a_metadata_entry_outside_the_vocabulary_is_refused(status: str, source: str) -> None:
+    with pytest.raises(ValueError, match="must be one of"):
+        MetadataEntry(key="fw", value=None, source_file="m.json", status=status, source=source)
+
+
+@pytest.mark.parametrize("status", sorted(KEY_STATUSES - SESSION_KEY_STATUSES))
+def test_a_session_entry_with_a_status_only_a_file_can_have_is_refused(status: str) -> None:
+    with pytest.raises(ValueError, match="must be one of"):
+        MetadataEntry(key="fw", value=None, source_file=None, status=status, source="session")
+
+
+@pytest.mark.parametrize(
+    ("value", "status"),
+    [(None, "captured"), ("2.1", "absent"), ("2.1", "value_too_large")],
+    ids=["captured-without-value", "absent-with-value", "too-large-with-value"],
+)
+def test_an_entry_whose_value_contradicts_its_status_is_refused(
+    value: str | None, status: str
+) -> None:
+    """Only a captured key has a value, so a filter on values can never
+    match a key whose value was dropped."""
+    with pytest.raises(ValueError, match="value must be set exactly when status is 'captured'"):
+        MetadataEntry(key="fw", value=value, source_file=None, status=status, source="session")
+
+
+def test_a_file_entry_without_its_file_is_refused() -> None:
+    with pytest.raises(ValueError, match="a file key must name its source_file"):
+        MetadataEntry(key="fw", value="2.1", source_file=None, status="captured")
+
+
+def test_a_session_entry_naming_a_file_is_refused() -> None:
+    with pytest.raises(ValueError, match="a session key has no source_file"):
+        MetadataEntry(
+            key="fw", value="2.1", source_file="m.json", status="captured", source="session"
+        )
+
+
+def test_an_undeclared_file_entry_is_refused() -> None:
+    """A file's keys are the ones its declaration lists."""
+    with pytest.raises(ValueError, match="a file key is always declared"):
+        MetadataEntry(
+            key="fw", value="2.1", source_file="m.json", status="captured", declared=False
+        )
+
+
+def test_an_undeclared_session_entry_with_no_name_is_accepted() -> None:
+    entry = MetadataEntry(
+        key="bench",
+        value="lab-3",
+        source_file=None,
+        status="captured",
+        source="session",
+        declared=False,
+    )
+
+    assert (entry.source, entry.name, entry.declared) == ("session", None, False)

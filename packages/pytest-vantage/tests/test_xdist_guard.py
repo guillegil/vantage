@@ -1,51 +1,53 @@
-"""design.md D2: the xdist guard is the FIRST statement in ``pytest_configure``.
+"""The xdist guard is the FIRST statement in ``pytest_configure``.
 
 Under xdist every worker re-runs ``pytest_configure`` as a full pytest
 session of its own -- unguarded, ``-n 4`` would leave four workers' recorders
-plus the controller's, breaking RQ-1's "exactly one run entry" (RQ-27's
-xdist half of the process-integration threat matrix). The discriminator is
-whether the config object carries a ``workerinput`` attribute.
+plus the controller's, recording one session as several runs. The
+discriminator is whether the config object carries a ``workerinput``
+attribute.
 
-**The invariant this file proves changed with `failure-capture` (design.md
-D68), and the change is deliberate, not a relaxation.** Before D68, nothing
-at all ran on a worker: `pytest_configure` returned before reading a single
-option. `EvidenceCollector` needs to run `pytest_runtest_makereport` on the
-worker -- that is the only process with `item`/`excinfo` -- so the worker
-branch now reads exactly three things: `getoption("vantage")` to decide
-whether to register at all; and `getoption("vantage_failure_text")`, gated
-through the same `resolve_failure_text_capture` the controller uses
-(design.md D72, revised after Phase 9's RQ-25 measurement and further
-corrected to remove the ini surface entirely -- capture is opt-in, absent
-by default, the opt-in is session-wide, not controller-only, and
-`--vantage-failure-text` is the only means by which it is granted); and
-`EvidenceCollector.__init__` itself reads `getoption("capture")` once
-(design.md D71, the empty-vs-absent rule for captured output). **What
-survives unchanged is narrower and still absolute**: a worker never
-resolves a server address, never reads a timeout, never preflights a
-socket, never asks the server's capability endpoint anything, and never
-constructs a `Recorder`. `_WorkerConfigDouble` therefore answers exactly
-those option/ini reads and raises for anything else -- the strongest
-available proof that the worker path reads exactly those things and
-touches nothing past them.
+A worker is the only process with `item`/`excinfo`, so `EvidenceCollector`
+runs there, and the only one that knows whether Ctrl-C or ``pytest.exit()``
+interrupted it, so `WorkerInterruptRelay` does too. Session fixtures run
+there as well, so `WorkerMetadataRelay` holds what the ``vantage_metadata``
+fixture hands them, once the controller has said in ``workerinput`` that
+it records. The worker branch reads
+exactly three options: ``vantage`` and ``vantage_failure_text`` to decide
+what to register, and ``capture``, read once by
+`EvidenceCollector.__init__`. xdist hands each
+worker the controller's typed arguments, so the worker applies the same
+"typed on the command line" rule and agrees with its controller. Beyond that
+a worker never resolves a server address, reads a timeout, preflights a
+socket, probes the server's capabilities or constructs a `Recorder`.
+`_WorkerConfigDouble` answers exactly those reads and raises for anything
+else.
 
-Pure unit test: a config double stands in for a real ``pytest.Config``, no
+Pure unit tests: config doubles stand in for a real ``pytest.Config``, no
 subprocess or real xdist session needed.
 """
 
 from __future__ import annotations
 
+import socket
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pytest_vantage.boundary import VantageWarning
+from pytest_vantage.evidence import EvidenceCollector
 from pytest_vantage.plugin import pytest_configure
+from pytest_vantage.recorder import (
+    _CONTROLLER_RECORDS_KEY,
+    WorkerInterruptRelay,
+    WorkerMetadataRelay,
+)
+from pytest_vantage.session_metadata import SESSION_METADATA
 
 
 class _RegisterCallDouble:
-    """A ``pluginmanager.register`` stand-in that records every call (task
-    4.21, design.md D36). If a worker ever constructed a `Recorder`,
-    `pytest_configure` would end its guarded path here -- this is the most
-    direct place to assert it never does, one step past the existing
-    `getoption`-raises proof that the guard runs first.
+    """A ``pluginmanager.register`` stand-in that records every call. If a
+    worker ever constructed a `Recorder`, it would be registered here --
+    the most direct place to assert it never is.
     """
 
     def __init__(self) -> None:
@@ -58,28 +60,27 @@ class _RegisterCallDouble:
 class _WorkerConfigDouble:
     """A ``pytest.Config`` stand-in carrying xdist's ``workerinput`` marker.
 
-    ``getoption`` answers only the option names D68/D71/D72 require a
-    worker to read -- `"vantage"`, `"vantage_failure_text"` (CLI only, no
-    ini form exists any more) and `"capture"` -- and raises for anything
-    else: if ``pytest_configure`` or `EvidenceCollector` ever reach for a
-    server address, a timeout, or anything else on a worker, this is where
-    that would be caught. ``getini`` raises unconditionally -- no ini value
-    is ever permitted on the opt-in path, on a worker or the controller,
-    now that the capability spec's "no committed configuration file MAY be
-    the means by which capture is enabled" requirement has removed that
-    surface entirely. ``pluginmanager`` is a ``_RegisterCallDouble``, so a
-    worker that ever constructed a `Recorder` (never permitted, D68) is
-    caught there too. Opted in (`True`) so this double still exercises the
-    registration mechanism D68 proves -- under D72's revised default-absent
-    polarity, an opted-out worker would register nothing at all, which is
-    a different (and separately covered) test.
+    ``getoption`` answers only the options a worker may read --
+    `"vantage"`, `"vantage_failure_text"` and `"capture"` -- and raises for
+    anything else: if ``pytest_configure`` or `EvidenceCollector` ever reach
+    for a server address, a timeout, or anything else on a worker, this is
+    where that would be caught. ``getini`` raises unconditionally -- no ini
+    value is read on a worker. ``pluginmanager`` is a
+    ``_RegisterCallDouble``, so a worker that ever constructed a `Recorder`
+    is caught there too. Both flags parse as set; ``typed`` is what the
+    controller's command line actually carried, and ``recorded`` whether
+    the controller said it records.
     """
 
-    workerinput: dict[str, Any] = {}
     _ALLOWED_OPTIONS = frozenset({"vantage", "capture", "vantage_failure_text"})
 
-    def __init__(self) -> None:
+    def __init__(self, typed: tuple[str, ...], *, recorded: bool = True) -> None:
+        self.workerinput: dict[str, Any] = {"workerid": "gw0"}
+        if recorded:
+            self.workerinput[_CONTROLLER_RECORDS_KEY] = True
         self.pluginmanager = _RegisterCallDouble()
+        self.invocation_params = SimpleNamespace(args=typed)
+        self.stash = pytest.Stash()
 
     def getoption(self, name: str, default: object = None) -> object:
         if name == "vantage":
@@ -90,21 +91,71 @@ class _WorkerConfigDouble:
             return True
         raise AssertionError(
             f"pytest_configure must not read option {name!r} on an xdist worker "
-            f"(design.md D68/D71/D72 -- only {sorted(self._ALLOWED_OPTIONS)!r} may be read there)"
+            f"(only {sorted(self._ALLOWED_OPTIONS)!r} may be read there)"
         )
 
     def getini(self, name: str) -> object:
         raise AssertionError(
             f"pytest_configure must not read ini value {name!r} on an xdist worker "
-            "(design.md D72, further corrected -- no ini value is ever read there)"
+            "(no ini value is ever read there)"
         )
 
 
-class _ControllerConfigDouble:
+@pytest.mark.parametrize(
+    ("typed", "expected"),
+    [
+        (("--vantage", "-n", "2"), [WorkerInterruptRelay, WorkerMetadataRelay]),
+        (
+            ("--vantage", "--vantage-failure-text", "-n", "2"),
+            [WorkerInterruptRelay, WorkerMetadataRelay, EvidenceCollector],
+        ),
+    ],
+    ids=["recording", "recording-with-failure-text"],
+)
+def test_a_recording_worker_registers_its_relays_and_collector_and_no_recorder(
+    typed: tuple[str, ...], expected: list[type]
+) -> None:
+    """A worker's `pytest_configure` registers both relays when recording,
+    `EvidenceCollector` when failure text was asked for too, and nothing
+    else -- in particular no `Recorder`. The metadata relay's mapping is the
+    one the fixture finds."""
+    config = _WorkerConfigDouble(typed=typed)
+    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+
+    assert [type(plugin) for plugin in config.pluginmanager.registered] == expected
+    (relay,) = [p for p in config.pluginmanager.registered if isinstance(p, WorkerMetadataRelay)]
+    assert config.stash[SESSION_METADATA] is relay.session_metadata
+
+
+def test_a_worker_whose_controller_does_not_record_hands_the_fixture_nothing() -> None:
+    """``--vantage`` was typed, so it reaches the worker, but the controller
+    found no server: the worker still relays an interrupt, which nobody
+    reads, and leaves the ``vantage_metadata`` fixture to hand out a mapping
+    that neither warns nor sends."""
+    config = _WorkerConfigDouble(typed=("--vantage", "-n", "2"), recorded=False)
+    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+
+    assert [type(plugin) for plugin in config.pluginmanager.registered] == [WorkerInterruptRelay]
+    assert SESSION_METADATA not in config.stash
+
+
+def test_worker_registers_nothing_when_the_flags_came_from_addopts() -> None:
+    """The flags parse as set -- a committed ``addopts`` reaches every
+    worker too -- but the controller's command line only carried ``-n``."""
+    config = _WorkerConfigDouble(typed=("-n", "2"))
+    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+
+    assert config.pluginmanager.registered == []
+
+
+class _UnactivatedControllerDouble:
     """The non-worker counterpart: no ``workerinput``, so the activation
     check must run -- triangulates that the guard is scoped to xdist workers
-    only, not swallowing every invocation.
+    only, not swallowing every invocation. No ``getini`` and no
+    ``pluginmanager``: an unactivated session touches neither.
     """
+
+    invocation_params = SimpleNamespace(args=())
 
     def __init__(self) -> None:
         self.options_read: list[str] = []
@@ -114,41 +165,47 @@ class _ControllerConfigDouble:
         return False
 
 
-def test_worker_registers_exactly_one_evidencecollector_when_activated() -> None:
-    """design.md D68 -- the highest-value unit-level RED test for this
-    decision (task 2.1). Confirmed failing on `ImportError` before
-    `pytest_vantage.evidence` existed: a worker's `pytest_configure` must
-    register exactly one `EvidenceCollector`, and nothing else, when
-    activated."""
-    from pytest_vantage.evidence import EvidenceCollector
-
-    config = _WorkerConfigDouble()
-    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
-
-    assert len(config.pluginmanager.registered) == 1
-    (registered,) = config.pluginmanager.registered
-    assert isinstance(registered, EvidenceCollector)
-
-
-@pytest.mark.req(id="RQ-1")
-@pytest.mark.req(id="RQ-27")
-def test_worker_never_registers_a_recorder_even_when_activated() -> None:
-    """design.md D68: the narrowed invariant. A worker MAY now register an
-    `EvidenceCollector`, but it must never construct a `Recorder` -- no
-    worker opens a socket, not even indirectly through the reporting path
-    RQ-1/RQ-27 exist to protect."""
-    from pytest_vantage.recorder import Recorder
-
-    config = _WorkerConfigDouble()
-    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
-
-    assert not any(isinstance(plugin, Recorder) for plugin in config.pluginmanager.registered)
-
-
-@pytest.mark.req(id="RQ-1")
-@pytest.mark.req(id="RQ-27")
 def test_no_worker_input_still_runs_the_activation_check() -> None:
-    config = _ControllerConfigDouble()
+    config = _UnactivatedControllerDouble()
     pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
-    assert config.options_read == ["vantage"]
+    assert "vantage" in config.options_read
+
+
+class _ActivatedControllerDouble:
+    """A controller whose typed arguments ask for recording and failure
+    text, pointed at a port where nothing listens: `EvidenceCollector`
+    registers before the preflight, so its outcome does not matter here."""
+
+    def __init__(self, address: str) -> None:
+        self.pluginmanager = _RegisterCallDouble()
+        self.invocation_params = SimpleNamespace(args=("--vantage", "--vantage-failure-text"))
+        self._options: dict[str, Any] = {
+            "vantage": True,
+            "vantage_server": address,
+            "vantage_timeout": 0.5,
+            "vantage_failure_text": True,
+            "capture": "fd",
+        }
+
+    def getoption(self, name: str, default: object = None) -> object:
+        return self._options.get(name, default)
+
+    def getini(self, name: str) -> object:
+        return None
+
+
+def test_controller_registers_an_evidencecollector_when_activated() -> None:
+    """A session with no xdist workers at all still needs failure evidence
+    collected somewhere, so the controller registers `EvidenceCollector`
+    too."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    closed_port = probe.getsockname()[1]
+    probe.close()
+    config = _ActivatedControllerDouble(f"http://127.0.0.1:{closed_port}")
+
+    with pytest.warns(VantageWarning, match="cannot reach"):
+        pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+
+    assert [type(plugin) for plugin in config.pluginmanager.registered] == [EvidenceCollector]

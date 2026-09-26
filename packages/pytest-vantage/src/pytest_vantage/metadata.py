@@ -1,152 +1,116 @@
-"""Path containment for a declared metadata file (design.md D93, ADR-0017
-C3/C4). Standard library only (RQ-24) -- `pathlib`, nothing else.
+"""Read `vantage-metadata.json`: the keys it declares for the session to
+report, and the files it names.
 
-This is a security boundary, not a convenience check: a declared path is
-REJECTED, never clamped, the moment it does not resolve strictly under
-`rootpath`. Clamping turns an attacker-controlled path into a different
-attacker-controlled path, which is why every failure mode below returns
-`None` rather than a "closest safe" substitute.
+The declaration is read in every recorded session, for its keys; the files
+it names are opened only with `--vantage-metadata`. Either way a problem
+with the declaration itself refuses all of it with one warning.
 
-**Both sides are resolved, or neither works.** Resolving only the
-candidate makes every legitimate path look like an escape the moment
-`rootpath` is itself reached through a symlink -- `/tmp` is `/private/tmp`
-on macOS, and the same shape recurs anywhere a checkout sits under a
-symlinked home. Resolving only the root would let a committed symlink
-inside the tree point at, say, `~/.ssh/id_rsa` and sail through a lexical
-check. Both sides are resolved here, in that order, before anything is
-compared.
+Path containment is a security boundary: a declared path is rejected, never
+clamped, unless it resolves strictly under `rootpath` to a regular file.
+Clamping would only turn one attacker-controlled path into another.
 
-**Symlinks are resolved BEFORE containment is checked**, never after: once
-`Path.resolve()` has run, `is_relative_to()` is a purely lexical comparison
-that touches no filesystem, so nothing on disk can change the answer
-between the resolve and the containment check.
+Both sides are resolved before the (purely lexical) containment check.
+Resolving only the candidate makes every path look like an escape when
+`rootpath` is reached through a symlink (`/tmp` is `/private/tmp` on macOS);
+resolving only the root lets a committed symlink point outside the tree.
 
-**Cross-version trap, verified rather than assumed** (2026-09-02, this
-session, against real `os.symlink` loops on cpython 3.10.21, 3.11.16,
-3.12.14 and 3.13.15 -- this project's floor and ceiling, and the two
-versions between): a symlink loop does NOT fail the same way on every
-supported interpreter. On 3.10-3.12, `Path.resolve()`'s pure-Python loop
-detection raises `RuntimeError`. On 3.13, `resolve()` was reimplemented
-over `os.path.realpath()`; with the default `strict=False` it raises
-NOTHING for a loop at all -- it silently returns the path lexically
-unresolved, and the rejection then comes from `is_file()` below returning
-`False` (stat-ing through an unresolvable loop fails, and `Path.is_file()`
-swallows that `OSError` per its own contract, rather than propagating it).
+`resolve_declared_path` fails closed on any exception, not on a list of
+known ones, because path operations fail differently across versions and
+inputs: a symlink loop raises `RuntimeError` on 3.10-3.12 but nothing on
+3.13 (where `is_file()` rejects it instead), and a NUL byte raises
+`ValueError` everywhere. An exception escaping here would cost the run all
+of its metadata rather than one file its status.
 
-**A third exception mechanism arrived after the first two were already
-enumerated and verified** (2026-09-04, `sdd-verify`, confirmed on 3.10.21
-and 3.13.15): a declared path containing a NUL byte makes `Path.resolve()`
-raise `ValueError`, on every supported interpreter, not `OSError` or
-`RuntimeError`. `isinstance(e, (OSError, RuntimeError))` is `False` for it
-on both ends of the supported range, so the enumerated tuple this
-docstring used to stop at let it through uncaught -- straight into
-`pytest_configure`, with nothing on the call chain above to catch it, and
-`INTERNALERROR` for the whole session. **The lesson generalises past this
-one addition: this boundary must fail closed on any exception a path
-operation can raise, not on a list of the ones observed so far.** A list
-is a claim about which failure modes exist, and this module has now
-disproved that claim twice from the standard library alone -- once across
-CPython minor versions, once across argument content -- with the second
-one being fatal precisely because the first one had already been "fixed"
-by naming its cause instead of its shape. `except Exception` below is
-deliberately broader than a tuple for that reason: the two statements
-after the `try` (`is_relative_to`, `is_file`) do no I/O this function
-cannot already tolerate failing, hold no resource that broad catching
-could leak, and have exactly one safe outcome on any error -- return
-`None`, the same rejection every other branch of this function already
-returns for a hostile or malformed path. Broad catching is usually
-the wrong call because it can hide a bug the caller needed to see; here
-there is no caller-visible invariant left to hide, only a security
-boundary whose only two exits are "resolved and contained" or "rejected,"
-and every exception belongs on the rejected side.
-
-**TOCTOU between this resolve and a later `open()` is accepted, not
-closed.** A path component can be replaced by a symlink after this function
-returns and before a caller opens the file it named. Closing that window
-needs `openat2(RESOLVE_BENEATH)` or per-component `O_NOFOLLOW`, neither of
-which is portable across the supported 3.10-3.13 range. It is accepted
-because the threat model this boundary answers is a hostile *server*
-directing which files get read, and a co-worker's *committed* declaration
-naming a path it should not -- not a concurrent local attacker who already
-holds write access to the checkout and could simply commit the secret
-directly instead of racing this check.
-
-**What this does and does not protect against, stated plainly.** This
-function protects against a declaration naming a path outside the test
-repository. It does NOT protect against a colleague with commit rights
-editing the committed `vantage-metadata.json` itself to name a sensitive
-file that genuinely lives inside `rootpath` -- that is a code-review
-problem, not a filesystem problem, and it is what ADR-0017's C4 (bounded,
-drop-whole, never truncated) and C5 (the read surface is auditable on the
-run afterwards) answer, not this function.
+Not defended against: a path component swapped for a symlink between the
+resolve and the later `open()` (closing that race portably is not possible
+on 3.10-3.13, and winning it needs write access to the checkout, which could
+commit the secret directly), and a committer declaring a sensitive file that
+genuinely lives inside the repository -- that is a code-review matter, and
+every file the plugin reads is recorded on the run under its declared path.
+A declared path the server would drop for its shape, together with its keys
+-- absolute, holding a `..` component, or read differently on Windows --
+refuses the whole declaration with one warning instead, so no declared key
+ever vanishes without a word.
 """
 
 from __future__ import annotations
 
 import json
+import stat
+from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePath
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
 
-from pytest_vantage.boundary import _warn
-from pytest_vantage.budget import _encoded_cost
+from pytest_vantage.boundary import warn
+from pytest_vantage.budget import encoded_cost
 
 DECLARATION_FILENAME = "vantage-metadata.json"
-"""The declaration's one fixed, well-known name, at the test repository
-root (design.md D92). Formerly a private constant of the same name and
-value in `recorder.py`; that copy is gone once this module is wired in
-(design.md D99's presence check and this module's own read now agree on
-one spelling, by construction rather than by two literals kept in step)."""
+"""The declaration's fixed name, at the test repository root."""
+
+MAX_DECLARATION_BYTES = 1024 * 1024
+"""Largest declaration read, in raw bytes: far more than any declaration
+whose paths and keys fit `MAX_METADATA_SECTION_BYTES` needs, and small
+enough that a huge file cannot exhaust memory at session start."""
 
 MAX_DECLARED_FILES = 16
-"""design.md D94: a bound on the declaration's *read surface* -- the
-`stat`+`open` syscall count this design commits to at session start
-(D99) -- independent of the byte budget a later slice adds, which already
-bounds bytes."""
+"""Bound on the number of declared files, and so on the `stat`/`open` calls
+made at session start, independent of the byte budgets below."""
 
 MAX_DECLARED_PATH_CHARS = 1024
-"""design.md D94: `MAX_IDENTITY_CHARS` -- a path-shaped, client-supplied
-value, the same bound D89 already argued for one of these."""
+"""Bound on a declared path's length: the same value as the server's
+`MAX_IDENTITY_CHARS`, its bound on a client-chosen, path-shaped test
+identity."""
 
 MAX_METADATA_ENTRIES = 200
-"""Mirrors `vantage.core.domain.metadata.MAX_METADATA_ENTRIES` across the
-RQ-24 boundary this plugin cannot import across directly -- the same shape
-`pytest_vantage.budget._REPORT_BYTES_CAP` already uses to mirror
-`vantage.service.errors.MAX_REPORT_BYTES`. Pinned by a test-only
-cross-package import (`test_metadata_declaration.py`), never trusted to
-stay in sync by convention alone."""
+"""Mirrors `vantage.core.domain.metadata.MAX_METADATA_ENTRIES`, which the
+plugin cannot import because it does not depend on the `vantage`
+distribution. `test_server_contract.py` pins the two values equal."""
 
 MAX_DECLARED_KEY_CHARS = 1024
-"""Mirrors `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS` across the
-same RQ-24 boundary `MAX_METADATA_ENTRIES` above already mirrors, for the
-same reason: a declared key is refused here, in `read_declaration`, before
-any `run_metadata` row exists, so no server-side status class or schema
-change is needed for it (`sdd-verify` WARNING-1) -- the whole declaration
-is refused outright, exactly like `MAX_DECLARED_PATH_CHARS` beside it.
-Pinned by the same test-only cross-package import as `MAX_METADATA_ENTRIES`
-(`test_metadata_declaration.py`), never trusted to stay in sync by
-convention alone."""
+"""Mirrors `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS`, pinned the
+same way. An over-long key refuses the whole declaration here, like an
+over-long path, and a session key past it is ignored with a warning."""
+
+MAX_METADATA_VALUE_BYTES = 1024
+"""Mirrors `vantage.core.domain.metadata.MAX_METADATA_VALUE_BYTES`, pinned
+the same way. A value the session reports past it is sent as
+`value_too_large` with no value, as the server records an over-long value
+read from a file."""
+
+MAX_KEY_NAME_CHARS = 256
+"""Bound on a declared key's display name."""
 
 MAX_DECLARED_FILE_BYTES = 8 * 1024
-"""design.md D94: the largest a declared file may be such that four of
-them at full size still fit `MAX_METADATA_SECTION_BYTES` -- keeps the two
-bounds coherent rather than one admitting what the other always rejects."""
+"""Largest declared file captured, in raw bytes. A larger file is dropped
+whole as `too_large`, never truncated -- and so is a file within it whose
+encoded content could not fit the section even with no other file
+captured (a control character costs six bytes on the wire)."""
 
 MAX_METADATA_SECTION_BYTES = 32 * 1024
-"""design.md D94: `4 * MAX_DECLARED_FILE_BYTES`, and `MAX_REPORT_BYTES //
-32`. Spent on JSON-encoded bytes, via `budget._encoded_cost`'s exact rule
-(no `ensure_ascii=False` -- see that function's own docstring for why)."""
+"""Budget for the declaration's part of the wire `metadata` section: 1/32
+of the server's 1 MiB report cap. Spent on JSON-encoded bytes via
+`budget.encoded_cost` (see there for why `ensure_ascii` stays default).
+Every declared key's entry and every declared file's entry -- its path,
+keys and status -- is charged first, because each reaches the wire
+whatever happens to the file; content is charged from what is left, so the
+section holds fewer than four files of `MAX_DECLARED_FILE_BYTES` raw bytes
+each. The values the session reports, sent in the last report only, are
+bounded separately (`budget.MAX_METADATA_VALUES_BYTES`)."""
 
 _ADMISSIBLE_FORMATS = frozenset({"json", "yaml"})
-"""design.md D92: `format` is required and explicit, never inferred from
-the file extension. `"toml"` is a one-value widening of this set later,
-with no other change."""
+"""`format` is required and explicit, never inferred from the file
+extension."""
+
+_KEY_ENTRY_FIELDS = frozenset({"name"})
+"""The fields a `keys` entry may carry. Anything else refuses the
+declaration, as a misspelt `name` would otherwise vanish without a word."""
 
 
 @dataclass(frozen=True, slots=True)
 class DeclaredFile:
-    """One validated entry from `vantage-metadata.json` (design.md D92)."""
+    """One validated `files` entry from `vantage-metadata.json`."""
 
     path: str
     format: str
@@ -154,11 +118,27 @@ class DeclaredFile:
 
 
 @dataclass(frozen=True, slots=True)
+class DeclaredKey:
+    """One validated `keys` entry: a key the session is expected to report,
+    and the name to display it under."""
+
+    key: str
+    name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Declaration:
+    """A validated `vantage-metadata.json`."""
+
+    keys: tuple[DeclaredKey, ...] = ()
+    files: tuple[DeclaredFile, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class CapturedFile:
-    """One entry of the wire `metadata.files` array (design.md D96):
-    `content` is `None` whenever `status` is not `"captured"` -- the same
-    "declared-but-dropped is a row, not an absence" contract D95 states
-    for the storage side, kept on the wire too."""
+    """One entry of the wire `metadata.files` array. `content` is `None`
+    whenever `status` is not `"captured"`: a dropped file still gets an
+    entry, never an absence."""
 
     path: str
     format: str
@@ -169,81 +149,334 @@ class CapturedFile:
 
 @dataclass(frozen=True, slots=True)
 class MetadataSection:
-    """The wire `metadata` section (design.md D96): the declaration's own
-    name, and the outcome recorded for every file it named."""
+    """What every report says about the declaration: its name, the keys it
+    declares, and the outcome for every file it named.
+
+    `files` is empty when the files were not read; `unread_file_keys` then
+    holds the keys they declare, which the server never gets a row for but
+    which still count as declared.
+    """
 
     declaration: str
     files: tuple[CapturedFile, ...]
+    keys: tuple[DeclaredKey, ...] = ()
+    unread_file_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SessionValue:
+    """One entry of the wire `metadata.values` array: a key the session
+    reported, or a declared key nothing reported (`absent`). `value` is
+    `None` whenever `status` is not `"captured"`."""
+
+    key: str
+    value: str | None
+    status: str
+
+
+SESSION_VALUE_STATUSES = ("captured", "absent", "value_too_large")
+"""Every status a `SessionValue` can carry."""
+
+
+def session_value(key: str, text: str | None) -> SessionValue:
+    """`text` as the wire carries it: no value is `absent`, and one past
+    `MAX_METADATA_VALUE_BYTES` is `value_too_large`, sent without it.
+
+    Measured with `surrogatepass`, as the budget measures text: a lone
+    surrogate costs the three bytes the server's replacement character
+    will.
+    """
+    if text is None:
+        return SessionValue(key, None, "absent")
+    if len(text.encode("utf-8", errors="surrogatepass")) > MAX_METADATA_VALUE_BYTES:
+        return SessionValue(key, None, "value_too_large")
+    return SessionValue(key, text, "captured")
+
+
+_FILE_STATUSES = (
+    "captured",
+    "not_found",
+    "path_rejected",
+    "unreadable",
+    "too_large",
+    "not_text",
+    "over_budget",
+)
+"""Every status `capture_metadata` can give a declared file."""
+
+
+def _section_document(
+    declaration: str | None,
+    keys: dict[str, str | None],
+    files: Sequence[CapturedFile],
+    values: Sequence[SessionValue],
+) -> dict[str, object]:
+    """The wire `metadata` section. `keys` and `values` are left out when
+    empty: the server defaults both, so a report that uses neither is also
+    accepted by a server that predates them."""
+    document: dict[str, object] = {"declaration": declaration}
+    if keys:
+        document["keys"] = {key: {"name": name} for key, name in keys.items()}
+    document["files"] = [
+        {
+            "path": entry.path,
+            "format": entry.format,
+            "status": entry.status,
+            "keys": list(entry.keys),
+            "content": entry.content,
+        }
+        for entry in files
+    ]
+    if values:
+        document["values"] = [
+            {"key": entry.key, "value": entry.value, "status": entry.status} for entry in values
+        ]
+    return document
+
+
+def wire_section(
+    section: MetadataSection | None,
+    values: Sequence[SessionValue] = (),
+    named_keys: Sequence[str] = (),
+) -> dict[str, object] | None:
+    """The `metadata` section a report carries, or `None` when it would say
+    nothing: no declared key, no file read and no value.
+
+    `named_keys` are keys of files that were not read which the session
+    reported a value for. They are declared in `keys`, with no name, because
+    the server marks a value declared only when its own report declares the
+    key, and the unread files are not in the report to declare it.
+    """
+    if section is None:
+        return _section_document(None, {}, (), values) if values else None
+    if not (section.keys or section.files or values):
+        return None
+    keys = {entry.key: entry.name for entry in section.keys}
+    keys.update(dict.fromkeys(named_keys))
+    return _section_document(section.declaration, keys, section.files, values)
+
+
+def _fixed_section_cost(declaration: Declaration) -> int:
+    """What the declaration's wire section costs before any content: every
+    declared key, and one entry per declared file with no content and the
+    longest status it could end with, so the charge never depends on how
+    the reads turn out."""
+    longest_status = max(_FILE_STATUSES, key=len)
+    placeholders = [
+        CapturedFile(
+            path=declared.path,
+            format=declared.format,
+            status=longest_status,
+            keys=declared.keys,
+            content=None,
+        )
+        for declared in declaration.files
+    ]
+    keys = {entry.key: entry.name for entry in declaration.keys}
+    return encoded_cost(_section_document(DECLARATION_FILENAME, keys, placeholders, ()))
+
+
+_IGNORED = "the declaration is ignored"
+"""How every refusal ends: nothing from a refused declaration is used, its
+keys are not declared and its files are not read."""
 
 
 def _reject(config: pytest.Config, message: str) -> None:
-    """Warn once, through `_warn` -- every one of `read_declaration`'s
-    rejection conditions is the plugin's own file, so it may be refused
-    outright (design.md D92). `-> None` is deliberate; callers use
-    `_reject(...); return None` as two statements, never `return
-    _reject(...)`, so mypy's `func-returns-value` check does not treat a
-    `None`-returning helper's result as a value being threaded through.
+    """Warn once, through `warn`, that the declaration is refused. Callers
+    follow it with `return None` rather than `return _reject(...)`, which
+    mypy flags as `func-returns-value`.
     """
-    _warn(config, f"vantage: {message}")
+    warn(config, f"vantage: {message}, {_IGNORED}")
 
 
-def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFile, ...] | None:
-    """Parse and validate `vantage-metadata.json` at `rootpath` (design.md
-    D92).
+def _read_declaration_bytes(
+    config: pytest.Config, rootpath: Path, *, warn_if_missing: bool
+) -> bytes | None:
+    """The declaration's bytes, or `None` after at most one warning.
 
-    The declaration is the plugin's own file, so -- unlike a *declared
-    document*, which never warns and never fails ingestion (D97) -- it may
-    be refused outright: refusing captures nothing, exactly what the
-    flag-absent path already does. Every rejection below warns **exactly
-    once**, through `_warn`, and returns `None`. A valid declaration
-    returns its ordered file list, which may be empty.
-
-    Never opens or reads any file the declaration *names* -- only the
-    declaration itself. Reading the files it names is `capture_metadata`'s
-    job, added in a later slice.
+    Read only if it is a regular file, and at most `MAX_DECLARATION_BYTES`
+    of it: opening a FIFO would hang session start, and a device such as
+    `/dev/zero` would be read until memory runs out. The type is checked
+    before the open, the same trade the declared files make: swapping
+    something else in between needs write access to the checkout.
     """
     declaration_path = rootpath / DECLARATION_FILENAME
     try:
-        raw = declaration_path.read_bytes()
-    except OSError:
-        _reject(
-            config, f"no {DECLARATION_FILENAME} found at {rootpath}, metadata will not be captured"
-        )
+        if not stat.S_ISREG(declaration_path.stat().st_mode):
+            _reject(config, f"{DECLARATION_FILENAME} at {rootpath} is not a regular file")
+            return None
+        with declaration_path.open("rb") as handle:
+            raw = handle.read(MAX_DECLARATION_BYTES + 1)
+    except FileNotFoundError:
+        if warn_if_missing:
+            warn(
+                config,
+                f"vantage: no {DECLARATION_FILENAME} found at {rootpath}, "
+                "no declared files will be read",
+            )
         return None
-    try:
-        text = raw.decode("utf-8")
-        document = json.loads(text)
-    except (UnicodeDecodeError, RecursionError, json.JSONDecodeError):
-        _reject(config, f"{DECLARATION_FILENAME} is not valid JSON, metadata will not be captured")
-        return None
-    if not isinstance(document, dict):
-        _reject(
-            config, f"{DECLARATION_FILENAME} must be a JSON object, metadata will not be captured"
-        )
-        return None
-    if document.get("version") != 1:
+    except OSError as exc:
         _reject(
             config,
-            f"{DECLARATION_FILENAME} declares no supported version, metadata will not be captured",
+            f"cannot read {DECLARATION_FILENAME} at {rootpath} "
+            f"({exc.strerror or type(exc).__name__})",
         )
         return None
-    files = document.get("files")
+    if len(raw) > MAX_DECLARATION_BYTES:
+        _reject(config, f"{DECLARATION_FILENAME} is larger than {MAX_DECLARATION_BYTES} bytes")
+        return None
+    return raw
+
+
+class _JsonObject(dict[str, object]):
+    """A decoded JSON object that remembers the names it held more than
+    once, which a plain `dict` silently collapses to the last."""
+
+    repeated: tuple[str, ...] = ()
+
+
+def _json_object(pairs: list[tuple[str, object]]) -> _JsonObject:
+    document = _JsonObject(pairs)
+    if len(document) < len(pairs):
+        seen: set[str] = set()
+        repeated: list[str] = []
+        for name, _value in pairs:
+            if name in seen:
+                repeated.append(name)
+            seen.add(name)
+        document.repeated = tuple(repeated)
+    return document
+
+
+def read_declaration(
+    config: pytest.Config, rootpath: Path, *, warn_if_missing: bool = True
+) -> Declaration | None:
+    """Parse and validate `vantage-metadata.json` at `rootpath`.
+
+    The declaration is the plugin's own configuration, so any problem with
+    it refuses the whole declaration: warn exactly once and return `None`,
+    as if there were none. (Problems with a declared *file* never warn;
+    they become that file's status.) A missing declaration warns only when
+    `warn_if_missing`, since declaring anything is optional unless the
+    files it names were asked for. A valid declaration returns its keys and
+    files in order, possibly none.
+
+    Reads only the declaration itself, never the files it names.
+    """
+    raw = _read_declaration_bytes(config, rootpath, warn_if_missing=warn_if_missing)
+    if raw is None:
+        return None
+    try:
+        # `utf-8-sig` drops one leading BOM, which several Windows editors
+        # write and `json.loads` refuses in a `str`.
+        document = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=_json_object)
+    except (RecursionError, ValueError):
+        # `ValueError` covers `UnicodeDecodeError`, `JSONDecodeError` and an
+        # integer literal past the interpreter's digit limit, which `json`
+        # raises as a plain `ValueError`.
+        _reject(config, f"{DECLARATION_FILENAME} is not valid JSON")
+        return None
+    if not isinstance(document, dict):
+        _reject(config, f"{DECLARATION_FILENAME} must be a JSON object")
+        return None
+    version = document.get("version")
+    # By type as well as value: `true` and `1.0` both compare equal to 1.
+    if type(version) is not int or version != 1:
+        _reject(config, f"{DECLARATION_FILENAME} declares no supported version")
+        return None
+    keys = _read_declared_keys(config, document.get("keys", {}))
+    if keys is None:
+        return None
+    files = _read_declared_files(config, document.get("files", []))
+    if files is None:
+        return None
+    declared_keys = {entry.key for entry in keys}.union(*(declared.keys for declared in files))
+    if len(declared_keys) > MAX_METADATA_ENTRIES:
+        _reject(
+            config,
+            f"{DECLARATION_FILENAME} declares more than {MAX_METADATA_ENTRIES} keys in total",
+        )
+        return None
+    declaration = Declaration(keys=keys, files=files)
+    # Within every per-item bound, 16 paths and 200 keys can still reach
+    # hundreds of kilobytes on the wire, where each entry goes whatever
+    # happens to its file.
+    if _fixed_section_cost(declaration) > MAX_METADATA_SECTION_BYTES:
+        _reject(
+            config,
+            f"{DECLARATION_FILENAME}'s declared paths and keys exceed the "
+            f"{MAX_METADATA_SECTION_BYTES}-byte metadata budget",
+        )
+        return None
+    return declaration
+
+
+def _read_declared_keys(config: pytest.Config, keys: object) -> tuple[DeclaredKey, ...] | None:
+    """The `keys` section, in order, or `None` after one warning."""
+    if not isinstance(keys, dict):
+        _reject(config, f'{DECLARATION_FILENAME}\'s "keys" must be an object')
+        return None
+    repeated = getattr(keys, "repeated", ())
+    if repeated:
+        _reject(config, f"{DECLARATION_FILENAME} declares the key {repeated[0]!r} more than once")
+        return None
+    # Checked before the loop, so a huge section is refused without
+    # validating every entry first.
+    if len(keys) > MAX_METADATA_ENTRIES:
+        _reject(
+            config,
+            f"{DECLARATION_FILENAME} declares more than {MAX_METADATA_ENTRIES} keys in total",
+        )
+        return None
+    declared: list[DeclaredKey] = []
+    for key, entry in keys.items():
+        if not key or len(key) > MAX_DECLARED_KEY_CHARS:
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares an empty key or one longer than "
+                f"{MAX_DECLARED_KEY_CHARS} characters",
+            )
+            return None
+        if not isinstance(entry, dict):
+            _reject(
+                config, f"{DECLARATION_FILENAME} declares the key {key!r} with a malformed entry"
+            )
+            return None
+        unknown = sorted(set(entry) - _KEY_ENTRY_FIELDS)
+        if unknown:
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares the key {key!r} with the unknown field "
+                f"{unknown[0]!r}",
+            )
+            return None
+        name = entry.get("name")
+        if name is not None and (not isinstance(name, str) or len(name) > MAX_KEY_NAME_CHARS):
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} names the key {key!r} with something other than "
+                f"text of at most {MAX_KEY_NAME_CHARS} characters",
+            )
+            return None
+        declared.append(DeclaredKey(key=key, name=name))
+    return tuple(declared)
+
+
+def _read_declared_files(config: pytest.Config, files: object) -> tuple[DeclaredFile, ...] | None:
+    """The `files` section, in order, or `None` after one warning."""
     if not isinstance(files, list) or len(files) > MAX_DECLARED_FILES:
         _reject(
             config,
             f'{DECLARATION_FILENAME}\'s "files" must be a list of at most '
-            f"{MAX_DECLARED_FILES} entries, metadata will not be captured",
+            f"{MAX_DECLARED_FILES} entries",
         )
         return None
     declared: list[DeclaredFile] = []
     seen_keys: set[str] = set()
+    seen_paths: set[PurePath] = set()
     for entry in files:
         if not isinstance(entry, dict):
-            _reject(
-                config,
-                f"{DECLARATION_FILENAME} declares a malformed file entry, "
-                "metadata will not be captured",
-            )
+            _reject(config, f"{DECLARATION_FILENAME} declares a malformed file entry")
             return None
         path = entry.get("path")
         fmt = entry.get("format")
@@ -254,77 +487,88 @@ def read_declaration(config: pytest.Config, rootpath: Path) -> tuple[DeclaredFil
             or not isinstance(keys, list)
             or not all(isinstance(key, str) for key in keys)
         ):
-            _reject(
-                config,
-                f"{DECLARATION_FILENAME} declares a malformed file entry, "
-                "metadata will not be captured",
-            )
+            _reject(config, f"{DECLARATION_FILENAME} declares a malformed file entry")
             return None
         if fmt not in _ADMISSIBLE_FORMATS:
-            _reject(
-                config,
-                f"{DECLARATION_FILENAME} declares an unsupported format {fmt!r}, "
-                "metadata will not be captured",
-            )
+            _reject(config, f"{DECLARATION_FILENAME} declares an unsupported format {fmt!r}")
             return None
         if len(path) > MAX_DECLARED_PATH_CHARS:
             _reject(
                 config,
                 f"{DECLARATION_FILENAME} declares a path longer than "
-                f"{MAX_DECLARED_PATH_CHARS} characters, metadata will not be captured",
+                f"{MAX_DECLARED_PATH_CHARS} characters",
             )
             return None
         if "\x00" in path:
-            # ADR-0017 C4: rejected outright, at the declaration boundary,
-            # rather than left to crash `resolve_declared_path` -- a NUL
-            # byte makes `Path.resolve()` raise `ValueError` on every
-            # supported interpreter (sdd-verify CRITICAL-1). Refusing it
-            # here, loudly, is the "declaration is the plugin's own file"
-            # branch this module's docstring already claims for every
-            # other malformed entry; silently dropping it would leave the
-            # plugin dependent on `resolve_declared_path`'s own defence
-            # alone to avoid a crash.
+            # A NUL byte makes `Path.resolve()` raise `ValueError`. Refuse it
+            # loudly here, like any other malformed entry, rather than rely
+            # on `resolve_declared_path` alone to survive it.
+            _reject(config, f"{DECLARATION_FILENAME} declares a path containing a NUL character")
+            return None
+        if "\\" in path or PureWindowsPath(path).drive:
+            # The server cannot tell which platform declared a path, so it
+            # drops any path read differently on Windows: a backslash is a
+            # separator there and a name character here, and `C:` or
+            # `//host/share` names a drive. Refused here, loudly, rather
+            # than recorded and then silently dropped with its keys.
             _reject(
                 config,
-                f"{DECLARATION_FILENAME} declares a path containing a NUL character, "
-                "metadata will not be captured",
+                f"{DECLARATION_FILENAME} declares the path {path!r} with a backslash or a "
+                "Windows drive",
             )
             return None
+        if _leaves_the_root(path):
+            # The server drops these too, keys and all; `resolve_declared_path`
+            # would refuse to read them anyway.
+            _reject(
+                config,
+                f"{DECLARATION_FILENAME} declares the path {path!r}, which is absolute or "
+                "holds a '..' component",
+            )
+            return None
+        # The server keeps one file entry per path, so a repeat would lose
+        # its status there. Compared as paths, so `./a.json` repeats `a.json`.
+        if PurePath(path) in seen_paths:
+            _reject(config, f"{DECLARATION_FILENAME} declares the path {path!r} more than once")
+            return None
+        seen_paths.add(PurePath(path))
         for key in keys:
             if key in seen_keys:
-                _reject(
-                    config,
-                    f"{DECLARATION_FILENAME} declares the key {key!r} more than once, "
-                    "metadata will not be captured",
-                )
+                _reject(config, f"{DECLARATION_FILENAME} declares the key {key!r} more than once")
                 return None
             if len(key) > MAX_DECLARED_KEY_CHARS:
                 _reject(
                     config,
                     f"{DECLARATION_FILENAME} declares a key longer than "
-                    f"{MAX_DECLARED_KEY_CHARS} characters, metadata will not be captured",
+                    f"{MAX_DECLARED_KEY_CHARS} characters",
                 )
                 return None
             seen_keys.add(key)
         if len(seen_keys) > MAX_METADATA_ENTRIES:
             _reject(
                 config,
-                f"{DECLARATION_FILENAME} declares more than {MAX_METADATA_ENTRIES} keys "
-                "in total, metadata will not be captured",
+                f"{DECLARATION_FILENAME} declares more than {MAX_METADATA_ENTRIES} keys in total",
             )
             return None
         declared.append(DeclaredFile(path=path, format=fmt, keys=tuple(keys)))
     return tuple(declared)
 
 
+def _leaves_the_root(path: str) -> bool:
+    """Whether `path`, read as a POSIX or as a Windows path, is absolute or
+    holds a `..` component: the shape check the server applies, which cannot
+    know the declaring platform."""
+    return any(
+        candidate.is_absolute() or bool(candidate.anchor) or ".." in candidate.parts
+        for candidate in (PurePosixPath(path), PureWindowsPath(path))
+    )
+
+
 def _rejected_file_status(rootpath: Path, declared_path: str) -> str:
-    """Best-effort, non-security label for *why* `resolve_declared_path`
-    rejected `declared_path` (design.md D97 classes 1 and 2): `not_found`
-    when nothing exists at that path at all, `path_rejected` for every
-    other reason (absolute, `..`, escape, not a regular file). Advisory
-    only -- the security decision was already made by `resolve_declared_
-    path` returning `None`; this only recovers a friendlier reason for the
-    wire and the reader's three-state contract (D95).
+    """Best-effort label for why `resolve_declared_path` rejected
+    `declared_path`: `not_found` when nothing exists there, `path_rejected`
+    for anything else (absolute, `..`, escape, not a regular file). Advisory
+    only; the security decision was already made.
     """
     candidate = PurePath(declared_path)
     if candidate.is_absolute() or candidate.drive or candidate.anchor:
@@ -339,9 +583,9 @@ def _rejected_file_status(rootpath: Path, declared_path: str) -> str:
 
 
 def _read_declared_file(rootpath: Path, declared_path: str) -> tuple[str, str | None]:
-    """Read one declared file, bounded to `MAX_DECLARED_FILE_BYTES` bytes
-    (design.md D97 classes 1-5). Never opens a path `resolve_declared_path`
-    rejects, and never raises: every failure returns a status and `None`.
+    """Read one declared file, bounded to `MAX_DECLARED_FILE_BYTES` bytes.
+    Never opens a path `resolve_declared_path` rejects, and never raises:
+    every failure returns a status and `None`.
     """
     target = resolve_declared_path(rootpath, declared_path)
     if target is None:
@@ -360,44 +604,45 @@ def _read_declared_file(rootpath: Path, declared_path: str) -> tuple[str, str | 
     return "captured", content
 
 
-def capture_metadata(config: pytest.Config, rootpath: Path) -> MetadataSection | None:
-    """Read, bound and ship every file `vantage-metadata.json` declares
-    (design.md D93-D97, D94's section budget). `None` only when the
-    declaration itself could not be read or validated -- `read_declaration`
-    has already warned exactly once for that case. Otherwise always a
-    `MetadataSection`, even when every file it names ends up dropped:
-    D95's "every declared thing gets a row" contract holds whether or not
-    capture succeeded.
+def capture_metadata(
+    config: pytest.Config, rootpath: Path, *, read_files: bool = True
+) -> MetadataSection | None:
+    """Read `vantage-metadata.json` and, if `read_files`, read and bound
+    every file it declares.
 
-    The section budget is spent in declaration order (D97 class 6): once
-    one file's encoded cost does not fit the remainder, every file from
-    that point on -- not just the one that overflowed -- is dropped whole
-    and marked `over_budget`, without being opened.
+    `None` when there is no declaration, or it is refused
+    (`read_declaration` has already warned). Otherwise always a
+    `MetadataSection` with the declared keys and, when the files were read,
+    one entry per declared file, even when every file was dropped. When
+    they were not, no file is opened and their keys are only listed.
+
+    Every entry is charged to `MAX_METADATA_SECTION_BYTES` up front, and
+    content from what is left, in declaration order. A file whose content
+    does not fit the remainder is `over_budget` on its own: every file is
+    read, and a later one that still fits is captured. A file whose content
+    could not fit even with no other file captured is `too_large`.
     """
-    declared_files = read_declaration(config, rootpath)
-    if declared_files is None:
+    declaration = read_declaration(config, rootpath, warn_if_missing=read_files)
+    if declaration is None:
         return None
-    remaining_budget = MAX_METADATA_SECTION_BYTES
-    budget_exhausted = False
+    if not read_files:
+        return MetadataSection(
+            declaration=DECLARATION_FILENAME,
+            files=(),
+            keys=declaration.keys,
+            unread_file_keys=tuple(key for declared in declaration.files for key in declared.keys),
+        )
+    content_budget = MAX_METADATA_SECTION_BYTES - _fixed_section_cost(declaration)
+    remaining_budget = content_budget
     captured: list[CapturedFile] = []
-    for declared in declared_files:
-        if budget_exhausted:
-            captured.append(
-                CapturedFile(
-                    path=declared.path,
-                    format=declared.format,
-                    status="over_budget",
-                    keys=declared.keys,
-                    content=None,
-                )
-            )
-            continue
+    for declared in declaration.files:
         status, content = _read_declared_file(rootpath, declared.path)
         if status == "captured" and content is not None:
-            cost = _encoded_cost(content)
-            if cost > remaining_budget:
+            cost = encoded_cost(content)
+            if cost > content_budget:
+                status, content = "too_large", None
+            elif cost > remaining_budget:
                 status, content = "over_budget", None
-                budget_exhausted = True
             else:
                 remaining_budget -= cost
         captured.append(
@@ -409,19 +654,20 @@ def capture_metadata(config: pytest.Config, rootpath: Path) -> MetadataSection |
                 content=content,
             )
         )
-    return MetadataSection(declaration=DECLARATION_FILENAME, files=tuple(captured))
+    return MetadataSection(
+        declaration=DECLARATION_FILENAME, files=tuple(captured), keys=declaration.keys
+    )
 
 
 def resolve_declared_path(rootpath: Path, declared: str) -> Path | None:
     """Return the resolved target for `declared`, or `None` if rejected.
 
-    Rejected, never clamped (ADR-0017 C4): an absolute path, a path
-    containing a `..` component, a path that does not resolve strictly
-    under `rootpath` once every symlink in either side is followed, a path
-    equal to `rootpath` itself, or anything that is not a regular file once
-    resolved -- a directory, a socket, a device node, a FIFO. None of those
-    is ever opened here: every check below is a `stat` (`is_file()`), never
-    an `open()`, so a FIFO with no reader cannot block this function.
+    Rejected, never clamped: an absolute path, a path containing a `..`
+    component, a path that does not resolve strictly under `rootpath` once
+    every symlink on either side is followed, `rootpath` itself, or anything
+    that is not a regular file once resolved (a directory, socket, device
+    node or FIFO). Nothing is opened here, only `stat`ed (`is_file()`), so a
+    FIFO cannot block this function.
     """
     candidate = PurePath(declared)
     if candidate.is_absolute() or candidate.drive or candidate.anchor:
@@ -436,25 +682,33 @@ def resolve_declared_path(rootpath: Path, declared: str) -> Path | None:
         if target == root or not target.is_file():
             return None
     except Exception:
-        # Fail closed on ANY exception a path operation can raise, not on
-        # an enumerated list -- see the module docstring for why a tuple
-        # of exception types was already proven incomplete once.
+        # Fail closed on any exception, not an enumerated list -- see the
+        # module docstring.
         return None
     return target
 
 
 __all__ = [
     "DECLARATION_FILENAME",
+    "MAX_DECLARATION_BYTES",
     "MAX_DECLARED_FILE_BYTES",
     "MAX_DECLARED_FILES",
     "MAX_DECLARED_KEY_CHARS",
     "MAX_DECLARED_PATH_CHARS",
+    "MAX_KEY_NAME_CHARS",
     "MAX_METADATA_ENTRIES",
     "MAX_METADATA_SECTION_BYTES",
+    "MAX_METADATA_VALUE_BYTES",
+    "SESSION_VALUE_STATUSES",
     "CapturedFile",
+    "Declaration",
     "DeclaredFile",
+    "DeclaredKey",
     "MetadataSection",
+    "SessionValue",
     "capture_metadata",
     "read_declaration",
     "resolve_declared_path",
+    "session_value",
+    "wire_section",
 ]

@@ -1,42 +1,48 @@
-"""The storage port: what any `ExecutionStore` adapter must implement (RQ-30).
-
-The read types below (`Page`, `RunListEntry`, `RunDetail`, `HistoryEntry`)
-and the pagination constants landed in Phase 1 of the read-api change
-(design.md D57, D58, D61). `list_runs` and `get_run_detail` landed in Phase
-2, paired with both adapters implementing them in the same commit. Phase 3
-adds `list_results` and `list_history` the same way -- all four read methods
-are now declared, each paired with both adapters landing in this commit so
-no adapter is ever mid-slice out of structural conformance under
-`mypy --strict`.
-"""
+"""The storage port: the `ExecutionStore` protocol every adapter implements,
+and the types it reads and writes."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.execution import Execution
-from vantage.core.domain.projection import FailureProjection, VcsProjection
+from vantage.core.domain.metadata import (
+    FILE_STATUSES,
+    KEY_STATUSES,
+    METADATA_CONTENT_TYPES,
+    METADATA_SOURCES,
+    SESSION_KEY_STATUSES,
+)
+from vantage.core.domain.projection import (
+    FailureProjection,
+    VcsProjection,
+    project_failure,
+    project_vcs,
+)
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 
 MAX_PAGE_ITEMS = 200
-"""The hard cap on items in one page (design.md D61) -- clamped in the
-adapter, never rejected; a request for more is satisfied up to this many."""
+"""The hard cap on items in one page -- clamped in the adapter, never
+rejected; a request for more is satisfied up to this many."""
 
 MAX_IDENTITY_CHARS = 1024
-"""The bound on a client-chosen test identity value (design.md D54) -- a
-1,024-character identity percent-encodes to at most ~3 KiB, comfortably
-inside the common 8 KiB request-line buffer."""
+"""The length of a short, client-chosen, path-shaped string. Nothing is
+refused against this constant itself: a stored node id may be longer --
+pytest never shortens a parametrize id -- and must stay readable by its
+exact value. It is the value `SECTION_PREFIX_MAX_CHARS`,
+`MAX_METADATA_KEY_CHARS` and `MAX_METADATA_VALUE_BYTES` take, and the
+plugin's bound on a declared path."""
 
 T = TypeVar("T")
 
 
 @dataclass(frozen=True)
 class Page(Generic[T]):
-    """A bounded page of items (design.md D58). No `total` -- no scenario
-    asks for one, and a total would need a `COUNT(*)` on every page.
+    """A bounded page of items. No `total` -- nothing needs one, and it
+    would cost a `COUNT(*)` on every page.
 
     No `slots=True`: dataclass slot-recreation combined with `Generic` is a
     hazard on this project's Python 3.10 floor, and this envelope gains
@@ -49,7 +55,7 @@ class Page(Generic[T]):
 
 @dataclass(frozen=True, slots=True)
 class RunListEntry:
-    """One row of `list_runs` (design.md D57, D58, D59).
+    """One row of `list_runs`.
 
     `execution.vcs` is always `None` here -- the lean VCS data rides beside
     it in `vcs`, a `VcsProjection`, so there is exactly one place a list
@@ -62,10 +68,22 @@ class RunListEntry:
     last_contact_at: datetime | None
     vcs: VcsProjection | None
 
+    @classmethod
+    def from_execution(
+        cls, execution: Execution, *, last_contact_at: datetime | None
+    ) -> RunListEntry:
+        """The list entry for a stored run, its VCS context moved into the
+        lean projection."""
+        return cls(
+            execution=replace(execution, vcs=None),
+            last_contact_at=last_contact_at,
+            vcs=project_vcs(execution.vcs),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class RunDetail:
-    """The full-record return of `get_run_detail` (design.md D57, D58, D59).
+    """The full-record return of `get_run_detail`.
 
     `execution.vcs` is the whole, unbounded `VcsContext` -- the detail path
     keeps the full record reachable, which is the other half of the
@@ -78,9 +96,8 @@ class RunDetail:
 
 @dataclass(frozen=True, slots=True)
 class HistoryEntry:
-    """One row of `list_history` -- a test's execution in one run
-    (design.md D57, D58, D59, D60). `vcs` is a lean `VcsProjection`, the
-    same read-display bound `RunListEntry` applies."""
+    """One row of `list_history` -- a test's execution in one run. `vcs` is
+    a lean `VcsProjection`, the same display bound `RunListEntry` applies."""
 
     run_id: str
     started_at: datetime
@@ -90,18 +107,34 @@ class HistoryEntry:
     duration: float | None
     vcs: VcsProjection | None
 
+    @classmethod
+    def from_execution(
+        cls,
+        execution: Execution,
+        *,
+        last_contact_at: datetime | None,
+        outcome: str,
+        duration: float | None,
+    ) -> HistoryEntry:
+        """The history entry for one test's result in a stored run."""
+        return cls(
+            run_id=execution.identity.value,
+            started_at=execution.started_at,
+            finished_at=execution.finished_at,
+            last_contact_at=last_contact_at,
+            outcome=outcome,
+            duration=duration,
+            vcs=project_vcs(execution.vcs),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ResultListEntry:
-    """One row of `list_results` (design.md D76, D77).
+    """One row of `list_results`.
 
-    Every field the pre-existing `/runs/{id}/results` wire contract already
-    carried -- identity, outcome, every phase outcome/duration, `worker_id`
-    -- is unchanged. Only `failure` is new here, and it is a lean
-    `FailureProjection`, never the full `FailureEvidence`: this type has no
-    field for `traceback`, `failure_repr` or captured output at all, the
-    same structural exclusion `VcsProjection` gives `vcs_root` (D59) --
-    nothing to leak because the type never carries it in the first place.
+    `failure` is a lean `FailureProjection`, never the full
+    `FailureEvidence`: this type has no field for `traceback`,
+    `failure_repr` or captured output, so a list response cannot leak them.
     """
 
     identity: CaseIdentity
@@ -118,12 +151,32 @@ class ResultListEntry:
     worker_id: str | None
     failure: FailureProjection | None
 
+    @classmethod
+    def from_result(cls, result: Result) -> ResultListEntry:
+        """The list entry for a stored result: everything but the heavy
+        evidence, with the failure evidence projected."""
+        return cls(
+            identity=result.identity,
+            outcome=result.outcome,
+            duration=result.duration,
+            started_at=result.started_at,
+            finished_at=result.finished_at,
+            setup_outcome=result.setup_outcome,
+            call_outcome=result.call_outcome,
+            teardown_outcome=result.teardown_outcome,
+            setup_duration=result.setup_duration,
+            call_duration=result.call_duration,
+            teardown_duration=result.teardown_duration,
+            worker_id=result.worker_id,
+            failure=project_failure(result.failure),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class UserSetting:
     """One row of `user_setting`. `value` is JSON TEXT this layer never
     parses -- the namespace's own Pydantic model in `vantage.service` is the
-    only thing that knows its shape (design.md D83)."""
+    only thing that knows its shape."""
 
     namespace: str
     key: str
@@ -131,48 +184,105 @@ class UserSetting:
     updated_at: datetime
 
 
+def _check_vocabulary(field: str, value: str, vocabulary: frozenset[str]) -> None:
+    if value not in vocabulary:
+        raise ValueError(f"{field} must be one of {sorted(vocabulary)}, got {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class MetadataFile:
-    """One row of `run_metadata_file` (design.md D91, D98). `source_file` is
-    the DECLARED, rootpath-relative path exactly as written (P-1) -- never
-    the resolved one, which is absolute and can carry a username."""
+    """One row of `run_metadata_file`. `source_file` is the DECLARED,
+    rootpath-relative path exactly as written -- never the resolved one,
+    which is absolute and can carry a username.
+
+    `content_type` and `status` are checked against the vocabularies the
+    schema's CHECK constraints accept, so no adapter is ever handed a row
+    one of them would store and another refuse."""
 
     source_file: str
     content_type: str
     status: str
 
+    def __post_init__(self) -> None:
+        _check_vocabulary("content_type", self.content_type, METADATA_CONTENT_TYPES)
+        _check_vocabulary("status", self.status, FILE_STATUSES)
+
 
 @dataclass(frozen=True, slots=True)
 class MetadataEntry:
-    """One row of `run_metadata` (design.md D91, D98). `value` is `None`
-    whenever `status` is not `'captured'` -- a declared-but-uncaptured key
-    is a row, never a missing row (design.md D95)."""
+    """One row of `run_metadata`: one key's outcome in one run.
+
+    `source` is where the value came from: `'file'`, a key of the declared
+    file `source_file`, or `'session'`, a key the test session reported
+    itself, which has no `source_file`. `name` is the display name the run's
+    declaration gave the key, and `declared` whether the declaration named
+    the key at all -- a file's key always is. The defaults describe a file
+    key with no display name.
+
+    `value` is set exactly when `status` is `'captured'` -- a key without a
+    value is a row, never a missing row. `status` and `source` are checked
+    as `MetadataFile`'s fields are, and a session key's status against the
+    narrower `SESSION_KEY_STATUSES`, so no adapter is handed a row that
+    contradicts itself."""
 
     key: str
     value: str | None
-    source_file: str
+    source_file: str | None
     status: str
+    source: str = "file"
+    name: str | None = None
+    declared: bool = True
+
+    def __post_init__(self) -> None:
+        _check_vocabulary("status", self.status, KEY_STATUSES)
+        _check_vocabulary("source", self.source, METADATA_SOURCES)
+        if (self.status == "captured") != (self.value is not None):
+            raise ValueError("value must be set exactly when status is 'captured'")
+        if self.source == "file":
+            if self.source_file is None:
+                raise ValueError("a file key must name its source_file")
+            if not self.declared:
+                raise ValueError("a file key is always declared")
+        elif self.source_file is not None:
+            raise ValueError("a session key has no source_file")
+        else:
+            _check_vocabulary("status", self.status, SESSION_KEY_STATUSES)
 
 
 @dataclass(frozen=True, slots=True)
 class RunMetadata:
-    """The frozen aggregate `record_session` accepts (design.md D98): one
-    parameter rather than two collections, so a caller cannot pass entries
-    without their files -- a state D95's "every declared thing gets a row"
-    rule forbids and this shape makes unrepresentable."""
+    """The frozen aggregate `record_session` accepts: files and entries as
+    one parameter rather than two, so a caller passes them together."""
 
     files: tuple[MetadataFile, ...] = ()
     entries: tuple[MetadataEntry, ...] = ()
 
 
 EMPTY_RUN_METADATA = RunMetadata()
-"""`record_session`'s default (design.md D98) -- what a session with no
-metadata declaration reports. Only the two adapter implementations change to
-accept the new keyword; no existing call site is widened or broken."""
+"""`record_session`'s default -- what a session with no metadata declaration
+reports."""
+
+
+class NamespaceFullError(Exception):
+    """`upsert_setting` refused a new key: its namespace already holds the
+    `max_keys` it was given."""
 
 
 class ExecutionStore(Protocol):
-    """Persists `Execution` rows. Implementations live in `vantage.storage`."""
+    """Persists `Execution` rows. Implementations live in `vantage.storage`.
+
+    The service calls one store from several worker threads at once, so an
+    implementation must be safe to share between them.
+
+    Strings reaching a store contain no U+0000: PostgreSQL text cannot hold
+    it, so the service replaces it with U+FFFD in everything it decodes, and
+    every adapter stores the same text. A lookup by a value holding one
+    therefore matches nothing, on every adapter.
+
+    `count_executions`, `get_results`, `count_results` and
+    `get_catalogue_entry` are called by no route: they are how the tests,
+    the plugin's included, check what a write stored, through the same port
+    on either adapter."""
 
     def record_session(
         self,
@@ -182,10 +292,13 @@ class ExecutionStore(Protocol):
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
-        """Store the run, its results and its declared metadata (design.md
-        D98). Return True if a row was created, False if the id was already
-        stored. `metadata`'s two tables are written once each -- a report
-        with metadata identical to what is already stored is a no-op."""
+        """Store the run, its results and its metadata. Return True if a row
+        was created, False if the id was already stored. Every metadata row
+        is written once: the first report to carry a file or a key keeps it,
+        whatever a later report says, and whichever source a later row of the
+        same key comes from. A run holds at most `MAX_METADATA_ENTRIES` keys:
+        once it does, every new key a report carries is dropped, in order,
+        however many reports the run is sent."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:
@@ -193,13 +306,12 @@ class ExecutionStore(Protocol):
         ...
 
     def touch_last_contact(self, execution_id: str, contacted_at: datetime) -> bool:
-        """Advance `execution_id`'s last contact to `contacted_at` (design.md D33).
+        """Advance `execution_id`'s last contact to `contacted_at`.
 
         Returns False if `execution_id` is unknown, or if a newer contact is
         already recorded -- the two cases are deliberately indistinguishable
         from this boolean alone; a caller that needs to tell them apart calls
-        `get_execution` first (design.md D33). Never touches the finish
-        fields."""
+        `get_execution` first. Never touches the finish fields."""
         ...
 
     def count_executions(self) -> int:
@@ -207,109 +319,122 @@ class ExecutionStore(Protocol):
         ...
 
     def get_results(self, execution_id: str) -> Sequence[Result]:
-        """Return every result stored for `execution_id` (RQ-4, RQ-5, RQ-9)."""
+        """Return every result stored for `execution_id`."""
         ...
 
     def count_results(self) -> int:
-        """Return how many result rows are stored across all executions (RQ-12, RQ-38.2)."""
+        """Return how many result rows are stored across all executions."""
         ...
 
     def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
-        """Return the catalogue entry for `node_id`, or None if never observed (RQ-13)."""
+        """Return the catalogue entry for `node_id`, or None if never observed."""
         ...
 
-    def list_runs(
-        self,
-        *,
-        limit: int,
-        offset: int,
-        metadata_key: str | None = None,
-        metadata_value: str | None = None,
-    ) -> Page[RunListEntry]:
-        """Return a page of runs, newest first (design.md D57, D61).
+    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+        """Return a page of runs, newest first.
 
         Ordered `started_at DESC, id DESC` -- the `id` tiebreak makes the
         order total, so a page boundary is deterministic even when two runs
         share a `started_at`. `limit` is clamped at `MAX_PAGE_ITEMS`, never
         rejected; `has_more` is true when more rows exist beyond the
-        returned page. Each entry's VCS data is a lean `VcsProjection`
-        (design.md D59, D60) -- the entry's own `execution.vcs` is always
-        `None`.
-
-        `metadata_key`/`metadata_value`, when both given, narrow the page to
-        runs holding that exact declared `(key, value)` pair (design.md
-        D100) -- served by `idx_run_metadata_key_value`, the same index
-        `count_runs_predating_metadata_key` reads left-anchored on `key`
-        alone. The caller (the route) is responsible for the both-or-neither
-        rule; this method treats `metadata_key is not None` as the switch."""
+        returned page. Each entry's VCS data is a lean `VcsProjection` --
+        the entry's own `execution.vcs` is always `None`."""
         ...
 
-    def count_runs_predating_metadata_key(self, key: str) -> int:
-        """Q2's horizon (design.md D100): how many runs were recorded before
-        `key` was ever declared, of any status.
+    def list_runs_with_metadata_horizon(
+        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+    ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
+        """`list_runs` narrowed to runs holding every `(key, value)` pair of
+        `filters` -- a captured value exactly equal to it, from a file or
+        the session alike -- together with, for each distinct key of
+        `filters` in the order it first appears, how many runs were recorded
+        before that key first appeared. The page and the counts are read
+        from one snapshot of the store: separate reads can straddle a
+        session another process records, and then describe two different
+        sets of runs. This is the only filtered read of the run list.
 
-        `first_seen` is `MIN(run.started_at)` over runs holding **any**
-        `run_metadata` row for `key`, regardless of status -- a
-        declared-but-dropped row (design.md D95) still counts, since without
-        it a run whose value was too large to capture would be miscounted as
-        predating the declaration. When no run has ever carried `key`,
-        `first_seen` is undefined and this returns the total run count:
-        every run predates a key that was never declared."""
+        A key without a captured value has no value, so it never matches,
+        and two pairs giving one key different values match no run. An
+        empty `filters` narrows nothing and counts nothing.
+
+        A key's `first_seen` is `MIN(run.started_at)` over runs holding
+        **any** `run_metadata` row for it, whatever its status or source --
+        a row without a value still counts, since without it a run whose
+        value was too large to capture would be miscounted as predating the
+        key. When no run has ever carried the key, every run predates it and
+        its count is the total run count."""
         ...
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         """Return the full record for one run, or None if `execution_id` is
-        unknown (design.md D57, D58, D59). The whole stored commit subject
-        is reachable here -- the complement of `list_runs`' bounded
-        projection."""
+        unknown. The whole stored commit subject is reachable here -- the
+        complement of `list_runs`' bounded projection."""
+        ...
+
+    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+        """Return every metadata row stored for one run, ordered by `key`
+        (code point order), or None if `execution_id` is unknown. A known
+        run with no metadata has an empty sequence. Not paginated:
+        `MAX_METADATA_ENTRIES` bounds a run's rows. The existence check and
+        the rows are read from one snapshot."""
         ...
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
-        """Return a page of one run's results (design.md D57, D76, D77) --
-        the paginated sibling of `get_results`, which is left unchanged.
-        Same clamp and `has_more` mechanism as `list_runs` (design.md D61).
-        Each entry's failure data is a lean `FailureProjection`, mirroring
-        `list_runs`' `VcsProjection` treatment of VCS data (design.md D59,
-        D76) -- the full record is reachable via `get_result`."""
+        """Return a page of one run's results -- the paginated sibling of
+        `get_results`, with the same clamp and `has_more` mechanism as
+        `list_runs`. Each entry's failure data is a lean `FailureProjection`,
+        as `list_runs` does for VCS data; the full record is reachable via
+        `get_result`."""
         ...
 
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
         """Return the full record for one result, or None if no result with
-        that `node_id` is stored for `execution_id` (design.md D77, D78) --
-        the complement of `list_results`' bounded projection. `failure` and
-        `captured` are populated in full, unbounded."""
+        that `node_id` is stored for `execution_id` -- the complement of
+        `list_results`' bounded projection. `failure` and `captured` are
+        populated in full, unbounded."""
         ...
 
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
-        """Return a page of one test's execution history, newest first
-        (design.md D57, D61, D63). An unknown `node_id` yields an empty
-        page, never an error. Each entry's VCS data is a lean
-        `VcsProjection` (design.md D59, D60), same as `list_runs`."""
+        """Return a page of one test's execution history, newest first. An
+        unknown `node_id` yields an empty page, never an error. Each entry's
+        VCS data is a lean `VcsProjection`, same as `list_runs`."""
         ...
 
     def list_settings(self, namespace: str) -> Sequence[UserSetting]:
-        """Return every setting stored for `namespace`, ordered by `key`
-        (design.md D85, D86) -- the same order `summarize_sections` presents
-        its section list in."""
+        """Return every setting stored for `namespace`, ordered by `key` --
+        the same order `summarize_sections` presents its section list in."""
         ...
 
-    def upsert_setting(self, namespace: str, key: str, *, value: str, updated_at: datetime) -> bool:
+    def upsert_setting(
+        self,
+        namespace: str,
+        key: str,
+        *,
+        value: str,
+        updated_at: datetime,
+        max_keys: int | None = None,
+    ) -> bool:
         """Create or replace one `(namespace, key)` pair. Returns True only
         on a true first insert, mirroring `record_session`'s `created`
-        boolean -- the route needs `201` versus `200` (design.md D86)."""
+        boolean -- the route needs `201` versus `200`.
+
+        With `max_keys`, a new key is refused with `NamespaceFullError`, and
+        nothing written, when `namespace` already holds that many; replacing
+        an existing key never is. The count and the write are one step, so
+        concurrent callers cannot pass the bound together."""
         ...
 
     def delete_setting(self, namespace: str, key: str) -> bool:
         """Delete one `(namespace, key)` pair. Returns False for a key that
         was not there, mirroring `touch_last_contact`'s boolean -- the route
-        needs `404` versus `204` (design.md D86)."""
+        needs `404` versus `204`."""
         ...
 
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
         """Return `(file_path, outcome)` for every result of `execution_id`
-        (design.md D85, D86) -- the aggregate input `summarize_sections`
-        classifies. Not paginated, like `get_results`: this is an aggregate
-        input, not a response."""
+        -- the aggregate input `summarize_sections` classifies. Not
+        paginated, like `get_results`: this is an aggregate input, not a
+        response."""
         ...
 
     def close(self) -> None:

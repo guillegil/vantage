@@ -1,9 +1,9 @@
-"""`pytest_vantage.vcs` -- the plugin's one bounded git read per session
-(design.md D43-D46). Every fixture is a real repository built with
-`subprocess`/`tmp_path`, never mocked git output (spec's own verification
-method). Tests that patch `subprocess.run` still spawn real processes via
-`_CallRecorder` -- the patch only counts or forwards calls, never
-fabricates stdout.
+"""`pytest_vantage.vcs` -- the plugin's one bounded git read per session.
+
+Every fixture is a real repository built with `subprocess`/`tmp_path`, never
+mocked git output. Tests that patch `subprocess.run` still spawn real
+processes via `_CallRecorder` -- the patch only counts or forwards calls,
+never fabricates stdout.
 """
 
 from __future__ import annotations
@@ -19,6 +19,8 @@ from typing import Any
 import pytest
 from pytest_vantage import vcs
 
+pytestmark = pytest.mark.usefixtures("git_confined_to_basetemp")
+
 # Set via the environment, not `git config`, so no fixture touches or
 # leaves behind a real `~/.gitconfig`.
 _GIT_IDENTITY_ENV = {
@@ -31,7 +33,12 @@ _GIT_IDENTITY_ENV = {
 
 
 def _fixture_env() -> dict[str, str]:
-    env = dict(os.environ)
+    # Drops the variables `vcs` drops: run from a hook in a linked worktree,
+    # the suite inherits GIT_DIR, and every fixture would be built inside
+    # the real repository.
+    env = {
+        key: value for key, value in os.environ.items() if key not in vcs._REPOSITORY_SELECTING_ENV
+    }
     env.update(_GIT_IDENTITY_ENV)
     return env
 
@@ -93,7 +100,6 @@ class _CallRecorder:
         return self._real_run(argv, **kwargs)
 
 
-@pytest.mark.req(id="RQ-10")
 def test_dirty_tracked_file_marks_run_dirty(tmp_path: Path) -> None:
     # Arm 1: an unstaged worktree modification to a tracked file.
     worktree_repo = _repo_with_one_commit(tmp_path / "worktree-dirty")
@@ -108,15 +114,14 @@ def test_dirty_tracked_file_marks_run_dirty(tmp_path: Path) -> None:
 
     assert vcs.capture(staged_repo).dirty is True
 
-    # Triangulation: `--untracked-files=no` (design.md D44) makes an
-    # untracked-only file invisible to `dirty` -- RQ-10.1 says *tracked*.
+    # `--untracked-files=no` makes an untracked-only file invisible to
+    # `dirty`: only changes to tracked files count.
     untracked_repo = _repo_with_one_commit(tmp_path / "untracked-only")
     (untracked_repo / "untracked.txt").write_text("never added\n")
 
     assert vcs.capture(untracked_repo).dirty is False
 
 
-@pytest.mark.req(id="RQ-10")
 def test_clean_tree_matches_independent_head_read(tmp_path: Path) -> None:
     repo = _repo_with_one_commit(tmp_path / "clean")
     expected_commit = _independent_head(repo)
@@ -126,7 +131,6 @@ def test_clean_tree_matches_independent_head_read(tmp_path: Path) -> None:
     assert snapshot.commit == expected_commit and snapshot.dirty is False
 
 
-@pytest.mark.req(id="RQ-10")
 def test_detached_head_records_commit_null_branch(tmp_path: Path) -> None:
     repo = _repo_with_one_commit(tmp_path / "detached")
     (repo / "tracked.txt").write_text("second version\n")
@@ -140,7 +144,33 @@ def test_detached_head_records_commit_null_branch(tmp_path: Path) -> None:
     assert snapshot.branch is None
 
 
-@pytest.mark.req(id="RQ-10")
+def test_a_tag_named_like_the_branch_leaves_the_branch_name_intact(tmp_path: Path) -> None:
+    # `symbolic-ref --short` keeps a `heads/` prefix whenever another ref
+    # shares the branch's name, which would split one branch in two.
+    repo = _repo_with_one_commit(tmp_path / "tagged")
+    _git("checkout", "-q", "-b", "release/2.0", cwd=repo)
+    _git("tag", "release/2.0", cwd=repo)
+
+    assert vcs.capture(repo).branch == "release/2.0"
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_an_entry_named_head_in_rootpath_keeps_the_commit_subject(
+    tmp_path: Path, kind: str
+) -> None:
+    # Without `--`, git refuses a HEAD that is both a revision and a path.
+    repo = _repo_with_one_commit(tmp_path / "head-entry")
+    if kind == "file":
+        (repo / "HEAD").write_text("not a revision\n")
+    else:
+        (repo / "HEAD").mkdir()
+
+    snapshot = vcs.capture(repo)
+
+    assert snapshot.commit == _independent_head(repo)
+    assert snapshot.commit_subject == "initial commit"
+
+
 def test_no_commits_yet_stores_null_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _init_repo(tmp_path / "empty-repo")
     recorder = _CallRecorder()
@@ -149,15 +179,13 @@ def test_no_commits_yet_stores_null_commit(tmp_path: Path, monkeypatch: pytest.M
     snapshot = vcs.capture(repo)
 
     assert snapshot.commit is None
-    # Invocation 4 (`git show ... HEAD`) must never be spawned when
-    # invocation 2 (`git rev-parse --verify --quiet HEAD`) returned null --
-    # design.md D44's "skipped entirely" rule. That leaves exactly four
-    # invocations: show-toplevel, rev-parse HEAD, symbolic-ref, status.
+    # `git show ... HEAD` is never spawned when `git rev-parse --verify
+    # --quiet HEAD` returned null. That leaves exactly four invocations:
+    # show-toplevel, rev-parse HEAD, symbolic-ref, status.
     assert len(recorder.calls) == 4
     assert not any(argv[1] == "show" for argv, _kwargs in recorder.calls)
 
 
-@pytest.mark.req(id="RQ-23")
 def test_not_a_repository_records_nulls_and_no_warning(tmp_path: Path) -> None:
     bare_dir = tmp_path / "not-a-repo"
     bare_dir.mkdir()
@@ -168,35 +196,57 @@ def test_not_a_repository_records_nulls_and_no_warning(tmp_path: Path) -> None:
     assert snapshot.warning is None
 
 
-@pytest.mark.req(id="RQ-39")
-def test_corrupt_git_entry_records_nulls_and_warns_once(tmp_path: Path) -> None:
-    # Fixture 1: a `.git` *file* with garbage, not a `gitdir: ...` pointer.
-    garbage_file_repo = tmp_path / "corrupt-git-file"
-    garbage_file_repo.mkdir()
-    (garbage_file_repo / ".git").write_text("not a valid gitfile pointer\n")
-
-    file_snapshot = vcs.capture(garbage_file_repo)
-
-    _assert_all_null(file_snapshot)
-    assert file_snapshot.warning is not None
-
-    # Fixture 2: a `.git` *directory* with a truncated `HEAD`, no objects.
-    truncated_head_repo = tmp_path / "corrupt-git-dir"
-    (truncated_head_repo / ".git").mkdir(parents=True)
-    (truncated_head_repo / ".git" / "HEAD").write_text("ref: ")
-
-    dir_snapshot = vcs.capture(truncated_head_repo)
-
-    _assert_all_null(dir_snapshot)
-    assert dir_snapshot.warning is not None
+def _break_repository(root: Path, kind: str) -> None:
+    root.mkdir(parents=True)
+    if kind == "garbage-git-file":  # a `.git` file that is not a `gitdir:` pointer
+        (root / ".git").write_text("not a valid gitfile pointer\n")
+    elif kind == "dangling-gitdir-pointer":  # a removed worktree's or submodule's
+        (root / ".git").write_text(f"gitdir: {root.parent / 'removed'}\n")
+    else:  # a `.git` directory with a truncated HEAD and no objects
+        (root / ".git").mkdir()
+        (root / ".git" / "HEAD").write_text("ref: ")
 
 
-@pytest.mark.req(id="RQ-39")
+@pytest.mark.parametrize("kind", ["garbage-git-file", "dangling-gitdir-pointer", "truncated-head"])
+@pytest.mark.parametrize("below_top", [False, True], ids=["at-top", "in-subdirectory"])
+def test_corrupt_repository_records_nulls_and_warns_once(
+    tmp_path: Path, kind: str, below_top: bool
+) -> None:
+    # git searches upward, so a broken repository whose top is above rootpath
+    # (a sub-package with its own pytest config) warns too.
+    repo = tmp_path / "corrupt"
+    _break_repository(repo, kind)
+    rootpath = repo / "packages" / "pkg" if below_top else repo
+    rootpath.mkdir(parents=True, exist_ok=True)
+
+    snapshot = vcs.capture(rootpath)
+
+    _assert_all_null(snapshot)
+    assert snapshot.warning == vcs._CORRUPT_WARNING
+
+
+def test_a_git_that_cannot_be_executed_is_not_reported_as_a_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo_with_one_commit(tmp_path / "repo")
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    # No shebang and no executable format: exec fails at once.
+    (shim_dir / "git").write_bytes(b"\x00not an executable\n")
+    (shim_dir / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", str(shim_dir))
+
+    snapshot = vcs.capture(repo)
+
+    _assert_all_null(snapshot)
+    assert snapshot.warning == vcs._CORRUPT_WARNING
+
+
 def test_missing_git_executable_records_nulls_silently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Scrubs PATH for real -- never mock.patch("subprocess.run"), which
-    # proves the mock, not FileNotFoundError (spec's own verification note).
+    # Empties PATH for real rather than mocking `subprocess.run`, which
+    # would only prove the mock.
     repo = _repo_with_one_commit(tmp_path / "repo-with-real-git")
     empty_path_dir = tmp_path / "empty-path"
     empty_path_dir.mkdir()
@@ -208,7 +258,6 @@ def test_missing_git_executable_records_nulls_silently(
     assert snapshot.warning is None
 
 
-@pytest.mark.req(id="RQ-39")
 @pytest.mark.skipif(
     os.geteuid() == 0 if hasattr(os, "geteuid") else True,
     reason="chmod 000 is a no-op as root; skip rather than pass vacuously",
@@ -239,6 +288,117 @@ def test_monorepo_subdirectory_records_toplevel(tmp_path: Path) -> None:
     assert snapshot.root == expected_toplevel and snapshot.commit is not None
 
 
+def test_an_inherited_git_dir_does_not_redirect_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A dotfiles manager (vcsh, yadm) exports GIT_DIR and GIT_WORK_TREE for
+    # another repository; the run must still describe the one holding
+    # rootpath.
+    project = _repo_with_one_commit(tmp_path / "project")
+    _git("checkout", "-q", "-b", "feature", cwd=project)
+    expected = vcs.VcsSnapshot(
+        commit=_independent_head(project),
+        branch="feature",
+        commit_subject="initial commit",
+        dirty=False,
+        root=_git("rev-parse", "--show-toplevel", cwd=project).stdout.strip(),
+    )
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".bashrc").write_text("dotfile\n")
+    dotfiles = tmp_path / "dotfiles.git"
+    _git("init", "-q", "--bare", str(dotfiles), cwd=tmp_path)
+    dotfiles_env = {**_fixture_env(), "GIT_DIR": str(dotfiles), "GIT_WORK_TREE": str(home)}
+    _git("add", ".bashrc", cwd=home, env=dotfiles_env)
+    _git("commit", "-q", "-m", "dotfiles commit", cwd=home, env=dotfiles_env)
+    monkeypatch.setenv("GIT_DIR", str(dotfiles))
+    monkeypatch.setenv("GIT_WORK_TREE", str(home))
+
+    assert vcs.capture(project) == expected
+
+
+def test_a_hook_in_a_linked_worktree_still_records_the_worktree_from_a_subdirectory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # git exports GIT_DIR and GIT_INDEX_FILE, but not GIT_WORK_TREE, to a
+    # hook in a linked worktree. Honoured, they make git take the sub-package
+    # for the top of the work tree and every file outside it for deleted.
+    main = _repo_with_one_commit(tmp_path / "main")
+    (main / "pkg").mkdir()
+    (main / "pkg" / "module.py").write_text("# nothing\n")
+    _git("add", "pkg", cwd=main)
+    _git("commit", "-q", "-m", "add pkg", cwd=main)
+    worktree = tmp_path / "worktree"
+    _git("worktree", "add", "-q", "-b", "side", str(worktree), cwd=main)
+    expected_root = _git("rev-parse", "--show-toplevel", cwd=worktree).stdout.strip()
+    git_dir = _git("rev-parse", "--absolute-git-dir", cwd=worktree).stdout.strip()
+    monkeypatch.delenv("GIT_WORK_TREE", raising=False)
+    monkeypatch.setenv("GIT_DIR", git_dir)
+    monkeypatch.setenv("GIT_INDEX_FILE", str(Path(git_dir) / "index"))
+
+    snapshot = vcs.capture(worktree / "pkg")
+
+    assert snapshot.root == expected_root
+    assert snapshot.branch == "side"
+    assert snapshot.dirty is False
+
+
+@pytest.mark.parametrize("repository", ["intact", "corrupt"])
+def test_a_repository_beyond_the_ceiling_is_neither_recorded_nor_warned_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repository: str
+) -> None:
+    # GIT_CEILING_DIRECTORIES is set deliberately, typically to keep a
+    # dotfiles repository in $HOME out of every project below it. git itself
+    # finds no repository here, so the run records none, and one git could
+    # not read up there is not a reason to warn.
+    home = tmp_path / "home"
+    if repository == "intact":
+        _repo_with_one_commit(home)
+    else:
+        _break_repository(home, "truncated-head")
+    project = home / "project"
+    project.mkdir()
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(home))
+
+    snapshot = vcs.capture(project)
+
+    _assert_all_null(snapshot)
+    assert snapshot.warning is None
+
+
+def test_the_ceiling_never_hides_the_repository_at_rootpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # git always looks in the directory it starts from, ceiling or not.
+    repo = _repo_with_one_commit(tmp_path / "repo")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", f"{tmp_path}{os.pathsep}{repo}")
+
+    assert vcs.capture(repo).commit == _independent_head(repo)
+
+
+def test_the_git_environment_drops_repository_selection_but_keeps_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Config passed through the environment can carry `safe.directory`;
+    # dropping it would refuse a readable repository owned by another uid.
+    monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "/elsewhere")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/elsewhere/.git/index")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "safe.directory")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "*")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", "/home")
+
+    env = vcs._build_env()
+
+    assert not {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"} & env.keys()
+    # Only a user sets the ceiling, git never exports it: it is kept.
+    assert env["GIT_CEILING_DIRECTORIES"] == "/home"
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert env["GIT_CONFIG_VALUE_0"] == "*"
+
+
 def test_argv_discipline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo_with_one_commit(tmp_path / "argv-discipline")
     recorder = _CallRecorder()
@@ -246,7 +406,7 @@ def test_argv_discipline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
 
     vcs.capture(repo)
 
-    assert recorder.calls, "no subprocess.run calls recorded -- the inspection would pass vacuously"
+    assert recorder.calls, "no subprocess.run calls recorded -- the checks would pass vacuously"
     repo_str = str(repo)
     for argv, kwargs in recorder.calls:
         assert argv[0] == "git"
@@ -277,42 +437,50 @@ def _write_sleeping_git_shim(directory: Path, *, sleep_seconds: float, forward: 
 
 
 @pytest.mark.slow
-@pytest.mark.slow
-def test_hung_git_bounded_at_capture_level(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("below_top", [False, True], ids=["at-top", "in-subdirectory"])
+def test_hung_git_bounded_at_capture_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, below_top: bool
+) -> None:
+    # `capture` reads the budget at call time; a short one keeps the test
+    # quick while still measuring that the hang is cut off.
+    monkeypatch.setattr(vcs, "_CAPTURE_BUDGET_SECONDS", 0.5)
+    repo = _repo_with_one_commit(tmp_path / "some-project")
+    rootpath = repo / "packages" / "pkg" if below_top else repo
+    rootpath.mkdir(parents=True, exist_ok=True)
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
     _write_sleeping_git_shim(shim_dir, sleep_seconds=30, forward=False)
     monkeypatch.setenv("PATH", str(shim_dir))
-    repo_marker = tmp_path / "some-project"
-    repo_marker.mkdir()
 
     started = time.monotonic()
-    snapshot = vcs.capture(repo_marker)
+    snapshot = vcs.capture(rootpath)
     elapsed = time.monotonic() - started
 
     assert elapsed < vcs._CAPTURE_BUDGET_SECONDS + 1.0
     _assert_all_null(snapshot)
+    assert snapshot.warning == vcs._TIMEOUT_WARNING
 
 
-@pytest.mark.slow
 @pytest.mark.slow
 def test_whole_capture_budget_not_per_invocation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A 3s-per-invocation shim that forwards to real git. Per-invocation 5s
-    # timeouts would let all five succeed (15s); one shared 5s budget cannot.
+    # A shim that sleeps 0.3s per invocation, then forwards to real git.
+    # Per-invocation 1s timeouts would let all five succeed (1.5s); one
+    # shared 1s budget cannot. The gate still has ample room to succeed.
+    monkeypatch.setattr(vcs, "_CAPTURE_BUDGET_SECONDS", 1.0)
     repo = _repo_with_one_commit(tmp_path / "slow-git-repo")
     shim_dir = tmp_path / "shim"
     shim_dir.mkdir()
-    _write_sleeping_git_shim(shim_dir, sleep_seconds=3.0, forward=True)
+    _write_sleeping_git_shim(shim_dir, sleep_seconds=0.3, forward=True)
     monkeypatch.setenv("PATH", str(shim_dir) + os.pathsep + os.environ.get("PATH", ""))
 
     started = time.monotonic()
     snapshot = vcs.capture(repo)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 10.0  # five independent 5s timeouts would tolerate up to 25s
-    assert snapshot.root is not None  # the gate succeeds (3s < the initial 5s budget)
+    assert elapsed < vcs._CAPTURE_BUDGET_SECONDS + 1.0
+    assert snapshot.root is not None  # the gate succeeds
     # ...but not every later invocation fits inside the shared budget.
     assert not (snapshot.commit and snapshot.branch and snapshot.dirty is not None)
 
@@ -320,17 +488,13 @@ def test_whole_capture_budget_not_per_invocation(
 def test_a_huge_commit_subject_is_bounded_before_it_reaches_the_wire(
     tmp_path: Path,
 ) -> None:
-    """`git`'s `%s` is unbounded.
-
-    Measured: a commit whose first paragraph is 200 000 characters yields a
-    200 001-byte subject. Nothing capped it, so it would ride the session
-    report whole -- and a large enough one pushes the report past
-    `MAX_REPORT_BYTES`, which the server rejects as a unit. Every result in
-    that session would be lost to a commit message.
+    """`git`'s `%s` is unbounded: a commit whose first paragraph is 200 000
+    characters yields a 200 001-byte subject. Uncapped, a large enough one
+    pushes the session report past `MAX_REPORT_BYTES`, which the server
+    rejects as a unit, losing every result in the session.
 
     The cap sits deliberately ABOVE the server's 64 KiB bound so the server
-    still sees something to truncate and its flag stays honest (design.md
-    D49). Found by review after Phase 1 shipped without it.
+    still sees something to truncate and its flag stays honest.
     """
     repo = tmp_path / "huge"
     repo.mkdir()

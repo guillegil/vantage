@@ -1,10 +1,8 @@
-"""`project_vcs`: the reference implementation of the list-display bound
-(design.md D59, D60).
+"""`project_vcs` and `project_failure`: the reference implementations of the
+list-display bound.
 
-Stdlib only -- `project_vcs` is a pure function with no caller yet (the
-adapters call it starting in Phase 2/3 of this change); nothing here needs a
-server, a socket, or a temporary file. New tests carry no `req` marker --
-this change mints no numeric requirement identifiers (CLAUDE.md).
+Stdlib only -- both are pure functions, so nothing here needs a server, a
+socket, or a temporary file.
 """
 
 from __future__ import annotations
@@ -35,9 +33,8 @@ def _vcs(*, subject: str | None, truncated: bool) -> VcsContext:
 
 
 def test_subject_bounded_at_120_chars_sets_flag() -> None:
-    """history-read-api -> Lean list projections -> The commit subject is
-    bounded in list responses (D60). A 200-character subject that was NOT
-    capture-truncated is still bounded and flagged by display width alone."""
+    """A 200-character subject that was NOT capture-truncated is still
+    bounded and flagged by display width alone."""
     vcs = _vcs(subject="x" * 200, truncated=False)
 
     projection = project_vcs(vcs)
@@ -49,10 +46,8 @@ def test_subject_bounded_at_120_chars_sets_flag() -> None:
 
 
 def test_capture_truncation_flag_survives_even_when_short() -> None:
-    """Lean list projections -> The truncation flag never surfaces
-    independently of its subject (D60). A short subject that WAS
-    capture-truncated still reports the flag -- the other half of the
-    disjunction, independent of display width."""
+    """A short subject that WAS capture-truncated still reports the flag --
+    the other half of the disjunction, independent of display width."""
     vcs = _vcs(subject="short subject", truncated=True)
 
     projection = project_vcs(vcs)
@@ -63,21 +58,20 @@ def test_capture_truncation_flag_survives_even_when_short() -> None:
 
 
 def test_null_vcs_context_projects_to_none() -> None:
-    """history-read-api -> Test history -> A non-repository execution has a
-    null VCS context, not an omitted entry."""
+    """A non-repository execution has a null VCS context, not an omitted
+    entry."""
     assert project_vcs(None) is None
 
 
 def test_vcs_projection_has_no_root_field() -> None:
-    """Lean list projections -> `vcs_root` appears in no run list or run
-    detail response (D59). The exclusion is structural -- a type with no
-    field to leak -- not a runtime assertion."""
+    """`vcs_root` never appears in a list response. The exclusion is
+    structural -- a type with no field to leak -- not a runtime assertion."""
     field_names = {f.name for f in dataclasses.fields(VcsProjection)}
 
     assert "root" not in field_names
 
 
-# --- 1.1-1.4: project_failure / FailureProjection (design.md D76, D77) ------
+# --- project_failure / FailureProjection ------------------------------------
 
 
 def _failure(**overrides: object) -> FailureEvidence:
@@ -101,9 +95,9 @@ def _failure(**overrides: object) -> FailureEvidence:
 
 
 def test_project_failure_bounds_message_to_200_chars_and_flags() -> None:
-    """design.md D76: a 300-char `failure_message` with
-    `failure_message_truncated=False` on the input is bounded to
-    `LIST_FAILURE_MESSAGE_CHARS` and the flag is set by display width alone."""
+    """A 300-char `failure_message` with `failure_message_truncated=False` on
+    the input is bounded to `LIST_FAILURE_MESSAGE_CHARS` and the flag is set
+    by display width alone."""
     failure = _failure(failure_message="x" * 300, failure_message_truncated=False)
 
     projection = project_failure(failure)
@@ -115,11 +109,8 @@ def test_project_failure_bounds_message_to_200_chars_and_flags() -> None:
 
 
 def test_project_failure_flag_survives_a_short_capture_truncated_message() -> None:
-    """history-read-api -> Lean list projections -> The truncation flag never
-    surfaces independently of its subject, applied here to `failure_message`
-    (D76): a short message that WAS capture-truncated still reports the
-    flag -- the disjunction holds at the domain layer regardless of display
-    width."""
+    """A short message that WAS capture-truncated still reports the flag --
+    the disjunction holds regardless of display width."""
     failure = _failure(failure_message="short message", failure_message_truncated=True)
 
     projection = project_failure(failure)
@@ -130,9 +121,9 @@ def test_project_failure_flag_survives_a_short_capture_truncated_message() -> No
 
 
 def test_failure_projection_excludes_the_heavy_fields_structurally() -> None:
-    """design.md D76: `FailureProjection` has no field for `traceback`,
-    `failure_repr` or any captured-output field -- the exclusion is
-    structural, not a runtime check."""
+    """`FailureProjection` has no field for `traceback`, `failure_repr` or
+    any captured-output field -- the exclusion is structural, not a runtime
+    check."""
     field_names = {f.name for f in dataclasses.fields(FailureProjection)}
 
     assert "traceback" not in field_names
@@ -144,3 +135,77 @@ def test_failure_projection_excludes_the_heavy_fields_structurally() -> None:
 def test_project_failure_of_none_is_none() -> None:
     """A result with no failure evidence projects to no failure projection."""
     assert project_failure(None) is None
+
+
+# --- when a projection is None ----------------------------------------------
+
+
+def test_an_empty_vcs_context_projects_to_none() -> None:
+    """Every value field null is a run outside a repository, whatever the
+    truncation flag says -- the flag only describes a subject."""
+    empty = VcsContext(
+        commit=None,
+        branch=None,
+        commit_subject=None,
+        commit_subject_truncated=True,
+        dirty=None,
+        root=None,
+    )
+
+    assert empty.is_empty()
+    assert project_vcs(empty) is None
+
+
+def test_a_vcs_context_known_only_by_its_root_projects_to_an_empty_projection() -> None:
+    """`root` is not projected, but it is what says the run was inside a
+    repository, so the projection exists with every field null."""
+    root_only = VcsContext(
+        commit=None,
+        branch=None,
+        commit_subject=None,
+        commit_subject_truncated=False,
+        dirty=None,
+        root="/repo",
+    )
+
+    assert not root_only.is_empty()
+    assert project_vcs(root_only) == VcsProjection(
+        commit=None, branch=None, commit_subject=None, commit_subject_truncated=False, dirty=None
+    )
+
+
+def test_empty_failure_evidence_projects_to_none() -> None:
+    empty = _failure(
+        failure_type=None,
+        failure_message=None,
+        failure_path=None,
+        failure_lineno=None,
+        failure_repr=None,
+        traceback=None,
+    )
+
+    assert empty.is_empty()
+    assert project_failure(empty) is None
+
+
+def test_evidence_outside_the_lean_fields_projects_to_an_empty_projection() -> None:
+    """A traceback alone is evidence, so the list entry has a failure object
+    -- empty, but present -- and a client knows the detail has more."""
+    traceback_only = _failure(
+        failure_type=None,
+        failure_message=None,
+        failure_path=None,
+        failure_lineno=None,
+        failure_repr=None,
+    )
+
+    assert not traceback_only.is_empty()
+    assert project_failure(traceback_only) == FailureProjection(
+        failure_type=None,
+        failure_message=None,
+        failure_message_truncated=False,
+        failure_path=None,
+        failure_lineno=None,
+        skip_reason=None,
+        xfail_reason=None,
+    )

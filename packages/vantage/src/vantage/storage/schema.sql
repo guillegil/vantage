@@ -1,37 +1,33 @@
--- Vantage database schema (RQ-29: complete schema from first use, ADR-5).
+-- Vantage database schema.
 --
--- All thirteen tables and their fifteen indexes are declared here, whole, and
--- applied the first time a database is opened (vantage/storage/connection.py,
--- PR4). Every statement is IF NOT EXISTS so a second process opening the same
--- fresh database races safely (design.md D8) and reopening an existing
--- database issues no schema-altering statement (RQ-29.2).
+-- Applied whole, in one transaction, the first time a database is opened
+-- (vantage/storage/connection.py), which also stamps `meta.schema_version`
+-- in that same transaction. Every statement is IF NOT EXISTS so two
+-- processes opening the same fresh database race safely.
 --
--- Milestone 1 populates only the marked `run` columns; the other twelve
--- tables exist empty until the milestone that writes them. No migration framework
--- ships in Phase 1 (ADR-5) -- `meta.schema_version` is the seam, not a
--- substitute for one. This file stamps that seam itself, as its own last
--- statement (ADR-0013, design.md D28): a database created without ever
--- passing through this file has no `schema_version` row at all, which
--- `vantage/storage/connection.py`'s open-time refusal treats as "absent",
--- refused the same as an explicitly older version.
+-- There is no migration framework: connection.py refuses any database whose
+-- stamp is absent or differs from the version the build expects. A table or
+-- column is added when something writes it, never ahead of that.
 --
--- Column-by-column traceability to requirements lives in
--- docs/schema-manifest.md, not in this file's comments -- this file is the
--- implementation the manifest is inspected against.
---
--- Conventions: timestamps are ISO-8601 UTC TEXT; booleans are INTEGER 0/1;
--- JSON-shaped values are TEXT written with stdlib `json`. A column whose
--- content is unbounded by nature carries a sibling `<name>_truncated`
--- INTEGER NOT NULL DEFAULT 0 (Milestone 2 populates the flag; the schema
--- makes it expressible now).
+-- Conventions: timestamps are fixed-width ISO-8601 UTC TEXT, so text order
+-- is chronological order; booleans are INTEGER 0/1. A column whose content
+-- is unbounded by nature carries a sibling `<name>_truncated` INTEGER NOT
+-- NULL DEFAULT 0 flag.
 --
 -- Foreign keys are declared here but only enforced when a connection turns
 -- on `PRAGMA foreign_keys=ON` (vantage/storage/connection.py, every
 -- connection) -- SQLite ignores unenforced foreign keys by default.
+--
+-- A few values are recorded for whoever reads the database directly and
+-- are returned by no route: `meta.created_at`/`created_by`,
+-- `run.received_at`, `test_case.first_seen_at`/`last_seen_run_id`, and the
+-- format and status of each declared metadata file (`run_metadata_file`),
+-- which say why its keys have no value. The tests read them to check what a
+-- write stored.
 
 -- ---------------------------------------------------------------------------
--- meta -- schema_version stamp (ADR-5): a seam for a future migration, not a
--- migration framework itself. Populated at creation, not by this file.
+-- meta -- `schema_version`, plus the best-effort `created_at`/`created_by`
+-- rows connection.py writes.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -39,9 +35,7 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 -- ---------------------------------------------------------------------------
--- run -- the only table Milestone 1 populates. See docs/schema-manifest.md
--- for which columns are driven by which requirement and populated by which
--- milestone.
+-- run -- one row per recorded session.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS run (
     id                            TEXT PRIMARY KEY,
@@ -52,40 +46,23 @@ CREATE TABLE IF NOT EXISTS run (
     exit_status                   INTEGER NULL,
     interrupted                   INTEGER NOT NULL DEFAULT 0,
     interrupt_reason              TEXT NULL,
-    interrupt_reason_truncated    INTEGER NOT NULL DEFAULT 0,
-    hostname                      TEXT NULL,
-    username                      TEXT NULL,
-    python_version                TEXT NULL,
-    pytest_version                TEXT NULL,
-    platform                      TEXT NULL,
-    command_line                  TEXT NULL,
-    command_line_truncated        INTEGER NOT NULL DEFAULT 0,
-    vantage_version                TEXT NULL,
-    root_dir                      TEXT NULL,
-    invocation_dir                TEXT NULL,
-    plugins                       TEXT NULL,
-    plugins_truncated             INTEGER NOT NULL DEFAULT 0,
-    xdist_enabled                 INTEGER NULL,
-    xdist_worker_count            INTEGER NULL,
     vcs_commit                    TEXT NULL,
     vcs_branch                    TEXT NULL,
     vcs_commit_subject            TEXT NULL,
     vcs_commit_subject_truncated  INTEGER NOT NULL DEFAULT 0,
     vcs_dirty                     INTEGER NULL,
-    vcs_root                      TEXT NULL,
-    collected_count                INTEGER NULL
+    vcs_root                      TEXT NULL
 );
 
 -- ---------------------------------------------------------------------------
--- test_case -- the RQ-13 catalogue. `node_id` is the Phase 1 identity key
--- (UNIQUE, enforced by an explicit index below, not an inline constraint, so
--- it is one of the thirteen indexes the manifest counts). `stable_id`
--- supersedes it in Phase 2 and carries its own inline UNIQUE constraint
--- until then.
+-- test_case -- the catalogue: one row per test ever seen, keyed by pytest
+-- node id. `node_id`'s uniqueness comes from `idx_test_case_node_id` below,
+-- the catalogue upsert's conflict target. Every result of a node id reads
+-- its file, class, function and parameter from here, as the newest run
+-- reported them; `last_seen_at` decides which run that is.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS test_case (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
-    stable_id                TEXT NOT NULL UNIQUE,
     node_id                  TEXT NOT NULL,
     file_path                TEXT NOT NULL,
     class_name               TEXT NULL,
@@ -93,27 +70,20 @@ CREATE TABLE IF NOT EXISTS test_case (
     param_id                 TEXT NULL,
     first_seen_at            TEXT NOT NULL,
     last_seen_at             TEXT NOT NULL,
-    last_seen_run_id         TEXT NULL REFERENCES run (id),
-    flake_score              REAL NULL,
-    flake_window             INTEGER NULL,
-    flake_computed_at        TEXT NULL,
-    param_signature          TEXT NULL,
-    param_signature_seen_at  TEXT NULL,
-    param_drift_detected_at  TEXT NULL
+    last_seen_run_id         TEXT NULL REFERENCES run (id)
 );
 
 -- ---------------------------------------------------------------------------
--- result -- one row per test phase resolution (RQ-4: `outcome` is composite,
--- resolved at teardown, not streamed from `call`). `UNIQUE(run_id, node_id,
--- attempt)` is the schema-level backstop for RQ-12's double delivery under
--- xdist.
+-- result -- one row per test per run. `outcome` is the test's overall
+-- outcome across setup, call and teardown, not the `call` phase alone.
+-- `UNIQUE(run_id, node_id)` keeps a result delivered twice (xdist reports it
+-- from both worker and controller) to one row.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS result (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id                   TEXT NOT NULL REFERENCES run (id),
     test_case_id             INTEGER NOT NULL REFERENCES test_case (id),
     node_id                  TEXT NOT NULL,
-    attempt                  INTEGER NOT NULL DEFAULT 0,
     outcome                  TEXT NOT NULL
         CHECK (outcome IN ('passed', 'failed', 'error', 'skipped', 'xfailed', 'xpassed')),
     duration                 REAL NULL,
@@ -143,100 +113,14 @@ CREATE TABLE IF NOT EXISTS result (
     captured_stdout_truncated    INTEGER NOT NULL DEFAULT 0,
     captured_stderr               TEXT NULL,
     captured_stderr_truncated     INTEGER NOT NULL DEFAULT 0,
-    UNIQUE (run_id, node_id, attempt)
-);
-
--- ---------------------------------------------------------------------------
--- result_marker (RQ-7)
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS result_marker (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    result_id         INTEGER NOT NULL REFERENCES result (id),
-    name              TEXT NOT NULL,
-    args              TEXT NULL,
-    args_truncated    INTEGER NOT NULL DEFAULT 0,
-    kwargs            TEXT NULL,
-    kwargs_truncated  INTEGER NOT NULL DEFAULT 0,
-    origin            TEXT NOT NULL
-        CHECK (origin IN ('function', 'class', 'module', 'package', 'session', 'config'))
-);
-
--- ---------------------------------------------------------------------------
--- result_parameter (RQ-6)
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS result_parameter (
-    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    result_id               INTEGER NOT NULL REFERENCES result (id),
-    name                    TEXT NOT NULL,
-    position                INTEGER NOT NULL,
-    value_repr              TEXT NULL,
-    value_repr_truncated    INTEGER NOT NULL DEFAULT 0,
-    value_type              TEXT NULL
-);
-
--- ---------------------------------------------------------------------------
--- result_log (Phase 2 -- structured per-test logs, filterable by severity;
--- `level_no` is numeric so `WHERE level_no >= 30` needs no application code).
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS result_log (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    result_id            INTEGER NOT NULL REFERENCES result (id),
-    sequence             INTEGER NOT NULL,
-    phase                TEXT CHECK (phase IN ('setup', 'call', 'teardown')),
-    created_at           TEXT NOT NULL,
-    level_no             INTEGER NOT NULL,
-    level_name           TEXT NOT NULL,
-    logger_name          TEXT NULL,
-    message              TEXT NOT NULL,
-    message_truncated    INTEGER NOT NULL DEFAULT 0,
-    path                 TEXT NULL,
-    lineno               INTEGER NULL
-);
-
--- ---------------------------------------------------------------------------
--- result_fixture (Phase 2)
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS result_fixture (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    result_id   INTEGER NOT NULL REFERENCES result (id),
-    name        TEXT NOT NULL,
-    scope       TEXT NULL,
-    position    INTEGER NOT NULL
-);
-
--- ---------------------------------------------------------------------------
--- artifact (Phase 2 -- content-addressed; the same screenshot from two
--- hundred runs is stored once. Its on-disk store is the `artifacts/`
--- directory created at 0700, design.md D9, RQ-40.2).
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS artifact (
-    content_hash       TEXT PRIMARY KEY,
-    algorithm          TEXT NOT NULL DEFAULT 'sha256',
-    size_bytes         INTEGER NOT NULL,
-    media_type         TEXT NULL,
-    content            BLOB NULL,
-    external_path      TEXT NULL,
-    first_stored_at    TEXT NOT NULL
-);
-
--- ---------------------------------------------------------------------------
--- result_artifact (Phase 2)
--- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS result_artifact (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    result_id      INTEGER NOT NULL REFERENCES result (id),
-    content_hash   TEXT NOT NULL REFERENCES artifact (content_hash),
-    label          TEXT NOT NULL,
-    phase          TEXT NULL,
-    created_at     TEXT NOT NULL,
-    UNIQUE (result_id, content_hash, label)
+    UNIQUE (run_id, node_id)
 );
 
 -- ---------------------------------------------------------------------------
 -- user_setting -- namespaced, server-persisted user preferences. Generic
 -- storage, specific validation: `value` is JSON text this schema does not
 -- describe and this adapter never parses; each namespace's shape is validated
--- by an ordinary Pydantic model in `vantage.service` (design.md D83).
+-- by an ordinary Pydantic model in `vantage.service`.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS user_setting (
     namespace   TEXT NOT NULL,
@@ -247,16 +131,15 @@ CREATE TABLE IF NOT EXISTS user_setting (
 );
 
 -- ---------------------------------------------------------------------------
--- run_metadata_file -- one row per DECLARED file, captured or not. This table
--- is the audit surface C5 requires and the "absence is marked" record for a
--- file that contributed no keys at all (design.md D91, D95). `source_file` is
--- the DECLARED, rootpath-relative path exactly as written (P-1) -- never the
--- resolved one, which is absolute and can carry a username (ADR-0016).
+-- run_metadata_file -- one row per DECLARED metadata file, captured or not,
+-- so a file that contributed no keys still records why in `status`.
+-- `source_file` is the declared, rootpath-relative path exactly as written --
+-- never the resolved one, which is absolute and can carry a username.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS run_metadata_file (
     run_id       TEXT NOT NULL REFERENCES run (id),
     source_file  TEXT NOT NULL,
-    content_type TEXT NOT NULL CHECK (content_type IN ('json', 'yaml', 'toml')),
+    content_type TEXT NOT NULL CHECK (content_type IN ('json', 'yaml')),
     status       TEXT NOT NULL CHECK (status IN (
                      'captured', 'not_found', 'path_rejected', 'too_large',
                      'not_text', 'unreadable', 'over_budget', 'malformed')),
@@ -264,71 +147,49 @@ CREATE TABLE IF NOT EXISTS run_metadata_file (
 );
 
 -- ---------------------------------------------------------------------------
--- run_metadata -- one row per DECLARED key. `value` is NULL whenever `status`
--- is not 'captured': a declared-but-uncaptured key is a row, never a missing
--- row (design.md D95). All values are TEXT, numbers included (D-c) --
--- comparison is string equality, and the declaration names keys, not types.
+-- run_metadata -- one row per key a run reported: every key of a declared
+-- file (`source` 'file', with its `source_file`), then every key the test
+-- session set itself, and every declared key nothing gave a value (`source`
+-- 'session', no file). `value` is NULL whenever `status` is not 'captured':
+-- a key without a value is a row, never a missing row. All values are TEXT,
+-- numbers included: comparison is string equality, and a declaration names
+-- keys, not types. `name` is the display name that run's declaration gave
+-- the key, and `declared` whether it named the key at all; a file's key
+-- always is.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS run_metadata (
     run_id       TEXT NOT NULL REFERENCES run (id),
     key          TEXT NOT NULL,
+    name         TEXT NULL,
     value        TEXT NULL,
-    source_file  TEXT NOT NULL,
     status       TEXT NOT NULL CHECK (status IN (
                      'captured', 'absent', 'not_scalar', 'value_too_large',
                      'source_unavailable')),
-    PRIMARY KEY (run_id, key)
+    source       TEXT NOT NULL CHECK (source IN ('file', 'session')),
+    source_file  TEXT NULL,
+    declared     INTEGER NOT NULL CHECK (declared IN (0, 1)),
+    PRIMARY KEY (run_id, key),
+    CHECK ((source = 'file') = (source_file IS NOT NULL))
 );
 
 -- ---------------------------------------------------------------------------
--- Indexes -- fifteen in total (docs/schema-manifest.md enumerates the same
--- list). The failure index (5) is RQ-8's criterion that twenty tests failing
--- at one source line come back as one `GROUP BY failure_path, failure_lineno`
--- group. `run(received_at)` (2) is the arrival-order index the Milestone 4
--- read API needs, created now per ADR-5. `run(last_contact_at)` (14) is the
--- liveness-derivation index a prior change added (RQ-44). `run_metadata(key,
--- value)` (15) is this change's own index -- the product itself: filtering
--- runs by a declared key/value pair is a full scan without it.
+-- Indexes -- each serves a statement in sqlite_store.py.
+-- `run(started_at)`: run-list order and the metadata horizon count.
+-- `result(run_id)`: one run's results in insertion order, without the
+-- temporary sort the `(run_id, node_id)` unique index would need.
+-- `result(test_case_id)`: one test's history.
+-- `test_case(node_id)`: the catalogue upsert's conflict target and every
+-- lookup by node id.
+-- `run_metadata(key, value)`: filtering runs by metadata key/value pairs,
+-- a full scan without it.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_started_at
-    ON run (started_at);                                            -- 1
-CREATE INDEX IF NOT EXISTS idx_run_received_at
-    ON run (received_at);                                           -- 2
+    ON run (started_at);
 CREATE INDEX IF NOT EXISTS idx_result_run_id
-    ON result (run_id);                                             -- 3
+    ON result (run_id);
 CREATE INDEX IF NOT EXISTS idx_result_test_case_id
-    ON result (test_case_id);                                       -- 4
-CREATE INDEX IF NOT EXISTS idx_result_failure_path_lineno
-    ON result (failure_path, failure_lineno);                       -- 5
-CREATE INDEX IF NOT EXISTS idx_result_outcome
-    ON result (outcome);                                            -- 6
+    ON result (test_case_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_test_case_node_id
-    ON test_case (node_id);                                         -- 7
-CREATE INDEX IF NOT EXISTS idx_test_case_last_seen_at
-    ON test_case (last_seen_at);                                    -- 8
-CREATE INDEX IF NOT EXISTS idx_result_log_result_id_sequence
-    ON result_log (result_id, sequence);                            -- 9
-CREATE INDEX IF NOT EXISTS idx_result_log_result_id_level_no
-    ON result_log (result_id, level_no);                            -- 10
-CREATE INDEX IF NOT EXISTS idx_result_marker_result_id_name
-    ON result_marker (result_id, name);                             -- 11
-CREATE INDEX IF NOT EXISTS idx_result_parameter_result_id
-    ON result_parameter (result_id);                                -- 12
-CREATE INDEX IF NOT EXISTS idx_result_artifact_content_hash
-    ON result_artifact (content_hash);                              -- 13
-CREATE INDEX IF NOT EXISTS idx_run_last_contact_at
-    ON run (last_contact_at);                                       -- 14
+    ON test_case (node_id);
 CREATE INDEX IF NOT EXISTS idx_run_metadata_key_value
-    ON run_metadata (key, value);                                   -- 15
-
--- ---------------------------------------------------------------------------
--- Schema version stamp (ADR-0013, design.md D28) -- must be the last
--- statement in this file. `_apply_schema` in connection.py wraps the whole
--- script in one `BEGIN IMMEDIATE` ... `COMMIT`, so this stamp commits
--- atomically with the schema it describes: no crash between "tables exist"
--- and "version recorded" can leave one without the other. `OR IGNORE` is the
--- DML register of the same `IF NOT EXISTS` idempotence the rest of this file
--- relies on, so reapplying this script against an already-stamped database
--- changes nothing.
--- ---------------------------------------------------------------------------
-INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '4');
+    ON run_metadata (key, value);

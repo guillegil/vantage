@@ -1,4 +1,4 @@
-"""Ports the core exposes to adapters, as `typing.Protocol` (ADR-3).
+"""Ports the core exposes to adapters, as `typing.Protocol`.
 
-Standard library only (RQ-26). See ``tests/test_architecture.py``.
+Standard library only. See ``tests/test_architecture.py``.
 """

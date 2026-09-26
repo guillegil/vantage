@@ -1,14 +1,9 @@
-"""`pytest_vantage.metadata` -- path containment for a declared metadata file
-(design.md D93, ADR-0017 C3/C4). Every fixture is a real filesystem
-structure built under `tmp_path`: real symlinks (`os.symlink`), a real
-symlink loop, and a real FIFO (`os.mkfifo`) where the platform supports it
--- never a mock of filesystem behaviour, the same verification approach
-`test_vcs.py` already uses for the plugin's other filesystem/subprocess
-boundary.
+"""`pytest_vantage.metadata.resolve_declared_path` -- path containment for a
+declared metadata file.
 
-This module covers `resolve_declared_path` only. Reading and parsing the
-declaration itself (`read_declaration`), the byte budget and the wire
-section are later slices (design.md D92, D94, D96) -- out of scope here.
+Every fixture is a real filesystem structure built under `tmp_path`: real
+symlinks (`os.symlink`), a real symlink loop, and a real FIFO (`os.mkfifo`)
+where the platform supports it -- never a mock of filesystem behaviour.
 """
 
 from __future__ import annotations
@@ -50,16 +45,10 @@ def test_a_symlink_escape_is_rejected_after_resolution(tmp_path: Path) -> None:
 
 
 def test_a_symlink_loop_is_rejected_not_crashed(tmp_path: Path) -> None:
-    # A real symlink loop -- `os.symlink`, never a mock. `Path.resolve()`
-    # raises `RuntimeError` for a loop on the interpreters that predate its
-    # reimplementation over `os.path.realpath` (3.10-3.12, verified this
-    # session); on 3.13 `resolve()` raises nothing at all with the default
-    # `strict=False` and instead returns the path lexically unresolved, so
-    # the rejection there comes from `is_file()` returning `False` rather
-    # than from the exception handler. Both mechanisms must reach `None` --
-    # this test asserts the outcome, not the mechanism, so it holds
-    # unchanged across the whole 3.10-3.13 CI matrix without branching on
-    # `sys.version_info`.
+    # `Path.resolve()` raises `RuntimeError` for a loop on 3.10-3.12; on
+    # 3.13 it returns the path unresolved and `is_file()` rejects it
+    # instead. The test asserts the outcome, not the mechanism, so it holds
+    # on every supported version.
     root = tmp_path / "project"
     root.mkdir()
     loop_a = root / "loop-a"
@@ -71,17 +60,9 @@ def test_a_symlink_loop_is_rejected_not_crashed(tmp_path: Path) -> None:
 
 
 def test_a_path_containing_a_nul_byte_is_rejected_not_crashed(tmp_path: Path) -> None:
-    # A third exception mechanism, found by `sdd-verify` after the module
-    # docstring's symlink-loop analysis had already enumerated two:
-    # `Path.resolve()` raises `ValueError` for a path containing a NUL
-    # byte, on every supported interpreter (confirmed 3.10.21, 3.13.15) --
-    # not `OSError` or `RuntimeError`. Before the fix this propagated
-    # straight out of `resolve_declared_path`, uncaught by anything on the
-    # `pytest_configure` -> `capture_metadata` -> `_read_declared_file`
-    # chain, and crashed the whole session with `INTERNALERROR`. This test
-    # asserts the outcome -- rejection, not a crash -- the same shape
-    # `test_a_symlink_loop_is_rejected_not_crashed` above already asserts
-    # for the other cross-version exception trap.
+    # `Path.resolve()` raises `ValueError` for a NUL byte on every supported
+    # version -- neither `OSError` nor `RuntimeError`. Escaping, it would
+    # cost the run all of its metadata.
     root = tmp_path / "project"
     root.mkdir()
 
@@ -98,11 +79,8 @@ def test_a_directory_is_rejected(tmp_path: Path) -> None:
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="os.mkfifo is POSIX-only")
 def test_a_fifo_is_rejected_without_blocking(tmp_path: Path) -> None:
     # Bounded wall-time, not just outcome: `open()` on a FIFO with no reader
-    # blocks forever, so a containment check that opened it even once would
-    # hang this test -- and, for real, `pytest_sessionstart` -- rather than
-    # merely fail an assertion. No reader or writer is ever attached to this
-    # FIFO, so the only way this test finishes is if `resolve_declared_path`
-    # never calls `open()` on it (it only ever `stat`s, via `is_file()`).
+    # blocks forever, so a containment check that opened it would hang this
+    # test, and a real session at startup, rather than fail an assertion.
     root = tmp_path / "project"
     root.mkdir()
     fifo_path = root / "blocking.json"
@@ -144,9 +122,9 @@ def test_a_legitimate_nested_path_is_accepted(tmp_path: Path) -> None:
 def test_a_root_reached_through_a_symlink_still_accepts_its_own_children(
     tmp_path: Path,
 ) -> None:
-    # design.md D93: both sides are resolved, or neither works -- a
-    # repository checked out under a symlinked root (`/tmp` -> `/private/tmp`
-    # on macOS) must not make every legitimate path look like an escape.
+    # Both sides are resolved: a repository checked out under a symlinked
+    # root (`/tmp` -> `/private/tmp` on macOS) must not make every
+    # legitimate path look like an escape.
     real_root = tmp_path / "real-project"
     real_root.mkdir()
     nested = real_root / "config" / "firmware.yaml"

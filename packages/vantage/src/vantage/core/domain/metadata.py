@@ -1,31 +1,24 @@
-"""User-declared run metadata: the file- and key-level status vocabularies
-and the three bounds this project already argued elsewhere (design.md D91,
-D94, D95).
+"""Run metadata: the file formats, the file- and key-level status
+vocabularies, where a key's value came from, and the size bounds on keys,
+display names and values.
 
-Stdlib only (RQ-26) -- no Pydantic, no ORM, matching every other module in
-`vantage.core.domain`. No logic beyond vocabulary lives here: parsing,
-bounding and path containment are `pytest-vantage` and `vantage.service`
-concerns (D92, D93, D97); this module only names the values those layers
-agree on.
+No logic lives here: parsing, bounding and path containment belong to
+`pytest-vantage` and `vantage.service`; this module only names the values
+those layers agree on.
 
-``FILE_STATUSES`` and ``KEY_STATUSES`` are module-level ``frozenset``s of
-plain ``str``, never an ``Enum`` -- ``liveness.PRESENTATIONS`` and
-``result.OUTCOMES`` already record why on this project's Python 3.10 floor:
-``class X(str, Enum)`` changes ``__format__`` between interpreter versions,
-measured as ``f"{X.A}"`` returning ``'abandoned'`` on Python 3.10 and
-``'X.A'`` on Python 3.13 for the identical source. This module follows the
-same precedent rather than inventing a third shape for the same kind of
-vocabulary.
-
-Both vocabularies mirror ``schema.sql``'s ``CHECK`` constraints on
-``run_metadata_file.status`` and ``run_metadata.status`` exactly (D91): the
-SQL ``CHECK``, this ``frozenset`` and the Pydantic report models the server
-builds from it (D96) must agree, and keeping those three in step is a task
-in its own right -- the same note `design.md` already carries for
-``result.OUTCOMES``.
+The vocabularies are module-level ``frozenset``s of plain ``str``, never an
+``Enum``, for the ``__format__`` reason recorded in ``liveness.py``. Each but
+``SESSION_KEY_STATUSES``, a subset of ``KEY_STATUSES``, mirrors one of
+``schema.sql``'s ``CHECK`` constraints exactly; ``test_metadata.py`` parses
+the constraints to hold them in step.
 """
 
 from __future__ import annotations
+
+METADATA_CONTENT_TYPES = frozenset({"json", "yaml"})
+"""The formats `run_metadata_file.content_type`'s `CHECK` constraint accepts:
+the ones the plugin declares and the server can parse. A file reported in
+any other format is dropped, with its keys, before it reaches the store."""
 
 FILE_STATUSES = frozenset(
     {
@@ -39,9 +32,9 @@ FILE_STATUSES = frozenset(
         "malformed",
     }
 )
-"""The eight values `run_metadata_file.status`'s `CHECK` constraint accepts
-(design.md D91). A declared file that is never rejected, dropped or
-unreadable is `captured`; every other value is a reason it was not."""
+"""The eight values `run_metadata_file.status`'s `CHECK` constraint accepts.
+A declared file that is never rejected, dropped or unreadable is `captured`;
+every other value is a reason it was not."""
 
 KEY_STATUSES = frozenset(
     {
@@ -52,29 +45,45 @@ KEY_STATUSES = frozenset(
         "source_unavailable",
     }
 )
-"""The five values `run_metadata.status`'s `CHECK` constraint accepts
-(design.md D91). `source_unavailable` is a key whose *file* failed --
-distinct from `absent` (the key itself was never found in a file that WAS
-read), so "too large" stays distinguishable from "never declared" (D95)."""
+"""The five values `run_metadata.status`'s `CHECK` constraint accepts.
+`source_unavailable` is a key whose *file* failed -- distinct from `absent`
+(the key itself was never found in a file that WAS read, or was declared and
+never given a value by the session), so "too large" stays distinguishable
+from "never declared"."""
+
+SESSION_KEY_STATUSES = frozenset({"captured", "absent", "value_too_large"})
+"""The subset of `KEY_STATUSES` a key the test session reported itself can
+have. `not_scalar` and `source_unavailable` describe a declared file, which a
+session value never comes from."""
+
+METADATA_SOURCES = frozenset({"file", "session"})
+"""The values `run_metadata.source`'s `CHECK` constraint accepts: a key read
+from a declared file, or one the test session reported itself. Every row
+keeps its source, so the two stay distinguishable on every read."""
 
 MAX_METADATA_VALUE_BYTES = 1024
-"""Bound on one captured value, in bytes not characters (design.md D94):
-`MAX_IDENTITY_CHARS`'s value, for D89's reason -- a short, indexed,
-client-supplied string. Not `MAX_TEXT_FIELD_BYTES`: a 64 KiB value in a
-`(key, value)` index is bloat with no query value (P-2)."""
+"""Bound on one captured value, in bytes not characters. `MAX_IDENTITY_CHARS`'s
+value, because it is a short, indexed, client-supplied string. Not
+`MAX_TEXT_FIELD_BYTES`: a 64 KiB value in a `(key, value)` index is bloat with
+no query value."""
 
 MAX_METADATA_KEY_CHARS = 1024
-"""Bound on one declared key's length (design.md's D94/D95 file-changes
-table names this constant without a separate derivation row of its own). A
-declared key is the same class of short, client-supplied, indexed string
-D89 already bounds at `MAX_IDENTITY_CHARS`, so it carries the identical
-value its two sibling bounds in the same table both use."""
+"""Bound on one key's length, declared or reported by the session:
+`MAX_IDENTITY_CHARS`'s value, since a key is the same class of short,
+client-supplied, indexed string."""
+
+MAX_METADATA_NAME_CHARS = 256
+"""Bound on the display name a declaration gives a key. The plugin refuses a
+declaration holding a longer one; the server stores a longer name another
+client sends as no name at all, and keeps the key and its value."""
 
 MAX_METADATA_ENTRIES = 200
-"""Bound on stored keys per run, total (design.md D94): `MAX_PAGE_ITEMS`. A
-run's metadata is presented unpaginated on the run detail, so this cap on
-stored entries *is* the bound on that response -- D89's argument for
-`MAX_SECTIONS`, unchanged."""
+"""Bound on metadata rows per run: the keys of every declared file first,
+then the keys the session reported, in the order first set. The plugin
+refuses a declaration past it and drops the session keys past it, and the
+server drops every row past it that another client sends, in one report or
+spread over several. It also keeps a run's metadata small enough to return
+whole, in one unpaged response."""
 
 
 __all__ = [
@@ -82,5 +91,9 @@ __all__ = [
     "KEY_STATUSES",
     "MAX_METADATA_ENTRIES",
     "MAX_METADATA_KEY_CHARS",
+    "MAX_METADATA_NAME_CHARS",
     "MAX_METADATA_VALUE_BYTES",
+    "METADATA_CONTENT_TYPES",
+    "METADATA_SOURCES",
+    "SESSION_KEY_STATUSES",
 ]

@@ -1,22 +1,20 @@
-"""`open_database` applies `schema.sql` once, inside one transaction, and never
-re-issues DDL against an existing, already-schema'd database (RQ-29.2).
-
-RQ-29's verification method is Inspection, not Test -- `docs/schema-manifest.md`
-(PR2) is the verification of record. This file is not tagged
-`@pytest.mark.req(id="RQ-29")`, for the same reason PR3's rot-detector isn't
-(plain comment instead): it mechanises/protects the same guarantee the
-Inspection already covers, rather than being the Inspection itself.
+"""`open_database` applies `schema.sql` once, inside one transaction, never
+re-issues DDL against an existing database, and refuses -- leaving it as it
+was -- a database stamped with a different schema version or holding some
+other schema.
 """
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sqlite3
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from vantage.storage.connection import SchemaVersionError, open_database
+from vantage.storage.connection import open_database
+from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCHEMA_SQL = _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"
@@ -67,19 +65,37 @@ def _spy_on_executescript(
     return captured
 
 
-def test_open_database_applies_schema_inside_one_begin_immediate_transaction(
+def test_a_fresh_database_is_stamped_with_the_current_schema_version(tmp_path: Path) -> None:
+    conn = open_database(tmp_path / "store" / "vantage.db")
+    try:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    finally:
+        conn.close()
+
+    assert row == (str(_SCHEMA_VERSION),)
+
+
+def test_the_tables_and_the_version_stamp_commit_together(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A stamp that fails after every table was created leaves no table
+    behind: a database with a schema but no stamp would be refused as
+    'absent' on every later open."""
     db_path = tmp_path / "store" / "vantage.db"
-    captured = _spy_on_executescript(monkeypatch)
+    monkeypatch.setattr(
+        "vantage.storage.connection._STAMP_SCHEMA_VERSION",
+        "INSERT INTO no_such_table (value) VALUES (?)",
+    )
 
-    conn = open_database(db_path)
-    conn.close()
+    with pytest.raises(sqlite3.OperationalError, match="no_such_table"):
+        open_database(db_path)
 
-    assert len(captured) == 1
-    script = captured[0].strip()
-    assert script.startswith("BEGIN IMMEDIATE")
-    assert script.rstrip().rstrip(";").endswith("COMMIT")
+    probe = sqlite3.connect(str(db_path))
+    try:
+        tables = probe.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    finally:
+        probe.close()
+    assert tables == []
 
 
 def test_every_ddl_statement_in_schema_sql_declares_if_not_exists() -> None:
@@ -96,7 +112,6 @@ def test_the_if_not_exists_check_catches_a_bare_create_table() -> None:
     assert _statements_missing_if_not_exists(sql) == ["TABLE widget"]
 
 
-# RQ-29.2: opening an existing database issues no schema-altering statement.
 def test_reopening_an_existing_database_issues_no_ddl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -115,8 +130,8 @@ def test_reopening_an_existing_database_issues_no_ddl(
 def _seed_meta_only_database(db_path: Path, *, schema_version_value: str | None) -> None:
     """Simulate a database whose `meta` table exists (so `open_database` treats
     the schema as already applied) but whose `schema_version` row is absent or
-    set to an arbitrary value -- exactly the shape D28 found every pre-change
-    database in, and the shape a database from a different release would have.
+    set to an arbitrary value -- the shape a database from a different release
+    has.
 
     Built with a plain `sqlite3.connect`, never `open_database`, so the test
     controls the stamped version independently of whatever `schema.sql` itself
@@ -136,75 +151,37 @@ def _seed_meta_only_database(db_path: Path, *, schema_version_value: str | None)
         conn.close()
 
 
-def test_opening_a_database_with_no_schema_version_row_is_refused(tmp_path: Path) -> None:
-    db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value=None)
-
-    with pytest.raises(SchemaVersionError) as exc_info:
-        open_database(db_path)
-
-    message = str(exc_info.value)
-    assert "absent" in message
-    assert "3" in message
-
-
-def test_opening_a_database_with_an_older_schema_version_is_refused(tmp_path: Path) -> None:
-    db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="1")
-
-    with pytest.raises(SchemaVersionError) as exc_info:
-        open_database(db_path)
-
-    message = str(exc_info.value)
-    assert "1" in message
-    assert "4" in message
-
-
-def test_opening_a_database_with_a_newer_schema_version_is_refused(tmp_path: Path) -> None:
-    db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="5")
-
-    with pytest.raises(SchemaVersionError) as exc_info:
-        open_database(db_path)
-
-    message = str(exc_info.value)
-    assert "5" in message
-    assert "4" in message
-
-
-# RQ-29 (`recording-schema`): "A database from an older schema version is
-# refused, not altered". `schema_version='3'` is exactly the shape a database
-# created before this change has -- predating `run_metadata` and the bump to
-# 4 -- so this proves the concrete scenario the requirement names, not only
-# the general "some other version" cases above.
-@pytest.mark.req(id="RQ-29")
-def test_opening_a_database_created_by_the_previous_schema_version_is_refused(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("stamped", "found"),
+    [
+        (None, "absent"),
+        (str(_SCHEMA_VERSION - 1), str(_SCHEMA_VERSION - 1)),
+        (str(_SCHEMA_VERSION + 1), str(_SCHEMA_VERSION + 1)),
+        ("not-a-number", "absent"),
+    ],
+    ids=["absent", "older", "newer", "unparseable"],
+)
+def test_a_database_stamped_with_any_other_schema_version_is_refused(
+    tmp_path: Path, stamped: str | None, found: str
 ) -> None:
+    """Older and newer are both refused: a build cannot honour an invariant
+    it does not know about. The message names what was found, what is
+    required, and which file."""
     db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="3")
+    _seed_meta_only_database(db_path, schema_version_value=stamped)
 
     with pytest.raises(SchemaVersionError) as exc_info:
         open_database(db_path)
 
     message = str(exc_info.value)
-    assert "3" in message
-    assert "4" in message
+    assert f"schema_version is {found}," in message
+    assert f"requires schema_version {_SCHEMA_VERSION};" in message
     assert str(db_path) in message
 
 
-def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="1")
-
-    before = sqlite3.connect(str(db_path))
-    before_master = before.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
-    ).fetchall()
-    before.close()
-
+def _capture_connections(monkeypatch: pytest.MonkeyPatch) -> list[sqlite3.Connection]:
+    """Record every connection `sqlite3.connect` hands out, so a test can
+    check the one `open_database` made after it raised."""
     created: list[sqlite3.Connection] = []
     real_connect = sqlite3.connect
 
@@ -214,6 +191,21 @@ def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
         return conn
 
     monkeypatch.setattr(sqlite3, "connect", _capturing_connect)
+    return created
+
+
+def test_a_refusal_changes_nothing_and_closes_the_connection_before_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not a byte of the refused file changes. Switching it to write-ahead
+    logging first would: the journal mode is stored in the file's header
+    and outlives the connection, so the refusal would leave behind a
+    database no older build opens the way it left it."""
+    db_path = tmp_path / "store" / "vantage.db"
+    _seed_meta_only_database(db_path, schema_version_value="1")
+    before = db_path.read_bytes()
+
+    created = _capture_connections(monkeypatch)
 
     with pytest.raises(SchemaVersionError):
         open_database(db_path)
@@ -225,21 +217,87 @@ def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
     with pytest.raises(sqlite3.ProgrammingError):
         created[0].execute("SELECT 1")
 
-    monkeypatch.undo()
-    after = sqlite3.connect(str(db_path))
-    after_master = after.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
-    ).fetchall()
-    after.close()
+    assert db_path.read_bytes() == before
+    assert sorted(path.name for path in db_path.parent.iterdir()) == ["vantage.db"]
 
-    assert after_master == before_master
+
+def test_a_database_holding_another_schema_is_refused_and_left_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """A mistyped `--database` can name some other application's SQLite
+    file. Adding vantage's tables to it, stamping it and switching its
+    journal mode would change someone else's data; refusing it says what
+    the file is."""
+    db_path = tmp_path / "store" / "customers.db"
+    db_path.parent.mkdir(parents=True)
+    with contextlib.closing(sqlite3.connect(str(db_path))) as foreign, foreign:
+        foreign.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)")
+        foreign.execute("INSERT INTO customers (name) VALUES ('a')")
+    before = db_path.read_bytes()
+
+    with pytest.raises(SchemaVersionError, match="not a vantage database"):
+        open_database(db_path)
+
+    assert db_path.read_bytes() == before
+    assert sorted(path.name for path in db_path.parent.iterdir()) == ["customers.db"]
+
+
+def test_a_schema_that_fails_partway_is_rolled_back_and_its_lock_released_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A statement near the end of the schema fails after every table
+    before it was created inside `BEGIN IMMEDIATE`. The connection must be
+    closed as part of raising, so the half-applied schema rolls back and the
+    write lock is free while the caller is still handling the error -- not
+    whenever the traceback that references the connection is collected."""
+    broken = tmp_path / "schema.sql"
+    broken.write_text(
+        _SCHEMA_SQL.read_text(encoding="utf-8")
+        + "\nCREATE INDEX IF NOT EXISTS idx_broken ON no_such_table (x);\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("vantage.storage.connection._SCHEMA_SQL_PATH", broken)
+    db_path = tmp_path / "store" / "vantage.db"
+    created = _capture_connections(monkeypatch)
+
+    with pytest.raises(sqlite3.OperationalError, match="no_such_table"):
+        open_database(db_path)
+
+    assert len(created) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        created[0].execute("SELECT 1")
+    monkeypatch.undo()
+    other = sqlite3.connect(str(db_path), isolation_level=None, timeout=0)
+    try:
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("ROLLBACK")
+        tables = other.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    finally:
+        other.close()
+    assert tables == []
+
+
+def test_a_file_that_is_not_a_database_leaves_no_open_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "store" / "vantage.db"
+    db_path.parent.mkdir(parents=True)
+    db_path.write_bytes(b"not a database, just some bytes " * 64)
+    created = _capture_connections(monkeypatch)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        open_database(db_path)
+
+    assert len(created) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        created[0].execute("SELECT 1")
 
 
 def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies_no_ddl(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = tmp_path / "store" / "vantage.db"
-    _seed_meta_only_database(db_path, schema_version_value="4")
+    _seed_meta_only_database(db_path, schema_version_value=str(_SCHEMA_VERSION))
 
     captured = _spy_on_executescript(monkeypatch)
 
@@ -252,15 +310,11 @@ def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies
 def test_creating_a_database_survives_a_username_lookup_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`getpass.getuser()` only normalises its failures to `OSError` on 3.13+;
-    its own docstring records the change. On 3.10-3.12 -- three of this
-    project's four CI legs -- it raises `KeyError` from `pwd.getpwuid`, which
-    is what a container run as an unmapped uid with no `LOGNAME`/`USER` in the
-    environment produces.
+    """Before 3.13, `getpass.getuser()` raises `KeyError` from `pwd.getpwuid`
+    in a container run as an unmapped uid with no `LOGNAME`/`USER` set.
 
-    `created_by` is a convenience row. Losing it must cost nothing; aborting
-    `open_database` would stop the server from starting at all. Found by
-    review, 2026-08-19.
+    `created_by` is a convenience row; losing it must not stop the server
+    from starting.
     """
 
     def _no_such_user() -> str:
@@ -275,5 +329,58 @@ def test_creating_a_database_survives_a_username_lookup_failure(
         conn.close()
 
     # The database exists and is usable; only the convenience row is absent.
-    assert stored["schema_version"] == "4"
+    assert stored["schema_version"] == str(_SCHEMA_VERSION)
     assert "created_by" not in stored
+
+
+def _wal_switch_locked(monkeypatch: pytest.MonkeyPatch, times: int | None) -> list[str]:
+    """Patch `sqlite3.connect` so the first `times` switches to WAL -- every
+    one, for `None` -- fail as SQLite fails one of two connections switching
+    a new database at once. Returns the answer each attempt got."""
+    attempts: list[str] = []
+
+    class _ContendedConnection(sqlite3.Connection):
+        def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+            if sql == "PRAGMA journal_mode=WAL":
+                if times is None or len(attempts) < times:
+                    attempts.append("locked")
+                    raise sqlite3.OperationalError("database is locked")
+                attempts.append("switched")
+            return super().execute(sql, *args)
+
+    real_connect = sqlite3.connect
+
+    def _connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        kwargs.setdefault("factory", _ContendedConnection)
+        return cast(sqlite3.Connection, real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(sqlite3, "connect", _connect)
+    return attempts
+
+
+def test_a_switch_to_wal_another_connection_holds_up_is_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two processes opening one new database at once -- two pytest
+    sessions storing their first runs -- must both get it."""
+    attempts = _wal_switch_locked(monkeypatch, times=2)
+
+    conn = open_database(tmp_path / "store" / "vantage.db")
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone() == ("wal",)
+    finally:
+        conn.close()
+
+    assert attempts == ["locked", "locked", "switched"]
+
+
+def test_a_switch_to_wal_that_stays_locked_gives_up_after_the_busy_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("vantage.storage.connection._BUSY_TIMEOUT_SECONDS", 0.05)
+    attempts = _wal_switch_locked(monkeypatch, times=None)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        open_database(tmp_path / "store" / "vantage.db")
+
+    assert len(attempts) > 1

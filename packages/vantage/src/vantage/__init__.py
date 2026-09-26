@@ -1,19 +1,25 @@
-"""Vantage server: records runs reported over HTTP and serves their history.
+"""Vantage: stores the runs pytest-vantage records and serves their history.
 
-Three internal packages, with the dependency arrow pointing inwards:
+Internal packages, with the dependency arrow pointing inwards:
 
 ``vantage.core``
-    Domain model, storage port, option resolution. Standard library only
-    (RQ-26), enforced by a static import walk rather than by convention.
+    Domain model, storage port, option resolution. Standard library only,
+    enforced by a static import walk rather than by convention.
 ``vantage.storage``
-    Adapters implementing the core's storage port -- SQLite first (ADR-6),
-    others later. Depends on the core alone.
+    Adapters implementing the core's storage port. Depends on the core alone.
+``vantage.ingestion``
+    A session report validated, converted and recorded in a store it is
+    handed. The core, Pydantic and PyYAML; never the web framework.
+``vantage.local``
+    Runs stored on the test machine in a SQLite database, through the same
+    ingestion: what the plugin calls when it records without a server.
 ``vantage.service``
-    HTTP surface: the ingestion endpoint the plugin reports to, and the
-    read API the interface consumes. The only package permitted a
-    third-party dependency.
+    HTTP surface: the ingestion endpoint the plugin reports to, the read API
+    the interface consumes, and the `vantage` command. The only package that
+    imports the web framework, which the `server` extra installs.
 
-The pytest plugin is *not* here. Under ADR-9 it reports over HTTP and shares
-no code with this package, which is why it ships as its own distribution
-(``pytest-vantage``) with no dependency on this one.
+The pytest plugin is *not* here. It ships as its own distribution
+(``pytest-vantage``) that never depends on this one, so installing it
+never brings a server along; only its local modes, where this package is
+installed, hand runs to ``vantage.local``.
 """

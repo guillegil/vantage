@@ -1,36 +1,38 @@
-"""Shared contract for any `ExecutionStore` implementation (RQ-30).
+"""Shared contract for any `ExecutionStore` implementation.
 
-Never collected directly by pytest -- it is not named ``test_*`` -- and never
-shipped in a wheel: the ``pytest`` import here would break ``vantage.core``'s
-stdlib-only rule (RQ-26) if this module lived inside the package instead of
-alongside the tests. Each adapter's own ``test_*_store.py`` subclasses
-``ExecutionStoreContract``, provides a ``store`` fixture, and inherits every
-test method unchanged -- that is what proves the core suite "passes
-unchanged" against a second adapter (RQ-30.1). ``vantage.storage`` implements
-this now (``test_memory_store.py``); ``vantage.storage.sqlite_store`` does
-the same in PR5.
+Never collected directly by pytest -- it is not named ``test_*`` -- and kept
+beside the tests rather than in the package, because ``vantage.core`` must not
+import pytest. Each adapter's ``test_*_store.py`` subclasses
+``ExecutionStoreContract``, provides ``store`` and ``stored_metadata``
+fixtures, and inherits every test unchanged, so both adapters are held to the
+same behaviour.
 """
 
 from __future__ import annotations
 
-import dataclasses
+from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
-from vantage.core.domain.projection import LIST_FAILURE_MESSAGE_CHARS, project_failure
+from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
+from vantage.core.domain.projection import (
+    LIST_COMMIT_SUBJECT_CHARS,
+    LIST_FAILURE_MESSAGE_CHARS,
+    project_failure,
+    project_vcs,
+)
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
     ExecutionStore,
     MetadataEntry,
     MetadataFile,
-    ResultListEntry,
+    NamespaceFullError,
     RunMetadata,
     UserSetting,
 )
-from vantage.storage.memory import InMemoryExecutionStore
-from vantage.storage.sqlite_store import SqliteExecutionStore
 
 
 def _execution(
@@ -57,9 +59,9 @@ def _execution(
 def _start_only_execution(
     hex_id: str, *, started: datetime | None = None, vcs: VcsContext | None = None
 ) -> Execution:
-    """The shape a start-write reports (design.md D25/D32): `exit_status` is
-    the only field never sent, `interrupted`/`interrupt_reason` are their
-    defaults because nothing is yet known about how the session will end."""
+    """The shape a start-write reports: `exit_status` is the only field never
+    sent, `interrupted`/`interrupt_reason` are their defaults because nothing
+    is yet known about how the session will end."""
     started = (
         started if started is not None else datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
     )
@@ -79,12 +81,9 @@ def _vcs(
     commit: str | None = "a" * 40,
     branch: str | None = "main",
     commit_subject: str | None = "a commit subject",
-    # `True` by default, deliberately. With `False`, both branches of the
-    # conflict clause's `CASE WHEN excluded.vcs_commit_subject IS NOT NULL`
-    # return the same value, so replacing the whole CASE with a bare
-    # `excluded.vcs_commit_subject_truncated` left every test green while
-    # producing a subject stored whole and flagged as untruncated -- a false
-    # zero the server cannot detect. Found by mutation, 2026-08-20.
+    # `True` by default: with `False`, both branches of the conflict clause's
+    # `CASE WHEN excluded.vcs_commit_subject IS NOT NULL` return the same
+    # value, so a broken CASE would go unnoticed.
     commit_subject_truncated: bool = True,
     dirty: bool | None = False,
     root: str | None = "/repo",
@@ -191,57 +190,24 @@ def _captured(
     )
 
 
-def _stored_metadata_files(store: ExecutionStore, run_id: str) -> frozenset[MetadataFile]:
-    """Adapter-agnostic introspection of `run_metadata_file` rows -- no port
-    read method exists for this table until Phase 10 (design.md D100), so
-    the contract proves the write path the only way it can this slice:
-    reading each adapter's own storage directly, mirroring
-    `test_sqlite_store.py`'s existing `store._conn.execute(...)` pattern."""
-    if isinstance(store, SqliteExecutionStore):
-        rows = store._conn.execute(  # noqa: SLF001
-            "SELECT source_file, content_type, status FROM run_metadata_file WHERE run_id = ?",
-            (run_id,),
-        ).fetchall()
-        return frozenset(
-            MetadataFile(source_file=row[0], content_type=row[1], status=row[2]) for row in rows
-        )
-    if isinstance(store, InMemoryExecutionStore):
-        return frozenset(
-            metadata_file
-            for (stored_run_id, _source_file), metadata_file in store._metadata_files.items()  # noqa: SLF001
-            if stored_run_id == run_id
-        )
-    raise NotImplementedError(f"no metadata introspection for {type(store)!r}")
-
-
-def _stored_metadata_entries(store: ExecutionStore, run_id: str) -> frozenset[MetadataEntry]:
-    """The `run_metadata` sibling of `_stored_metadata_files`."""
-    if isinstance(store, SqliteExecutionStore):
-        rows = store._conn.execute(  # noqa: SLF001
-            "SELECT key, value, source_file, status FROM run_metadata WHERE run_id = ?",
-            (run_id,),
-        ).fetchall()
-        return frozenset(
-            MetadataEntry(key=row[0], value=row[1], source_file=row[2], status=row[3])
-            for row in rows
-        )
-    if isinstance(store, InMemoryExecutionStore):
-        return frozenset(
-            entry
-            for (stored_run_id, _key), entry in store._metadata_entries.items()  # noqa: SLF001
-            if stored_run_id == run_id
-        )
-    raise NotImplementedError(f"no metadata introspection for {type(store)!r}")
+StoredMetadata = Callable[[str], RunMetadata]
+"""Reads back the metadata files and entries an adapter stored for one run
+id. The port never returns the files, so each adapter's test module reads its
+own storage for both."""
 
 
 class ExecutionStoreContract:
-    """Inherit this and override the `store` fixture with a fresh adapter instance."""
+    """Inherit this and override the `store` fixture with a fresh adapter
+    instance, and `stored_metadata` with a reader of that instance's storage."""
 
     @pytest.fixture
     def store(self) -> ExecutionStore:
         raise NotImplementedError("subclasses must override the `store` fixture")
 
-    @pytest.mark.req(id="RQ-30")
+    @pytest.fixture
+    def stored_metadata(self) -> StoredMetadata:
+        raise NotImplementedError("subclasses must override the `stored_metadata` fixture")
+
     def test_first_write_creates_a_row(self, store: ExecutionStore) -> None:
         execution = _execution("a" * 32)
 
@@ -252,7 +218,6 @@ class ExecutionStoreContract:
         assert created is True
         assert store.count_executions() == 1
 
-    @pytest.mark.req(id="RQ-30")
     def test_replaying_the_same_id_reports_no_new_row(self, store: ExecutionStore) -> None:
         execution = _execution("b" * 32)
         store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
@@ -264,7 +229,6 @@ class ExecutionStoreContract:
         assert created_again is False
         assert store.count_executions() == 1
 
-    @pytest.mark.req(id="RQ-30")
     def test_get_execution_returns_what_was_stored(self, store: ExecutionStore) -> None:
         execution = _execution("c" * 32, finished=False)
         store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
@@ -273,11 +237,9 @@ class ExecutionStoreContract:
 
         assert found == execution
 
-    @pytest.mark.req(id="RQ-30")
     def test_get_execution_returns_none_for_an_unknown_id(self, store: ExecutionStore) -> None:
         assert store.get_execution("d" * 32) is None
 
-    @pytest.mark.req(id="RQ-30")
     def test_recording_a_session_with_results_persists_both(self, store: ExecutionStore) -> None:
         execution = _execution("e" * 32)
         results = (_result("t.py::test_a"), _result("t.py::test_b"))
@@ -289,7 +251,6 @@ class ExecutionStoreContract:
         assert created is True
         assert store.count_results() == 2
 
-    @pytest.mark.req(id="RQ-41")
     def test_replaying_the_same_report_does_not_duplicate_results(
         self, store: ExecutionStore
     ) -> None:
@@ -304,11 +265,10 @@ class ExecutionStoreContract:
         assert replayed is False
         assert store.count_results() == 2
 
-    @pytest.mark.req(id="RQ-3")
     def test_finish_after_start_applies_in_full(self, store: ExecutionStore) -> None:
-        """design.md D25, task 1.1: a finish-write following an accepted
-        start-write for the same run id applies in full -- `exit_status`
-        goes NULL -> int, and the finish's other fields and results land."""
+        """A finish-write following an accepted start-write for the same run id
+        applies in full -- `exit_status` goes NULL -> int, and the finish's
+        other fields and results land."""
         identity = "1" + "0" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
@@ -326,13 +286,11 @@ class ExecutionStoreContract:
         assert stored.interrupt_reason == finish.interrupt_reason
         assert store.count_results() == 1
 
-    @pytest.mark.req(id="RQ-3")
     def test_reordered_start_after_finish_never_nulls_the_recorded_finish(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D25, task 1.2: `run-recording`'s 'A reordered
-        start-write never nulls a recorded finish' -- the finish, its exit
-        fields and its result rows survive a start-write arriving late."""
+        """A start-write arriving after the finish never nulls it -- the
+        finish, its exit fields and its result rows survive."""
         identity = "1" + "1" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         finish = _execution(identity, finished=True, started=started)
@@ -346,11 +304,9 @@ class ExecutionStoreContract:
         assert stored == finish
         assert store.count_results() == 1
 
-    @pytest.mark.req(id="RQ-41")
     def test_replayed_finish_is_a_no_op_first_finish_wins(self, store: ExecutionStore) -> None:
-        """design.md D25, task 1.3: finish-after-finish (replay) is a no-op
-        -- the first accepted finish wins, unchanged semantics (RQ-41),
-        now expressed through the same discriminator as every other case."""
+        """A second finish for the same run is a no-op -- the first accepted
+        finish wins."""
         identity = "1" + "2" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         first_finish = _execution(identity, finished=True, started=started)
@@ -369,11 +325,10 @@ class ExecutionStoreContract:
         stored = store.get_execution(identity)
         assert stored == first_finish
 
-    @pytest.mark.req(id="RQ-30")
     def test_duplicate_start_after_start_is_a_no_op(self, store: ExecutionStore) -> None:
-        """design.md D25, task 1.4: a second start-write for the same run id
-        changes nothing -- `excluded.exit_status IS NULL` never satisfies
-        the conflict `WHERE`, regardless of what `run.exit_status` holds."""
+        """A second start-write for the same run id changes nothing --
+        `excluded.exit_status IS NULL` never satisfies the conflict `WHERE`,
+        regardless of what `run.exit_status` holds."""
         identity = "1" + "3" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         first_start = _start_only_execution(identity, started=started)
@@ -385,12 +340,11 @@ class ExecutionStoreContract:
         stored = store.get_execution(identity)
         assert stored == first_start
 
-    @pytest.mark.req(id="RQ-30")
     def test_created_is_true_only_on_a_true_first_insert(self, store: ExecutionStore) -> None:
-        """design.md D26, task 1.5: `record_session` returns True only for a
-        true first insert. A finish applied over an existing start-only row,
-        and a true duplicate, both return False -- `rowcount` can no longer
-        answer this under `DO UPDATE`, so the adapter must probe first."""
+        """`record_session` returns True only for a true first insert. A finish
+        applied over an existing start-only row, and a true duplicate, both
+        return False -- `rowcount` cannot answer this under `DO UPDATE`, so
+        the adapter must probe first."""
         identity = "1" + "4" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
@@ -410,7 +364,6 @@ class ExecutionStoreContract:
         )
         assert created_by_duplicate is False
 
-    @pytest.mark.req(id="RQ-5")
     def test_get_results_preserves_phase_outcomes_and_durations_exactly(
         self, store: ExecutionStore
     ) -> None:
@@ -438,7 +391,6 @@ class ExecutionStoreContract:
         assert stored["t.py::test_setup_failure"].setup_outcome == "failed"
         assert stored["t.py::test_instant"].call_duration == 0.0
 
-    @pytest.mark.req(id="RQ-9")
     def test_empty_param_id_is_distinct_from_no_param_id(self, store: ExecutionStore) -> None:
         execution = _execution("3" + "c" * 31)
         empty_param = _result("t.py::test_x[]", param_id="")
@@ -457,7 +409,6 @@ class ExecutionStoreContract:
         without_param = [r for r in stored if r.identity.param_id is None]
         assert [r.identity.node_id for r in without_param] == ["t.py::test_y"]
 
-    @pytest.mark.req(id="RQ-13")
     def test_catalogue_entry_advances_last_seen_and_keeps_first_seen(
         self, store: ExecutionStore
     ) -> None:
@@ -490,7 +441,6 @@ class ExecutionStoreContract:
         assert entry_after_second.last_seen_at == second_execution.started_at
         assert entry_after_second.last_seen_run_id == second_execution.identity.value
 
-    @pytest.mark.req(id="RQ-13")
     def test_an_older_session_does_not_roll_back_the_catalogue_entry(
         self, store: ExecutionStore
     ) -> None:
@@ -516,7 +466,30 @@ class ExecutionStoreContract:
         assert entry.last_seen_at == later_execution.started_at
         assert entry.last_seen_run_id == later_execution.identity.value
 
-    @pytest.mark.req(id="RQ-13")
+    def test_a_late_report_of_an_earlier_session_moves_first_seen_back(
+        self, store: ExecutionStore
+    ) -> None:
+        """Results arrive with the finish report, so of two overlapping
+        sessions the one that started later can report first. The session
+        that started earlier still saw the test first."""
+        node_id = "t.py::test_overlapping"
+        started = datetime(2026, 9, 1, 10, 30, 0, tzinfo=timezone.utc)
+        short_job = _execution("a" * 32, started=started)
+        long_job = _execution("b" * 32, started=started - timedelta(minutes=30))
+        store.record_session(
+            short_job, results=(_result(node_id),), received_at=datetime.now(timezone.utc)
+        )
+        store.record_session(
+            long_job, results=(_result(node_id),), received_at=datetime.now(timezone.utc)
+        )
+
+        entry = store.get_catalogue_entry(node_id)
+
+        assert entry is not None
+        assert entry.first_seen_at == long_job.started_at
+        assert entry.last_seen_at == short_job.started_at
+        assert entry.last_seen_run_id == short_job.identity.value
+
     def test_a_report_without_a_node_id_leaves_its_catalogue_entry_untouched(
         self, store: ExecutionStore
     ) -> None:
@@ -541,15 +514,54 @@ class ExecutionStoreContract:
         entry_after = store.get_catalogue_entry(stable_node_id)
         assert entry_after == entry_before
 
-    @pytest.mark.req(id="RQ-44")
+    def test_every_run_reads_a_node_ids_identity_from_its_newest_report(
+        self, store: ExecutionStore
+    ) -> None:
+        """One catalogue entry per node id holds the file, class, function
+        and parameter a report decomposed it into, and every run's result
+        of that node id reads it, so a run's results and section totals are
+        the same from either adapter. It follows the newest run: a late
+        report of an older run, decomposing the node id some other way,
+        changes nothing a newer run reads."""
+        node_id = "tests/a.py::T::test_x"
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+
+        def _reported(file_path: str, class_name: str | None) -> Result:
+            identity = CaseIdentity(
+                node_id=node_id,
+                file_path=file_path,
+                class_name=class_name,
+                function_name="test_x",
+                param_id=None,
+            )
+            return replace(_result(node_id), identity=identity)
+
+        runs = [
+            (_execution("1" * 32, started=started), _reported("tests/a.py", "T")),
+            (_execution("2" * 32, started=started + timedelta(days=1)), _reported("b.py", None)),
+            (_execution("3" * 32, started=started - timedelta(days=1)), _reported("c.py", "L")),
+        ]
+        for execution, result in runs:
+            store.record_session(execution, results=(result,), received_at=started)
+
+        newest = runs[1][1].identity
+        for execution, _result_reported in runs:
+            run_id = execution.identity.value
+            found = store.get_result(run_id, node_id=node_id)
+            (listed,) = store.list_results(run_id, limit=10, offset=0).items
+            assert found is not None
+            assert found.identity == newest
+            assert listed.identity == newest
+            assert [r.identity for r in store.get_results(run_id)] == [newest]
+            assert store.get_run_case_outcomes(run_id) == (("b.py", "passed"),)
+
     def test_touch_last_contact_is_monotonic_and_reports_unknown_runs(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D33, task 4.1: `touch_last_contact` advances on a known
-        run (returns True); a second, earlier-or-equal contact leaves it
-        unchanged (returns False, the monotonic guard); an unknown execution
-        id also returns False -- the route disambiguates the two `False`
-        cases itself, by calling `get_execution` (D33), not this method."""
+        """`touch_last_contact` advances on a known run (returns True); an
+        earlier-or-equal contact leaves it unchanged (returns False); an
+        unknown execution id also returns False -- the route tells the two
+        `False` cases apart by calling `get_execution`."""
         identity = "2" + "0" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
@@ -569,14 +581,9 @@ class ExecutionStoreContract:
 
         assert store.touch_last_contact("9" * 32, later_contact) is False
 
-        # A heartbeat touches the contact clock and NOTHING else. Without
-        # this read-back the assertions above are satisfied by the return
-        # value alone, and an adapter whose UPDATE also fabricated a
-        # `finished_at` would pass every one of them -- verified by
-        # mutation, which left the whole suite green. The store is the only
-        # place that can say so, because the route never reads these fields
-        # back and `Execution` is what the client reported, not what was
-        # stored beside it.
+        # A heartbeat touches the contact clock and nothing else. The return
+        # values above cannot show that: an UPDATE that also wrote
+        # `finished_at` would satisfy all of them.
         after = store.get_execution(identity)
         assert after is not None
         assert after.started_at == started
@@ -588,12 +595,11 @@ class ExecutionStoreContract:
     def test_second_report_with_null_vcs_section_leaves_recorded_vcs_intact(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D48, task 4.1: a start-write carries a vcs snapshot; the
-        finish-write that follows carries no `vcs` section at all
-        (`vcs=None`). The conflict branch's per-column `COALESCE` (SQL) /
-        `merged_over` (memory) must leave the previously-recorded vcs values
-        untouched -- a report with no vcs data is not a report that nulls
-        the vcs it does not carry."""
+        """A start-write carries a vcs snapshot; the finish-write that follows
+        carries no `vcs` section at all (`vcs=None`). The conflict branch's
+        per-column `COALESCE` (SQL) / field-by-field merge (memory) must leave the
+        previously-recorded vcs values untouched -- a report with no vcs data
+        is not a report that nulls the vcs it does not carry."""
         identity = "2" + "1" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started, vcs=_vcs())
@@ -609,20 +615,13 @@ class ExecutionStoreContract:
     def test_a_partial_finish_snapshot_does_not_clobber_a_fuller_start_one(
         self, store: ExecutionStore
     ) -> None:
-        """The case that discriminates a per-FIELD merge from a per-OBJECT one.
+        """The case that discriminates a per-field merge from a whole-object
+        swap: the other vcs tests give both writes the same snapshot or none,
+        where the two agree.
 
-        Every other vcs contract test hands both writes the same snapshot or
-        no snapshot at all, and under either of those a whole-object swap and
-        a per-column `COALESCE` agree. So `merged_over` shipped correct but
-        unguarded: reverting it to
-        `stored.vcs if execution.vcs is None else execution.vcs` left all 326
-        tests green while the two adapters silently diverged. Found by
-        mutation, 2026-08-20.
-
-        The asymmetry is not contrived. A detached HEAD yields a snapshot with
-        a null branch, and a repository with no commits yields one with a null
-        commit and a null subject -- so a report whose snapshot is a strict
-        subset of an earlier one is what git itself produces.
+        A partial snapshot is what git itself produces: a detached HEAD has a
+        null branch, and a repository with no commits has a null commit and
+        subject.
         """
         identity = "2" + "6" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
@@ -653,13 +652,57 @@ class ExecutionStoreContract:
         assert stored.vcs.root == full.root
         assert stored.vcs.commit == full.commit
 
+    @pytest.mark.parametrize(
+        ("finish_subject", "expected_subject", "expected_flag"),
+        [(None, "A long subject that was cut", True), ("Short", "Short", False)],
+        ids=["no-subject-keeps-the-flag", "a-new-subject-brings-its-own"],
+    )
+    def test_the_truncation_flag_travels_with_the_subject_it_describes(
+        self,
+        store: ExecutionStore,
+        finish_subject: str | None,
+        expected_subject: str,
+        expected_flag: bool,
+    ) -> None:
+        """The flag describes a subject, so it is kept or replaced with the
+        subject, not by its own null-coalesce."""
+        identity = "2" + "7" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start_vcs = _vcs(
+            commit_subject="A long subject that was cut", commit_subject_truncated=True
+        )
+        store.record_session(
+            _start_only_execution(identity, started=started, vcs=start_vcs),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+        finish_vcs = _vcs(
+            commit=None,
+            branch=None,
+            commit_subject=finish_subject,
+            commit_subject_truncated=False,
+            dirty=None,
+            root=None,
+        )
+        store.record_session(
+            _execution(identity, finished=True, started=started, vcs=finish_vcs),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        stored = store.get_execution(identity)
+
+        assert stored is not None
+        assert stored.vcs == replace(
+            start_vcs, commit_subject=expected_subject, commit_subject_truncated=expected_flag
+        )
+
     def test_identical_vcs_snapshots_across_start_and_finish_apply_once(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D47, task 4.2: both reports of one session carry the
-        identical vcs snapshot, so the upsert is idempotent -- the finish's
-        (identical) snapshot applying over the start's own is a no-op, not a
-        divergence."""
+        """Both reports of one session carry the identical vcs snapshot, so the
+        upsert is idempotent -- the finish's (identical) snapshot applying over
+        the start's own is a no-op, not a divergence."""
         identity = "2" + "2" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         snapshot = _vcs(commit="b" * 40)
@@ -676,9 +719,9 @@ class ExecutionStoreContract:
     def test_reordered_start_after_finish_never_nulls_vcs_columns(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D48, task 4.3: a start-write arriving after the finish
-        fails the row-level `exit_status` guard and changes nothing -- vcs
-        columns included, same as every other field."""
+        """A start-write arriving after the finish fails the row-level
+        `exit_status` guard and changes nothing -- vcs columns included, same
+        as every other field."""
         identity = "2" + "3" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         finish_snapshot = _vcs(commit="c" * 40)
@@ -696,11 +739,10 @@ class ExecutionStoreContract:
     def test_vcs_none_normalizes_the_same_whether_absent_or_all_null(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D48, task 4.5: an absent `vcs` section and a section
-        whose five value fields are all null both read back as
-        `execution.vcs is None`, in every adapter -- proven independently of
-        `_to_execution`'s own normalisation (which never runs in this
-        contract test) so the two normalisation rules cannot drift apart."""
+        """An absent `vcs` section and a section whose five value fields are
+        all null both read back as `execution.vcs is None`, in every adapter --
+        independently of the service's `_to_vcs_context` normalisation, which
+        never runs here."""
         absent_id = "2" + "4" * 31
         all_null_id = "2" + "5" * 31
         absent = _execution(absent_id, vcs=None)
@@ -725,34 +767,39 @@ class ExecutionStoreContract:
         assert stored_all_null is not None
         assert stored_all_null.vcs is None
 
-    @pytest.mark.req(id="RQ-23")
-    def test_absent_repository_run_is_retrievable_in_storage(self, store: ExecutionStore) -> None:
-        """design.md D48, task 4.9. Storage-level regression guard, kept
-        alongside the route-level demonstration `read-api` now provides
-        (`test_list_runs_includes_absent_repository_run_undistinguished`,
-        `test_absent_repository_run_appears_in_list_undistinguished`): a
-        deferral this docstring used to name -- "awaiting `read-api`", "not
-        claimed as met until a run list exists" -- is retired, because a run
-        list exists now. Verified here at the storage level via
-        `count_executions` and `get_execution`; renamed in verify round 1
-        (SUGGESTION-3) after its "pending a run list" name outlived the
-        deferral it described."""
-        identity = "2" + "6" * 31
-        execution = _execution(identity, vcs=None)
+    # -- list_runs / get_run_detail --
 
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+    def test_timestamps_in_another_offset_order_by_the_instant_they_name(
+        self, store: ExecutionStore
+    ) -> None:
+        """The port takes any aware `datetime`. 11:30+02:00 is 09:30 UTC --
+        earlier than 10:00 UTC, though its ISO text sorts later -- so the
+        10:00 run is the newer one everywhere order matters."""
+        node_id = "t.py::test_x"
+        newer = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+        older = datetime(2026, 9, 1, 11, 30, 0, tzinfo=timezone(timedelta(hours=2)))
+        store.record_session(
+            _execution("a" * 32, started=newer), results=(_result(node_id),), received_at=newer
+        )
+        store.record_session(
+            _execution("b" * 32, started=older), results=(_result(node_id),), received_at=newer
+        )
 
-        assert store.count_executions() == 1
-        found = store.get_execution(identity)
-        assert found is not None
-        assert found.vcs is None
+        runs = store.list_runs(limit=10, offset=0).items
+        history = store.list_history(node_id=node_id, limit=10, offset=0).items
+        entry = store.get_catalogue_entry(node_id)
 
-    # -- list_runs / get_run_detail (read-api Phase 2, design.md D57-D61) --
+        assert [run.execution.identity.value for run in runs] == ["a" * 32, "b" * 32]
+        assert [item.run_id for item in history] == ["a" * 32, "b" * 32]
+        assert runs[1].execution.started_at == older
+        assert entry is not None
+        assert entry.last_seen_at == newer
+        assert entry.last_seen_run_id == "a" * 32
 
     def test_list_runs_orders_newest_first_with_total_tiebreak(self, store: ExecutionStore) -> None:
-        """design.md D61: two runs sharing one `started_at`; `id DESC`
-        breaks the tie so the order is total, not merely partial -- a page
-        boundary can never fall inside the tie group."""
+        """Two runs sharing one `started_at`; `id DESC` breaks the tie so the
+        order is total, not merely partial -- a page boundary can never fall
+        inside the tie group."""
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         store.record_session(_execution("a" * 32, started=started), results=(), received_at=started)
         store.record_session(_execution("b" * 32, started=started), results=(), received_at=started)
@@ -765,8 +812,8 @@ class ExecutionStoreContract:
         ]
 
     def test_list_runs_caps_at_200_items(self, store: ExecutionStore) -> None:
-        """history-read-api -> Bounded pagination: a list response never
-        exceeds 200 items, even when the caller asks for more."""
+        """A list response never exceeds 200 items, even when the caller asks
+        for more."""
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         for i in range(MAX_PAGE_ITEMS + 1):
             identity = f"{i:032x}"
@@ -784,9 +831,9 @@ class ExecutionStoreContract:
     def test_list_runs_has_more_distinguishes_exhaustion_from_truncation(
         self, store: ExecutionStore
     ) -> None:
-        """history-read-api -> Bounded pagination: the more-items flag
-        distinguishes exhaustion (exactly 200 stored) from truncation (201
-        stored) -- both drawn from the same fetch, never a second query."""
+        """The more-items flag distinguishes exhaustion (exactly 200 stored)
+        from truncation (201 stored) -- both drawn from the same fetch, never a
+        second query."""
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         for i in range(MAX_PAGE_ITEMS):
             identity = f"{i:032x}"
@@ -809,8 +856,8 @@ class ExecutionStoreContract:
         assert truncated.has_more is True
 
     def test_list_runs_honors_a_smaller_requested_page_size(self, store: ExecutionStore) -> None:
-        """history-read-api -> Bounded pagination: a caller-requested page
-        size under the cap is honored, not silently rounded up to 200."""
+        """A caller-requested page size under the cap is honored, not silently
+        rounded up to 200."""
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         for i in range(10):
             identity = f"{i:032x}"
@@ -828,11 +875,9 @@ class ExecutionStoreContract:
     def test_list_runs_includes_absent_repository_run_undistinguished(
         self, store: ExecutionStore
     ) -> None:
-        """version-control-context -> Absent repository: a run recorded
-        outside a repository appears in the run list at its ordinary
-        chronological position, `vcs is None`, no positional distinction
-        from a run recorded inside one -- the criterion `version-control-
-        context` deferred to this change by name."""
+        """A run recorded outside a repository appears in the run list at its
+        ordinary chronological position, with `vcs is None` and no other
+        distinction from a run recorded inside one."""
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         store.record_session(
             _execution("a" * 32, started=base, vcs=_vcs()),
@@ -861,9 +906,8 @@ class ExecutionStoreContract:
         assert by_id["b" * 32].vcs is None
 
     def test_list_runs_bounds_commit_subject_at_display_width(self, store: ExecutionStore) -> None:
-        """history-read-api -> Lean list projections: the commit subject is
-        bounded in list responses -- proves the SQL projection agrees with
-        `project_vcs` (design.md D57, D60)."""
+        """The commit subject is bounded in list responses, and the SQL
+        projection agrees with `project_vcs`."""
         subject = "x" * 200
         store.record_session(
             _execution(
@@ -884,9 +928,8 @@ class ExecutionStoreContract:
     def test_list_runs_flags_capture_truncated_subject_even_when_short(
         self, store: ExecutionStore
     ) -> None:
-        """history-read-api -> Lean list projections: the truncation flag
-        never surfaces independently of its subject -- the other input to
-        the disjunction, at adapter level (design.md D60)."""
+        """A subject already truncated at capture keeps its flag in the list
+        even when it is shorter than the display width."""
         store.record_session(
             _execution(
                 "a" * 32,
@@ -903,10 +946,98 @@ class ExecutionStoreContract:
         assert entry.vcs.commit_subject == "short"
         assert entry.vcs.commit_subject_truncated is True
 
+    def test_list_views_bound_text_holding_control_characters_like_any_other_text(
+        self, store: ExecutionStore
+    ) -> None:
+        """A failure message can hold control characters -- a test of a
+        binary protocol that puts raw bytes in its exception -- and a
+        hand-written report can put one in a commit subject. The list must
+        show the display width and flag the rest, not a prefix cut at a
+        control character that claims to be the whole value. (U+0000 never
+        reaches a store; the service replaces it.)"""
+        message = "ValueError: bad frame header \x01\x02\x7f" + "x" * 300
+        subject = "Fix\x1b" + "y" * 200
+        vcs = _vcs(commit_subject=subject, commit_subject_truncated=False)
+        failure = _failure(failure_message=message)
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        store.record_session(
+            _execution("a" * 32, started=started, vcs=vcs),
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=started,
+        )
+
+        (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0).items
+        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+
+        assert result_entry.failure == project_failure(failure)
+        assert result_entry.failure is not None
+        assert result_entry.failure.failure_message == message[:LIST_FAILURE_MESSAGE_CHARS]
+        assert result_entry.failure.failure_message_truncated is True
+        assert run_entry.vcs == project_vcs(vcs)
+        assert run_entry.vcs is not None
+        assert run_entry.vcs.commit_subject == subject[:LIST_COMMIT_SUBJECT_CHARS]
+        assert run_entry.vcs.commit_subject_truncated is True
+        assert history_entry.vcs == run_entry.vcs
+
+    def test_list_views_keep_empty_text_empty(self, store: ExecutionStore) -> None:
+        """The plugin sends an empty commit subject for a commit whose
+        message is empty, and any client can send an empty failure message.
+        A list entry carries a value exactly when the full record does, so
+        `""` lists as `""` -- and a result whose only evidence is that empty
+        message still lists with a failure object."""
+        vcs = _vcs(commit_subject="", commit_subject_truncated=False)
+        failure = _failure(
+            failure_type=None,
+            failure_message="",
+            failure_path=None,
+            failure_lineno=None,
+            failure_repr=None,
+            traceback=None,
+        )
+        store.record_session(
+            _execution("a" * 32, vcs=vcs),
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0).items
+        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+        detail = store.get_run_detail("a" * 32)
+
+        assert result_entry.failure == project_failure(failure)
+        assert result_entry.failure is not None
+        assert result_entry.failure.failure_message == ""
+        assert run_entry.vcs == project_vcs(vcs)
+        assert run_entry.vcs is not None
+        assert run_entry.vcs.commit_subject == ""
+        assert history_entry.vcs == run_entry.vcs
+        assert detail is not None
+        assert detail.execution.vcs is not None
+        assert detail.execution.vcs.commit_subject == ""
+
+    def test_list_views_bound_multibyte_text_by_characters(self, store: ExecutionStore) -> None:
+        """The display width counts characters, whatever their UTF-8 length."""
+        message = "é" * 250
+        subject = "🙂" * 150
+        vcs = _vcs(commit_subject=subject, commit_subject_truncated=False)
+        failure = _failure(failure_message=message)
+        store.record_session(
+            _execution("a" * 32, vcs=vcs),
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0).items
+
+        assert result_entry.failure == project_failure(failure)
+        assert run_entry.vcs == project_vcs(vcs)
+
     def test_list_runs_null_subject_flag_is_false_not_null(self, store: ExecutionStore) -> None:
-        """design.md D60's `COALESCE` edge case: a run with
-        `vcs_commit_subject IS NULL` reports `commit_subject_truncated is
-        False`, never `None`."""
+        """A run with `vcs_commit_subject IS NULL` reports
+        `commit_subject_truncated is False`, never `None`."""
         store.record_session(
             _execution(
                 "a" * 32,
@@ -924,10 +1055,9 @@ class ExecutionStoreContract:
         assert entry.vcs.commit_subject_truncated is False
 
     def test_get_run_detail_returns_full_untruncated_subject(self, store: ExecutionStore) -> None:
-        """design.md D58, D59: `get_run_detail` is the lean-list rule's
-        complement -- the full record stays reachable at the whole stored
-        subject, with `commit_subject_truncated` reflecting only
-        capture-time truncation, unchanged meaning."""
+        """`get_run_detail` is the lean list's complement -- the full record
+        stays reachable at the whole stored subject, with
+        `commit_subject_truncated` reflecting only capture-time truncation."""
         subject = "y" * 200
         execution = _execution(
             "a" * 32, vcs=_vcs(commit_subject=subject, commit_subject_truncated=False)
@@ -944,12 +1074,12 @@ class ExecutionStoreContract:
     def test_get_run_detail_returns_none_for_unknown_id(self, store: ExecutionStore) -> None:
         assert store.get_run_detail("f" * 32) is None
 
-    # -- list_results / list_history (read-api Phase 3, design.md D57-D63) --
+    # -- list_results / list_history --
 
     def test_list_history_orders_newest_first_with_full_vcs(self, store: ExecutionStore) -> None:
-        """history-read-api -> Test history: executions return newest first,
-        and every entry carries its full VCS context -- commit, branch,
-        commit subject, truncation flag, dirty flag -- and its duration."""
+        """Executions return newest first, and every entry carries its full VCS
+        context -- commit, branch, commit subject, truncation flag, dirty flag
+        -- and its duration."""
         node_id = "t.py::test_recurring"
         older = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         newer = older + timedelta(hours=1)
@@ -981,17 +1111,15 @@ class ExecutionStoreContract:
         assert oldest.duration == 0.5
 
     def test_list_history_unknown_node_id_is_empty_not_error(self, store: ExecutionStore) -> None:
-        """history-read-api -> Test history: an unknown test identity yields
-        an empty history, not an error."""
+        """An unknown test identity yields an empty history, not an error."""
         page = store.list_history(node_id="t.py::test_never_ran", limit=10, offset=0)
 
         assert page.items == ()
         assert page.has_more is False
 
     def test_list_history_null_vcs_entry_present_not_omitted(self, store: ExecutionStore) -> None:
-        """history-read-api -> Test history: an execution recorded outside a
-        git repository is present in the history with a null VCS context,
-        not omitted."""
+        """An execution recorded outside a git repository is present in the
+        history with a null VCS context, not omitted."""
         node_id = "t.py::test_no_repo"
         store.record_session(
             _execution("a" * 32, vcs=None),
@@ -1005,9 +1133,8 @@ class ExecutionStoreContract:
         assert page.items[0].vcs is None
 
     def test_list_history_caps_and_reports_more_like_list_runs(self, store: ExecutionStore) -> None:
-        """history-read-api -> Bounded pagination, reused for the history
-        endpoint: the same 200/201 clamp and `has_more` transition as
-        `list_runs`."""
+        """History pagination has the same 200/201 clamp and `has_more`
+        transition as `list_runs`."""
         node_id = "t.py::test_hot_path"
         base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         for i in range(MAX_PAGE_ITEMS):
@@ -1033,9 +1160,8 @@ class ExecutionStoreContract:
         assert truncated.has_more is True
 
     def test_list_results_paginates_a_runs_results(self, store: ExecutionStore) -> None:
-        """design.md D57: `list_results` is the paginated sibling of
-        `get_results` -- respects `limit`/`offset`/`has_more` over one run's
-        results."""
+        """`list_results` is the paginated sibling of `get_results` -- respects
+        `limit`/`offset`/`has_more` over one run's results."""
         execution = _execution("a" * 32)
         results = tuple(_result(f"t.py::test_{i}") for i in range(5))
         store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
@@ -1057,16 +1183,14 @@ class ExecutionStoreContract:
         assert page.items == ()
         assert page.has_more is False
 
-    # -- list_results / get_result failure evidence (failure-capture Phase 7, design.md D76-D78) --
+    # -- list_results / get_result failure evidence --
 
     def test_list_results_projects_failure_evidence_via_failure_projection(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D76 -- the two-mechanism agreement: a stored result
-        with a >200-character message; the `list_results` entry's `failure`
-        agrees with `project_failure`'s own bounding and disjunction rule,
-        the same pattern `project_vcs`/SQL `substr` already proves for the
-        commit subject."""
+        """A stored result with a >200-character message: the `list_results`
+        entry's `failure` agrees with `project_failure`'s bounding and
+        truncation-flag rule."""
         long_message = "E" * (LIST_FAILURE_MESSAGE_CHARS + 51)
         failure = _failure(failure_message=long_message, failure_message_truncated=False)
         execution = _execution("a" * 32)
@@ -1084,34 +1208,101 @@ class ExecutionStoreContract:
         assert entry.failure.failure_message == long_message[:LIST_FAILURE_MESSAGE_CHARS]
         assert entry.failure.failure_message_truncated is True
 
-    def test_list_results_excludes_the_heavy_fields_structurally(
-        self, store: ExecutionStore
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            _failure(
+                failure_type=None, failure_message=None, failure_path=None, failure_lineno=None
+            ),
+            _failure(
+                failure_type=None,
+                failure_message=None,
+                failure_path=None,
+                failure_lineno=None,
+                failure_repr=None,
+                traceback=None,
+                skip_reason_truncated=True,
+            ),
+        ],
+        ids=["repr-and-traceback-only", "dropped-skip-reason-only"],
+    )
+    def test_a_list_entry_carries_failure_data_exactly_when_the_full_record_does(
+        self, store: ExecutionStore, failure: FailureEvidence
     ) -> None:
-        """design.md D76 -- `ResultListEntry` has no field to carry
-        `traceback`, `failure_repr` or captured output, proven against the
-        type `list_results` actually returns, not merely `ResultListEntry`
-        in isolation."""
+        """Evidence whose only content is outside the lean projection still
+        lists as a failure object, so a client can tell from the list that
+        the detail has something to show."""
         execution = _execution("a" * 32)
         store.record_session(
             execution,
-            results=(_result("t.py::test_failing", outcome="failed", failure=_failure()),),
+            results=(_result("t.py::test_x", outcome="failed", failure=failure),),
             received_at=datetime.now(timezone.utc),
         )
 
-        page = store.list_results(execution.identity.value, limit=10, offset=0)
+        (entry,) = store.list_results(execution.identity.value, limit=10, offset=0).items
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
 
-        entry = page.items[0]
-        assert isinstance(entry, ResultListEntry)
-        field_names = {f.name for f in dataclasses.fields(ResultListEntry)}
-        assert "traceback" not in field_names
-        assert "failure_repr" not in field_names
-        assert "captured" not in field_names
+        assert entry.failure is not None
+        assert entry.failure == project_failure(failure)
+        assert found is not None
+        assert found.failure == failure
+
+    def test_all_null_failure_evidence_reads_back_as_none_everywhere(
+        self, store: ExecutionStore
+    ) -> None:
+        """Evidence with every field null or false is no evidence: every read
+        path returns `failure is None`, however the caller spelled it."""
+        empty = _failure(
+            failure_type=None,
+            failure_message=None,
+            failure_path=None,
+            failure_lineno=None,
+            failure_repr=None,
+            traceback=None,
+        )
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x", failure=empty),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+        (listed,) = store.get_results(execution.identity.value)
+        (entry,) = store.list_results(execution.identity.value, limit=10, offset=0).items
+
+        assert found is not None
+        assert found.failure is None
+        assert listed.failure is None
+        assert entry.failure is None
+
+    def test_a_run_whose_only_vcs_field_is_its_root_lists_with_an_empty_projection(
+        self, store: ExecutionStore
+    ) -> None:
+        """A repository whose every git read but the root failed is still a
+        repository: the list says so with an all-null projection rather than
+        the `None` of a run recorded outside one, as the detail does."""
+        root_only = _vcs(commit=None, branch=None, commit_subject=None, dirty=None)
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        store.record_session(
+            _execution("a" * 32, started=started, vcs=root_only),
+            results=(_result("t.py::test_x"),),
+            received_at=started,
+        )
+
+        (run_entry,) = store.list_runs(limit=10, offset=0).items
+        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+        detail = store.get_run_detail("a" * 32)
+
+        assert detail is not None
+        assert detail.execution.vcs == root_only
+        assert run_entry.vcs == project_vcs(root_only)
+        assert run_entry.vcs is not None
+        assert history_entry.vcs == run_entry.vcs
 
     def test_get_result_returns_the_full_record_hit(self, store: ExecutionStore) -> None:
-        """history-read-api -> Single result detail -> The full record is
-        reachable (port half, design.md D77, D78): `get_result` returns the
-        whole stored `Result`, `failure`/`captured` populated in full,
-        unbounded."""
+        """`get_result` returns the whole stored `Result`, `failure` and
+        `captured` populated in full, unbounded."""
         execution = _execution("a" * 32)
         failure = _failure()
         captured = _captured(stdout="captured output", stderr="")
@@ -1137,9 +1328,9 @@ class ExecutionStoreContract:
         assert store.get_result(execution.identity.value, node_id="t.py::test_never_ran") is None
 
     def test_get_result_truncation_flag_travels_with_the_field(self, store: ExecutionStore) -> None:
-        """A bounded field's truncation flag travels with it -- port half
-        (design.md D77): `get_result`'s `traceback_truncated` is exactly
-        what was stored, never dropped or defaulted."""
+        """A bounded field's truncation flag travels with it: `get_result`'s
+        `traceback_truncated` is exactly what was stored, never dropped or
+        defaulted."""
         execution = _execution("a" * 32)
         failure = _failure(traceback="a truncated traceback", traceback_truncated=True)
         store.record_session(
@@ -1155,13 +1346,33 @@ class ExecutionStoreContract:
         assert found.failure.traceback == "a truncated traceback"
         assert found.failure.traceback_truncated is True
 
+    def test_a_result_without_evidence_reads_back_with_no_failure_and_no_output(
+        self, store: ExecutionStore
+    ) -> None:
+        """A result stored with no failure evidence and nothing captured reads
+        back as `failure is None` and an all-`None` `CapturedOutput` from both
+        read paths -- never as a record whose fields all happen to be null."""
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_x"),),
+            received_at=datetime.now(timezone.utc),
+        )
+
+        found = store.get_result(execution.identity.value, node_id="t.py::test_x")
+        (listed,) = store.get_results(execution.identity.value)
+
+        for result in (found, listed):
+            assert result is not None
+            assert result.failure is None
+            assert result.captured == _captured()
+
     def test_captured_output_empty_versus_absent_round_trips_through_storage(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D77's asymmetry: `""` (captured, empty) and `None`
-        (never captured) round-trip distinctly through storage, both
-        adapters -- collapsing `""` to `None` (a truthy check on the
-        string) would make the two indistinguishable."""
+        """`""` (captured, empty) and `None` (never captured) round-trip
+        distinctly through storage, both adapters -- collapsing `""` to `None`
+        (a truthy check on the string) would make the two indistinguishable."""
         execution = _execution("a" * 32)
         empty_captured = _captured(stdout="", stderr=None)
         store.record_session(
@@ -1177,7 +1388,7 @@ class ExecutionStoreContract:
         assert found.captured.stdout_truncated is False
         assert found.captured.stderr is None
 
-    # user-configuration: namespaced setting persistence, create/replace/delete/parity.
+    # -- settings: namespaced persistence, create/replace/delete --
 
     def test_list_settings_is_empty_for_an_unknown_namespace(self, store: ExecutionStore) -> None:
         assert store.list_settings("test_sections") == ()
@@ -1246,6 +1457,46 @@ class ExecutionStoreContract:
         assert len(settings) == 1
         assert settings[0].value == "a"
 
+    def test_upsert_setting_refuses_a_new_key_at_max_keys_and_writes_nothing(
+        self, store: ExecutionStore
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+        store.upsert_setting("test_sections", "Checkout", value="b", updated_at=now)
+
+        with pytest.raises(NamespaceFullError):
+            store.upsert_setting("test_sections", "Accounts", value="c", updated_at=now, max_keys=2)
+
+        assert [setting.key for setting in store.list_settings("test_sections")] == [
+            "Billing",
+            "Checkout",
+        ]
+
+    def test_upsert_setting_replaces_an_existing_key_at_max_keys(
+        self, store: ExecutionStore
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+
+        created = store.upsert_setting(
+            "test_sections", "Billing", value="b", updated_at=now, max_keys=1
+        )
+
+        assert created is False
+        assert [setting.value for setting in store.list_settings("test_sections")] == ["b"]
+
+    def test_max_keys_counts_only_the_keys_of_its_own_namespace(
+        self, store: ExecutionStore
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        store.upsert_setting("other_namespace", "Billing", value="a", updated_at=now)
+
+        created = store.upsert_setting(
+            "test_sections", "Billing", value="b", updated_at=now, max_keys=1
+        )
+
+        assert created is True
+
     def test_get_run_case_outcomes_is_empty_for_a_run_with_no_results(
         self, store: ExecutionStore
     ) -> None:
@@ -1268,9 +1519,11 @@ class ExecutionStoreContract:
 
         assert sorted(outcomes) == sorted([("t.py", "passed"), ("t.py", "failed")])
 
-    def test_recording_metadata_persists_both_tables(self, store: ExecutionStore) -> None:
-        """design.md D91, D98: a metadata-carrying report writes one
-        `run_metadata_file` row and one `run_metadata` row."""
+    def test_recording_metadata_persists_both_tables(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A metadata-carrying report writes one `run_metadata_file` row and
+        one `run_metadata` row."""
         execution = _execution("1" * 32)
         metadata = RunMetadata(
             files=(
@@ -1292,17 +1545,16 @@ class ExecutionStoreContract:
             execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
         )
 
-        assert _stored_metadata_files(store, execution.identity.value) == frozenset(metadata.files)
-        assert _stored_metadata_entries(store, execution.identity.value) == frozenset(
-            metadata.entries
-        )
+        stored = stored_metadata(execution.identity.value)
+        assert set(stored.files) == set(metadata.files)
+        assert set(stored.entries) == set(metadata.entries)
 
     def test_a_declared_but_dropped_file_and_key_still_record_a_row(
-        self, store: ExecutionStore
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:
-        """design.md D95: absence is a row, not a missing row -- a file
-        dropped for being too large and its key's `source_unavailable`
-        entry both persist, with the entry's `value` NULL."""
+        """Absence is a row, not a missing row -- a file dropped for being too
+        large and its key's `source_unavailable` entry both persist, with the
+        entry's `value` NULL."""
         execution = _execution("2" * 32)
         metadata = RunMetadata(
             files=(
@@ -1324,46 +1576,17 @@ class ExecutionStoreContract:
             execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
         )
 
-        files = _stored_metadata_files(store, execution.identity.value)
-        entries = _stored_metadata_entries(store, execution.identity.value)
-        assert files == frozenset(metadata.files)
-        assert entries == frozenset(metadata.entries)
-        assert next(iter(entries)).value is None
-
-    def test_replaying_the_same_metadata_is_a_no_op(self, store: ExecutionStore) -> None:
-        """design.md D98: both metadata inserts are `INSERT OR IGNORE` --
-        write-once, mechanically. A second `record_session` call for the
-        same run with the identical metadata changes nothing."""
-        execution = _execution("3" * 32)
-        metadata = RunMetadata(
-            files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
-            entries=(MetadataEntry(key="k", value="v", source_file="a.yaml", status="captured"),),
-        )
-        store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
-        )
-
-        store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
-        )
-
-        assert _stored_metadata_files(store, execution.identity.value) == frozenset(metadata.files)
-        assert _stored_metadata_entries(store, execution.identity.value) == frozenset(
-            metadata.entries
-        )
+        stored = stored_metadata(execution.identity.value)
+        assert set(stored.files) == set(metadata.files)
+        assert set(stored.entries) == set(metadata.entries)
+        assert stored.entries[0].value is None
 
     def test_replaying_metadata_with_a_different_value_does_not_backfill(
-        self, store: ExecutionStore
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:
-        """`run-metadata` R7: a stored value is unchanged from what was
-        written at ingestion (`sdd-verify` SUGGESTION-1). Identical-metadata
-        replay, above, proves `INSERT OR IGNORE` is idempotent -- it does
-        NOT prove no-backfill, since idempotence holds trivially when the
-        two writes agree. This asserts the requirement directly: a second
-        `record_session` call for the same run, same key, a DIFFERENT
-        value, must leave the FIRST value on read -- `INSERT OR IGNORE`
-        silently discards the second write's row rather than updating it,
-        which is a different, stronger claim than "replaying is a no-op"."""
+        """A stored value never changes after ingestion: a second
+        `record_session` call for the same run and key with a different value
+        leaves the first value on read."""
         execution = _execution("8" * 32)
         first = RunMetadata(
             files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
@@ -1381,18 +1604,17 @@ class ExecutionStoreContract:
             execution, results=(), received_at=datetime.now(timezone.utc), metadata=second
         )
 
-        stored = _stored_metadata_entries(store, execution.identity.value)
-        assert stored == frozenset(first.entries)
-        assert stored != frozenset(second.entries)
+        stored = set(stored_metadata(execution.identity.value).entries)
+        assert stored == set(first.entries)
+        assert stored != set(second.entries)
 
     def test_a_finish_only_session_records_the_same_rows_a_start_finish_pair_would(
-        self, store: ExecutionStore
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:
-        """design.md D96, D98: metadata is frozen once and sent unchanged
-        on both writes. A start-write followed by a finish-write, both
-        carrying the identical `RunMetadata`, must leave the same stored
-        rows a single finish-only report would (task 4.3's third contract
-        obligation) -- proving write-once tolerates either arrival order."""
+        """Metadata is frozen once and sent unchanged on both writes. A
+        start-write followed by a finish-write, both carrying the identical
+        `RunMetadata`, leaves the same stored rows a single finish-only report
+        would."""
         metadata = RunMetadata(
             files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
             entries=(MetadataEntry(key="k", value="v", source_file="a.yaml", status="captured"),),
@@ -1415,24 +1637,402 @@ class ExecutionStoreContract:
             finish_only, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
         )
 
-        assert _stored_metadata_files(store, pair_identity) == _stored_metadata_files(
-            store, finish_only_identity
-        )
-        assert _stored_metadata_entries(store, pair_identity) == _stored_metadata_entries(
-            store, finish_only_identity
-        )
-        assert _stored_metadata_files(store, pair_identity) == frozenset(metadata.files)
-        assert _stored_metadata_entries(store, pair_identity) == frozenset(metadata.entries)
+        pair = stored_metadata(pair_identity)
+        single = stored_metadata(finish_only_identity)
+        assert set(pair.files) == set(single.files) == set(metadata.files)
+        assert set(pair.entries) == set(single.entries) == set(metadata.entries)
 
-    def test_a_session_with_no_metadata_argument_persists_no_metadata_rows(
+    def test_every_kind_of_key_round_trips_with_its_source_name_and_declaration(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A file key and the keys a session reported itself -- declared or
+        not, with and without a value -- are stored side by side, each with
+        where it came from, its display name and whether it was declared."""
+        execution = _execution("3" * 32)
+        metadata = RunMetadata(
+            files=(MetadataFile(source_file="board.json", content_type="json", status="captured"),),
+            entries=(
+                MetadataEntry(
+                    key="board.revision",
+                    value="rev-b",
+                    source_file="board.json",
+                    status="captured",
+                    name="Board revision",
+                ),
+                MetadataEntry(
+                    key="fpga.firmware",
+                    value="1.1.0",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    name="FPGA firmware version",
+                    declared=True,
+                ),
+                MetadataEntry(
+                    key="bench",
+                    value="lab-3",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    declared=False,
+                ),
+                MetadataEntry(
+                    key="fmc.hardware",
+                    value=None,
+                    source_file=None,
+                    status="absent",
+                    source="session",
+                    name="FMC hardware version",
+                    declared=True,
+                ),
+                MetadataEntry(
+                    key="fpga.dna",
+                    value=None,
+                    source_file=None,
+                    status="value_too_large",
+                    source="session",
+                    declared=False,
+                ),
+            ),
+        )
+
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        stored = stored_metadata(execution.identity.value)
+        assert set(stored.files) == set(metadata.files)
+        assert set(stored.entries) == set(metadata.entries)
+
+    def test_a_key_recorded_from_a_file_keeps_its_value_over_a_later_session_value(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A file's keys arrive with the start report and the session's own
+        values only with the finish report; the first row for a key is the
+        one kept, whichever source the later one comes from."""
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        identity = "4" * 32
+        from_file = MetadataEntry(
+            key="fpga.firmware", value="1.0.0", source_file="fw.json", status="captured"
+        )
+        store.record_session(
+            _start_only_execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=RunMetadata(
+                files=(
+                    MetadataFile(source_file="fw.json", content_type="json", status="captured"),
+                ),
+                entries=(from_file,),
+            ),
+        )
+
+        store.record_session(
+            _execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=RunMetadata(
+                entries=(
+                    MetadataEntry(
+                        key="fpga.firmware",
+                        value="1.1.0",
+                        source_file=None,
+                        status="captured",
+                        source="session",
+                        declared=False,
+                    ),
+                ),
+            ),
+        )
+
+        assert stored_metadata(identity).entries == (from_file,)
+
+    def test_a_run_holds_at_most_the_entry_bound_of_keys_across_its_reports(
         self, store: ExecutionStore
     ) -> None:
-        """design.md D98: the defaulted keyword's whole point -- an
-        existing caller that never passes `metadata=` (the empty default,
+        """Each report is bounded on its way in, but a run may be sent any
+        number of them. The store keeps the first keys up to the bound and
+        drops every new one after it; a key the run already holds takes no
+        second place."""
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        identity = "9" * 32
+
+        def _values(*keys: str, value: str = "v") -> RunMetadata:
+            return RunMetadata(
+                entries=tuple(
+                    MetadataEntry(
+                        key=key,
+                        value=value,
+                        source_file=None,
+                        status="captured",
+                        source="session",
+                        declared=False,
+                    )
+                    for key in keys
+                )
+            )
+
+        first = [f"a{index:03d}" for index in range(MAX_METADATA_ENTRIES - 1)]
+        store.record_session(
+            _start_only_execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=_values(*first),
+        )
+        store.record_session(
+            _execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=_values(first[0], "b000", "b001", value="later"),
+        )
+
+        stored = store.get_run_metadata(identity)
+        assert stored is not None
+        assert [(entry.key, entry.value) for entry in stored] == [
+            *((key, "v") for key in first),
+            ("b000", "later"),
+        ]
+
+    def test_a_session_with_no_metadata_argument_persists_no_metadata_rows(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A caller that never passes `metadata=` (the empty default,
         `EMPTY_RUN_METADATA`) writes zero rows to either table."""
         execution = _execution("8" * 32)
 
         store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
 
-        assert _stored_metadata_files(store, execution.identity.value) == frozenset()
-        assert _stored_metadata_entries(store, execution.identity.value) == frozenset()
+        assert stored_metadata(execution.identity.value) == RunMetadata()
+
+    # -- list_runs_with_metadata_horizon --
+
+    def test_the_horizon_of_a_key_never_declared_is_every_run(self, store: ExecutionStore) -> None:
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+        for i in range(3):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
+                results=(),
+                received_at=base,
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "2.1")], limit=10, offset=0
+        )
+
+        assert page.items == ()
+        assert page.has_more is False
+        assert predating == (3,)
+
+    def test_the_horizon_counts_the_runs_started_before_the_key_was_first_declared(
+        self, store: ExecutionStore
+    ) -> None:
+        """The first declaration is the earliest run holding a row for the
+        key in any status: a value too large to capture still declares it,
+        though it never matches the filter."""
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+        def _declaring(value: str | None, status: str) -> RunMetadata:
+            return RunMetadata(
+                files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+                entries=(
+                    MetadataEntry(key="fw", value=value, source_file="m.json", status=status),
+                ),
+            )
+
+        for i in range(2):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
+                results=(),
+                received_at=base,
+            )
+        store.record_session(
+            _execution("a" * 32, started=base + timedelta(minutes=5)),
+            results=(),
+            received_at=base,
+            metadata=_declaring(None, "value_too_large"),
+        )
+        store.record_session(
+            _execution("b" * 32, started=base + timedelta(minutes=6)),
+            results=(),
+            received_at=base,
+            metadata=_declaring("2.1", "captured"),
+        )
+        store.record_session(
+            _execution("c" * 32, started=base + timedelta(minutes=7)),
+            results=(),
+            received_at=base,
+            metadata=_declaring("2.1", "captured"),
+        )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "2.1")], limit=1, offset=0
+        )
+
+        assert [entry.execution.identity.value for entry in page.items] == ["c" * 32]
+        assert page.has_more is True
+        assert predating == (2,)
+
+    def test_several_pairs_match_the_runs_holding_every_one_from_either_source(
+        self, store: ExecutionStore
+    ) -> None:
+        """A run matches only when it holds each pair, whether the value was
+        read from a file or reported by the session; each distinct key gets
+        its own horizon, in the order the filter first names it."""
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+
+        def _holding(**values: str) -> RunMetadata:
+            return RunMetadata(
+                files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+                entries=tuple(
+                    MetadataEntry(key=key, value=value, source_file="m.json", status="captured")
+                    if key == "fw"
+                    else MetadataEntry(
+                        key=key, value=value, source_file=None, status="captured", source="session"
+                    )
+                    for key, value in values.items()
+                ),
+            )
+
+        runs = {
+            "0" * 32: RunMetadata(),
+            "1" * 32: _holding(fmc="5.2.0"),
+            "2" * 32: _holding(fw="1.1.0", fmc="5.2.0"),
+            "3" * 32: _holding(fw="1.1.0", fmc="5.3.0"),
+            "4" * 32: _holding(fw="1.1.0", fmc="5.2.0", bench="lab-3"),
+            "5" * 32: _holding(fw="1.0.0", fmc="5.2.0"),
+        }
+        for minute, (run_id, metadata) in enumerate(runs.items()):
+            store.record_session(
+                _execution(run_id, started=base + timedelta(minutes=minute)),
+                results=(),
+                received_at=base,
+                metadata=metadata,
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "1.1.0"), ("fmc", "5.2.0"), ("fw", "1.1.0")], limit=10, offset=0
+        )
+
+        assert [entry.execution.identity.value for entry in page.items] == ["4" * 32, "2" * 32]
+        assert page.has_more is False
+        assert predating == (2, 1)
+
+    def test_two_values_for_one_key_match_no_run(self, store: ExecutionStore) -> None:
+        store.record_session(
+            _execution("a" * 32),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(
+                files=(MetadataFile(source_file="m.json", content_type="json", status="captured"),),
+                entries=(
+                    MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured"),
+                ),
+            ),
+        )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "2.1"), ("fw", "2.2")], limit=10, offset=0
+        )
+
+        assert page.items == ()
+        assert predating == (0,)
+
+    def test_no_pairs_narrow_nothing_and_count_nothing(self, store: ExecutionStore) -> None:
+        base = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
+        for i in range(2):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
+                results=(),
+                received_at=base,
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(filters=[], limit=10, offset=0)
+
+        assert page == store.list_runs(limit=10, offset=0)
+        assert predating == ()
+
+    # -- get_run_metadata --
+
+    def test_get_run_metadata_is_none_for_an_unknown_run(self, store: ExecutionStore) -> None:
+        assert store.get_run_metadata("0" * 32) is None
+
+    def test_get_run_metadata_is_empty_for_a_run_that_reported_none(
+        self, store: ExecutionStore
+    ) -> None:
+        execution = _execution("5" * 32)
+        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+
+        stored = store.get_run_metadata(execution.identity.value)
+
+        assert stored is not None
+        assert list(stored) == []
+
+    def test_get_run_metadata_returns_the_runs_rows_whole_in_code_point_order(
+        self, store: ExecutionStore
+    ) -> None:
+        """Every field of every row of that run and no other, whichever
+        source it came from, ordered by key the same way on either adapter:
+        by code point, so capitals before lower case and ASCII before
+        anything else."""
+        execution = _execution("6" * 32)
+        other = _execution("7" * 32)
+        entries = (
+            MetadataEntry(
+                key="zeta",
+                value="z",
+                source_file=None,
+                status="captured",
+                source="session",
+                declared=False,
+            ),
+            MetadataEntry(
+                key="fw",
+                value="2.1",
+                source_file="m.json",
+                status="captured",
+                name="Firmware version",
+            ),
+            MetadataEntry(
+                key="é",
+                value=None,
+                source_file=None,
+                status="absent",
+                source="session",
+                name="Accented",
+                declared=True,
+            ),
+            MetadataEntry(key="Zeta", value=None, source_file="m.json", status="not_scalar"),
+            MetadataEntry(
+                key="\U0001f600",
+                value=None,
+                source_file=None,
+                status="value_too_large",
+                source="session",
+                declared=False,
+            ),
+            MetadataEntry(key="a.b", value="1", source_file="m.json", status="captured"),
+        )
+        files = (MetadataFile(source_file="m.json", content_type="json", status="captured"),)
+        store.record_session(
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(files=files, entries=entries),
+        )
+        store.record_session(
+            other,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(
+                files=files,
+                entries=(
+                    MetadataEntry(key="b", value="2", source_file="m.json", status="captured"),
+                ),
+            ),
+        )
+
+        stored = store.get_run_metadata(execution.identity.value)
+
+        assert stored is not None
+        assert [entry.key for entry in stored] == ["Zeta", "a.b", "fw", "zeta", "é", "\U0001f600"]
+        assert list(stored) == sorted(entries, key=lambda entry: entry.key)

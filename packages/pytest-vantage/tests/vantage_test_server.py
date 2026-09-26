@@ -1,115 +1,246 @@
 """`VantageTestServer` -- a real `vantage` server for `pytest-vantage`'s own
-end-to-end tests (design.md D2a), and the `vantage_server` fixture that
-wraps it.
+end-to-end tests, and the `vantage_server` fixture that wraps it; `ServerGate` and its
+`server_gate` fixture, one address for a server that goes away and comes
+back; and `git_confined_to_basetemp`, for the tests that need git to find
+no repository above their temp directory.
 
 A separate, non-`test_*` module rather than a `conftest.py`: a package-level
 `conftest.py` alongside the workspace-root one both resolve to the bare
 module name `conftest` under this project's plain (non-package) test
-layout, which mypy rejects as a duplicate module -- pytest itself tolerates
-it (each is loaded through its own path-keyed machinery), but a second
-`conftest.py` here would fail `mypy --strict` outright. Importing the
-fixture function directly into the one test module that needs it
-(`test_run_report.py`) is the standard pytest idiom for a fixture that does
-not need conftest.py's directory-wide auto-application, and it sidesteps
-the collision entirely. `vantage_port_contract.py` and `importwalk.py`
-(both PR1) already establish the same "shared, non-test module living
-directly inside a `tests/` directory" pattern.
+layout, which mypy rejects as a duplicate module. The workspace-root
+conftest registers this module as a plugin instead, so any test can request
+`vantage_server` without importing it.
 
-Dev-only: never packaged (RQ-24 constrains `src/`, not `tests/`).
+Dev-only and never packaged, so it may import the server and `uvicorn`.
 """
 
 from __future__ import annotations
 
-import asyncio
 import socket
+import struct
 import threading
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
-import uvicorn
+from loopback_server import LoopbackServer
+from sqlite_rows import read_metadata
+from starlette.types import Receive, Scope, Send
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.result import CatalogueEntry, Result
+from vantage.core.ports.storage import MAX_PAGE_ITEMS, RunMetadata
 from vantage.service.app import create_app
-from vantage.storage.memory import InMemoryExecutionStore
+from vantage.storage.sqlite_store import SqliteExecutionStore
 
 
-class VantageTestServer:
-    """A real `vantage` server (uvicorn + `create_app`), bound to an
-    ephemeral loopback port, backed by an in-memory store the test can
-    inspect directly.
+class VantageTestServer(LoopbackServer):
+    """A real `vantage` server (uvicorn + `create_app`) on an ephemeral
+    loopback port, backed by a `SqliteExecutionStore` in `directory` -- the
+    adapter `vantage` serves -- so the plugin's end-to-end tests exercise
+    the store that ships.
 
-    Binds its own listening socket first (`("127.0.0.1", 0)`, then
-    `getsockname()` for the OS-assigned port), the same ordering
-    `test_rejection.py::_RawSocketServer` uses and for the same reason: the
-    real port must be known ahead of time without guessing or hardcoding
-    one that might already be taken.
+    The inspection helpers read through the store's port, and through plain
+    SQL for a run's metadata, whose file rows no port method returns.
     """
 
-    def __init__(self) -> None:
-        self.store = InMemoryExecutionStore()
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(128)
-        self.port = self._sock.getsockname()[1]
-        self.address = f"http://127.0.0.1:{self.port}"
+    def __init__(self, directory: Path) -> None:
+        self._database = directory / "vantage.db"
+        self.store = SqliteExecutionStore(self._database)
+        app = create_app(self.store)
+        # Every HTTP request, in arrival order, so a test can assert what the
+        # plugin sent even when it left nothing in the store.
+        self.requests: list[tuple[str, str]] = []
 
-        config = uvicorn.Config(
-            create_app(self.store), host="127.0.0.1", log_level="warning", lifespan="off"
-        )
-        self._server = uvicorn.Server(config)
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(target=self._run, name="vantage-test-server", daemon=True)
+        async def _log_requests(scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "http":
+                self.requests.append((scope["method"], scope["path"]))
+            await app(scope, receive, send)
 
-    def _run(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._server.serve(sockets=[self._sock]))
+        super().__init__(_log_requests)
 
-    def start(self) -> None:
-        self._thread.start()
-        while not self._server.started:
-            time.sleep(0.001)
+    def close(self) -> None:
+        """Stop serving, then close the store. A test may stop the server
+        itself and still inspect the store until then."""
+        try:
+            self.stop()
+        finally:
+            self.store.close()
 
-    def stop(self) -> None:
-        self._server.should_exit = True
-        # A failing assertion above must not leave a listener behind to
-        # poison a later test -- join with a bound, not forever.
-        self._thread.join(timeout=5)
+    def _run_ids(self) -> list[str]:
+        """Every stored run id, newest first. The plugin generates the id,
+        so a test rarely knows it ahead of time; the run list does."""
+        run_ids: list[str] = []
+        while True:
+            page = self.store.list_runs(limit=MAX_PAGE_ITEMS, offset=len(run_ids))
+            run_ids.extend(entry.execution.identity.value for entry in page.items)
+            if not page.has_more:
+                return run_ids
 
     def executions(self) -> list[Execution]:
-        """Every execution the server has stored so far, in no particular
-        order. `InMemoryExecutionStore.get_execution` needs the id, which
-        the caller here rarely knows ahead of time (it is client-generated
-        by `Recorder`) -- reaching into the store's own dict once here,
-        rather than scattering the same private-attribute access across
-        every test that needs to inspect what was recorded.
-        """
-        return list(self.store._executions.values())  # noqa: SLF001
+        """Every execution the server has stored so far, newest first."""
+        return [
+            execution
+            for run_id in self._run_ids()
+            if (execution := self.store.get_execution(run_id)) is not None
+        ]
 
     def results(self) -> list[Result]:
         """Every result the server has stored so far, across every
-        execution, in no particular order (task 8.1). `get_results` on the
-        port needs an execution id the caller rarely knows ahead of time --
-        same reasoning as `executions()` above, and the same private-attribute
-        reach-in rather than scattering it across every test that needs it.
-        """
-        return list(self.store._results.values())  # noqa: SLF001
+        execution."""
+        return [result for run_id in self._run_ids() for result in self.store.get_results(run_id)]
+
+    def metadata(self, run_id: str) -> RunMetadata:
+        """The metadata files and entries stored for `run_id`, in no
+        particular order."""
+        return read_metadata(self._database, run_id)
 
     def catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
         """The catalogue entry for one node id, or `None` if the server has
-        never observed it (task 8.1). A thin pass-through -- `get_catalogue_entry`
-        is already public on the port and already takes exactly this argument,
-        so no private reach-in is needed here (unlike `executions()`/`results()`).
-        """
+        never observed it."""
         return self.store.get_catalogue_entry(node_id)
 
 
+def wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> Execution:
+    """Poll `server` until a run entry has landed and return the newest, or
+    raise after `timeout` seconds: a bounded wait on an observable condition
+    rather than a fixed sleep, which is flaky on a loaded CI runner.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        executions = server.executions()
+        if executions:
+            return executions[0]
+        time.sleep(0.02)
+    raise TimeoutError(f"no run entry appeared within {timeout}s")
+
+
+def wait_for_file(path: Path, *, timeout: float = 15.0) -> None:
+    """Poll until `path` exists, or raise after `timeout` seconds: the same
+    bounded wait, on a marker a child process writes once it has reached a
+    point the test must not act before.
+    """
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"{path} did not appear within {timeout}s")
+        time.sleep(0.01)
+
+
 @pytest.fixture
-def vantage_server() -> Iterator[VantageTestServer]:
-    server = VantageTestServer()
-    server.start()
+def vantage_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[VantageTestServer]:
+    # A directory of its own, never one the test itself writes to or
+    # inspects, such as `tmp_path` or `pytester.path`.
+    server = VantageTestServer(tmp_path_factory.mktemp("vantage-server"))
     try:
+        # Inside the `try`: a server that fails to start still closes its
+        # store's connection.
+        server.start()
         yield server
     finally:
-        server.stop()
+        server.close()
+
+
+class ServerGate:
+    """A loopback address that refuses every connection until `open`, then
+    forwards each to a real server: one address for a server that is down
+    and then back. Bound but not listening is what makes a connect fail
+    with "connection refused".
+
+    Let through a number of `connections`, it resets every connection after
+    those: a server that went away in the middle of a session.
+    `let_through(None)` brings it back for good."""
+
+    def __init__(self) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.bind(("127.0.0.1", 0))
+        self.address = f"http://127.0.0.1:{self._sock.getsockname()[1]}"
+        self._stopped = threading.Event()
+        self._target: tuple[str, int] | None = None
+        self._forwarding: int | None = None
+
+    def open(self, target: VantageTestServer, *, connections: int | None = None) -> None:
+        self._target = ("127.0.0.1", target.port)
+        self._forwarding = connections
+        self._sock.listen(16)
+        self._sock.settimeout(0.1)
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def let_through(self, connections: int | None) -> None:
+        """Forward the next `connections` and reset the rest; `None` for
+        every one."""
+        self._forwarding = connections
+
+    def _accept(self) -> None:
+        while not self._stopped.is_set():
+            try:
+                client, _ = self._sock.accept()
+            except OSError:
+                continue
+            if self._forwarding is not None:
+                if self._forwarding == 0:
+                    # A zero linger makes close send a reset, not a clean end.
+                    client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                    client.close()
+                    continue
+                self._forwarding -= 1
+            threading.Thread(target=self._forward, args=(client,), daemon=True).start()
+
+    def _forward(self, client: socket.socket) -> None:
+        assert self._target is not None
+        try:
+            upstream = socket.create_connection(self._target, timeout=10)
+        except OSError:
+            client.close()
+            return
+        pumps = [
+            threading.Thread(target=_pump, args=(client, upstream), daemon=True),
+            threading.Thread(target=_pump, args=(upstream, client), daemon=True),
+        ]
+        for pump in pumps:
+            pump.start()
+        for pump in pumps:
+            pump.join(timeout=30)
+        client.close()
+        upstream.close()
+
+    def close(self) -> None:
+        self._stopped.set()
+        self._sock.close()
+
+
+def _pump(source: socket.socket, sink: socket.socket) -> None:
+    try:
+        while data := source.recv(65536):
+            sink.sendall(data)
+    except OSError:
+        pass
+    try:
+        sink.shutdown(socket.SHUT_WR)
+    except OSError:
+        pass
+
+
+@pytest.fixture
+def server_gate() -> Iterator[ServerGate]:
+    gate = ServerGate()
+    try:
+        yield gate
+    finally:
+        gate.close()
+
+
+@pytest.fixture
+def git_confined_to_basetemp(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stops git's upward search at the session's base temp directory.
+
+    A test that builds a directory with no repository, or a broken one,
+    relies on git finding nothing above it. A base temp directory inside
+    some git work tree (a `--basetemp` in a checkout, a TMPDIR under a
+    git-managed home) would let git find that repository instead. git and
+    `vcs.capture` both honour the ceiling, and a subprocess session
+    inherits it.
+    """
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path_factory.getbasetemp()))
