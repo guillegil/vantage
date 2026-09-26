@@ -11,6 +11,7 @@ same behaviour.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -511,6 +512,47 @@ class ExecutionStoreContract:
 
         entry_after = store.get_catalogue_entry(stable_node_id)
         assert entry_after == entry_before
+
+    def test_every_run_reads_a_node_ids_identity_from_its_newest_report(
+        self, store: ExecutionStore
+    ) -> None:
+        """One catalogue entry per node id holds the file, class, function
+        and parameter a report decomposed it into, and every run's result
+        of that node id reads it, so a run's results and section totals are
+        the same from either adapter. It follows the newest run: a late
+        report of an older run, decomposing the node id some other way,
+        changes nothing a newer run reads."""
+        node_id = "tests/a.py::T::test_x"
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+
+        def _reported(file_path: str, class_name: str | None) -> Result:
+            identity = CaseIdentity(
+                node_id=node_id,
+                file_path=file_path,
+                class_name=class_name,
+                function_name="test_x",
+                param_id=None,
+            )
+            return replace(_result(node_id), identity=identity)
+
+        runs = [
+            (_execution("1" * 32, started=started), _reported("tests/a.py", "T")),
+            (_execution("2" * 32, started=started + timedelta(days=1)), _reported("b.py", None)),
+            (_execution("3" * 32, started=started - timedelta(days=1)), _reported("c.py", "L")),
+        ]
+        for execution, result in runs:
+            store.record_session(execution, results=(result,), received_at=started)
+
+        newest = runs[1][1].identity
+        for execution, _result_reported in runs:
+            run_id = execution.identity.value
+            found = store.get_result(run_id, node_id=node_id)
+            (listed,) = store.list_results(run_id, limit=10, offset=0).items
+            assert found is not None
+            assert found.identity == newest
+            assert listed.identity == newest
+            assert [r.identity for r in store.get_results(run_id)] == [newest]
+            assert store.get_run_case_outcomes(run_id) == (("b.py", "passed"),)
 
     def test_touch_last_contact_is_monotonic_and_reports_unknown_runs(
         self, store: ExecutionStore

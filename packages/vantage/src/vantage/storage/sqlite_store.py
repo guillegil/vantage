@@ -219,16 +219,25 @@ _COUNT_RUNS_PREDATING_KEY = """
 # Conflict target is `node_id`, the catalogue's identity key. Every
 # right-hand side reads the row as it was before the update, so the order of
 # the assignments does not matter.
+#
+# The row holds the one decomposition of `node_id` -- file, class, function,
+# parameter -- that every result of it reads through `test_case_id`. It
+# follows the newest run, under the same guard as `last_seen_run_id`, so a
+# late report of an older run never changes what newer runs read.
 _UPSERT_TEST_CASE = """
     INSERT INTO test_case (
         node_id, file_path, class_name, function_name,
         param_id, first_seen_at, last_seen_at, last_seen_run_id
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(node_id) DO UPDATE SET
-        file_path        = excluded.file_path,
-        class_name       = excluded.class_name,
-        function_name    = excluded.function_name,
-        param_id         = excluded.param_id,
+        file_path        = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
+                                THEN excluded.file_path ELSE test_case.file_path END,
+        class_name       = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
+                                THEN excluded.class_name ELSE test_case.class_name END,
+        function_name    = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
+                                THEN excluded.function_name ELSE test_case.function_name END,
+        param_id         = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
+                                THEN excluded.param_id ELSE test_case.param_id END,
         last_seen_run_id = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
                                 THEN excluded.last_seen_run_id ELSE test_case.last_seen_run_id END,
         first_seen_at    = MIN(test_case.first_seen_at, excluded.first_seen_at),

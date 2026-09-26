@@ -11,6 +11,10 @@ the run upsert guard -- a finish-write (`exit_status` is not `None`) applies
 over a start-only row, never the reverse. It compares real `datetime`s where
 the SQLite adapter compares fixed-width UTC text; the two orders agree.
 
+A result's identity is read through the catalogue, as the SQLite adapter
+reads it through its `test_case` row: one decomposition per node id, shared
+by every run's result of it.
+
 ``_last_contact`` is a separate dict because ``Execution`` carries no
 ``last_contact_at`` field; that column is a storage concern. It is set on
 the insert branch of ``record_session`` and advanced only by
@@ -156,17 +160,30 @@ class InMemoryExecutionStore:
             )
             return
 
-        # Mirrors the SQLite `DO UPDATE`: identity fields always refresh,
-        # `first_seen_at` moves back to an earlier run, and
-        # `last_seen_at`/`last_seen_run_id` advance only when the new run is
-        # strictly newer.
+        # Mirrors the SQLite `DO UPDATE`: `first_seen_at` moves back to an
+        # earlier run, and the identity, `last_seen_at` and
+        # `last_seen_run_id` advance only when the new run is strictly newer.
         advances = execution.started_at > existing.last_seen_at
         self._catalogue[identity.node_id] = CatalogueEntry(
-            identity=identity,
+            identity=identity if advances else existing.identity,
             first_seen_at=min(existing.first_seen_at, execution.started_at),
             last_seen_at=execution.started_at if advances else existing.last_seen_at,
             last_seen_run_id=execution.identity.value if advances else existing.last_seen_run_id,
         )
+
+    def _as_catalogued(self, result: Result) -> Result:
+        """`result` with the identity its node id's catalogue entry holds,
+        for a caller already holding the lock."""
+        return replace(result, identity=self._catalogue[result.identity.node_id].identity)
+
+    def _run_results(self, execution_id: str) -> list[Result]:
+        """`execution_id`'s results in insertion order, identities read
+        through the catalogue, for a caller already holding the lock."""
+        return [
+            self._as_catalogued(result)
+            for (run_id, _node_id), result in self._results.items()
+            if run_id == execution_id
+        ]
 
     @_locked
     def get_execution(self, execution_id: str) -> Execution | None:
@@ -188,9 +205,7 @@ class InMemoryExecutionStore:
 
     @_locked
     def get_results(self, execution_id: str) -> Sequence[Result]:
-        return [
-            result for (run_id, _node_id), result in self._results.items() if run_id == execution_id
-        ]
+        return self._run_results(execution_id)
 
     @_locked
     def count_results(self) -> int:
@@ -284,17 +299,15 @@ class InMemoryExecutionStore:
         # clamp/`has_more` mechanism as `list_runs`. Dict insertion order
         # mirrors the SQLite adapter's `ORDER BY r.id`.
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        matching = [
-            result for (run_id, _node_id), result in self._results.items() if run_id == execution_id
-        ]
-        window = matching[offset : offset + page_limit + 1]
+        window = self._run_results(execution_id)[offset : offset + page_limit + 1]
         has_more = len(window) > page_limit
         items = tuple(ResultListEntry.from_result(result) for result in window[:page_limit])
         return Page(items=items, has_more=has_more)
 
     @_locked
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
-        return self._results.get((execution_id, node_id))
+        result = self._results.get((execution_id, node_id))
+        return None if result is None else self._as_catalogued(result)
 
     @_locked
     def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
@@ -370,8 +383,7 @@ class InMemoryExecutionStore:
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
         return tuple(
             (result.identity.file_path, result.outcome)
-            for (run_id, _node_id), result in self._results.items()
-            if run_id == execution_id
+            for result in self._run_results(execution_id)
         )
 
     @_locked
