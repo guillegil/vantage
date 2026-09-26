@@ -284,7 +284,12 @@ in-progress reports and puts the last of them in the finishing report.
 run unfinished rather than finished with results missing. Its full sequence
 is: a start report (in progress, no results), heartbeats, any in-progress
 reports with results, and the finishing report. Without the
-`session_lifecycle` capability it sends only the last two.
+`session_lifecycle` capability it sends only the last two. In its backup
+modes, a report that got no answer or a `5xx` is sent again later,
+unchanged, with the reports after it: by a later session or by
+`vantage push`, from another process, possibly days later. A session that
+could not reach the server at its start sends no start report at all, and
+its reports arrive only that way.
 
 Every report of a session carries the declaration's `keys` and `files`, so
 the files' keys are stored from the first report that arrives. Only the

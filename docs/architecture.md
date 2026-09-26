@@ -9,46 +9,67 @@ is in [`api/v1-ingestion.md`](api/v1-ingestion.md).
 ```
 packages/
 ├── pytest-vantage/                published as `pytest-vantage`
-│   ├── src/pytest_vantage/        the pytest plugin
+│   ├── src/pytest_vantage/        the pytest plugin, its outbox, its one door to vantage.local
 │   └── tests/
-└── vantage/                       published as `vantage`
+└── vantage/                       published as `vantage`, with `server` and `postgres` extras
     ├── src/vantage/
     │   ├── core/                  domain model, storage port, config resolution
     │   ├── storage/               the SQLite adapter, the PostgreSQL one in postgres/
-    │   └── service/               FastAPI app, `vantage` command, OpenAPI document
+    │   ├── ingestion/             a report validated, converted and stored: the one way in
+    │   ├── local/                 runs stored on the test machine, through ingestion
+    │   └── service/               FastAPI app, `vantage` and `vantage push`, OpenAPI document
     └── tests/
 ```
 
-The plugin and the server share no code and never import each other. Each
-has its own rule for what it may import, and each rule is checked
+`vantage` depends on `pytest-vantage`, never the reverse: installing
+`vantage` brings the plugin, and the plugin declares nothing but pytest. The
+two meet in two places, both lazy. The plugin's local modes hand a run to
+`vantage.local`, imported by `pytest_vantage/local.py` alone, inside its
+functions, once such a mode is configured; and `vantage push` sends the
+plugin's outbox with the plugin's own code (`pytest_vantage.outbox`). Each
+package has its own rule for what it may import, and each rule is checked
 mechanically:
 
 | Package | Ships in | May import | Checked by |
 | --- | --- | --- | --- |
-| `pytest_vantage` | `pytest-vantage` | the standard library and pytest | AST import walk, deptry, clean-environment install job |
+| `pytest_vantage` | `pytest-vantage` | the standard library and pytest; `vantage.local` from `pytest_vantage/local.py` alone, inside functions | AST import walk, a server-mode session loading none of the local modules, deptry, clean-environment install job |
 | `vantage.core` | `vantage` | the standard library, minus modules that open a database, socket or process (`sqlite3`, `socket`, `http`, `urllib`, `subprocess`, `asyncio`, ...) | AST import walk |
 | `vantage.storage` | `vantage` | the standard library and `vantage.core` | AST import walk |
 | `vantage.storage.postgres` | `vantage` | the same, and the PostgreSQL driver (`psycopg`, `psycopg_pool`) from the `postgres` extra | AST import walk, an import of the command with the driver unavailable |
-| `vantage.service` | `vantage` | anything; it declares FastAPI, Uvicorn and PyYAML | none needed |
+| `vantage.ingestion` | `vantage` | the standard library, `vantage.core`, Pydantic and PyYAML; never a web framework or a storage adapter | AST import walk, an import with the web framework and the driver unavailable |
+| `vantage.local` | `vantage` | the standard library, `vantage.core`, `vantage.ingestion` and the SQLite adapter's modules | AST import walk, the same import |
+| `vantage.service` | `vantage` | anything; the only package that imports FastAPI, Starlette or Uvicorn, which the `server` extra declares | an AST scan of every other package for them |
 
-The three checks catch different failures:
+The checks catch different failures:
 
 - **The AST import walk** (`packages/vantage/tests/importwalk.py`) reads every
   import statement, those inside functions included, and resolves relative
   imports, so `from ..service import x` inside the core is caught.
-  `packages/vantage/tests/test_architecture.py` applies it to the core and
-  storage, and `packages/pytest-vantage/tests/test_plugin_imports.py` to the
-  plugin. The storage walk allows the driver's two top-level modules to
-  `vantage.storage.postgres` and the modules under it, and to nothing else.
-  Because the extra is optional, the same test also imports storage, the app
-  and the `vantage` command in a fresh interpreter where `psycopg` and
-  `psycopg_pool` cannot be imported, and checks that the adapter was not
-  loaded: nothing a SQLite server runs may reach it.
+  `packages/vantage/tests/test_architecture.py` applies it to the core,
+  storage, ingestion and the local store, and
+  `packages/pytest-vantage/tests/test_plugin_imports.py` to the plugin, where
+  the one import it allows outside pytest is `vantage.local` in
+  `pytest_vantage/local.py`, inside a function. The storage walk allows the
+  driver's two top-level modules to `vantage.storage.postgres` and the
+  modules under it, and to nothing else; the local store's walk allows the
+  SQLite adapter's modules by name, not the storage package. Because both
+  extras are optional, the same test also imports storage, the app and the
+  `vantage` command in a fresh interpreter where `psycopg` and
+  `psycopg_pool` cannot be imported, and ingestion, the local store and the
+  command in one where FastAPI, Starlette and Uvicorn cannot be either, and
+  checks that the PostgreSQL adapter was not loaded: nothing a SQLite server
+  or a test machine runs may reach it. An AST scan of every module outside
+  the service checks that none imports the web framework.
 - **deptry**, run over the whole workspace, flags an import of a third-party
   package the workspace does not declare.
-- **The `clean-environment-install` CI job** builds the plugin wheel, installs
-  it into an environment holding only pytest, and fails unless exactly one
-  distribution was added. It is the only check that sees what reaches a user.
+- **The `clean-environment-install` CI job** builds both wheels and installs
+  them into fresh environments. The plugin's alone, into one holding only
+  pytest, must add exactly one distribution. `vantage`'s, with the plugin's,
+  must bring pytest-vantage, pytest, Pydantic and PyYAML and no web
+  framework; there `vantage` must refuse to serve in one line, `vantage push`
+  must run, and a session in local mode must store its run where `vantage`
+  serves by default. `vantage[server]` must serve. It is the only check that
+  sees what reaches a user.
 
 Values both sides must agree on (the 1 MiB body cap, the 64 KiB text-field
 cap, the metadata bounds and statuses, the outcome vocabulary, the timestamp
@@ -58,8 +79,9 @@ imports both and compares every copy.
 
 ## Clean architecture with Protocol ports
 
-Dependencies point inwards: the service depends on storage and the core,
-storage on the core, and the core on nothing but the standard library.
+Dependencies point inwards: the service and the local store depend on
+ingestion, storage and the core, ingestion and storage on the core, and the
+core on nothing but the standard library.
 
 - **`vantage.core`** holds the domain as frozen standard-library dataclasses
   (`Execution`, `Identity`, `VcsContext`, `Result`, `CaseIdentity`,
@@ -74,11 +96,26 @@ storage on the core, and the core on nothing but the standard library.
 - **`vantage.storage`** holds the two adapters the server ships:
   `SqliteExecutionStore`, and `PostgresExecutionStore` in
   `vantage.storage.postgres`, which needs the optional `postgres` extra.
-- **`vantage.service`** is the HTTP edge. Pydantic models (`schemas.py`)
-  validate what arrives; the routes convert a validated report into core
-  dataclasses before calling the store, so no Pydantic type reaches the core
-  or storage. `create_app(store)` takes the store as a parameter: `cli.py` is
-  the one place that builds one, a `SqliteExecutionStore` or a
+- **`vantage.ingestion`** is the one way a report becomes rows.
+  `ingest(report, store, received_at=...)` validates a decoded report
+  against its Pydantic models (`ingestion/schemas.py`), converts it into core
+  dataclasses (`conversion.py`, declared YAML metadata included) and calls
+  `store.record_session`, so no Pydantic type reaches the core or storage. It
+  knows nothing of HTTP: a report it cannot take raises a plain
+  `RejectionError` carrying a status code, an error code, a fixed sentence
+  and field paths, which the service turns into a response and the local
+  store into a line.
+- **`vantage.local`** stores runs on the test machine:
+  `store_reports(database, reports)` opens a `SqliteExecutionStore` at the
+  path, runs each report through the same encoding, decoding and `ingest` a
+  server applies, and closes it, raising `LocalStoreError`, one line, for any
+  failure. `default_database_path()` is the `vantage` command's own default,
+  from the same pure function in `core/config/resolution.py`.
+- **`vantage.service`** is the HTTP edge: it reads and caps a body, hands it
+  to ingestion in the threadpool, and shapes every answer. Its own Pydantic
+  models (`schemas.py`) are the responses and the section settings.
+  `create_app(store)` takes the store as a parameter: `cli.py` is the one
+  place that builds one, a `SqliteExecutionStore` or a
   `PostgresExecutionStore`, and tests pass their own.
 
 Two conventions follow from Python and pytest rather than from the design.
@@ -87,32 +124,48 @@ formats differently on Python 3.10 and 3.13. And no domain class name starts
 with `Test`, because pytest would try to collect it; the aggregate is
 `Execution`, not `TestExecution`.
 
-## Why the plugin never opens a database
+## Why the plugin's own code never opens a database
 
-The plugin reports over HTTP and the server performs every write.
+In `server` mode the plugin reports over HTTP and the server performs every
+write. The local modes do not change who writes: the plugin hands the
+session's reports to `vantage.local`, which runs the server's own ingestion
+in-process, against the SQLite adapter the server ships.
 
 - **Nothing to conflict with.** Installing the plugin into a test environment
   adds one distribution and no dependency beyond pytest, so it cannot clash
   with the pins of the project under test. A database driver or ORM in the
-  plugin would.
+  plugin would. The local modes need `vantage`, installed on purpose, and
+  the plugin imports it only when one is configured.
 - **No schema in the plugin.** Storage can change without a plugin release;
-  the plugin and the server only have to agree on the HTTP contract.
-- **One writer per database.** CI jobs, xdist sessions and developers all
-  report to a server, never to the database. With SQLite one server process
+  the plugin and the server only have to agree on the HTTP contract, and a
+  run stored locally is validated and written by the very code a server
+  would use, so it reads back the same.
+- **Few writers per database.** CI jobs, xdist sessions and developers report
+  to a server, never to its database. With SQLite one server process
   serialises writes on one connection, and nobody shares a database file
   across machines or network filesystems. With PostgreSQL several servers
-  may share one database, and its transactions keep their writes apart.
+  may share one database, and its transactions keep their writes apart. A
+  local database is written by the sessions on one machine, each opening it
+  once, at its end, and by nothing else; SQLite's own locking keeps them
+  apart, and a `vantage` serving the file meanwhile is one more process on
+  it.
 - **Liveness needs a listener.** Because the server is told when a session
   starts and hears from it while it runs, it can tell a running session from
-  one that was killed.
+  one that was killed. A local run is stored whole at the end, so a killed
+  session leaves nothing there.
 
-The cost is that recording needs a server the test machine can reach.
+Recording to a server needs one the test machine can reach; the local modes
+are for when there is none, or when a run should outlive an outage.
 
 ## The HTTP contract is the compatibility boundary
 
 The plugin and the server are released separately, so an old plugin meets a
 new server and the reverse. The versioned API is the only thing they share:
 every route is under `/api/v1`, and nothing answers an unversioned path.
+The one place they meet in-process is the test machine, where the local
+modes call `vantage.local` and `vantage push` calls `pytest_vantage.outbox`;
+there both come from one install, since `vantage` depends on
+`pytest-vantage`.
 
 The report schema tolerates skew where skew is expected and rejects it where
 it signals a bug:
@@ -159,12 +212,18 @@ patterns or lengths.
    `_NO_TEST_OPTIONS`) stops here; a session whose selection is merely empty
    does not, and is recorded with exit status 5. Opt-in switches that were
    not typed on the command line are reported in one warning and ignored. The
-   address and timeout are resolved and validated; a bad value is a usage
-   error. A bare TCP connect checks that something listens at the address;
-   if nothing does, one warning and the session runs unrecorded. A capability
-   probe asks for `session_lifecycle`, and the `Recorder` is built: a random
-   run id, the start time, one git read (five seconds in total), the
-   metadata declaration and, if asked, the files it names.
+   mode is resolved, then what it uses of the address, the timeout and the
+   local database, and a bad value is a usage error; so is a mode with a
+   local database where `vantage.local` cannot be imported. `local` mode
+   builds the `Recorder` at once and touches no network, then or later.
+   Otherwise a bare TCP connect checks that something listens at the
+   address; if nothing does, `server` mode warns once and the session runs
+   unrecorded, while the modes with a local database record it with the
+   lifecycle off (no start report, no heartbeats) and say what happened only
+   at the finish. A capability probe asks for `session_lifecycle`, and the
+   `Recorder` is built: a random run id, the start time, one git read (five
+   seconds in total), the metadata declaration and, if asked, the files it
+   names.
 2. **`pytest_sessionstart`: the start report.** A `POST /api/v1/runs` with the
    run's id and start time, `finished_at` and `exit_status` null, the `vcs`
    section, `metadata` when the declaration declares keys or files were
@@ -187,7 +246,8 @@ patterns or lengths.
    finishing report alone, planned against the declaration first (`absent`
    rows, the entry bound, the warnings); when the last slice leaves no room
    for them, it goes out in progress and the finishing report carries no
-   results.
+   results. The reports are built once, then sent, stored locally, or both,
+   as the mode says (see [Where a finished run goes](#where-a-finished-run-goes)).
 
 How the session ended decides the finish fields. Ctrl-C and `pytest.exit()`
 send no finish time, `interrupted: true` and the reason. pytest's internal
@@ -236,6 +296,72 @@ arrive.
 plugin's last attempt is the one recorded. Subtest reports are kept apart
 from the call report, and a failed subtest fails its test.
 
+## Where a finished run goes
+
+`Recorder.pytest_sessionfinish` builds the finish reports once and delivers
+them by mode (`config.MODES`):
+
+| Mode | At the finish |
+| --- | --- |
+| `server` | every report to the server, as it always did |
+| `local` | every report to `vantage.local.store_reports`; a failure warns that the run is lost |
+| `server+backup` | every report to the server; if one fails, the whole run stored locally, and queued if a retry could succeed |
+| `server+local` | every report to the server, and the whole run stored locally regardless; queued as in `server+backup` |
+
+**Local storage gets the reports a server gets.** `vantage.local` encodes
+each report with `json.dumps`, as the transport does, decodes it as the
+server decodes a body (lone surrogates and U+0000 replaced), and hands it to
+`ingest`; the sliced reports go in one by one, so a local copy holds exactly
+the rows a server holds. The local database is opened once, at the finish,
+by the xdist controller alone, and closed again: nothing holds it open while
+tests run.
+
+**What is queued.** Sending stops at the first failed report. A failure a
+later attempt can fix -- no connection, a broken one, a timeout, a 5xx
+(`outbox.worth_retrying`) -- queues that report and the ones after it; the
+reports the server acknowledged are not queued again, and a replay of any of
+them would change nothing anyway. A 4xx, a redirect or an answer that does
+not acknowledge the run would fail the same way next time and is not
+queued. A server unreachable at the start queues every report. The session
+then warns once, saying where the run is: stored, queued, both, or lost.
+
+**The outbox** (`pytest_vantage/outbox.py`) is the plugin's own SQLite file
+beside the local database, `<database>-outbox`, written with the standard
+library's `sqlite3`; it is not a vantage database. One row per queued run:
+the server address as configured, the run id, the report bodies in send
+order as JSON text, when it was queued, attempts and the last error.
+
+- The file is created 0600 before `sqlite3` opens it, in a directory created
+  0700 if missing; an existing directory keeps its mode. A `PRAGMA
+  user_version` stamp marks it, so some other SQLite file at the path is
+  refused untouched.
+- At most 1,000 runs and 256 MiB of reports. Queueing past either deletes
+  the oldest rows first, in the same transaction, and the plugin warns with
+  their run ids; a run larger than the whole bound is refused.
+- `send_queued(outbox, server, timeout=..., budget=...)` sends one server's
+  runs, oldest first, and only runs queued for exactly that address. Each is
+  claimed in a `BEGIN IMMEDIATE` transaction by writing `claimed_until`, for
+  as long as sending it can take plus a minute, so concurrent senders -- two
+  sessions, or a session and `vantage push` -- take different runs, and a
+  claim left by a killed sender lapses. An acknowledged run is deleted; one
+  refused with a 4xx is deleted and named in the summary; a 5xx releases it
+  with its attempt counted and moves on, since it may be that run's own
+  problem; no answer, a redirect or a stranger's answer releases it and
+  stops, and so does a spent budget, without counting an attempt. A
+  duplicate send is harmless: the server's writes are idempotent.
+- A session whose own run reached its server sends that server's queue
+  within the report timeout and prints one line. It never creates the
+  outbox just to find it empty.
+
+**`vantage push`** (`service/push.py`) is the same `send_queued` on demand,
+with no budget beyond each report's timeout, for every server in the outbox
+or one given with `--to`. `cli.main` hands it the arguments when the first
+is `push`, before anything imports FastAPI or Uvicorn, so it runs in an
+install without the `server` extra; it finds the outbox from `--database` or
+`vantage.local.default_database_path()`, and never creates one. `vantage`
+names no floor for `pytest-vantage`, so an older plugin with no outbox is
+refused in one line naming the upgrade.
+
 ## Failure isolation in the plugin
 
 pytest imports `plugin.py` in every session, recording or not, so it
@@ -244,8 +370,10 @@ implements only `pytest_addoption`, `pytest_configure` and the
 recording modules are imported, and the `Recorder` registered, only once
 `--vantage` is typed; a test checks that an unactivated session loads
 nothing beyond the plugin's entry module and its configuration and warning
-helpers. A session that is not recorded gets a fixture mapping nobody reads,
-so a project's fixtures run the same either way.
+helpers, and another that a session recording to a server alone never loads
+`pytest_vantage.local`, `pytest_vantage.outbox` or `vantage.local`. A
+session that is not recorded gets a fixture mapping nobody reads, so a
+project's fixtures run the same either way.
 
 Every `Recorder` hook runs behind a decorator from `boundary.py` that catches
 `Exception` (never `BaseException`, so Ctrl-C still stops the run), warns
@@ -272,6 +400,13 @@ switch off another:
   `try`, so a failure there costs the run its values, never its finish.
 - `pytest_configure` has no decorator; a failure building the `Recorder` is
   caught there and leaves the session unrecorded.
+- Storing locally, queueing and sending the queue each catch `Exception`
+  themselves, inside the finish write, so a local database or an outbox that
+  cannot be written costs its own part and never the server's copy. What
+  went wrong goes into the session's one warning about where the run is.
+  `pytest_vantage/local.py` turns anything `vantage.local` raises into a
+  one-line `LocalStoreFailedError`, and the outbox's own failures are a
+  one-line `OutboxError`.
 - Warnings are `VantageWarning`, a `UserWarning` rather than a
   `PytestWarning`, so a project's `-W error::pytest.PytestWarning` does not
   turn them into errors. When the active filters raise it anyway, the message
@@ -307,9 +442,10 @@ would stall every other request, heartbeats included.
 
 - **`POST /runs` is `async`** only so it can stream the body: it checks
   `Content-Type` from the header, then reads the body chunk by chunk and stops
-  as soon as it passes 1 MiB, never trusting `Content-Length`. Decoding,
-  validation, conversion (YAML parsing of metadata included) and the store
-  write then run in the threadpool through `run_in_threadpool`.
+  as soon as it passes 1 MiB, never trusting `Content-Length`. Decoding
+  (`ingestion/decode.py`) and `vantage.ingestion.ingest` -- validation,
+  conversion (YAML parsing of metadata included) and the store write -- then
+  run in the threadpool through `run_in_threadpool`.
 - **Every other route that reaches the store is a plain `def`**, which
   FastAPI runs on AnyIO's worker threads (40 by default).
 - **`GET /capabilities` and `GET /openapi.yaml` are `async`** and never block,
@@ -325,7 +461,12 @@ free, it does not make the store parallel. The lock also stops a read from
 running inside another thread's open transaction on the shared connection,
 where it would see rows not yet committed. Multi-statement writes open with
 `BEGIN IMMEDIATE`. WAL mode and a five-second busy timeout cover a second
-process on the same file, which no in-process lock can reach.
+process on the same file, which no in-process lock can reach: the pytest
+sessions storing into a local database, and a `vantage` serving it. Opening
+switches a new file to WAL, which needs the file to itself for an instant;
+SQLite answers a second connection switching at the same moment "database is
+locked" at once rather than through the busy timeout, so `connection.py`
+retries the switch for as long as that timeout.
 
 **PostgreSQL's transactions.** `PostgresExecutionStore` holds no lock of its
 own: it keeps a `psycopg_pool.ConnectionPool` (one connection at least, 10
@@ -371,9 +512,10 @@ another process by construction, never by a check first:
 
 **No store is ever handed U+0000.** PostgreSQL's `text` cannot hold it,
 and no UTF-8 encoder takes a lone surrogate, so `decode_json`
-(`service/text.py`) replaces every U+0000 in a key or string value of a body
-with U+FFFD, and every lone surrogate too for `POST /runs`;
-`POST /config/sections` refuses a lone surrogate instead. `metadata_parse`
+(`ingestion/decode.py`, with `ingestion/text.py`) replaces every U+0000 in a
+key or string value of a body with U+FFFD, and every lone surrogate too for
+`POST /runs` and the local store; `POST /config/sections` refuses a lone
+surrogate instead. `metadata_parse`
 replaces a U+0000 that a declared document spells as an escape the same
 way. Every adapter therefore stores the same text. A value that is only
 looked up with -- a node id, a metadata filter, a section name to delete --
@@ -384,9 +526,13 @@ store for the `metadata_horizon` of a filtered key holding U+0000, as the
 key with U+FFFD in its place: the text a report carrying it stored.
 
 **Rejections have one shape**, built in `service/errors.py`: an error code, a
-fixed sentence and dotted field paths. Pydantic's own error details, which
-echo the submitted value, are never forwarded, and a client-chosen key name
-is echoed only if it looks like an identifier. The router's own `404` and
+fixed sentence and dotted field paths. The rejections a report itself earns
+are `vantage.ingestion.errors`' plain exceptions, which carry exactly those
+and a status code; the service's handlers map them, and its own HTTP-only
+ones (a wrong media type, a body too large or cut short) derive from the
+same base. Pydantic's own error details, which echo the submitted value, are
+never forwarded, and a client-chosen key name is echoed only if it looks
+like an identifier. The router's own `404` and
 `405` are reshaped the same way; the `405` keeps its `Allow` header. An
 unexpected exception is not a rejection and becomes Starlette's plain-text
 `500`.
@@ -511,7 +657,10 @@ network access, so asking where the database would go never creates it, and
 it rejects an unusable value (an empty host, a port outside 1 to 65535, a
 grace period that is not positive or exceeds 365 days) before anything
 opens. A port or grace period that is not a number never reaches it:
-`argparse` refuses it with its usage message and exit status 2.
+`argparse` refuses it with its usage message and exit status 2. The default
+path comes from `default_sqlite_path`, which `vantage.local` calls too, with
+`VANTAGE_DATABASE` left out: the plugin's local modes store by default where
+`vantage` with no options serves.
 
 Resolution names the database as a target (`core/config/database.py`): a
 `PostgresTarget` for a value whose scheme is `postgresql://` or
@@ -526,7 +675,12 @@ and the last `@` counts as the password, and a query parameter's value runs
 on over any `&` piece without an `=`. A `PostgresTarget`'s `repr` is
 redacted too.
 
-`service/cli.py` acts on the result. For SQLite it checks that an existing
+`service/cli.py` acts on the result, once it knows it is to serve: `vantage
+push` is handed off before argument parsing, and FastAPI, Uvicorn and the
+app are imported only after it, so an install without the `server` extra is
+refused in one line naming the extra, before anything is bound or created.
+Any other `ImportError` is a broken installation and raised as it is. For
+SQLite it checks that an existing
 database directory is writable. For PostgreSQL it imports
 `vantage.storage.postgres` by name, so no other start loads the adapter or
 its driver, and a driver that is not installed (psycopg or psycopg-pool
@@ -578,7 +732,7 @@ plugins, need none.
 | `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]`, `[sqlite]` and `[postgres]`, the last skipped without `VANTAGE_TEST_POSTGRES_URL`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
 | `packages/vantage/tests/sqlite_rows.py` | reads a run's metadata rows, whose file rows no port method returns, with plain SQL on a separate connection |
 | `packages/vantage/tests/loopback_server.py` | `LoopbackServer`: a real Uvicorn server on a thread, on a `127.0.0.1` port the OS assigns, with bounded start and stop |
-| `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a temporary directory, recording each request's method and path, for the plugin's end-to-end tests |
+| `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a directory, recording each request's method and path, for the plugin's end-to-end tests, and able to serve a local database the plugin wrote; `ServerGate` and the `server_gate` fixture: one address that refuses connections, then forwards them to a server, then resets them after a given number, for a server that is down, back, or gone by a session's finish |
 
 `slow` marks the tests that measure elapsed time; `-m 'not slow'` skips them
 locally, and CI always runs everything. The tests that need a PostgreSQL
@@ -588,11 +742,19 @@ otherwise; each gets a database of its own, created and dropped around it.
 The `tests/` directory at the root checks the CI workflow's shell steps, the
 PostgreSQL job's wiring and the pre-commit configuration.
 
+The plugin's mode tests (`test_local_modes.py`) give each session a stand-in
+for `vantage.local`, written into its conftest, to see exactly what the
+plugin hands local storage and to make storing fail on demand;
+`test_local_storage_end_to_end.py` lets the real one write the local
+database and compares what a `vantage` app serving that file returns with
+what the server returns.
+
 CI (`.github/workflows/ci.yml`) runs on pushes to `main` and on every pull
 request: the suite on Python 3.10 to 3.13, with and without pytest-xdist; the
 whole suite on Python 3.12 against a `postgres:17` service container, the
 one job that sets `VANTAGE_TEST_POSTGRES_URL`; a check that Python 3.9
 refuses to install the plugin; the whole suite with every non-loopback
-outbound connection rejected and counted; the clean-environment install; and
+outbound connection rejected and counted; the clean-environment installs of
+both wheels; and
 ruff, `mypy --strict`, deptry and a build of both wheels. `pip-audit` runs
 weekly (`audit.yml`).
