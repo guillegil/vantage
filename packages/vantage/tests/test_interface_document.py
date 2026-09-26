@@ -596,7 +596,7 @@ def test_every_declared_schema_is_bound_to_a_model() -> None:
 
 
 def test_declared_schema_properties_match_their_model_fields() -> None:
-    """The document's schemas restate `service/schemas.py`; this binds them.
+    """The document's schemas restate the Pydantic models; this binds them.
 
     Both directions, per schema: a model field the document never declares
     is an undocumented part of the contract, and a declared property with no
