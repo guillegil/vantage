@@ -35,7 +35,9 @@ Inside `vantage` the dependency rule is per internal package:
 | `vantage.service` | anything; the only place third-party packages (FastAPI, Pydantic, uvicorn, PyYAML) are allowed |
 
 Clean architecture: ports are `typing.Protocol`, not abstract base classes, so an
-adapter satisfies a port without importing the core.
+adapter satisfies a port by shape, without importing or subclassing the
+protocol. It still imports the core's domain and value types; the core never
+imports an adapter.
 
 **The plugin never opens a database.** It reports to `POST /api/v1/runs` with
 `urllib` and `json`, and the server performs every write. That is what keeps the
@@ -53,11 +55,15 @@ numbers — they release independently on prefixed tags.
   ini equivalent at all. Tests for this are differential — run once with the
   flag absent and once with `-p no:vantage` and compare the trees — because
   pytest itself writes `.pytest_cache` and `__pycache__`.
-- **Plugin failures never change the suite's exit status.** An unreachable
-  server is found by a preflight and produces one warning; an error while
-  reporting is caught by the fault-isolation boundary around every recorder hook
-  and also produces one warning. A hang is worse than a failure, so every
-  request is bounded by a timeout.
+- **Plugin failures never change the suite's exit status**, with one
+  deliberate exception: with `--vantage`, an invalid address, timeout or ini
+  value raises `pytest.UsageError` from `pytest_configure` (exit status 4)
+  before any test runs, because recording was asked for and can never work.
+  Everything after that is a warning. An unreachable server is found by a
+  preflight and produces one warning; an error while reporting is caught by
+  the fault-isolation boundary around every recorder hook and also produces
+  one warning. A hang is worse than a failure, so every request is bounded by
+  a timeout.
 - **xdist.** Every worker re-runs `pytest_configure` as a session of its own and
   every result reaches the controller too. Branch on the config's `workerinput`
   attribute: workers collect failure evidence only; the `Recorder` exists only on
@@ -113,11 +119,14 @@ vantage --database ./vantage.db                      # run the server (default 1
 | Layer | Contents |
 | --- | --- |
 | pre-commit | `ruff format`, `ruff check --fix` and hygiene hooks, modified files only |
-| pre-push | `mypy --strict` over the whole project; the test suite |
-| CI | everything again, the 3.10–3.13 × with/without-xdist matrix, a job that runs the suite with non-loopback networking blocked, `deptry`, a clean-environment install proving the plugin adds exactly one distribution, a job proving Python 3.9 refuses the install, and a build of both wheels |
+| pre-push | `mypy --strict` over the whole project; the tests not marked `slow` |
+| CI | `ruff format --check`, `ruff check` and `mypy` again (not the pre-commit hygiene hooks), every test on the 3.10–3.13 × with/without-xdist matrix, a job that runs the suite with non-loopback networking blocked, `deptry`, a clean-environment install proving the plugin adds exactly one distribution, a job proving Python 3.9 refuses the install, and a build of both wheels |
 | Weekly | `pip-audit` |
 
 Coverage is not measured. The plugin's dependency boundary has three guards that
-catch different failures: the AST architecture test (the core reaching a
-non-stdlib module), `deptry` (an undeclared import), and the clean-environment
-install (what actually lands in a user's environment).
+catch different failures: the AST import walk in
+`packages/pytest-vantage/tests/test_plugin_imports.py` (the plugin importing
+anything beyond the standard library and pytest), `deptry` (an undeclared
+import), and the clean-environment install (what actually lands in a user's
+environment). `packages/vantage/tests/test_architecture.py` applies the same
+walk to `vantage.core` and `vantage.storage`.
