@@ -226,6 +226,11 @@ switch off another:
   `PytestWarning`, so a project's `-W error::pytest.PytestWarning` does not
   turn them into errors. When the active filters raise it anyway, the message
   goes to the terminal reporter, or to stderr.
+- pytest records warnings only inside its collection, test-protocol,
+  session-finish and terminal-summary hooks. A warning from
+  `pytest_configure` or `pytest_sessionstart`, and one from the xdist
+  controller's `pytest_runtest_logreport`, is printed to stderr and never
+  reaches the warnings summary.
 
 The transport (`transport.py`) uses an `urllib` opener with only the HTTP and
 HTTPS handlers. It follows no redirect, because `urllib` would resend a
@@ -234,8 +239,10 @@ proxy: the reachability check connects directly, and honouring `http_proxy`
 would send every report, failure text included, to a host that check never
 saw. The timeout is a deadline on the whole exchange: the request runs on a
 daemon thread that is abandoned at the deadline, so a server trickling bytes
-cannot stretch it. The answer is read to at most 64 KiB and must acknowledge
-this run's id with `created` or `duplicate`, or the report counts as failed.
+cannot stretch it. Abandoning only the client's side means a report that
+timed out may still be stored by the server; the plugin cannot know. The
+answer is read to at most 64 KiB and must acknowledge this run's id with
+`created` or `duplicate`, or the report counts as failed.
 
 ## Request handling and concurrency
 

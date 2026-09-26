@@ -226,15 +226,32 @@ still run and the suite's exit status is never changed.
   appears only when the session ends.
 - **The start report or a heartbeat fails:** heartbeats stop; the final
   report is still sent.
-- **The final report fails** (timeout, HTTP error, rejected report): if the
-  start report got through, the run stays unfinished on the server and later
-  reads as `abandoned`; otherwise nothing is recorded.
+- **The final report fails** (HTTP error, rejected report): if the start
+  report got through, the run stays unfinished on the server and later reads
+  as `abandoned`; otherwise nothing is recorded.
+- **The final report times out:** the plugin stops waiting at the deadline,
+  but the server may still finish storing the report, so the run may be
+  recorded as finished after all. The warning cannot tell which.
 - **Something cannot be read** (git, the metadata declaration, a test report
   of an unexpected shape): that part of the report is left out.
 
-Warnings are `VantageWarning`, a `UserWarning` subclass, and appear in
-pytest's warnings summary. If your warning filters turn warnings into errors,
-the message is written to the terminal instead.
+Warnings are `VantageWarning`, a `UserWarning` subclass. Where one appears
+depends on when it is raised:
+
+- **At the start of the session** (server unreachable, switches ignored,
+  recording could not start, session tracking unavailable, the start report
+  failed, git or the metadata declaration unreadable): printed to stderr as
+  a plain Python warning, above pytest's session header. pytest neither
+  lists nor counts it in its warnings summary, so in a long CI log the line
+  saying a session is not being recorded is at the top.
+- **At the end of the session** (the final report failed, results left
+  out): in pytest's warnings summary.
+- **While tests run** (a heartbeat failed, a test report of an unexpected
+  shape): in the warnings summary, listed under whichever test was running
+  at the time; under pytest-xdist, printed to stderr when it happens.
+
+If your warning filters turn warnings into errors, the message is written to
+the terminal instead.
 
 A run whose final report never arrives (the process was killed, the machine
 lost power) reads as `abandoned` once the server has heard nothing from it
