@@ -89,6 +89,45 @@ def test_an_ini_timeout_that_is_not_a_usable_number_is_refused(ini_timeout: str)
         resolve_report_timeout(cli_timeout=None, ini_timeout=ini_timeout)
 
 
+class _ConfigDouble:
+    """Hands `resolve_settings` an ini value of any type, as pytest before
+    8.4 does: a list from the TOML table reaches the plugin unconverted."""
+
+    def __init__(self, ini: dict[str, object]) -> None:
+        self._ini = ini
+
+    def getoption(self, name: str, default: object = None) -> object:
+        return None
+
+    def getini(self, name: str) -> object:
+        return self._ini.get(name)
+
+
+@pytest.mark.parametrize(
+    ("ini", "option"),
+    [
+        ({"vantage_server": ["http://127.0.0.1:1"]}, "vantage_server"),
+        ({"vantage_server": 8765}, "vantage_server"),
+        ({"vantage_timeout": ["5"]}, "vantage_timeout"),
+        ({"vantage_timeout": {"seconds": 5}}, "vantage_timeout"),
+        ({"vantage_timeout": True}, "vantage_timeout"),
+    ],
+    ids=["address-list", "address-number", "timeout-list", "timeout-table", "timeout-bool"],
+)
+def test_an_ini_value_of_the_wrong_type_is_refused_naming_the_option(
+    monkeypatch: pytest.MonkeyPatch, ini: dict[str, object], option: str
+) -> None:
+    """A TOML list or table where a URL or a number of seconds belongs is a
+    configuration error naming the option, not an `AttributeError` or
+    `TypeError` escaping `pytest_configure` as an INTERNALERROR. `true` is
+    no number of seconds, although Python would read it as 1."""
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+
+    with pytest.raises(VantageConfigError, match=option):
+        resolve_settings(_ConfigDouble(ini))  # type: ignore[arg-type]
+
+
+# --- Reading the real configuration --------------------------------------------
 # --- Reading the real configuration --------------------------------------------
 
 
@@ -161,6 +200,18 @@ _INVALID_CONFIGURATIONS = {
         "VANTAGE_SERVER",
     ),
     "ftp scheme in the ini file": ("vantage_server = ftp://127.0.0.1:1", {}, [], "vantage_server"),
+    "credentials on the command line": (
+        "",
+        {},
+        ["--vantage-server=http://user:s3cret-pw@127.0.0.1:1"],
+        "--vantage-server",
+    ),
+    "query in the environment": (
+        "",
+        {"VANTAGE_SERVER": "http://127.0.0.1:1?x=1"},
+        [],
+        "VANTAGE_SERVER",
+    ),
     "negative timeout on the command line": ("", {}, ["--vantage-timeout=-1"], "--vantage-timeout"),
     "zero timeout on the command line": ("", {}, ["--vantage-timeout=0"], "--vantage-timeout"),
     "nan timeout on the command line": ("", {}, ["--vantage-timeout=nan"], "--vantage-timeout"),
@@ -202,6 +253,7 @@ def test_an_invalid_configuration_is_a_usage_error_naming_the_option(
     output = result.stdout.str() + result.stderr.str()
     assert result.ret == pytest.ExitCode.USAGE_ERROR, output
     assert "INTERNALERROR" not in output
+    assert "s3cret-pw" not in output
     assert any(line.startswith("ERROR: ") and option in line for line in result.stderr.lines), (
         output
     )

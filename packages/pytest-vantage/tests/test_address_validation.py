@@ -77,6 +77,46 @@ def test_a_malformed_port_or_host_is_refused(address: str) -> None:
     assert repr(address) in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    "address",
+    [
+        "http://user:s3cret-pw@127.0.0.1:8765",
+        "http://user@127.0.0.1:8765",
+        "http://:s3cret-pw@127.0.0.1:8765",
+        "http://@127.0.0.1:8765",
+        "https://user:s3cret-pw@vantage.example.com:99999",
+    ],
+)
+def test_an_address_carrying_credentials_is_refused_without_echoing_them(address: str) -> None:
+    """urllib would take `user:pw@127.0.0.1` for the host, so every request
+    fails although the preflight reached the server. The address is refused
+    and not repeated, so the password never reaches a CI log."""
+    with pytest.raises(VantageConfigError, match="user name or password") as excinfo:
+        resolve_and_validate_address(address, option="--vantage-server")
+    message = str(excinfo.value)
+    assert message.startswith("--vantage-server ")
+    assert "s3cret-pw" not in message
+    assert "user" not in message.replace("user name", "")
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "http://127.0.0.1:8765?x=1",
+        "http://127.0.0.1:8765/?",
+        "http://127.0.0.1:8765#frag",
+        "http://127.0.0.1:8765/prefix/#",
+    ],
+)
+def test_an_address_with_a_query_or_a_fragment_is_refused(address: str) -> None:
+    """Every route is appended to the address, so `?x=1` would swallow it
+    into the query (`/?x=1/api/v1/runs`) and `#frag` would drop it from
+    the request altogether: every request would miss the server."""
+    with pytest.raises(VantageConfigError, match="query or a fragment") as excinfo:
+        resolve_and_validate_address(address)
+    assert repr(address) in str(excinfo.value)
+
+
 def test_the_message_names_the_option_the_address_came_from() -> None:
     with pytest.raises(VantageConfigError, match="^VANTAGE_SERVER "):
         resolve_and_validate_address("ftp://example.com", option="VANTAGE_SERVER")
@@ -90,6 +130,7 @@ def test_the_message_names_the_option_the_address_came_from() -> None:
         "http://[::1]:8765",
         "http://localhost",
         "https://vantage.example.com:443/",
+        "https://example.com/vantage",
     ],
 )
 def test_a_well_formed_address_is_returned_unchanged(address: str) -> None:

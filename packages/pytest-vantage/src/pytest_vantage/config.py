@@ -8,9 +8,10 @@ example by CI. An allow-list of exactly two schemes, ``http`` and
 ``urllib``'s ``file:``/``ftp:`` handlers are ever reached.
 
 `resolve_settings` is the one place a configured value is checked. Every
-problem -- a bad scheme, no host, an unusable port, a timeout the socket
-layer cannot use -- is a `VantageConfigError` naming the option it came
-from, so nothing malformed ever reaches the socket layer.
+problem -- a value of the wrong type, a bad scheme, no host, credentials, a
+query or fragment, an unusable port, a timeout the socket layer cannot use
+-- is a `VantageConfigError` naming the option it came from, so nothing
+malformed ever reaches the socket layer.
 """
 
 from __future__ import annotations
@@ -50,7 +51,8 @@ class ReportSettings:
 
 def resolve_and_validate_address(address: str, *, option: str = "vantage server address") -> str:
     """Return ``address`` unchanged if it is an ``http`` or ``https`` URL
-    naming a host and, if it gives one, a port from 1 to 65535.
+    naming a host and, if it gives one, a port from 1 to 65535, with no
+    user name, password, query or fragment.
 
     Raises ``VantageConfigError`` naming ``option`` and the address otherwise.
     ``urlparse`` does not raise on a bare host with no scheme at all (e.g.
@@ -59,12 +61,24 @@ def resolve_and_validate_address(address: str, *, option: str = "vantage server 
     allow-list rejects that case the same way it rejects ``ftp://``: by
     scheme, not by success of the parse.
 
+    Credentials are refused first, and without repeating the address, so a
+    password never reaches a log: urllib would take ``user:pw@host`` for the
+    host and every request would fail. A query or a fragment would swallow
+    or drop every route appended to the address.
+
     The host is checked the way the socket layer will encode it, as IDNA,
     so an empty or over-long label is a configuration error here rather
     than an unexpected exception from the preflight's connect.
     """
     try:
         parsed = urlparse(address)
+    except ValueError as exc:
+        raise VantageConfigError(f"{option} {address!r} is not a valid URL: {exc}") from None
+    if "@" in parsed.netloc:
+        raise VantageConfigError(
+            f"{option} must not carry a user name or password (the part before '@')"
+        )
+    try:
         port = parsed.port
     except ValueError as exc:
         raise VantageConfigError(f"{option} {address!r} is not a valid URL: {exc}") from None
@@ -78,6 +92,8 @@ def resolve_and_validate_address(address: str, *, option: str = "vantage server 
         )
     if port == 0:
         raise VantageConfigError(f"{option} {address!r} must use a port from 1 to 65535")
+    if "?" in address or "#" in address:
+        raise VantageConfigError(f"{option} {address!r} must not carry a query or a fragment")
     try:
         parsed.hostname.encode("idna")
     except UnicodeError:
@@ -87,7 +103,7 @@ def resolve_and_validate_address(address: str, *, option: str = "vantage server 
     return address
 
 
-def resolve_server_address(*, cli_url: str | None, env_url: str | None, ini_url: str | None) -> str:
+def resolve_server_address(*, cli_url: str | None, env_url: str | None, ini_url: object) -> str:
     """Where to report to: `--vantage-server` > `VANTAGE_SERVER` > the
     `vantage_server` ini value > the default (`http://127.0.0.1:8765`).
 
@@ -99,25 +115,33 @@ def resolve_server_address(*, cli_url: str | None, env_url: str | None, ini_url:
 
     Validates the address that wins, naming its source, before returning
     it -- every caller gets a validated address, never a raw configured
-    string.
+    string. The ini value is anything pytest read: before pytest 8.4 a list
+    in the TOML table arrives as a list.
     """
-    sources = (
+    sources: tuple[tuple[str, object], ...] = (
         ("--vantage-server", cli_url),
         ("VANTAGE_SERVER", env_url),
         ("vantage_server ini value", ini_url),
     )
     for option, url in sources:
-        if url:
-            return resolve_and_validate_address(url, option=option)
+        if url is None or url == "":
+            continue
+        if not isinstance(url, str):
+            raise VantageConfigError(f"{option} must be a URL (got {url!r})")
+        return resolve_and_validate_address(url, option=option)
     return _DEFAULT_ADDRESS
 
 
-def _positive_seconds(raw: str | float, option: str) -> float:
+def _positive_seconds(raw: object, option: str) -> float:
     """A zero timeout makes the connect non-blocking, a negative one makes
     the socket layer raise, and NaN, infinity or anything above
     ``threading.TIMEOUT_MAX`` (the largest timeout Python's blocking calls
     accept) get past the preflight's ``min(2.0, t)`` only to fail the
-    finish report -- none is usable."""
+    finish report -- none is usable. Only text or a number is read as
+    seconds: a list or table from TOML is not, and neither is a boolean,
+    which Python would read as 0 or 1."""
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+        raise VantageConfigError(f"{option} must be a number of seconds (got {raw!r})")
     try:
         seconds = float(raw)
     except ValueError:
@@ -131,14 +155,14 @@ def _positive_seconds(raw: str | float, option: str) -> float:
     return seconds
 
 
-def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: str | float | None) -> float:
+def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: object) -> float:
     """The bound on each reporting request: `--vantage-timeout` > the
     `vantage_timeout` ini value > the default (`10.0` seconds). No
     environment variable is defined for the timeout -- only the address has
     one.
 
     The ini value is text in an ini file and a number in pytest's native
-    TOML table; both are accepted.
+    TOML table; both are accepted, and nothing else.
     """
     if cli_timeout is not None:
         return _positive_seconds(cli_timeout, "--vantage-timeout")
