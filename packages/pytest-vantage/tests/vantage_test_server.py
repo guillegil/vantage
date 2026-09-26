@@ -37,7 +37,7 @@ class VantageTestServer(LoopbackServer):
     the store that ships.
 
     The inspection helpers read through the store's port, and through plain
-    SQL for the metadata rows the port never returns.
+    SQL for a run's metadata, whose file rows no port method returns.
     """
 
     def __init__(self, directory: Path) -> None:
