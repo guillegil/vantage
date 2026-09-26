@@ -4,6 +4,8 @@ store call never holds up an unrelated request.
 
 Every thread is joined with a timeout: a deadlock is exactly what these tests
 look for, and an unbounded `join` would hang the suite instead of failing it.
+For the same reason every thread is a daemon: a thread still stuck when its
+test has failed must not keep the interpreter from exiting afterwards.
 """
 
 from __future__ import annotations
@@ -65,7 +67,7 @@ def _run_concurrently(targets: list[Callable[[], object]]) -> list[BaseException
 
         return _run
 
-    threads = [threading.Thread(target=_wrap(target)) for target in targets]
+    threads = [threading.Thread(target=_wrap(target), daemon=True) for target in targets]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -201,10 +203,10 @@ def test_a_read_never_sees_another_threads_write_in_progress(
         )
 
     try:
-        writer = threading.Thread(target=_write)
+        writer = threading.Thread(target=_write, daemon=True)
         writer.start()
         assert inside.wait(_JOIN_TIMEOUT_SECONDS)
-        reader = threading.Thread(target=_read)
+        reader = threading.Thread(target=_read, daemon=True)
         reader.start()
         # A reader that does not wait for the writer has finished by now.
         reader.join(timeout=0.2)
@@ -351,8 +353,8 @@ def test_a_slow_store_write_holds_up_no_other_request() -> None:
             answered["capabilities"] = client.get("/api/v1/capabilities").status_code
             answered["heartbeat"] = client.post(f"/api/v1/runs/{live_run}/heartbeat").status_code
 
-        writer = threading.Thread(target=_write)
-        others = threading.Thread(target=_others)
+        writer = threading.Thread(target=_write, daemon=True)
+        others = threading.Thread(target=_others, daemon=True)
         writer.start()
         try:
             assert store.writing.wait(_JOIN_TIMEOUT_SECONDS)
@@ -367,6 +369,116 @@ def test_a_slow_store_write_holds_up_no_other_request() -> None:
 
     assert not writer.is_alive()
     assert answered == {"capabilities": 200, "heartbeat": 200, "write": 201}
+
+
+_HELD_RUN = "c" * 32
+_HELD_NODE = "tests/test_held.py::test_x"
+
+# Each route that reaches the store, with the store method it calls first.
+_STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
+    "create_run": ("POST", "/api/v1/runs", {"json": _report("d" * 32)}, "record_session"),
+    "heartbeat": ("POST", f"/api/v1/runs/{_HELD_RUN}/heartbeat", {}, "get_execution"),
+    "list_runs": ("GET", "/api/v1/runs", {}, "list_runs"),
+    "list_runs_by_metadata": (
+        "GET",
+        "/api/v1/runs",
+        {"params": {"metadata_key": "k", "metadata_value": "v"}},
+        "list_runs_with_metadata_horizon",
+    ),
+    "get_run_detail": ("GET", f"/api/v1/runs/{_HELD_RUN}", {}, "get_run_detail"),
+    "list_results": ("GET", f"/api/v1/runs/{_HELD_RUN}/results", {}, "get_execution"),
+    "get_result": (
+        "GET",
+        f"/api/v1/runs/{_HELD_RUN}/result",
+        {"params": {"node_id": _HELD_NODE}},
+        "get_execution",
+    ),
+    "list_history": (
+        "GET",
+        "/api/v1/tests/history",
+        {"params": {"node_id": _HELD_NODE}},
+        "list_history",
+    ),
+    "list_sections": ("GET", "/api/v1/config/sections", {}, "list_settings"),
+    "upsert_section": (
+        "POST",
+        "/api/v1/config/sections",
+        {"json": {"name": "Held", "prefix": "tests/held"}},
+        "upsert_setting",
+    ),
+    "delete_section": (
+        "DELETE",
+        "/api/v1/config/sections",
+        {"params": {"name": "Seeded"}},
+        "delete_setting",
+    ),
+    "get_run_sections": ("GET", f"/api/v1/runs/{_HELD_RUN}/sections", {}, "get_execution"),
+}
+
+
+def _hold(store: InMemoryExecutionStore, method: str) -> tuple[threading.Event, threading.Event]:
+    """Make `store.<method>` wait until `release` is set, after setting
+    `entered`. An instance attribute shadows the class's method, so every
+    route that calls it through the store gets the held one."""
+    entered = threading.Event()
+    release = threading.Event()
+    original = getattr(store, method)
+
+    def _held(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        release.wait(2 * _JOIN_TIMEOUT_SECONDS)
+        return original(*args, **kwargs)
+
+    setattr(store, method, _held)
+    return entered, release
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "request_kwargs", "held"), _STORE_ROUTES.values(), ids=_STORE_ROUTES
+)
+def test_a_held_store_call_holds_up_no_other_request(
+    method: str, path: str, request_kwargs: dict[str, Any], held: str
+) -> None:
+    """A route that called the store on the event loop would stall every
+    other request until the call returned -- heartbeats included, and a
+    session that cannot heartbeat reads as abandoned. With each route's
+    store call held, the capability check must still answer."""
+    store = InMemoryExecutionStore()
+    now = datetime.now(timezone.utc)
+    store.record_session(
+        _start_only_execution(_HELD_RUN), results=[_result(_HELD_NODE)], received_at=now
+    )
+    store.upsert_setting(
+        TEST_SECTIONS_NAMESPACE, "Seeded", value='{"prefix": "tests/seeded/"}', updated_at=now
+    )
+    entered, release = _hold(store, held)
+    answered: dict[str, int] = {}
+
+    with TestClient(create_app(store)) as client:
+
+        def _held_request() -> None:
+            answered["held"] = client.request(method, path, **request_kwargs).status_code
+
+        def _capabilities() -> None:
+            answered["capabilities"] = client.get("/api/v1/capabilities").status_code
+
+        holder = threading.Thread(target=_held_request, daemon=True)
+        other = threading.Thread(target=_capabilities, daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(_JOIN_TIMEOUT_SECONDS), f"{path} never called {held}"
+            other.start()
+            other.join(timeout=_JOIN_TIMEOUT_SECONDS)
+            assert not other.is_alive(), f"a request waited for {path}'s {held}"
+            assert "held" not in answered
+        finally:
+            release.set()
+            holder.join(timeout=_JOIN_TIMEOUT_SECONDS)
+            other.join(timeout=_JOIN_TIMEOUT_SECONDS)
+
+    assert not holder.is_alive()
+    assert answered["capabilities"] == 200
+    assert 200 <= answered["held"] < 300
 
 
 def test_section_posts_racing_for_the_last_slot_never_pass_the_bound(
