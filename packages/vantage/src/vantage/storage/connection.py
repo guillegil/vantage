@@ -5,12 +5,17 @@ idempotent schema application.
 permissive umask, so a `chmod` afterwards leaves a window in which another
 user can open it. The file is therefore created at 0600 before `sqlite3`
 ever sees the path. Only what this module creates is made owner-only: an
-existing directory or database file keeps the mode its owner chose.
+existing directory or database file keeps the mode its owner chose, and
+SQLite gives the `-wal` and `-shm` files the database file's own mode, so
+they follow whichever it has.
 
-A database from a different schema version is refused, not migrated.
-`_apply_schema` stamps `meta.schema_version` inside the same transaction that
-creates the tables, and the refusal reads that stamp without issuing any
-DDL, so a mismatched database is never altered.
+A database from a different schema version is refused, not migrated, and so
+is a file that already holds some other schema. `_apply_schema` stamps
+`meta.schema_version` inside the same transaction that creates the tables.
+Everything that decides a refusal only reads, and write-ahead logging --
+which is persistent, and rewrites the file's header -- is switched on only
+once the database is known to be this build's, so a refused database is
+left exactly as it was found.
 """
 
 from __future__ import annotations
@@ -56,10 +61,11 @@ def isoformat_utc(moment: datetime) -> str:
 
 
 class SchemaVersionError(RuntimeError):
-    """`meta.schema_version` does not match what this build requires.
+    """`meta.schema_version` does not match what this build requires, or the
+    file holds another schema and no stamp at all.
 
-    Raised by `open_database` before any DDL runs against the mismatched
-    database, and after the connection that read the mismatch is closed.
+    Raised by `open_database` before anything in the refused database is
+    changed, and after the connection that read it is closed.
     """
 
 
@@ -70,8 +76,8 @@ def open_database(path: Path) -> sqlite3.Connection:
     0600 before `sqlite3.connect` runs, applies `schema.sql` inside one
     transaction on first creation only, and -- on POSIX -- warns without
     rewriting the mode of an existing database an operator deliberately
-    widened. Any failure after connecting closes the connection before the
-    error propagates.
+    widened, once the database has been accepted. Any failure after
+    connecting closes the connection before the error propagates.
     """
     path = Path(path)
     parent = path.parent
@@ -86,8 +92,7 @@ def open_database(path: Path) -> sqlite3.Connection:
     except FileExistsError:
         pass
 
-    if is_posix:
-        _create_database_file_or_warn(path)
+    created = _create_database_file(path) if is_posix else False
 
     # `check_same_thread=False`: the store may be called from any thread, so
     # several can share this one connection; `SqliteExecutionStore`'s lock
@@ -99,16 +104,19 @@ def open_database(path: Path) -> sqlite3.Connection:
         # A committed session survives a power loss; one fsync per session is
         # not noticeable.
         conn.execute("PRAGMA synchronous = FULL")
-        _enable_wal(conn)
 
-        if _schema_already_applied(conn):
+        objects = _schema_objects(conn)
+        if _SCHEMA_SENTINEL_TABLE in objects:
             _check_schema_version(conn, path)
+        elif objects:
+            raise SchemaVersionError(
+                f"{path} holds tables but no schema_version stamp, so it is not a vantage "
+                "database; nothing was added to it. Choose a different path."
+            )
         else:
             _apply_schema(conn)
             _stamp_creation_metadata(conn)
-
-        if is_posix:
-            _secure_wal_sidecars(path)
+        _enable_wal(conn)
     except BaseException:
         # Closing rolls back a half-applied schema and releases its write
         # lock now, not whenever the traceback that references `conn` is
@@ -116,16 +124,21 @@ def open_database(path: Path) -> sqlite3.Connection:
         conn.close()
         raise
 
+    # Only now: a refused database gets its one-line refusal, not a warning
+    # that recording will continue first.
+    if is_posix and not created:
+        _warn_if_permissive(path)
     return conn
 
 
-def _create_database_file_or_warn(path: Path) -> None:
+def _create_database_file(path: Path) -> bool:
+    """Create `path` at 0600 and return True, or return False if it exists."""
     try:
         fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
     except FileExistsError:
-        _warn_if_permissive(path)
-    else:
-        os.close(fd)
+        return False
+    os.close(fd)
+    return True
 
 
 def _warn_if_permissive(path: Path) -> None:
@@ -149,12 +162,13 @@ def _enable_wal(conn: sqlite3.Connection) -> None:
         )
 
 
-def _schema_already_applied(conn: sqlite3.Connection) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-        (_SCHEMA_SENTINEL_TABLE,),
-    ).fetchone()
-    return row is not None
+def _schema_objects(conn: sqlite3.Connection) -> set[str]:
+    """The names of every table, index, view and trigger in the database,
+    SQLite's own `sqlite_*` bookkeeping aside. Empty for a new file."""
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+    ).fetchall()
+    return {row[0] for row in rows}
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
@@ -164,6 +178,11 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     `executescript` commits a pending transaction before it runs, never
     after, so `BEGIN IMMEDIATE` opens the script and the parameterised stamp
     and the `COMMIT` follow it on the same, still-open transaction.
+
+    Two processes opening the same new file can both find it empty and both
+    get here; the second waits for the first's write lock, then every
+    `IF NOT EXISTS` statement and the `OR IGNORE` stamp leave the first's
+    schema as it is.
     """
     schema_sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
     conn.executescript(f"BEGIN IMMEDIATE;\n{schema_sql}")
@@ -221,15 +240,3 @@ def _stamp_creation_metadata(conn: sqlite3.Connection) -> None:
         # `ImportError` on Windows with no `USERNAME` set; 3.13+ raises
         # `OSError`. None of them may abort server startup.
         _LOGGER.warning("failed to stamp created_at/created_by in meta", exc_info=True)
-
-
-def _secure_wal_sidecars(path: Path) -> None:
-    """SQLite normally gives `-wal`/`-shm` the main file's mode; this narrows
-    them explicitly in case some platform does not.
-    """
-    for suffix in ("-wal", "-shm"):
-        sidecar = path.with_name(path.name + suffix)
-        try:
-            os.chmod(sidecar, 0o600)
-        except FileNotFoundError:
-            pass

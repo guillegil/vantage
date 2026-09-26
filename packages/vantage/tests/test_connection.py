@@ -1,10 +1,12 @@
 """`open_database` applies `schema.sql` once, inside one transaction, never
-re-issues DDL against an existing database, and refuses a database stamped
-with a different schema version.
+re-issues DDL against an existing database, and refuses -- leaving it as it
+was -- a database stamped with a different schema version or holding some
+other schema.
 """
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sqlite3
 from pathlib import Path
@@ -191,17 +193,16 @@ def _capture_connections(monkeypatch: pytest.MonkeyPatch) -> list[sqlite3.Connec
     return created
 
 
-def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
+def test_a_refusal_changes_nothing_and_closes_the_connection_before_raising(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Not a byte of the refused file changes. Switching it to write-ahead
+    logging first would: the journal mode is stored in the file's header
+    and outlives the connection, so the refusal would leave behind a
+    database no older build opens the way it left it."""
     db_path = tmp_path / "store" / "vantage.db"
     _seed_meta_only_database(db_path, schema_version_value="1")
-
-    before = sqlite3.connect(str(db_path))
-    before_master = before.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
-    ).fetchall()
-    before.close()
+    before = db_path.read_bytes()
 
     created = _capture_connections(monkeypatch)
 
@@ -215,34 +216,50 @@ def test_a_refusal_issues_no_ddl_and_closes_the_connection_before_raising(
     with pytest.raises(sqlite3.ProgrammingError):
         created[0].execute("SELECT 1")
 
-    monkeypatch.undo()
-    after = sqlite3.connect(str(db_path))
-    after_master = after.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
-    ).fetchall()
-    after.close()
+    assert db_path.read_bytes() == before
+    assert sorted(path.name for path in db_path.parent.iterdir()) == ["vantage.db"]
 
-    assert after_master == before_master
+
+def test_a_database_holding_another_schema_is_refused_and_left_as_it_was(
+    tmp_path: Path,
+) -> None:
+    """A mistyped `--database` can name some other application's SQLite
+    file. Adding vantage's tables to it, stamping it and switching its
+    journal mode would change someone else's data; refusing it says what
+    the file is."""
+    db_path = tmp_path / "store" / "customers.db"
+    db_path.parent.mkdir(parents=True)
+    with contextlib.closing(sqlite3.connect(str(db_path))) as foreign, foreign:
+        foreign.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT)")
+        foreign.execute("INSERT INTO customers (name) VALUES ('a')")
+    before = db_path.read_bytes()
+
+    with pytest.raises(SchemaVersionError, match="not a vantage database"):
+        open_database(db_path)
+
+    assert db_path.read_bytes() == before
+    assert sorted(path.name for path in db_path.parent.iterdir()) == ["customers.db"]
 
 
 def test_a_schema_that_fails_partway_is_rolled_back_and_its_lock_released_at_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A foreign SQLite file with its own `run` table: `CREATE TABLE IF NOT
-    EXISTS run` is skipped and the `run(started_at)` index then fails after
-    `BEGIN IMMEDIATE`. The connection must be closed as part of raising, so
-    the half-applied schema rolls back and the write lock is free while the
-    caller is still handling the error -- not whenever the traceback that
-    references the connection is collected."""
+    """A statement near the end of the schema fails after every table
+    before it was created inside `BEGIN IMMEDIATE`. The connection must be
+    closed as part of raising, so the half-applied schema rolls back and the
+    write lock is free while the caller is still handling the error -- not
+    whenever the traceback that references the connection is collected."""
+    broken = tmp_path / "schema.sql"
+    broken.write_text(
+        _SCHEMA_SQL.read_text(encoding="utf-8")
+        + "\nCREATE INDEX IF NOT EXISTS idx_broken ON no_such_table (x);\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("vantage.storage.connection._SCHEMA_SQL_PATH", broken)
     db_path = tmp_path / "store" / "vantage.db"
-    db_path.parent.mkdir(parents=True)
-    foreign = sqlite3.connect(str(db_path))
-    foreign.execute("CREATE TABLE run (id TEXT PRIMARY KEY)")
-    foreign.commit()
-    foreign.close()
     created = _capture_connections(monkeypatch)
 
-    with pytest.raises(sqlite3.OperationalError, match="no such column"):
+    with pytest.raises(sqlite3.OperationalError, match="no_such_table"):
         open_database(db_path)
 
     assert len(created) == 1
@@ -256,7 +273,7 @@ def test_a_schema_that_fails_partway_is_rolled_back_and_its_lock_released_at_onc
         tables = other.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
     finally:
         other.close()
-    assert tables == [("run",)]
+    assert tables == []
 
 
 def test_a_file_that_is_not_a_database_leaves_no_open_connection(
