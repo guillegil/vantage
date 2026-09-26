@@ -5,9 +5,8 @@ Runs the app factory (`vantage.service.app.create_app`) against **both**
 `ExecutionStore` implementations: the `store` fixture is parametrised, so
 every test below executes twice -- once against `InMemoryExecutionStore` and
 once against `SqliteExecutionStore`, the adapter that actually ships. Only
-the SQLite run catches a row-to-domain mapper (`_row_to_run_list_entry`,
-`_row_to_history_entry`, `_row_to_vcs_projection`) that drops a value on its
-way to the wire.
+the SQLite run catches a query or a row decoder in `sqlite_store.py` that
+drops a value on its way to the wire.
 
 Every fixture constructs `Execution`/`VcsContext` directly and seeds the
 store through `record_session`, never through the ingestion route: these
@@ -557,7 +556,8 @@ def test_run_detail_carries_every_stored_field_by_value(
     assert orderly["presentation"] == "finished"
     # The detail path's five VCS fields, by value: detail is the only route
     # that reads a full `VcsContext` rather than a `VcsProjection`, so
-    # nothing else on the wire covers `_row_to_vcs_context`.
+    # nothing else on the wire covers how a stored run's full VCS columns
+    # are decoded.
     # `commit_subject_truncated` is `True` here beside an unshortened
     # subject, which only capture-time truncation can produce -- the detail
     # path never applies display bounding.
