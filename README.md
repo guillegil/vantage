@@ -270,7 +270,8 @@ say), so the same fixtures run either way.
 **When it is sent.** The values go to the server in the session's last
 report only, once every test has run. A session that is killed loses them,
 and so can a value set in a fixture's teardown when the session stops early
-(`-x`, `--maxfail`): set values in the fixture's setup, before its `yield`.
+(`-x`, `--maxfail`, Ctrl-C): set values in the fixture's setup, before its
+`yield`.
 A value longer than 1,024 bytes of UTF-8 is recorded as `value_too_large`,
 without the value.
 
@@ -278,7 +279,10 @@ without the value.
 hands its values to the controller as it finishes, and the controller sends
 them all in the run's one last report. A key two workers report alike is
 recorded once. A key they report with different values keeps the first
-value the controller received, with one warning.
+value the controller received, with one warning. Ctrl-C stops the
+controller before its workers have handed anything over, so a session
+interrupted that way under pytest-xdist is recorded without any of the
+values its fixtures reported.
 
 ### Declaring keys
 
@@ -321,9 +325,10 @@ Once keys are declared:
 
 **Bounds.** A run records at most 200 keys: the keys of the files read
 first, then the keys the session reported, in the order first set, then the
-declared keys recorded `absent`. All the values together may take up to
-512 KiB of the last report. Keys past either bound are left out, with one
-warning for each bound.
+declared keys recorded `absent`. All the keys and values together may
+take up to 512 KiB of the last report, counted as sent, where each
+character outside ASCII takes six bytes. Keys past either bound are left
+out, with one warning for each bound.
 
 ### Reading it back
 

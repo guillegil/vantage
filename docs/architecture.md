@@ -212,12 +212,16 @@ fixtures, which run on every worker and never on the controller, and relays
 its values. A worker cannot tell from `--vantage` alone whether its
 controller records, so the `Recorder` says so the other way, in each
 worker's `workerinput` (`pytest_configure_node`); without that word the
-worker registers no metadata relay and its fixture stays silent. execnet refuses a `str` subclass and any text holding a lone
-surrogate, and either would crash the worker as it finishes, so keys and
-values are plain `str` from the moment they are set and cross as
-ASCII-escaped JSON text. The controller merges the values in the order it
-receives them, keeping the first value of a key two workers disagree on,
-with one warning.
+worker registers no metadata relay and its fixture stays silent. execnet
+refuses a `str` subclass and any text holding a lone surrogate, and either
+would crash the worker as it finishes, so keys and values are plain `str`
+from the moment they are set and cross as ASCII-escaped JSON text. The
+controller merges the values in the order it receives them, keeping the
+first value of a key two workers disagree on, with one warning. A Ctrl-C
+ends the controller's event loop at once, before any worker has finished,
+so an xdist session interrupted that way is reported without its workers'
+values; `pytest.exit()` in a worker ends that worker first, and its values
+arrive.
 
 **Reruns and subtests.** A new setup report starts a new attempt, so a rerun
 plugin's last attempt is the one recorded. Subtest reports are kept apart
