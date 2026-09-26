@@ -140,9 +140,11 @@ patterns or lengths.
 
 ## Session lifecycle
 
-1. **`pytest_configure`, on the controller.** A session that runs no test
-   (`--collect-only` and similar) stops here. Opt-in switches that were not
-   typed on the command line are reported in one warning and ignored. The
+1. **`pytest_configure`, on the controller.** An invocation that never runs
+   a test (`--collect-only`, `--fixtures` and the other options in
+   `_NO_TEST_OPTIONS`) stops here; a session whose selection is merely empty
+   does not, and is recorded with exit status 5. Opt-in switches that were
+   not typed on the command line are reported in one warning and ignored. The
    address and timeout are resolved and validated; a bad value is a usage
    error. A bare TCP connect checks that something listens at the address;
    if nothing does, one warning and the session runs unrecorded. A capability
@@ -348,12 +350,16 @@ the whole text.
 | Port | `--port` | none | `8765` |
 | Grace period | `--grace-period` | none | 900 seconds |
 
-A flag beats the environment, which beats the default; an empty value is
-unset and a relative `XDG_DATA_HOME` is ignored. Resolution
+A flag beats the environment, which beats the default. An empty
+`--database`, `VANTAGE_DATABASE` or `XDG_DATA_HOME` is unset and a relative
+`XDG_DATA_HOME` is ignored; an empty `--host` is refused instead, because
+the event loop would bind `""` as every interface. Resolution
 (`core/config/resolution.py`) is a pure function with no filesystem access,
 so asking where the database would go never creates it, and it rejects an
 unusable value (an empty host, a port outside 1 to 65535, a grace period
-outside zero to 365 days) before anything opens. `service/cli.py` acts on the
+that is not positive or exceeds 365 days) before anything opens. A port or
+grace period that is not a number never reaches it: `argparse` refuses it
+with its usage message and exit status 2. `service/cli.py` acts on the
 result: it checks that an existing database directory is writable, opens the
 store, refuses any failure with one `vantage: ...` line and exit status 1,
 warns about a bind other than `127.0.0.1` once the database is open, and

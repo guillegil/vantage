@@ -107,9 +107,12 @@ from: they say where and how, never whether.
 
 ### What is not recorded
 
-A session that runs no test is not recorded, even with `--vantage`:
-`--collect-only` (`--co`), `--setup-only`, `--setup-plan`, `--fixtures`,
-`--fixtures-per-test`, `--cache-show`, `--markers` and `--help`.
+These invocations never run a test and are not recorded, even with
+`--vantage`: `--collect-only` (`--co`), `--setup-only`, `--setup-plan`,
+`--fixtures`, `--fixtures-per-test`, `--cache-show`, `--markers` and
+`--help`. A session whose selection turns out empty (`-k` or `-m` matching
+nothing) is still recorded, as a finished run with exit status 5 and no
+results.
 
 ## What each switch uploads
 
@@ -271,7 +274,9 @@ vantage [--database PATH] [--host HOST] [--port PORT] [--grace-period SECONDS]
 | Grace period before an unfinished run reads as abandoned | `--grace-period` | none | `900` seconds |
 
 - A flag beats the environment variable, which beats the default. An empty
-  value counts as unset, and a relative `XDG_DATA_HOME` is ignored.
+  `--database`, `VANTAGE_DATABASE` or `XDG_DATA_HOME` counts as unset, and a
+  relative `XDG_DATA_HOME` is ignored. An empty `--host` is refused rather
+  than taken to mean every interface.
 - A missing database directory is created with mode 0700 and a new database
   file with mode 0600. An existing database file open to its group or to
   others is used as it is, with a warning.
@@ -280,9 +285,13 @@ vantage [--database PATH] [--host HOST] [--port PORT] [--grace-period SECONDS]
   text included. Any `--host` other than `127.0.0.1` logs a warning saying so
   at startup.
 - The server refuses to start, with one `vantage: ...` line on stderr and
-  exit status 1, when a setting is unusable, the database cannot be created
-  or opened, or the database was made by a build with a different schema.
-  There are no migrations: move the old file aside and start again.
+  exit status 1, when a setting is unusable (an empty host, a port outside 1
+  to 65535, a grace period that is not positive or exceeds 365 days), the
+  database cannot be created or opened, or the database was made by a build
+  with a different schema. There are no migrations: move the old file aside
+  and start again.
+- A `--port` or `--grace-period` that is not a number never gets that far:
+  the argument parser refuses it with its usage message and exit status 2.
 
 The server's API is under `/api/v1`. It serves its own OpenAPI document at
 `GET /api/v1/openapi.yaml`, and the ingestion contract the plugin uses is
@@ -299,8 +308,9 @@ side:
 | `GET`, `POST`, `DELETE /api/v1/config/sections` | Named file-path prefixes that group results |
 | `GET /api/v1/runs/{run_id}/sections` | One run's pass rate per section |
 
-Lists take `limit` (at most 200 per page) and `offset`, and say whether more
-items exist in `has_more`.
+The run list, a run's results and a test's history are paged: they take
+`limit` (at most 200 per page) and `offset`, and say in `has_more` whether
+more items exist. The section lists are returned whole.
 
 ## Development
 
