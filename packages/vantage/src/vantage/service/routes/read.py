@@ -40,7 +40,7 @@ page and the counts come from one store call, so they describe the same set
 of runs. `metadata_horizon` is `None` when no filter was given.
 
 A node id or metadata filter holding U+0000 matches nothing: nothing stored
-holds one (`service/text.py`), and PostgreSQL cannot even be asked about
+holds one (`ingestion/text.py`), and PostgreSQL cannot even be asked about
 one, so these routes answer it without passing it to the store.
 """
 
@@ -65,6 +65,7 @@ from vantage.core.ports.storage import (
     RunDetail,
     RunListEntry,
 )
+from vantage.ingestion.text import NUL, without_nul
 from vantage.service.dependencies import get_grace_period, get_store
 from vantage.service.errors import InvalidMetadataFilterError, UnknownResultError, UnknownRunError
 from vantage.service.schemas import (
@@ -82,7 +83,6 @@ from vantage.service.schemas import (
     RunMetadataResponse,
     RunVcsResponse,
 )
-from vantage.service.text import NUL, without_nul
 
 router = APIRouter()
 

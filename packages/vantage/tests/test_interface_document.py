@@ -34,6 +34,16 @@ from pydantic import BaseModel
 from vantage.core.domain.liveness import PRESENTATIONS
 from vantage.core.domain.metadata import KEY_STATUSES, METADATA_SOURCES
 from vantage.core.domain.result import OUTCOMES
+from vantage.ingestion.schemas import (
+    MetadataFileReport,
+    MetadataKeyReport,
+    MetadataReport,
+    MetadataValueReport,
+    ResultReport,
+    RunReport,
+    SessionReport,
+    VcsReport,
+)
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
@@ -43,30 +53,22 @@ from vantage.service.schemas import (
     HeartbeatAcknowledgement,
     HistoryEntryResponse,
     HistoryResponse,
-    MetadataFileReport,
     MetadataHorizonResponse,
     MetadataItemResponse,
-    MetadataKeyReport,
-    MetadataReport,
-    MetadataValueReport,
     RejectionResponse,
     ResultDetailResponse,
     ResultListItemResponse,
-    ResultReport,
     ResultsResponse,
     RunDetailResponse,
     RunListItemResponse,
     RunListResponse,
     RunMetadataResponse,
-    RunReport,
     RunSectionSummaryResponse,
     RunVcsResponse,
     SectionListResponse,
     SectionResponse,
     SectionSummaryResponse,
     SectionUpsertRequest,
-    SessionReport,
-    VcsReport,
 )
 from vantage.storage.sqlite_store import SqliteExecutionStore
 

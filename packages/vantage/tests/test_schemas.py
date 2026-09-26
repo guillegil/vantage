@@ -15,7 +15,7 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 from vantage.core.domain.result import OUTCOMES
-from vantage.service.schemas import (
+from vantage.ingestion.schemas import (
     MetadataFileReport,
     MetadataReport,
     ResultReport,
@@ -61,9 +61,9 @@ def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
     assert zero_duration.duration == 0.0
 
 
-def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None:
+def test_outcome_vocabulary_matches_across_schema_sql_core_and_ingestion() -> None:
     """The six outcome strings live in three places: `schema.sql`'s CHECK,
-    `OUTCOMES`, and the service `_Outcome` Literal. Parses the CHECK clause
+    `OUTCOMES`, and the ingestion `_Outcome` Literal. Parses the CHECK clause
     itself instead of trusting a fourth, hand-typed copy here -- the CHECK
     is the ground truth this test protects."""
     schema_sql = (

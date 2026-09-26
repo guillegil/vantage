@@ -8,10 +8,17 @@ never reach the service or a third-party package -- except
 `vantage.storage.postgres`, which alone may import the PostgreSQL driver the
 optional `postgres` extra installs, so that an install without it still
 imports and serves SQLite.
+
+`vantage.ingestion` turns a report into rows for the server and for the
+local store alike, so it takes Pydantic and PyYAML, which every install
+has, and never the web framework, which only the `server` extra brings, nor
+a storage adapter: the store is handed in. `vantage.service` is the only
+package that imports the web framework.
 """
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 import textwrap
@@ -23,6 +30,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SRC_ROOT = _REPO_ROOT / "packages" / "vantage" / "src"
 _CORE_DIR = _SRC_ROOT / "vantage" / "core"
 _STORAGE_DIR = _SRC_ROOT / "vantage" / "storage"
+_INGESTION_DIR = _SRC_ROOT / "vantage" / "ingestion"
 _STDLIB = frozenset(sys.stdlib_module_names)
 
 # Standard-library modules that open a database, a socket or a process.
@@ -54,6 +62,10 @@ _CORE_ALLOWED = _STDLIB - _IO_MODULES
 _POSTGRES_ADAPTER = "vantage.storage.postgres"
 _POSTGRES_DRIVER = frozenset({"psycopg", "psycopg_pool"})
 
+# What the `server` extra brings: FastAPI, the Starlette it is built on, and
+# the ASGI server.
+_WEB_FRAMEWORK = frozenset({"fastapi", "starlette", "uvicorn"})
+
 
 def _walk_core() -> WalkResult:
     return walk_package(
@@ -71,6 +83,15 @@ def _walk_storage() -> WalkResult:
         allowed_top_levels=_STDLIB,
         allowed_internal_prefixes=("vantage.core", "vantage.storage"),
         allowed_top_levels_within={_POSTGRES_ADAPTER: _POSTGRES_DRIVER},
+    )
+
+
+def _walk_ingestion() -> WalkResult:
+    return walk_package(
+        _INGESTION_DIR,
+        src_root=_SRC_ROOT,
+        allowed_top_levels=_STDLIB | {"pydantic", "yaml"},
+        allowed_internal_prefixes=("vantage.core", "vantage.ingestion"),
     )
 
 
@@ -96,6 +117,39 @@ def test_every_storage_import_resolves_to_the_standard_library_or_the_core() -> 
     ]
 
 
+def test_every_ingestion_import_resolves_to_the_standard_library_the_core_or_validation() -> None:
+    """Pydantic and PyYAML, and nothing that serves HTTP or opens a store."""
+    result = _walk_ingestion()
+
+    assert result.is_clean, [
+        f"{v.file}:{v.lineno} imports {v.imported!r}" for v in result.violations
+    ]
+
+
+def _web_framework_importers() -> set[str]:
+    """Every module under `vantage` with an import of the web framework,
+    those inside functions included."""
+    importers: set[str] = set()
+    for file in sorted((_SRC_ROOT / "vantage").rglob("*.py")):
+        for node in ast.walk(ast.parse(file.read_text(encoding="utf-8"), filename=str(file))):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names = [node.module]
+            else:
+                continue
+            if any(name.partition(".")[0] in _WEB_FRAMEWORK for name in names):
+                importers.add(file.relative_to(_SRC_ROOT).as_posix())
+    return importers
+
+
+def test_the_service_is_the_only_package_that_imports_the_web_framework() -> None:
+    importers = _web_framework_importers()
+
+    assert "vantage/service/app.py" in importers
+    assert [path for path in importers if not path.startswith("vantage/service/")] == []
+
+
 def test_the_core_walk_is_not_vacuous() -> None:
     examined = _examined(_walk_core())
 
@@ -112,6 +166,15 @@ def test_the_storage_walk_is_not_vacuous() -> None:
     assert "vantage/storage/version.py" in examined
     assert "vantage/storage/postgres/connection.py" in examined
     assert "vantage/storage/postgres/store.py" in examined
+
+
+def test_the_ingestion_walk_is_not_vacuous() -> None:
+    examined = _examined(_walk_ingestion())
+
+    assert "vantage/ingestion/__init__.py" in examined
+    assert "vantage/ingestion/conversion.py" in examined
+    assert "vantage/ingestion/metadata_parse.py" in examined
+    assert "vantage/ingestion/schemas.py" in examined
 
 
 def test_every_io_module_kept_out_of_the_core_is_a_real_stdlib_module() -> None:
@@ -279,3 +342,34 @@ def test_storage_and_the_command_import_without_the_postgresql_driver() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.split() == ["psycopg"]
+
+
+_WITHOUT_THE_WEB_FRAMEWORK = """
+import sys
+
+for name in ("fastapi", "starlette", "uvicorn"):
+    sys.modules[name] = None
+
+import vantage.ingestion
+import vantage.ingestion.decode
+
+try:
+    import vantage.service.app
+except ImportError as exc:
+    print(exc.name)
+"""
+
+
+def test_ingestion_imports_without_the_web_framework() -> None:
+    """An install without the `server` extra has no FastAPI: ingestion must
+    import there, and the app, asked for, fails on the missing framework."""
+    completed = subprocess.run(  # noqa: S603 -- the interpreter running this test
+        [sys.executable, "-c", _WITHOUT_THE_WEB_FRAMEWORK],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["fastapi"]
