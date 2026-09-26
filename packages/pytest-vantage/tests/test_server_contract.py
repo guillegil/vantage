@@ -9,9 +9,10 @@ imports both and compares the copies directly.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,6 +23,7 @@ from vantage.core.domain.result import OUTCOMES
 from vantage.service import errors, truncation
 from vantage.service.app import create_app
 from vantage.service.routes import runs as runs_route
+from vantage.service.schemas import MetadataReport
 from vantage.storage.connection import isoformat_utc as server_isoformat_utc
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
@@ -85,6 +87,65 @@ def test_the_file_statuses_are_the_servers_but_malformed() -> None:
     give, so a status the plugin gains must land in `_FILE_STATUSES`.
     """
     assert set(metadata._FILE_STATUSES) == core_metadata.FILE_STATUSES - {"malformed"}
+
+
+def test_every_file_the_plugin_reads_is_recorded_under_its_declared_path(
+    tmp_path: Path,
+) -> None:
+    """The server re-checks each declared path's shape and drops a file that
+    fails it, with every key it declared. Each shape the plugin reads must
+    pass that check, or a captured file would vanish from the run; the
+    shapes it refuses to read -- absolute, or holding `..` -- are the ones
+    dropped.
+    """
+    root = tmp_path / "project"
+    (root / "config").mkdir(parents=True)
+    (tmp_path / "outside.json").write_text("{}")
+    read = ["top.json", "./dot.json", "config/nested.json", "config/./dot.json", "a b: c.json"]
+    for declared in read:
+        (root / declared).write_text("{}")
+    refused = [str(root / "top.json"), "../outside.json", "config/../top.json"]
+    (root / metadata.DECLARATION_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "files": [
+                    {"path": declared, "format": "json", "keys": [f"key_{index}"]}
+                    for index, declared in enumerate([*read, *refused])
+                ],
+            }
+        )
+    )
+    # `warn` is reached only for a refused declaration, which this is not.
+    config: pytest.Config = SimpleNamespace()  # type: ignore[assignment]
+
+    section = metadata.capture_metadata(config, root)
+
+    assert section is not None
+    statuses = {file.path: file.status for file in section.files}
+    assert statuses == {
+        **dict.fromkeys(read, "captured"),
+        **dict.fromkeys(refused, "path_rejected"),
+    }
+    stored = runs_route._to_run_metadata(
+        MetadataReport.model_validate(
+            {
+                "declaration": section.declaration,
+                "files": [
+                    {
+                        "path": file.path,
+                        "format": file.format,
+                        "status": file.status,
+                        "keys": list(file.keys),
+                        "content": file.content,
+                    }
+                    for file in section.files
+                ],
+            }
+        )
+    )
+    assert [file.source_file for file in stored.files] == read
+    assert {entry.source_file for entry in stored.entries} == set(read)
 
 
 # --- the acknowledgement ------------------------------------------------------

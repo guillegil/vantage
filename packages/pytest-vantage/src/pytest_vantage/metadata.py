@@ -20,8 +20,11 @@ Not defended against: a path component swapped for a symlink between the
 resolve and the later `open()` (closing that race portably is not possible
 on 3.10-3.13, and winning it needs write access to the checkout, which could
 commit the secret directly), and a committer declaring a sensitive file that
-genuinely lives inside the repository -- that is a code-review matter;
-every declared path is recorded on the run.
+genuinely lives inside the repository -- that is a code-review matter, and
+every file the plugin reads is recorded on the run under its declared path.
+A declared path the plugin refuses to read for its shape -- absolute, or
+holding a `..` component -- is sent as `path_rejected`, and the server drops
+that entry together with its keys, so the run carries no trace of it.
 """
 
 from __future__ import annotations
