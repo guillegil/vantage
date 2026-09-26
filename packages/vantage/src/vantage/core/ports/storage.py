@@ -9,7 +9,13 @@ from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.execution import Execution
-from vantage.core.domain.metadata import FILE_STATUSES, KEY_STATUSES, METADATA_CONTENT_TYPES
+from vantage.core.domain.metadata import (
+    FILE_STATUSES,
+    KEY_STATUSES,
+    METADATA_CONTENT_TYPES,
+    METADATA_SOURCES,
+    SESSION_KEY_STATUSES,
+)
 from vantage.core.domain.projection import (
     FailureProjection,
     VcsProjection,
@@ -204,17 +210,43 @@ class MetadataFile:
 
 @dataclass(frozen=True, slots=True)
 class MetadataEntry:
-    """One row of `run_metadata`. `value` is `None` whenever `status` is not
-    `'captured'` -- a declared-but-uncaptured key is a row, never a missing
-    row. `status` is checked as `MetadataFile`'s is."""
+    """One row of `run_metadata`: one key's outcome in one run.
+
+    `source` is where the value came from: `'file'`, a key of the declared
+    file `source_file`, or `'session'`, a key the test session reported
+    itself, which has no `source_file`. `name` is the display name the run's
+    declaration gave the key, and `declared` whether the declaration named
+    the key at all -- a file's key always is. The defaults describe a file
+    key with no display name.
+
+    `value` is set exactly when `status` is `'captured'` -- a key without a
+    value is a row, never a missing row. `status` and `source` are checked
+    as `MetadataFile`'s fields are, and a session key's status against the
+    narrower `SESSION_KEY_STATUSES`, so no adapter is handed a row that
+    contradicts itself."""
 
     key: str
     value: str | None
-    source_file: str
+    source_file: str | None
     status: str
+    source: str = "file"
+    name: str | None = None
+    declared: bool = True
 
     def __post_init__(self) -> None:
         _check_vocabulary("status", self.status, KEY_STATUSES)
+        _check_vocabulary("source", self.source, METADATA_SOURCES)
+        if (self.status == "captured") != (self.value is not None):
+            raise ValueError("value must be set exactly when status is 'captured'")
+        if self.source == "file":
+            if self.source_file is None:
+                raise ValueError("a file key must name its source_file")
+            if not self.declared:
+                raise ValueError("a file key is always declared")
+        elif self.source_file is not None:
+            raise ValueError("a session key has no source_file")
+        else:
+            _check_vocabulary("status", self.status, SESSION_KEY_STATUSES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,10 +287,11 @@ class ExecutionStore(Protocol):
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
     ) -> bool:
-        """Store the run, its results and its declared metadata. Return True
-        if a row was created, False if the id was already stored.
-        `metadata`'s two tables are written once each -- a report with
-        metadata identical to what is already stored is a no-op."""
+        """Store the run, its results and its metadata. Return True if a row
+        was created, False if the id was already stored. Every metadata row
+        is written once: the first report to carry a file or a key keeps it,
+        whatever a later report says, and whichever source a later row of the
+        same key comes from."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:

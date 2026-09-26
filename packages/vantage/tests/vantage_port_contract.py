@@ -1640,6 +1640,111 @@ class ExecutionStoreContract:
         assert set(pair.files) == set(single.files) == set(metadata.files)
         assert set(pair.entries) == set(single.entries) == set(metadata.entries)
 
+    def test_every_kind_of_key_round_trips_with_its_source_name_and_declaration(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A file key and the keys a session reported itself -- declared or
+        not, with and without a value -- are stored side by side, each with
+        where it came from, its display name and whether it was declared."""
+        execution = _execution("3" * 32)
+        metadata = RunMetadata(
+            files=(MetadataFile(source_file="board.json", content_type="json", status="captured"),),
+            entries=(
+                MetadataEntry(
+                    key="board.revision",
+                    value="rev-b",
+                    source_file="board.json",
+                    status="captured",
+                    name="Board revision",
+                ),
+                MetadataEntry(
+                    key="fpga.firmware",
+                    value="1.1.0",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    name="FPGA firmware version",
+                    declared=True,
+                ),
+                MetadataEntry(
+                    key="bench",
+                    value="lab-3",
+                    source_file=None,
+                    status="captured",
+                    source="session",
+                    declared=False,
+                ),
+                MetadataEntry(
+                    key="fmc.hardware",
+                    value=None,
+                    source_file=None,
+                    status="absent",
+                    source="session",
+                    name="FMC hardware version",
+                    declared=True,
+                ),
+                MetadataEntry(
+                    key="fpga.dna",
+                    value=None,
+                    source_file=None,
+                    status="value_too_large",
+                    source="session",
+                    declared=False,
+                ),
+            ),
+        )
+
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+        )
+
+        stored = stored_metadata(execution.identity.value)
+        assert set(stored.files) == set(metadata.files)
+        assert set(stored.entries) == set(metadata.entries)
+
+    def test_a_key_recorded_from_a_file_keeps_its_value_over_a_later_session_value(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A file's keys arrive with the start report and the session's own
+        values only with the finish report; the first row for a key is the
+        one kept, whichever source the later one comes from."""
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        identity = "4" * 32
+        from_file = MetadataEntry(
+            key="fpga.firmware", value="1.0.0", source_file="fw.json", status="captured"
+        )
+        store.record_session(
+            _start_only_execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=RunMetadata(
+                files=(
+                    MetadataFile(source_file="fw.json", content_type="json", status="captured"),
+                ),
+                entries=(from_file,),
+            ),
+        )
+
+        store.record_session(
+            _execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=RunMetadata(
+                entries=(
+                    MetadataEntry(
+                        key="fpga.firmware",
+                        value="1.1.0",
+                        source_file=None,
+                        status="captured",
+                        source="session",
+                        declared=False,
+                    ),
+                ),
+            ),
+        )
+
+        assert stored_metadata(identity).entries == (from_file,)
+
     def test_a_session_with_no_metadata_argument_persists_no_metadata_rows(
         self, store: ExecutionStore, stored_metadata: StoredMetadata
     ) -> None:

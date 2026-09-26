@@ -376,7 +376,7 @@ def test_a_timestamp_from_an_early_year_is_stored_zero_padded(tmp_path: Path) ->
     assert found.started_at == started
 
 
-def _forced(row: _Row, **fields: str) -> _Row:
+def _forced(row: _Row, **fields: str | None) -> _Row:
     """`row` with values the core refuses, forced past its validation -- the
     shape a caller bypassing the domain types could hand the adapter."""
     for name, value in fields.items():
@@ -386,6 +386,9 @@ def _forced(row: _Row, **fields: str) -> _Row:
 
 _VALID_FILE = MetadataFile(source_file="m.json", content_type="json", status="captured")
 _VALID_ENTRY = MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured")
+_SESSION_ENTRY = MetadataEntry(
+    key="bench", value="lab-3", source_file=None, status="captured", source="session"
+)
 
 # Every table `record_session` writes.
 _SESSION_TABLES = ("run", "test_case", "result", "run_metadata_file", "run_metadata")
@@ -397,8 +400,18 @@ _SESSION_TABLES = ("run", "test_case", "result", "run_metadata_file", "run_metad
         ((_forced(replace(_VALID_FILE), content_type="xml"),), (_VALID_ENTRY,)),
         ((_forced(replace(_VALID_FILE), status="bogus"),), (_VALID_ENTRY,)),
         ((_VALID_FILE,), (_forced(replace(_VALID_ENTRY), status="bogus"),)),
+        ((_VALID_FILE,), (_forced(replace(_VALID_ENTRY), source="bogus"),)),
+        ((_VALID_FILE,), (_forced(replace(_VALID_ENTRY), source_file=None),)),
+        ((_VALID_FILE,), (_forced(replace(_SESSION_ENTRY), source_file="m.json"),)),
     ],
-    ids=["content-type", "file-status", "entry-status"],
+    ids=[
+        "content-type",
+        "file-status",
+        "entry-status",
+        "entry-source",
+        "file-entry-without-file",
+        "session-entry-with-file",
+    ],
 )
 def test_a_metadata_row_the_schema_refuses_rolls_back_the_whole_session(
     tmp_path: Path, files: tuple[MetadataFile, ...], entries: tuple[MetadataEntry, ...]

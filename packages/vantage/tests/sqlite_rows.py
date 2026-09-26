@@ -17,15 +17,16 @@ from vantage.core.ports.storage import MetadataEntry, MetadataFile, RunMetadata
 
 def read_metadata(database: Path, run_id: str) -> RunMetadata:
     """The metadata files and entries stored for `run_id`, in no particular
-    order. The run list filters by them without showing them, so the port
-    never returns them."""
+    order. No port method returns the file rows, so both tables are read
+    here, the same way."""
     with closing(sqlite3.connect(database)) as conn:
         files = conn.execute(
             "SELECT source_file, content_type, status FROM run_metadata_file WHERE run_id = ?",
             (run_id,),
         ).fetchall()
         entries = conn.execute(
-            "SELECT key, value, source_file, status FROM run_metadata WHERE run_id = ?",
+            "SELECT key, name, value, status, source, source_file, declared"
+            " FROM run_metadata WHERE run_id = ?",
             (run_id,),
         ).fetchall()
     return RunMetadata(
@@ -34,7 +35,15 @@ def read_metadata(database: Path, run_id: str) -> RunMetadata:
             for source_file, content_type, status in files
         ),
         entries=tuple(
-            MetadataEntry(key=key, value=value, source_file=source_file, status=status)
-            for key, value, source_file, status in entries
+            MetadataEntry(
+                key=key,
+                name=name,
+                value=value,
+                status=status,
+                source=source,
+                source_file=source_file,
+                declared=bool(declared),
+            )
+            for key, name, value, status, source, source_file, declared in entries
         ),
     )

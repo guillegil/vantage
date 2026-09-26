@@ -267,7 +267,10 @@ _INSERT_RESULT = """
 """
 
 # `ON CONFLICT(<primary key>) DO NOTHING` makes metadata write-once: a
-# replay, even one carrying different values, never changes a stored row.
+# replay, even one carrying different values, never changes a stored row,
+# and the first report to carry a key keeps it whichever source a later row
+# comes from. The plugin sends a file's keys from the start report on and the
+# session's own values only in the finish report, so a file's value wins.
 # Not `INSERT OR IGNORE`, which would also skip a row that fails a CHECK
 # constraint and commit the session without it.
 _INSERT_METADATA_FILE = """
@@ -277,8 +280,8 @@ _INSERT_METADATA_FILE = """
 """
 
 _INSERT_METADATA_ENTRY = """
-    INSERT INTO run_metadata (run_id, key, value, source_file, status)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO run_metadata (run_id, key, name, value, status, source, source_file, declared)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(run_id, key) DO NOTHING
 """
 
@@ -627,11 +630,18 @@ def _metadata_file_rows(run_id: str, metadata: RunMetadata) -> list[tuple[str, s
     return [(run_id, file.source_file, file.content_type, file.status) for file in metadata.files]
 
 
-def _metadata_entry_rows(
-    run_id: str, metadata: RunMetadata
-) -> list[tuple[str, str, str | None, str, str]]:
+def _metadata_entry_rows(run_id: str, metadata: RunMetadata) -> list[tuple[object, ...]]:
     return [
-        (run_id, entry.key, entry.value, entry.source_file, entry.status)
+        (
+            run_id,
+            entry.key,
+            entry.name,
+            entry.value,
+            entry.status,
+            entry.source,
+            entry.source_file,
+            1 if entry.declared else 0,
+        )
         for entry in metadata.entries
     ]
 
