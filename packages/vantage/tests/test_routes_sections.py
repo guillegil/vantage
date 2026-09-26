@@ -1,30 +1,29 @@
-"""Definitions API -- the three CRUD routes for `test_sections` (design.md
-D87, D89; spec `test-sections`, `user-configuration`).
+"""The sections routes: the three CRUD routes for `test_sections` and the
+per-run section summary.
 
-Runs the app factory against an injected `InMemoryExecutionStore`, the same
-choice `test_ingestion.py` makes for a route slice that does not depend on
-the SQLite row-to-domain mappers -- the port contract
-(`vantage_port_contract.py`) already proves the two adapters agree beneath
-the port. No `req` marker: each test names its capability and scenario in
-its own docstring.
+Runs the app factory against an injected `InMemoryExecutionStore`. These
+routes do not depend on the SQLite row-to-domain mappers, and the port
+contract (`vantage_port_contract.py`) already proves the two adapters agree
+beneath the port.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
 import httpx2 as httpx
 import pytest
 from fastapi.testclient import TestClient
+from memory_store import InMemoryExecutionStore
 from vantage.core.domain.sections import (
     MAX_SECTIONS,
     SECTION_NAME_MAX_CHARS,
     SECTION_PREFIX_MAX_CHARS,
 )
 from vantage.service.app import create_app
-from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
-from vantage.storage.memory import InMemoryExecutionStore
+from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES, TEST_SECTIONS_NAMESPACE
 from vantage_port_contract import _execution, _result
 
 _SECTIONS = "/api/v1/config/sections"
@@ -67,18 +66,98 @@ def test_posting_an_existing_name_returns_200_not_201(client: TestClient) -> Non
     assert response.json() == {"name": "Checkout", "prefix": "tests/checkout-v2/"}
 
 
-def test_a_missing_trailing_slash_is_coerced_on_write(client: TestClient) -> None:
-    """Scenario: A missing trailing slash is coerced on write."""
-    response = _upsert(client, "Billing", "tests/billing")
-
-    assert response.json()["prefix"] == "tests/billing/"
-
-
 # --- POST: rejections --------------------------------------------------------
 
 
+_JSON = {"content-type": "application/json"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{bad",
+        b'{"name": "a", "prefix": "b"',
+        b'{"name": "\xff", "prefix": "b"}',
+        b'{"name": ' + b"1" * 5000 + b', "prefix": "b"}',
+        b"[" * 20_000 + b"]" * 20_000,
+        b'{"name": "a", "prefix": NaN}',
+    ],
+    ids=["malformed", "cut-short", "not-utf8", "over-the-digit-limit", "deep", "nan"],
+)
+def test_a_body_that_is_not_json_is_400_invalid_json(
+    client: TestClient, store: InMemoryExecutionStore, body: bytes
+) -> None:
+    """The same answer `POST /runs` gives for the same bytes -- not a
+    character offset reported as a field, nor an undocumented `http_error`."""
+    response = client.post(_SECTIONS, content=body, headers=_JSON)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+
+
+@pytest.mark.parametrize(
+    ("body", "fields"),
+    [({}, ["name", "prefix"]), ({"name": 1, "prefix": "b"}, ["name"]), ([], [])],
+    ids=["empty-object", "name-not-a-string", "not-an-object"],
+)
+def test_json_that_is_not_a_section_is_422_invalid_section(
+    client: TestClient, body: object, fields: list[str]
+) -> None:
+    response = client.post(_SECTIONS, json=body)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": "invalid_section",
+        "detail": "The submitted section does not match the expected shape.",
+        "fields": fields,
+    }
+
+
+def test_a_body_that_is_not_declared_json_is_415(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    response = client.post(
+        _SECTIONS, content=b'{"name": "a", "prefix": "b"}', headers={"content-type": "text/plain"}
+    )
+
+    assert response.status_code == 415
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+
+
+def test_a_body_over_the_cap_is_413(client: TestClient, store: InMemoryExecutionStore) -> None:
+    padding = b" " * MAX_SECTION_BODY_BYTES
+    response = client.post(
+        _SECTIONS, content=b'{"name": "a", "prefix": "b"}' + padding, headers=_JSON
+    )
+
+    assert response.status_code == 413
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+
+
+def test_the_largest_valid_section_fits_under_the_cap(client: TestClient) -> None:
+    """A name and a prefix at their bounds, every character escaped as a
+    surrogate pair: the most bytes a valid section can take."""
+    wide = "\U0001f600"
+    prefix = wide * (SECTION_PREFIX_MAX_CHARS - 1) + "/"
+    section = {"name": wide * SECTION_NAME_MAX_CHARS, "prefix": prefix}
+    body = json.dumps(section).encode()  # `ensure_ascii` writes each as `\ud83d\ude00`
+    assert len(body) <= MAX_SECTION_BODY_BYTES
+
+    response = client.post(_SECTIONS, content=body, headers=_JSON)
+
+    assert response.status_code == 201
+
+
+def test_a_body_starting_with_a_byte_order_mark_is_accepted(client: TestClient) -> None:
+    response = client.post(
+        _SECTIONS, content=b'\xef\xbb\xbf{"name": "a", "prefix": "b"}', headers=_JSON
+    )
+
+    assert response.status_code == 201
+
+
 def test_an_empty_or_whitespace_only_name_is_rejected(client: TestClient) -> None:
-    """Scenario: An empty or whitespace-only name is rejected."""
     response = _upsert(client, "   ", "tests/x")
 
     assert response.status_code == 422
@@ -87,7 +166,6 @@ def test_an_empty_or_whitespace_only_name_is_rejected(client: TestClient) -> Non
 
 @pytest.mark.parametrize("name", ["Unassigned", "UNASSIGNED", "unassigned"])
 def test_unassigned_is_reserved_regardless_of_casing(client: TestClient, name: str) -> None:
-    """Scenario: "unassigned" is reserved regardless of casing."""
     response = _upsert(client, name, "tests/x")
 
     assert response.status_code == 422
@@ -110,6 +188,32 @@ def test_an_over_length_name_or_prefix_is_rejected(
     assert response.json()["error"] == expected_error
 
 
+def test_a_prefix_that_normalizes_past_the_bound_is_rejected(client: TestClient) -> None:
+    """The coerced trailing `/` counts: a prefix of exactly the bound with
+    no slash would be stored one character over it."""
+    response = _upsert(client, "Billing", "x" * SECTION_PREFIX_MAX_CHARS)
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_section_prefix"
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["x" * (SECTION_PREFIX_MAX_CHARS - 1), "x" * (SECTION_PREFIX_MAX_CHARS - 1) + "/"],
+    ids=["without-slash", "with-slash"],
+)
+def test_a_prefix_at_the_bound_once_normalized_is_stored_and_posts_back(
+    client: TestClient, prefix: str
+) -> None:
+    """Whatever the list returns can be posted back unchanged."""
+    created = _upsert(client, "Billing", prefix)
+    listed = client.get(_SECTIONS).json()["items"][0]["prefix"]
+
+    assert created.status_code == 201
+    assert len(listed) == SECTION_PREFIX_MAX_CHARS
+    assert _upsert(client, "Billing", listed).status_code == 200
+
+
 def test_too_many_sections_is_rejected_at_the_bound(client: TestClient) -> None:
     for index in range(MAX_SECTIONS):
         response = _upsert(client, f"Section{index}", f"tests/section{index}")
@@ -119,13 +223,35 @@ def test_too_many_sections_is_rejected_at_the_bound(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"] == "too_many_sections"
+    assert _upsert(client, "Section0", "tests/moved").status_code == 200
+
+
+def test_an_unreadable_stored_section_can_be_overwritten_in_place(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A write reads no stored definition, so a row the API cannot parse
+    neither blocks posting another section nor its own repair."""
+    store.upsert_setting(
+        TEST_SECTIONS_NAMESPACE,
+        "Broken",
+        value="not valid json",
+        updated_at=datetime.now(timezone.utc),
+    )
+    assert client.get(_SECTIONS).status_code == 500
+
+    assert _upsert(client, "Checkout", "tests/checkout").status_code == 201
+    assert _upsert(client, "Broken", "tests/broken").status_code == 200
+    assert client.get(_SECTIONS).json()["items"] == [
+        {"name": "Broken", "prefix": "tests/broken/"},
+        {"name": "Checkout", "prefix": "tests/checkout/"},
+    ]
 
 
 # --- DELETE -------------------------------------------------------------
 
 
 def test_delete_then_delete_again_is_204_then_404(client: TestClient) -> None:
-    """Scenario: A deleted setting is not read back."""
+    """A deleted section is gone: deleting it again is a `404`."""
     _upsert(client, "Checkout", "tests/checkout")
 
     first = client.delete(_SECTIONS, params={"name": "Checkout"})
@@ -136,11 +262,25 @@ def test_delete_then_delete_again_is_204_then_404(client: TestClient) -> None:
     assert second.json()["error"] == "unknown_section"
 
 
+@pytest.mark.parametrize("delete_name", [" Checkout ", "Checkout"])
+def test_delete_resolves_a_name_the_way_post_stores_it(
+    client: TestClient, delete_name: str
+) -> None:
+    """POST strips surrounding whitespace before storing a name, so the
+    padded spelling that created a section and the stored one both delete
+    it."""
+    _upsert(client, " Checkout ", "tests/checkout")
+
+    response = client.delete(_SECTIONS, params={"name": delete_name})
+
+    assert response.status_code == 204
+    assert client.get(_SECTIONS).json() == {"items": []}
+
+
 # --- GET ------------------------------------------------------------------
 
 
 def test_an_upserted_section_is_listed(client: TestClient) -> None:
-    """Scenario: An upserted section is listed."""
     _upsert(client, "Checkout", "tests/checkout")
 
     response = client.get(_SECTIONS)
@@ -149,15 +289,15 @@ def test_an_upserted_section_is_listed(client: TestClient) -> None:
     assert response.json() == {"items": [{"name": "Checkout", "prefix": "tests/checkout/"}]}
 
 
-# --- Threat matrix: no echo, byte-identical quoting -------------------------
+# --- Hostile input: no echo, byte-identical quoting -------------------------
 
 
 def test_a_crlf_and_script_tag_name_is_rejected_without_appearing_in_the_body(
     client: TestClient,
 ) -> None:
-    """Threat matrix: "Client-chosen text reaching a rejection body" -- a
-    name made hostile AND over-length still triggers only the fixed
-    `invalid_section_name` message; the submitted text never rides along."""
+    """Client-chosen text never reaches a rejection body: a name made
+    hostile and over-length still triggers only the fixed
+    `invalid_section_name` message."""
     hostile = ("\r\n</script>\r\n" * 20) + ("x" * SECTION_NAME_MAX_CHARS)
 
     response = _upsert(client, hostile, "tests/x")
@@ -168,9 +308,9 @@ def test_a_crlf_and_script_tag_name_is_rejected_without_appearing_in_the_body(
 
 
 def test_a_quoting_shaped_name_round_trips_byte_identically(client: TestClient) -> None:
-    """Threat matrix: "Client-chosen text reaching SQL" -- bound parameters
-    only; a name containing quote characters is stored and returned intact,
-    never escaped or normalised."""
+    """Client-chosen text reaches SQL only as a bound parameter: a name
+    containing quote characters is stored and returned intact, never escaped
+    or normalised."""
     name = 'He said "hi", didn\'t he?'
 
     response = _upsert(client, name, "tests/quoting")
@@ -182,7 +322,35 @@ def test_a_quoting_shaped_name_round_trips_byte_identically(client: TestClient) 
     assert listing.json()["items"][0]["name"] == name
 
 
-# --- GET /runs/{run_id}/sections: the run aggregate (Phase 4) ---------------
+@pytest.mark.parametrize(
+    ("body", "expected_error"),
+    [
+        (b'{"name": "Check\\ud800out", "prefix": "tests/checkout"}', "invalid_section_name"),
+        (b'{"name": "Checkout", "prefix": "tests/check\\ud800out"}', "invalid_section_prefix"),
+    ],
+    ids=["name", "prefix"],
+)
+def test_a_lone_surrogate_is_rejected_and_nothing_is_stored(
+    client: TestClient, store: InMemoryExecutionStore, body: bytes, expected_error: str
+) -> None:
+    """JSON can escape a lone surrogate, but no UTF-8 encoder accepts one:
+    unchecked, it fails in the store or the response serializer as a bare
+    `500`, and the in-memory store keeps the row and fails every later
+    read."""
+    _upsert(client, "Billing", "tests/billing")
+    before = store.list_settings(TEST_SECTIONS_NAMESPACE)
+
+    response = client.post(_SECTIONS, content=body, headers={"content-type": "application/json"})
+
+    assert response.status_code == 422
+    assert response.json()["error"] == expected_error
+    assert "ud800" not in response.text
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == before
+    listing = client.get(_SECTIONS)
+    assert listing.json() == {"items": [{"name": "Billing", "prefix": "tests/billing/"}]}
+
+
+# --- GET /runs/{run_id}/sections: the run aggregate -------------------------
 
 _SECTIONED_START = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
 
@@ -192,8 +360,6 @@ def _run_sections(client: TestClient, run_id: str) -> httpx.Response:
 
 
 def test_run_sections_summary_unknown_run_is_404(client: TestClient) -> None:
-    """Scenario: A run's summary reflects its sections -- the unknown-run
-    half (design.md D87's fourth route)."""
     response = _run_sections(client, _UNKNOWN_RUN_ID)
 
     assert response.status_code == 404
@@ -203,10 +369,9 @@ def test_run_sections_summary_unknown_run_is_404(client: TestClient) -> None:
 def test_run_sections_summary_worked_example_yields_94_4_percent(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Scenario: The worked example yields 94.4% (spec test-sections: pass
-    percentage) -- 80 passed, 5 xfailed, 2 xpassed, 3 failed, 10 skipped,
-    reached through the live route rather than `summarize_sections`
-    directly."""
+    """80 passed, 5 xfailed, 2 xpassed, 3 failed and 10 skipped yield 94.4%
+    (xfailed counts as passing, skipped leaves the denominator), reached
+    through the live route rather than `summarize_sections` directly."""
     _upsert(client, "Billing", "tests/billing")
     run_id = "1" * 32
     outcomes = (
@@ -237,9 +402,8 @@ def test_run_sections_summary_worked_example_yields_94_4_percent(
 def test_run_sections_summary_totals_reconcile_with_unassigned_results(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Scenario: Section totals plus unassigned equal the run total (spec
-    test-sections: `unassigned` bucket is always present and reconciles) --
-    a run carrying results that match no section."""
+    """Section totals plus the `unassigned` bucket equal the run's result
+    count, for a run carrying results that match no section."""
     _upsert(client, "Billing", "tests/billing")
     run_id = "2" * 32
     results = [
@@ -264,10 +428,9 @@ def test_run_sections_summary_totals_reconcile_with_unassigned_results(
 def test_renaming_a_section_regroups_history_with_zero_writes(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Scenario: Renaming a section re-groups history with no backfill (spec
-    test-sections: longest-prefix-wins derivation at read time) -- the
-    load-bearing test for "derived at read time": the run/result rows must
-    be byte-identical before and after the rename."""
+    """Sections are derived at read time, so renaming one regroups existing
+    results with no backfill: the run and result rows are identical before
+    and after the rename."""
     _upsert(client, "Billing", "tests/billing")
     run_id = "3" * 32
     results = [_result("tests/billing/test_x.py::test_0")]
@@ -296,8 +459,8 @@ def test_renaming_a_section_regroups_history_with_zero_writes(
 def test_run_sections_summary_malformed_stored_value_is_500(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Scenario: a stored `value` failing its namespace's model is a named
-    `500`, never a traceback (design.md D89 -- `UnreadableSettingError`)."""
+    """A stored `value` failing its namespace's model is a named `500`
+    (`UnreadableSettingError`), never a traceback."""
     run_id = "4" * 32
     store.record_session(
         _execution(run_id, started=_SECTIONED_START), results=[], received_at=_SECTIONED_START
@@ -310,3 +473,35 @@ def test_run_sections_summary_malformed_stored_value_is_500(
 
     assert response.status_code == 500
     assert response.json()["error"] == "unreadable_setting"
+
+
+def test_a_stored_section_named_unassigned_is_unreadable_not_double_counted(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A row written around the POST route's reservation -- by hand, or by
+    another caller of the port -- would merge with the unassigned bucket and
+    be reported twice. It reads as a named `500` instead, like any other
+    stored row the API would not have accepted, and deleting it by name
+    recovers."""
+    run_id = "5" * 32
+    store.record_session(
+        _execution(run_id, started=_SECTIONED_START),
+        results=[_result("tests/a/test_x.py::test_0"), _result("tests/b/test_y.py::test_0")],
+        received_at=_SECTIONED_START,
+    )
+    store.upsert_setting(
+        TEST_SECTIONS_NAMESPACE,
+        "unassigned",
+        value='{"prefix": "tests/a/"}',
+        updated_at=_SECTIONED_START,
+    )
+
+    summary = _run_sections(client, run_id)
+    listing = client.get(_SECTIONS)
+
+    assert summary.status_code == 500
+    assert summary.json()["error"] == "unreadable_setting"
+    assert summary.json()["fields"] == ["unassigned"]
+    assert listing.status_code == 500
+    assert client.delete(_SECTIONS, params={"name": "unassigned"}).status_code == 204
+    assert _run_sections(client, run_id).json()["unassigned"]["total"] == 2

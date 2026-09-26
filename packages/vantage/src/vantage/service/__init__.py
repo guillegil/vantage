@@ -1,17 +1,12 @@
 """HTTP surface: the ingestion endpoint and the read API.
 
-Two responsibilities, deliberately distinct:
+- **Ingestion.** ``pytest-vantage`` reports sessions here, and this package
+  performs every write. The path is versioned (``/api/v1/...``) because the
+  plugin and the server are released independently and the API, not their
+  version numbers, is the contract between them.
+- **Read API.** Serves recorded history to any HTTP client.
 
-- **Ingestion.** ``pytest-vantage`` reports finished sessions here, and this
-  package performs every write (ADR-9). Version the path -- ``/api/v1/...``
-  -- because plugin and server release independently and the API is the
-  contract between them, not their version numbers.
-- **Read API.** Serves recorded history to the web interface and to anything
-  else that speaks it (RQ-14). The interface is a separate TypeScript client
-  built in CI (ADR-8); it reaches this package only over HTTP and holds no
-  import of any module here.
-
-The only package in the workspace permitted a third-party dependency,
-because it is installed deliberately by someone who wants a server rather
-than landing in a stranger's test environment.
+This is the only package in the workspace allowed third-party dependencies
+beyond the plugin's pytest: it is installed deliberately by someone who
+wants a server, never pulled into a stranger's test environment.
 """

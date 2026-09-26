@@ -1,13 +1,10 @@
 """Shared AST import walker for Vantage's static import boundaries.
 
-Used by ``vantage``'s core-isolation guard (``test_architecture.py``, RQ-26:
-stdlib only) and, from PR10 onward, ``pytest-vantage``'s zero-dependency
-guard (RQ-24: stdlib or pytest). It lives here rather than inside either
-package's ``src/`` tree because it must never ship in a wheel, and a copy
-inside ``vantage.core`` would still have to import ``ast`` from a test-only
-module colocated with production code -- one shared home is simpler and is
-what ADR-4 already accepts for the cross-boundary tests (design.md, D10).
-Reached through the root ``pythonpath = ["packages/vantage/tests"]``.
+Used by ``vantage``'s layer guards (``test_architecture.py``: the core and
+the storage adapter) and ``pytest-vantage``'s zero-dependency guard (stdlib
+or pytest). It lives outside either package's ``src/`` tree because it must
+never ship in a wheel. Reached through the root
+``pythonpath = ["packages/vantage/tests"]``.
 """
 
 from __future__ import annotations
@@ -62,7 +59,7 @@ def _resolve_relative(containing_package: str, level: int, module: str | None) -
     ``level=1`` (``from . import x``) targets the containing package itself;
     each further dot climbs one package upward. ``level > 0`` alone is NOT
     sufficient permission to allow the import -- the resolved target still
-    has to land inside the allowed internal prefix (design.md, D10).
+    has to land inside an allowed internal prefix.
     """
     parts = containing_package.split(".") if containing_package else []
     keep = max(len(parts) - (level - 1), 0)
@@ -77,14 +74,16 @@ def _is_allowed(
     *,
     is_relative: bool,
     allowed_top_levels: frozenset[str],
-    allowed_internal_prefix: str,
+    allowed_internal_prefixes: tuple[str, ...],
 ) -> bool:
-    if resolved == allowed_internal_prefix or resolved.startswith(allowed_internal_prefix + "."):
+    if any(
+        resolved == prefix or resolved.startswith(prefix + ".")
+        for prefix in allowed_internal_prefixes
+    ):
         return True
     if is_relative:
-        # A relative import that does not land inside the internal prefix is
-        # by definition a sibling (or further) subpackage -- never allowed,
-        # regardless of level.
+        # A relative import that lands outside every internal prefix reaches a
+        # sibling (or further) subpackage -- never allowed, regardless of level.
         return False
     top_level = resolved.split(".")[0] if resolved else ""
     return top_level in allowed_top_levels
@@ -95,14 +94,14 @@ def walk_package(
     *,
     src_root: Path,
     allowed_top_levels: frozenset[str],
-    allowed_internal_prefix: str,
+    allowed_internal_prefixes: tuple[str, ...] = (),
 ) -> WalkResult:
     """Walk every ``.py`` file under ``package_dir`` and report disallowed imports.
 
     ``allowed_top_levels`` gates absolute imports (e.g. the standard library,
-    optionally plus ``pytest``). ``allowed_internal_prefix`` gates both
+    optionally plus ``pytest``). ``allowed_internal_prefixes`` gates both
     absolute and relative imports that resolve inside the package's own
-    dependency-inward tree (e.g. ``"vantage.core"``).
+    dependency-inward tree (e.g. ``("vantage.core", "vantage.storage")``).
     """
     modules_examined: list[Path] = []
     violations: list[ImportViolation] = []
@@ -120,7 +119,7 @@ def walk_package(
                         alias.name,
                         is_relative=False,
                         allowed_top_levels=allowed_top_levels,
-                        allowed_internal_prefix=allowed_internal_prefix,
+                        allowed_internal_prefixes=allowed_internal_prefixes,
                     ):
                         violations.append(ImportViolation(file, alias.name, node.lineno))
             elif isinstance(node, ast.ImportFrom):
@@ -134,7 +133,7 @@ def walk_package(
                     resolved,
                     is_relative=is_relative,
                     allowed_top_levels=allowed_top_levels,
-                    allowed_internal_prefix=allowed_internal_prefix,
+                    allowed_internal_prefixes=allowed_internal_prefixes,
                 ):
                     violations.append(ImportViolation(file, resolved, node.lineno))
 

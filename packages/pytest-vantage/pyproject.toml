@@ -10,10 +10,9 @@ license = "MIT"
 requires-python = ">=3.10,<3.14"
 authors = [{ name = "Guillermo Gil" }]
 
-# pytest only. Under ADR-9 this plugin reports over HTTP and never touches a
-# database, so it imports nothing outside the standard library -- `urllib`
-# for transport, `json` for encoding. RQ-24 permits exactly one added
-# distribution beyond the test runner the user already has.
+# pytest only. The plugin reports over HTTP and never touches a database, so
+# it imports nothing outside the standard library -- `urllib` for transport,
+# `json` for encoding -- and installing it adds no third-party dependency.
 dependencies = ["pytest>=8.0"]
 
 [project.entry-points.pytest11]

@@ -1,17 +1,16 @@
-"""One bounded `git` read per session (design.md D43-D46, RQ-10, RQ-23,
-RQ-39). `capture(rootpath)` never raises: it is its own fail-closed boundary
-(follows `transport.fetch_capabilities`, D40) rather than either of
-`boundary.py`'s two decorators -- both `fault_isolated` and
-`liveness_isolated` **latch**, which would let one failed session silently
-stop reporting results or heartbeats, turning RQ-39's "record nulls" into
-"record nothing". `boundary.py` is unchanged, deliberately.
+"""One bounded `git` read per session.
 
-Every exception this module can encounter is swallowed inside `capture`,
-named exhaustively rather than a bare `except Exception`:
+`capture(rootpath)` never raises: it is its own fail-closed boundary rather
+than using `boundary.py`'s decorators, which latch after one failure and
+would stop the session's later reports and heartbeats. A failed git read
+records nulls; it must not stop recording.
+
+Every `Exception` is swallowed inside `capture`. The ones expected are:
 
 - `FileNotFoundError` -- no `git` binary, even past `shutil.which`: `which`
-  and `exec` can disagree (RQ-39.2), and `PATH` can change between them.
-- `subprocess.TimeoutExpired` -- the whole-capture deadline (D44) elapsed.
+  and `exec` can disagree, and `PATH` can change between them.
+- `subprocess.TimeoutExpired` -- the whole-capture deadline elapsed; the
+  only failure the warning calls a timeout.
 - `OSError` (`PermissionError`, `NotADirectoryError`, `BlockingIOError`) --
   a non-executable `git`, a deleted `cwd`, a permission refusal, a fork
   failure.
@@ -19,12 +18,9 @@ named exhaustively rather than a bare `except Exception`:
   `check=True`), caught anyway so a later `check=True` cannot fail open.
 - `UnicodeDecodeError`, `LookupError` -- decoding stdout; `errors="replace"`
   already prevents the first, `LookupError` covers a broken codec registry.
-- Anything else -- `Exception`, the outer net. Never `BaseException`:
-  `KeyboardInterrupt`/`SystemExit` must still reach pytest's `wrap_session`
-  (RQ-31), the same rule `boundary._isolated` states.
 
-Stdlib only (RQ-24): `subprocess`, `shutil`, `os`, `time`, `dataclasses`,
-`pathlib`.
+Never `BaseException`: `KeyboardInterrupt`/`SystemExit` must still reach
+pytest's `wrap_session`, the same rule `boundary._isolated` follows.
 """
 
 from __future__ import annotations
@@ -36,17 +32,16 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-# The whole capture shares this one budget (design.md D44): five
-# independent 5s timeouts would cost a 25s session, against a spec
-# bounding the session at *timeout + 5s* (RQ-21 criterion 4).
+# The whole capture shares this one budget: five independent 5s timeouts
+# could delay session start by 25s instead of 5s.
 _CAPTURE_BUDGET_SECONDS = 5.0
 
 _MIN_TIMEOUT_SECONDS = 0.05  # floor so an expired deadline still times out positively
 
-# design.md D46: inherit the caller's environment, override only the keys
-# that make git interactive/slow/mutating -- clearing it entirely drops
-# `HOME`, so `safe.directory` is never seen and a readable repository owned
-# by another uid becomes `fatal: detected dubious ownership`.
+# Inherit the caller's environment except the variables below, and override
+# only the keys that make git interactive/slow/mutating -- clearing it
+# entirely drops `HOME`, so `safe.directory` is never seen and a readable
+# repository owned by another uid becomes `fatal: detected dubious ownership`.
 _ENV_OVERRIDES: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ASKPASS": "",
@@ -55,6 +50,36 @@ _ENV_OVERRIDES: dict[str, str] = {
     "PAGER": "cat",
     "LC_ALL": "C",
 }
+
+# Removed so that git discovers the repository from `cwd=rootpath`. Once
+# GIT_DIR is set git skips discovery, so an exported one -- a dotfiles
+# manager's, or the one git itself gives a hook in a linked worktree --
+# would point every read at another repository, or make `rootpath` the top
+# of the work tree. These are git's `rev-parse --local-env-vars` minus the
+# config entries (they can carry `safe.directory`), plus the variables that
+# scope the refs.
+#
+# GIT_CEILING_DIRECTORIES is kept: git never exports it, so it is always
+# someone's deliberate limit on the upward search -- typically to keep a
+# dotfiles repository in $HOME out of every project below it -- and a run
+# must not record a repository git itself refuses to find.
+_REPOSITORY_SELECTING_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_PREFIX",
+    "GIT_NAMESPACE",
+)
+
+_BRANCH_REF_PREFIX = "refs/heads/"
 
 _TIMEOUT_WARNING = "could not read the git repository (timed out)"
 _CORRUPT_WARNING = "could not read the git repository"
@@ -71,43 +96,31 @@ class VcsSnapshot:
     dirty: bool | None = None
     root: str | None = None
     # What to say, or None to stay silent -- returned, never emitted here,
-    # so the one caller (Recorder.__init__, design.md D51) warns once.
+    # so the one caller (Recorder.__init__) warns once.
     warning: str | None = None
 
 
 _EMPTY = VcsSnapshot()
 
-# Named exhaustively -- see the module docstring for what raises each one.
-_SWALLOWED_EXCEPTIONS: tuple[type[BaseException], ...] = (
-    FileNotFoundError,
-    subprocess.TimeoutExpired,
-    OSError,
-    subprocess.CalledProcessError,
-    UnicodeDecodeError,
-    LookupError,
-    Exception,
-)
-
 
 def _field(result: subprocess.CompletedProcess[str] | None) -> str | None:
     """`None` on any failed or swallowed invocation; the stripped stdout on
-    success -- shared by every field-by-field invocation (design.md D44).
+    success.
     """
     return result.stdout.strip() if result is not None and result.returncode == 0 else None
 
 
 _MAX_SUBJECT_BYTES = 64 * 1024 + 1024
-"""The plugin's cap, deliberately ABOVE the server's 64 KiB semantic bound
-(design.md D49). Cutting at or below it would deliver a long subject already
-short, so the server would find nothing to truncate and record
-`vcs_commit_subject_truncated = 0` -- a false zero it has no way to detect.
-The extra kibibyte is the margin that keeps the server's flag honest.
+"""The plugin's cap, deliberately ABOVE the server's 64 KiB bound. Cutting at
+or below it would deliver a long subject already short, so the server would
+find nothing to truncate and record `vcs_commit_subject_truncated = 0` -- a
+false zero it has no way to detect. The extra kibibyte keeps that flag
+honest.
 """
 
 
 def _bounded_subject(value: str | None) -> str | None:
-    """One line, and never large enough to threaten the report's size cap
-    (design.md D44, D49).
+    """One line, and never large enough to threaten the report's size cap.
 
     `git`'s `%s` folds a multi-line first paragraph into one line, so the
     newline cut is belt-and-braces rather than the primary mechanism -- but
@@ -131,7 +144,7 @@ def _bounded_subject(value: str | None) -> str | None:
 
 
 def _build_env() -> dict[str, str]:
-    env = dict(os.environ)
+    env = {key: value for key, value in os.environ.items() if key not in _REPOSITORY_SELECTING_ENV}
     env.update(_ENV_OVERRIDES)
     env.pop("SSH_ASKPASS", None)  # removed, not overridden -- no ssh-safe empty value
     return env
@@ -156,51 +169,108 @@ def _run(
     )
 
 
+def _ceiling_directories() -> set[Path]:
+    """The directories `GIT_CEILING_DIRECTORIES` stops git's upward search
+    at, read as git reads them: absolute entries only, each resolved unless
+    it follows an empty entry."""
+    ceilings: set[Path] = set()
+    resolve = True
+    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
+        if not entry:
+            resolve = False
+        elif os.path.isabs(entry):
+            ceilings.add(Path(entry).resolve() if resolve else Path(entry))
+    return ceilings
+
+
+def _inside_a_repository(rootpath: Path) -> bool:
+    """Whether a `.git` entry exists where git looks for one: at `rootpath`,
+    then in each directory above it up to, not including, the first ceiling
+    directory.
+
+    git searches upward, so a broken or hung repository whose top is above
+    `rootpath` (a sub-package with its own pytest config) must still warn;
+    one beyond the ceiling git never looks at must not. Resolved first
+    because git walks the physical path. A failed check stays silent, as if
+    there were no repository.
+    """
+    try:
+        start = rootpath.resolve()
+        ceilings = _ceiling_directories()
+        for directory in (start, *start.parents):
+            if directory != start and directory in ceilings:
+                return False
+            if (directory / ".git").exists():
+                return True
+        return False
+    except Exception:  # `capture` never raises, and this only chooses a warning
+        return False
+
+
 def capture(rootpath: Path) -> VcsSnapshot:
-    """One bounded git read. Never raises. All-null on any failure of the
-    gate invocation (design.md D44); the four after it are field-by-field,
-    each degrading to `None` on its own failure rather than nulling the
-    whole snapshot (design.md D45: a detached HEAD is invocation 3 failing
-    while 2, 4, 5 succeed; no commits is invocation 2 failing while 3, 5
-    succeed).
+    """One bounded git read. Never raises.
+
+    All-null on any failure of the gate invocation (`rev-parse
+    --show-toplevel`). The four after it are field-by-field, each degrading
+    to `None` on its own failure rather than nulling the whole snapshot: a
+    detached HEAD fails only `symbolic-ref`; a repository with no commits
+    fails `rev-parse HEAD`, which also skips `git show`.
     """
     if shutil.which("git") is None:
-        return _EMPTY  # RQ-39.2: zero processes spawned, silent
+        return _EMPTY  # no git on PATH: spawn nothing, warn nothing
 
     env = _build_env()
     deadline = time.monotonic() + _CAPTURE_BUDGET_SECONDS
+    timed_out = False
 
     def remaining() -> float:
         return max(_MIN_TIMEOUT_SECONDS, deadline - time.monotonic())
 
     def invoke(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
         # None on any swallowed failure, timeout included. A timeout here
-        # ends the capture: every later invocation finds `remaining()`
-        # already at the floor and times out too -- the shared, not
-        # per-invocation, budget (design.md D44).
+        # ends the capture: the budget is shared, so every later invocation
+        # finds `remaining()` already at the floor and times out too.
+        nonlocal timed_out
         try:
             return _run(argv, cwd=rootpath, env=env, timeout=remaining())
-        except _SWALLOWED_EXCEPTIONS:
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            return None
+        except Exception:  # the module docstring lists what is expected here
             return None
 
     gate = invoke(["git", "rev-parse", "--show-toplevel"])
     if gate is None or gate.returncode != 0:
-        # design.md D45: not-a-repo and corrupt-repo are both exit 128.
-        # The discriminator is a filesystem check, never stderr text.
-        if (rootpath / ".git").exists():
-            warning = _TIMEOUT_WARNING if gate is None else _CORRUPT_WARNING
+        # Not-a-repo and corrupt-repo are both exit 128. The discriminator
+        # is a filesystem check, never stderr text.
+        if _inside_a_repository(rootpath):
+            warning = _TIMEOUT_WARNING if timed_out else _CORRUPT_WARNING
             return VcsSnapshot(warning=warning)
         return _EMPTY
 
     root = gate.stdout.strip()
 
     commit = _field(invoke(["git", "rev-parse", "--verify", "--quiet", "HEAD"]))
-    branch = _field(invoke(["git", "symbolic-ref", "--quiet", "--short", "HEAD"]))
+    # The full ref, stripped here: `--short` keeps a `heads/` prefix whenever
+    # a tag or another ref shares the branch's name.
+    head_ref = _field(invoke(["git", "symbolic-ref", "--quiet", "HEAD"]))
+    branch: str | None = None
+    if head_ref is not None and head_ref.startswith(_BRANCH_REF_PREFIX):
+        branch = head_ref[len(_BRANCH_REF_PREFIX) :]
 
     commit_subject: str | None = None
     if commit is not None:
-        # design.md D44: skipped entirely when invocation 2 returned null.
-        subject_argv = ["git", "show", "--no-patch", "--no-show-signature", "--format=%s", "HEAD"]
+        # `--` so that a file or directory named HEAD in rootpath cannot make
+        # the revision ambiguous, which git refuses.
+        subject_argv = [
+            "git",
+            "show",
+            "--no-patch",
+            "--no-show-signature",
+            "--format=%s",
+            "HEAD",
+            "--",
+        ]
         commit_subject = _bounded_subject(_field(invoke(subject_argv)))
 
     dirty_field = _field(invoke(["git", "status", "--porcelain", "--untracked-files=no"]))

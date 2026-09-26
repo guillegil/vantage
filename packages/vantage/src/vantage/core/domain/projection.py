@@ -1,17 +1,16 @@
-"""`VcsProjection` and `project_vcs`: the list-display bound on `VcsContext`
-(design.md D59, D60).
+"""List-display projections of `VcsContext` and `FailureEvidence`.
 
-Stdlib only, as `architecture-boundaries` -> *Core isolation* requires --
-this module has exactly one caller today
-(`test_projection.py`); the two storage adapters gain their own calls to
-`project_vcs` starting in Phase 2/3 of this change.
+`project_vcs` and `project_failure` are the one statement of the list rule
+both storage adapters apply: a list entry carries a projection exactly when
+the full record carries the value it projects, bounded to the display width.
+An adapter that bounds text in SQL still hands the bounded value to these
+functions rather than restating the rule.
 
 `VcsProjection` has no `root` field. That exclusion is structural, not a
 runtime check: a list or history response built from this type has nothing
 to leak, because the type never carries `vcs_root` in the first place --
 unlike `VcsContext`, where the exclusion on the detail path is a choice that
-has to be made correctly at the response-model boundary every time
-(design.md D59).
+has to be made correctly at the response-model boundary every time.
 """
 
 from __future__ import annotations
@@ -22,26 +21,24 @@ from vantage.core.domain.execution import VcsContext
 from vantage.core.domain.result import FailureEvidence
 
 LIST_COMMIT_SUBJECT_CHARS = 120
-"""The list/history display width, in characters -- not bytes, so SQLite's
-`substr`/`length` and Python's slicing/`len` agree by construction across
-both storage adapters (design.md D57, D60)."""
+"""The list/history display width for `commit_subject`, in characters."""
 
 LIST_FAILURE_MESSAGE_CHARS = 200
-"""The list/history display width for `failure_message`, in characters (design.md
-D76). Derived from `excinfo.exconly()`'s shape (`ExceptionType: message`) -- a
+"""The list/history display width for `failure_message`, in characters.
+Derived from `excinfo.exconly()`'s shape (`ExceptionType: message`) -- a
 qualified exception name routinely spends 20-40 characters before the
 discriminating content starts, so 200 keeps the type plus a usable head."""
 
 
 @dataclass(frozen=True, slots=True)
 class VcsProjection:
-    """A read-only VCS projection for a list-shaped response (design.md D59).
+    """A read-only VCS projection for a list-shaped response.
 
     `commit_subject_truncated` widens its meaning relative to `VcsContext`:
     here it means "this is not the whole stored subject" -- true if the
     capture itself was truncated OR if display bounding shortened it here.
     On `VcsContext` (the detail path) the flag keeps its original,
-    capture-only meaning unchanged (design.md D60).
+    capture-only meaning unchanged.
     """
 
     commit: str | None
@@ -52,16 +49,17 @@ class VcsProjection:
 
 
 def project_vcs(vcs: VcsContext | None) -> VcsProjection | None:
-    """Reference implementation of the rule the SQLite adapter states in SQL
-    (design.md D57, D60).
+    """The list projection of a run's VCS context.
 
-    Returns `None` for `None` -- a non-repository execution has a null VCS
-    context, not an omitted list entry (history-read-api -> Test history).
-    The all-null normalisation is inherited from wherever the caller's
-    `VcsContext` came from (`_row_to_vcs_context`, for the SQLite adapter);
-    this function restates none of it.
+    `None` exactly when the context is `None` or empty -- a non-repository
+    run lists with a null VCS context, not an omitted entry. A context known
+    only by its `root` still projects, with every field null: the run was
+    inside a repository, as its detail says.
+
+    `commit_subject` only needs its first `LIST_COMMIT_SUBJECT_CHARS + 1`
+    characters: one past the display width is enough to know it was longer.
     """
-    if vcs is None:
+    if vcs is None or vcs.is_empty():
         return None
 
     subject = vcs.commit_subject
@@ -79,11 +77,9 @@ def project_vcs(vcs: VcsContext | None) -> VcsProjection | None:
 
 @dataclass(frozen=True, slots=True)
 class FailureProjection:
-    """A read-only failure projection for a list-shaped response (design.md
-    D76). No field carries `traceback`, `failure_repr` or captured output --
-    the exclusion is structural: this type has nothing to leak because it
-    never carries those fields in the first place, the same defence
-    `VcsProjection` gives `vcs_root` (D59).
+    """A read-only failure projection for a list-shaped response. No field
+    carries `traceback`, `failure_repr` or captured output -- the same
+    structural exclusion `VcsProjection` applies to `vcs_root`.
 
     `failure_message_truncated` widens its meaning relative to
     `FailureEvidence`: here it means "this is not the whole stored message"
@@ -101,13 +97,17 @@ class FailureProjection:
 
 
 def project_failure(failure: FailureEvidence | None) -> FailureProjection | None:
-    """Reference implementation of the rule the SQLite adapter states in SQL
-    (design.md D76), mirroring `project_vcs`'s shape exactly.
+    """The list projection of a result's failure evidence, by the same rule
+    as `project_vcs`.
 
-    Returns `None` for `None` -- a result with no failure evidence projects
-    to no failure projection, never an empty one.
+    `None` exactly when the evidence is `None` or empty. Evidence whose only
+    content lies outside the lean fields -- a traceback alone -- projects
+    with every field null, so the list still shows that the detail has
+    evidence. Only the emptiness of `failure_repr` and `traceback` matters
+    here, and `failure_message` only needs its first
+    `LIST_FAILURE_MESSAGE_CHARS + 1` characters.
     """
-    if failure is None:
+    if failure is None or failure.is_empty():
         return None
 
     message = failure.failure_message

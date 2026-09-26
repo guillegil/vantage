@@ -1,4 +1,4 @@
-"""RQ-42: malformed session report rejection.
+"""Malformed session report rejection.
 
 Runs the app factory (`vantage.service.app.create_app`) against an injected
 `InMemoryExecutionStore`, same pattern as `test_ingestion.py`.
@@ -9,30 +9,21 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import socket
-import sqlite3
 import threading
-import time
-import tracemalloc
-from collections.abc import Sequence
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, get_args
+from typing import Any
 
 import pytest
-import uvicorn
 from fastapi.testclient import TestClient
+from loopback_server import LoopbackServer
+from memory_store import InMemoryExecutionStore
 from starlette.types import ASGIApp, Receive, Scope, Send
-from vantage.core.domain.result import OUTCOMES
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
-from vantage.service.schemas import _Outcome
-from vantage.storage.memory import InMemoryExecutionStore
-from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _captured, _execution, _failure, _result, _start_only_execution
+from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+# `any_store`, for each adapter in turn.
+pytest_plugins = ["store_fixtures"]
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -49,8 +40,8 @@ def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
 
 
 def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
-    """One well-formed `results[]` entry (design.md D15 interface example) --
-    mirrors `test_ingestion.py`'s helper of the same name and shape."""
+    """One well-formed `results[]` entry -- mirrors `test_ingestion.py`'s
+    helper of the same name and shape."""
     entry: dict[str, Any] = {
         "node_id": node_id,
         "file_path": node_id.split("::", 1)[0],
@@ -77,7 +68,7 @@ def _bulk_results_report(
     run_id: str, count: int, *, malformed_index: int | None = None
 ) -> dict[str, Any]:
     """A well-formed report carrying `count` results, one of which is
-    deliberately malformed at `malformed_index` (task 5.1/5.5/5.6 fixture)."""
+    deliberately malformed at `malformed_index`."""
     report = _well_formed_report(run_id)
     results = []
     for index in range(count):
@@ -99,15 +90,13 @@ def client(store: InMemoryExecutionStore) -> TestClient:
     return TestClient(create_app(store))
 
 
-@pytest.mark.req(id="RQ-42")
 def test_422_response_never_echoes_input_or_pydantic_types(client: TestClient) -> None:
     """FastAPI's default handler mirrors the client's own value back in an
     ``"input"`` key, and can carry pydantic's internal error ``"type"``
-    string and a ``"url"`` pointing at versioned pydantic docs (design.md
-    D5). A report can legitimately carry a filesystem path, node id, or
-    environment string; the field that fails validation is exactly the
-    field whose value would be echoed -- that is what RQ-42.4 exists to
-    stop.
+    string and a ``"url"`` pointing at versioned pydantic docs. A report can
+    legitimately carry a filesystem path, node id, or environment string,
+    and the field that fails validation is exactly the field whose value
+    would be echoed, so none of that may reach the response.
     """
     report = _well_formed_report()
     report["run"]["started_at"] = "NOT-A-DATE"
@@ -128,7 +117,6 @@ def test_422_response_never_echoes_input_or_pydantic_types(client: TestClient) -
     assert "pydantic" not in body_text.lower()
 
 
-@pytest.mark.req(id="RQ-42")
 def test_missing_field_is_422_naming_the_field(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -144,7 +132,6 @@ def test_missing_field_is_422_naming_the_field(
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_non_json_body_is_400(client: TestClient, store: InMemoryExecutionStore) -> None:
     response = client.post(
         "/api/v1/runs",
@@ -158,7 +145,123 @@ def test_non_json_body_is_400(client: TestClient, store: InMemoryExecutionStore)
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
+_REPORT_BYTES = json.dumps(_well_formed_report()).encode()
+_UNPARSEABLE_BODIES = {
+    "invalid_utf8": _REPORT_BYTES.replace(b"null", b'"\xff"', 1),
+    "encoded_surrogate": _REPORT_BYTES.replace(b"null", b'"\xed\xa0\x80"', 1),
+    "nesting_deeper_than_the_recursion_limit": b"[" * 200_000,
+    "integer_over_the_digit_limit": b'{"run": {"exit_status": ' + b"1" * 5000 + b"}}",
+}
+
+
+@pytest.mark.parametrize("body", _UNPARSEABLE_BODIES.values(), ids=_UNPARSEABLE_BODIES.keys())
+def test_every_unparseable_body_is_400_invalid_json(
+    client: TestClient, store: InMemoryExecutionStore, body: bytes
+) -> None:
+    """`json.loads` fails with `UnicodeDecodeError`, `RecursionError` or a
+    plain `ValueError`, not only `JSONDecodeError`; each is the same client
+    error. A UTF-8-encoded surrogate is not UTF-8 at all, so it is refused
+    here rather than decoded into a lone surrogate."""
+    response = client.post(
+        "/api/v1/runs", content=body, headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+    assert store.count_executions() == 0
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_json_number_token_is_400_invalid_json(
+    client: TestClient, store: InMemoryExecutionStore, token: str
+) -> None:
+    """`json.loads` accepts these, but they are not JSON, and a value no
+    JSON response can carry would be stored and then read back as `null`."""
+    report = _well_formed_report()
+    report["results"] = [_result_entry("tests/test_a.py::test_one")]
+    body = json.dumps(report).replace('"call_duration": 0.0019', f'"call_duration": {token}')
+    assert token in body
+
+    response = client.post(
+        "/api/v1/runs", content=body.encode(), headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+    assert store.count_executions() == 0
+
+
+def test_a_duration_too_large_to_be_finite_is_422_naming_the_field(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """`1e400` is valid JSON, but it parses as infinity, which the server
+    could store and never give back."""
+    report = _well_formed_report()
+    report["results"] = [_result_entry("tests/test_a.py::test_one")]
+    body = json.dumps(report).replace('"duration": 0.0031', '"duration": 1e400')
+    assert "1e400" in body
+
+    response = client.post(
+        "/api/v1/runs", content=body.encode(), headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["fields"] == ["results.0.duration"]
+    assert store.count_executions() == 0
+
+
+def _report_with(field: str, value: object) -> dict[str, Any]:
+    """`_well_formed_report` carrying one result, with `value` at the dotted
+    `field` (`run.<name>` or `results.0.<name>`)."""
+    report = _well_formed_report()
+    report["results"] = [_result_entry("tests/test_a.py::test_one")]
+    section, *rest = field.split(".")
+    target = report["run"] if section == "run" else report["results"][int(rest.pop(0))]
+    target[rest[0]] = value
+    return report
+
+
+_OUT_OF_RANGE_VALUES = {
+    "exit_status_above_int64": ("run.exit_status", 2**63),
+    "exit_status_below_int64": ("run.exit_status", -(2**63) - 1),
+    "failure_lineno_above_int64": ("results.0.failure_lineno", 2**63),
+    "started_at_past_year_9999_in_utc": ("run.started_at", "9999-12-31T23:59:59-05:00"),
+    "started_at_before_year_1_in_utc": ("run.started_at", "0001-01-01T00:00:00+01:00"),
+    "finished_at_past_year_9999_in_utc": ("run.finished_at", "9999-12-31T23:59:59-05:00"),
+    "result_started_at_past_year_9999_in_utc": (
+        "results.0.started_at",
+        "9999-12-31T23:59:59-05:00",
+    ),
+    "result_finished_at_before_year_1_in_utc": (
+        "results.0.finished_at",
+        "0001-01-01T00:00:00+01:00",
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), _OUT_OF_RANGE_VALUES.values(), ids=_OUT_OF_RANGE_VALUES.keys()
+)
+def test_a_value_the_store_cannot_hold_is_422_naming_the_field(
+    any_store: Any, field: str, value: object
+) -> None:
+    """Integers outside SQLite's signed 64-bit range, and timestamps whose
+    UTC form leaves years 1-9999, are refused at validation in the shared
+    shape -- not a 500 from the store or from the UTC conversion, and the
+    same answer from either adapter."""
+    client = TestClient(create_app(any_store))
+
+    response = client.post("/api/v1/runs", json=_report_with(field, value))
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": "invalid_report",
+        "detail": "The submitted report does not match the expected shape.",
+        "fields": [field],
+    }
+    assert any_store.count_executions() == 0
+
+
 def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore) -> None:
     from vantage.service.errors import MAX_REPORT_BYTES
 
@@ -173,32 +276,63 @@ def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore
     assert store.count_executions() == 0
 
 
-def test_a_report_exceeding_the_size_cap_with_failure_evidence_stores_nothing(
-    client: TestClient, store: InMemoryExecutionStore
+def _post_streamed(app: Any, path: str, chunk: bytes, chunks: int) -> tuple[int | None, int]:
+    """POST `chunks` copies of `chunk` straight through the ASGI interface,
+    one `http.request` message each, and return the status answered and
+    how many chunks the app asked for. `TestClient` cannot show this: it
+    reads the whole body before the app sees any of it."""
+    asked = 0
+    status: int | None = None
+
+    async def receive() -> dict[str, Any]:
+        nonlocal asked
+        asked += 1
+        return {"type": "http.request", "body": chunk, "more_body": asked < chunks}
+
+    async def send(message: dict[str, Any]) -> None:
+        nonlocal status
+        if message["type"] == "http.response.start":
+            status = message["status"]
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+    asyncio.run(app(scope, receive, send))
+    return status, asked
+
+
+@pytest.mark.parametrize(
+    ("path", "cap"),
+    [("/api/v1/runs", MAX_REPORT_BYTES), ("/api/v1/config/sections", MAX_SECTION_BODY_BYTES)],
+    ids=["runs", "sections"],
+)
+def test_reading_a_body_stops_at_the_chunk_that_crosses_the_cap(
+    store: InMemoryExecutionStore, path: str, cap: int
 ) -> None:
-    """session-ingestion → A report exceeding the size cap stores nothing
-    (task 6.13): the encoded body -- failure evidence included -- exceeds
-    `MAX_REPORT_BYTES`; the run table stays empty. Whole-report rejection,
-    unchanged by `failure-capture` -- the same `413` `_read_bounded_body`
-    already raises for any oversized field."""
-    oversized_report = _well_formed_report()
-    oversized_report["results"] = [
-        _result_entry(
-            "packages/vantage/tests/test_f.py::test_one",
-            outcome="failed",
-            traceback="x" * (MAX_REPORT_BYTES + 1),
-        )
-    ]
+    """The cap bounds memory only if reading stops when it is crossed: a
+    body checked once it is complete would buffer everything a client
+    streams, gigabytes included, before refusing it."""
+    chunk = b" " * 4096
 
-    response = client.post("/api/v1/runs", json=oversized_report)
+    status, asked = _post_streamed(create_app(store), path, chunk, chunks=10_000)
 
-    assert response.status_code == 413
-    body = response.json()
-    assert body["error"] == "payload_too_large"
+    assert status == 413
+    assert asked == cap // len(chunk) + 1
     assert store.count_executions() == 0
+    assert store.list_settings("test_sections") == ()
 
 
-@pytest.mark.req(id="RQ-42")
 def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
     import json
 
@@ -214,7 +348,6 @@ def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionS
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
     import json
 
@@ -224,10 +357,79 @@ def test_absent_content_type_is_415(client: TestClient, store: InMemoryExecution
     )
 
     assert response.status_code == 415
+    assert "'<absent>'" in response.json()["detail"]
     assert store.count_executions() == 0
 
 
-@pytest.mark.req(id="RQ-42")
+def test_the_415_body_names_a_plain_media_type(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/runs", content=b"{}", headers={"content-type": "text/plain; charset=utf-8"}
+    )
+
+    assert response.status_code == 415
+    assert "text/plain" in response.json()["detail"]
+
+
+def test_the_415_body_never_reflects_the_content_type_header(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """The header is client text like any other: echoed verbatim it would
+    carry markup and kilobytes of padding back in the response."""
+    marker = "</script><img src=x onerror=alert(1)>"
+
+    response = client.post(
+        "/api/v1/runs",
+        content=json.dumps(_well_formed_report()).encode(),
+        headers={"content-type": marker + "a" * 5000},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["error"] == "unsupported_media_type"
+    assert marker not in response.text
+    assert len(response.content) < 512
+    assert store.count_executions() == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "status", "error"),
+    [
+        ("PUT", "/api/v1/runs", 405, "method_not_allowed"),
+        ("DELETE", "/api/v1/runs", 405, "method_not_allowed"),
+        ("GET", f"/api/v1/runs/{'e' * 32}/heartbeat", 405, "method_not_allowed"),
+        ("POST", "/runs", 404, "not_found"),
+        ("GET", "/api/v1/nonexistent", 404, "not_found"),
+        ("POST", "/api/v2/runs", 404, "not_found"),
+    ],
+)
+def test_an_unrouted_request_answers_in_the_rejection_shape(
+    client: TestClient, method: str, path: str, status: int, error: str
+) -> None:
+    """The router's own 404 and 405 are rejections too, so a client parses
+    them the same way; a 405 still says which methods the path takes."""
+    response = client.request(method, path)
+
+    assert response.status_code == status
+    body = response.json()
+    assert set(body) == {"error", "detail", "fields"}
+    assert body["error"] == error
+    assert body["fields"] == []
+    if status == 405:
+        assert "POST" in response.headers["allow"]
+
+
+@pytest.mark.parametrize("body", [b"null", b"[]", b"42", b'"x"'])
+def test_a_body_that_is_not_an_object_names_no_empty_field(client: TestClient, body: bytes) -> None:
+    """The failure is the body as a whole, which has no dotted path; an
+    empty string in `fields` would name nothing."""
+    response = client.post(
+        "/api/v1/runs", content=body, headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_report"
+    assert response.json()["fields"] == []
+
+
 def test_forbidden_extra_field_name_is_not_echoed(client: TestClient) -> None:
     """A rejected *value* is never echoed -- but for an `extra_forbidden`
     error the offending path segment is a key the CLIENT chose, and echoing
@@ -246,7 +448,6 @@ def test_forbidden_extra_field_name_is_not_echoed(client: TestClient) -> None:
         assert "\r" not in field and "\n" not in field
 
 
-@pytest.mark.req(id="RQ-42")
 def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -> None:
     """A 50 KiB key must not come back as a 50 KiB field path."""
     report = _well_formed_report()
@@ -258,10 +459,9 @@ def test_forbidden_extra_field_cannot_amplify_the_response(client: TestClient) -
     assert max(len(field) for field in response.json()["fields"]) < 128
 
 
-# --- Phase 4: heartbeat rejection (design.md D33, task 4.4) ----------------
+# --- Heartbeat rejection ----------------------------------------------------
 
 
-@pytest.mark.req(id="RQ-44")
 def test_heartbeat_for_unknown_run_is_404(client: TestClient) -> None:
     response = client.post(f"/api/v1/runs/{'e' * 32}/heartbeat")
 
@@ -270,31 +470,47 @@ def test_heartbeat_for_unknown_run_is_404(client: TestClient) -> None:
     assert body["error"] == "unknown_run"
 
 
-@pytest.mark.req(id="RQ-44")
-def test_heartbeat_for_malformed_run_id_is_422(client: TestClient) -> None:
-    """No new code (design.md D33): the malformed id is caught by the path
-    parameter's own pattern, and rejected through the existing
-    `register_error_handlers`/`RequestValidationError` path."""
-    response = client.post("/api/v1/runs/not-a-hex-id/heartbeat")
+@pytest.mark.parametrize(
+    ("method", "path", "params", "field"),
+    [
+        ("POST", "/api/v1/runs/not-a-hex-id/heartbeat", {}, "path.run_id"),
+        ("GET", "/api/v1/runs/ABC", {}, "path.run_id"),
+        ("GET", "/api/v1/runs", {"limit": 0}, "query.limit"),
+        ("GET", "/api/v1/runs", {"offset": -1}, "query.offset"),
+        ("GET", f"/api/v1/runs/{'e' * 32}/results", {"limit": "x"}, "query.limit"),
+        ("GET", "/api/v1/tests/history", {"node_id": "n", "limit": 0}, "query.limit"),
+        ("GET", "/api/v1/runs/zzz/sections", {}, "path.run_id"),
+        ("DELETE", "/api/v1/config/sections", {}, "query.name"),
+    ],
+)
+def test_a_bad_path_or_query_parameter_is_422_invalid_parameter(
+    client: TestClient, method: str, path: str, params: dict[str, Any], field: str
+) -> None:
+    """Caught by the parameter's own declaration and rejected through the
+    shared `RequestValidationError` handler. None of these requests carries
+    a report, so none may be told its report is malformed: a client that
+    switches on `error` must tell a bad page parameter from a bad session
+    report."""
+    response = client.request(method, path, params=params)
 
     assert response.status_code == 422
-    body = response.json()
-    assert body["error"] == "invalid_report"
+    assert response.json() == {
+        "error": "invalid_parameter",
+        "detail": "A path or query parameter is not valid.",
+        "fields": [field],
+    }
 
 
-# --- Phase 5: whole-report rejection, atomicity, measurement ---------------
+# --- Whole-report rejection and atomicity ----------------------------------
 
 
-@pytest.mark.req(id="RQ-42")
-@pytest.mark.req(id="RQ-3")
 def test_one_malformed_result_among_five_hundred_rejects_the_whole_report(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """RQ-42.1 with RQ-3.2: one malformed entry deep inside a large `results`
-    list rejects the entire report, not the 250 valid entries ahead of it.
-    Pydantic validates the whole model before this route ever converts a
-    single entry or calls `record_session` -- rejection is whole-report,
-    never partial (design.md D19's sibling guarantee)."""
+    """One malformed entry deep inside a large `results` list rejects the
+    entire report, including the 250 valid entries ahead of it. Pydantic
+    validates the whole model before the route converts a single entry or
+    calls `record_session`, so rejection is never partial."""
     report = _bulk_results_report("2" + "a" * 31, 500, malformed_index=250)
 
     response = client.post("/api/v1/runs", json=report)
@@ -304,13 +520,12 @@ def test_one_malformed_result_among_five_hundred_rejects_the_whole_report(
     assert store.count_results() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_duplicate_node_id_inside_one_report_is_422_whole_report(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """D19 layer 2: a duplicate `node_id` inside one report is rejected
-    loudly and wholesale -- the layer that catches a plugin defect before it
-    ever reaches the silent replay backstop (D19 layer 3)."""
+    """A duplicate `node_id` inside one report is rejected loudly and
+    wholesale, catching a plugin defect before storage's
+    `ON CONFLICT ... DO NOTHING` result insert would silently drop it."""
     node_id = "packages/vantage/tests/test_dup.py::test_one"
     report = _well_formed_report("3" + "b" * 31)
     report["results"] = [_result_entry(node_id), _result_entry(node_id, outcome="failed")]
@@ -322,13 +537,12 @@ def test_duplicate_node_id_inside_one_report_is_422_whole_report(
     assert store.count_results() == 0
 
 
-@pytest.mark.req(id="RQ-42")
 def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
     client: TestClient,
 ) -> None:
-    """Threat-derived (design.md D15/Threat Matrix): the rejection body names
-    the offending field through the existing `safe_segment` allow-list, and
-    the node id **value** is never echoed anywhere in the response."""
+    """The rejection body names the offending field through the
+    `safe_segment` allow-list, and the node id **value** -- which can reveal
+    a filesystem path -- is never echoed anywhere in the response."""
     node_id = "packages/vantage/tests/test_secret_path.py::test_should_not_leak"
     report = _well_formed_report("4" + "c" * 31)
     report["results"] = [_result_entry(node_id), _result_entry(node_id, outcome="failed")]
@@ -343,301 +557,13 @@ def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
         assert safe_segment(field) == field
 
 
-@pytest.mark.req(id="RQ-3")
-def test_five_hundred_results_fit_within_the_body_cap() -> None:
-    """D23: the cap is not raised in this change -- it is measured against.
-    Builds a 500-result report through the same wire-shaped assembly the
-    other tests in this module use and reports the real byte count."""
-    report = _bulk_results_report("5" + "d" * 31, 500)
-    encoded = json.dumps(report).encode("utf-8")
-
-    print(f"500-result report size: {len(encoded)} bytes (cap {MAX_REPORT_BYTES})")
-    assert len(encoded) < MAX_REPORT_BYTES
-
-
-@pytest.mark.req(id="RQ-3")
-def test_server_peak_memory_for_one_five_hundred_result_request(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
-    """D23: server-side peak memory for one 500-result request is measured,
-    not asserted against an invented threshold."""
-    report = _bulk_results_report("6" + "e" * 31, 500)
-
-    tracemalloc.start()
-    try:
-        response = client.post("/api/v1/runs", json=report)
-        _current, peak = tracemalloc.get_traced_memory()
-    finally:
-        tracemalloc.stop()
-
-    print(f"peak traced memory for one 500-result request: {peak} bytes")
-    assert response.status_code == 201
-    assert store.count_results() == 500
-
-
-class _CommitCountingConnection:
-    """Wraps a real `sqlite3.Connection`, counting only `COMMIT` statements.
-
-    RQ-3.3 (D21): `record_session` must reach storage in exactly one commit
-    for the whole batch, not one per result or one per statement. Wrapping
-    the connection is the only way to observe that from outside
-    `SqliteExecutionStore` without weakening the adapter's own commit
-    discipline for the sake of a test.
-    """
-
-    def __init__(self, real: sqlite3.Connection) -> None:
-        self._real = real
-        self.commit_count = 0
-
-    def execute(self, sql: str, parameters: Sequence[object] = ()) -> sqlite3.Cursor:
-        if sql.strip() == "COMMIT":
-            self.commit_count += 1
-        return self._real.execute(sql, parameters)
-
-    def executemany(self, sql: str, seq_of_parameters: Any) -> sqlite3.Cursor:
-        return self._real.executemany(sql, seq_of_parameters)
-
-    def close(self) -> None:
-        self._real.close()
-
-
-@pytest.mark.req(id="RQ-3")
-def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
-    """Renamed from `test_five_hundred_results_reach_storage_in_one_commit`
-    (design.md D35, task 1.6) -- the Analysis argument moved from one commit
-    per *session* to one commit per *report*, and this is the finish-write's
-    premise. The rename alone would be cosmetic: without the finish-field
-    assertions below, a `DO NOTHING` regression that dropped every finish
-    field on conflict would still satisfy the commit count and row counts.
-
-    **Measurements:** the 500-result finish-write generated here measures
-    252,511 bytes in body size (via `test_five_hundred_results_fit_within_the_body_cap`);
-    server peak memory traced for one such finish-write request reaches
-    approximately 2,021,039 bytes (`test_server_peak_memory_for_one_five_hundred_result_request`).
-    These measurements are diagnostic; they inform payload size budgeting and
-    resource planning for deployments. Future changes to the result schema or
-    the batch-insert strategy MUST re-run this test via `tracemalloc` at
-    request time and justify any material increase.
-
-    **failure-capture Phase 7 (design.md D80):** `_INSERT_RESULT` widened
-    from 14 to 31 bound columns, one per result row; a handful of the 500
-    carry failure evidence and captured output. The premise this test
-    exists to guard -- one commit for the whole batch -- must still hold at
-    the wider width, and a failing result's evidence must still round-trip,
-    or the batch-insert strategy silently split under the extra columns.
-    """
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    counting = _CommitCountingConnection(adapter._conn)
-    adapter._conn = counting  # type: ignore[assignment]
-
-    try:
-        execution = _execution("f" + "0" * 31)
-        failure = _failure()
-        captured = _captured(stdout="some output", stderr="")
-        results = [
-            _result(
-                f"packages/vantage/tests/test_bulk.py::test_{i}",
-                outcome="failed" if i < 5 else "passed",
-                failure=failure if i < 5 else None,
-                captured=captured if i < 5 else None,
-            )
-            for i in range(500)
-        ]
-
-        created = adapter.record_session(
-            execution, results=results, received_at=datetime.now(timezone.utc)
-        )
-
-        assert created is True
-        assert counting.commit_count == 1
-        # Counting commits proves the transaction's SHAPE and nothing about
-        # its content: an adapter that committed once and wrote no rows would
-        # satisfy the count alone. RQ-3.1 is verified by Analysis resting on
-        # this test, so the test has to carry the weight.
-        assert adapter.count_results() == 500
-        assert adapter.count_executions() == 1
-        stored = adapter.get_execution(execution.identity.value)
-        assert stored is not None
-        assert stored.finished_at == execution.finished_at
-        assert stored.exit_status == execution.exit_status
-
-        found = adapter.get_result(
-            execution.identity.value,
-            node_id="packages/vantage/tests/test_bulk.py::test_0",
-        )
-        assert found is not None
-        assert found.failure == failure
-        assert found.captured == captured
-    finally:
-        adapter.close()
-
-
-@pytest.mark.req(id="RQ-3")
-def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_commit(
-    tmp_path: Path,
-) -> None:
-    """design.md D25, D35, task 1.7: the same finish-write, run after a
-    prior accepted start-write for the same run id -- one commit, the same
-    500 result rows, and the finish fields actually applied through the
-    conflict (`DO UPDATE`) branch rather than the insert branch."""
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-
-    try:
-        identity = "f" + "1" * 31
-        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
-        start = _start_only_execution(identity, started=started)
-        adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
-
-        counting = _CommitCountingConnection(adapter._conn)
-        adapter._conn = counting  # type: ignore[assignment]
-
-        finish = _execution(identity, finished=True, started=started)
-        results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
-
-        created = adapter.record_session(
-            finish, results=results, received_at=datetime.now(timezone.utc)
-        )
-
-        assert created is False
-        assert counting.commit_count == 1
-        assert adapter.count_results() == 500
-        assert adapter.count_executions() == 1
-        stored = adapter.get_execution(identity)
-        assert stored is not None
-        assert stored.finished_at == finish.finished_at
-        assert stored.exit_status == finish.exit_status
-    finally:
-        adapter.close()
-
-
-@pytest.mark.req(id="RQ-3")
-def test_start_write_reaches_storage_in_one_commit(tmp_path: Path) -> None:
-    """design.md D35, task 1.8: the start-write's own commit-count premise --
-    one commit, one run row, a null `finished_at`, and zero result rows,
-    since a start report carries none."""
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    counting = _CommitCountingConnection(adapter._conn)
-    adapter._conn = counting  # type: ignore[assignment]
-
-    try:
-        identity = "f" + "2" * 31
-        start = _start_only_execution(identity)
-
-        created = adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
-
-        assert created is True
-        assert counting.commit_count == 1
-        assert adapter.count_results() == 0
-        assert adapter.count_executions() == 1
-        stored = adapter.get_execution(identity)
-        assert stored is not None
-        assert stored.finished_at is None
-    finally:
-        adapter.close()
-
-
-@pytest.mark.req(id="RQ-3")
-def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> None:
-    """design.md D25, task 1.9: the slice-1 acceptance criterion, driven
-    through the same `_CommitCountingConnection` wrapper the rest of this
-    module uses -- an explicitly reordered pair, finish then start."""
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-
-    try:
-        identity = "f" + "3" * 31
-        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
-        finish = _execution(identity, finished=True, started=started)
-        results = [_result("packages/vantage/tests/test_bulk.py::test_reordered")]
-        adapter.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
-
-        counting = _CommitCountingConnection(adapter._conn)
-        adapter._conn = counting  # type: ignore[assignment]
-
-        late_start = _start_only_execution(identity, started=started)
-        created = adapter.record_session(
-            late_start, results=(), received_at=datetime.now(timezone.utc)
-        )
-
-        assert created is False
-        assert counting.commit_count == 1
-        stored = adapter.get_execution(identity)
-        assert stored is not None
-        assert stored.finished_at == finish.finished_at
-        assert stored.exit_status == finish.exit_status
-        assert adapter.count_results() == 1
-    finally:
-        adapter.close()
-
-
-@pytest.mark.req(id="RQ-30")
-def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None:
-    """The six outcome strings live in three places (design.md, Interfaces
-    section): `schema.sql`'s CHECK, `OUTCOMES`, and the service `_Outcome`
-    Literal. Parses the CHECK clause itself instead of trusting a fourth,
-    hand-typed copy here -- the CHECK is the ground truth this test protects."""
-    schema_sql = (
-        _REPO_ROOT / "packages" / "vantage" / "src" / "vantage" / "storage" / "schema.sql"
-    ).read_text(encoding="utf-8")
-    match = re.search(r"CHECK \(outcome IN \(([^)]+)\)\)", schema_sql)
-    assert match is not None
-    schema_outcomes = frozenset(value.strip(" '") for value in match.group(1).split(","))
-
-    assert schema_outcomes == OUTCOMES
-    assert schema_outcomes == frozenset(get_args(_Outcome))
-
-
-# --- Raw-socket truncation (task 3.7) ---------------------------------------
+# --- Raw-socket truncation --------------------------------------------------
 #
 # Everything above drives `create_app` through `fastapi.testclient.TestClient`,
 # whose ASGI transport hands the whole submitted body to `request.stream()`
-# already assembled in memory (PR7's stated, honest gap). No test built on
-# `TestClient` can ever observe a socket stopping mid-transfer, so it cannot
-# prove the streaming cap in `_read_bounded_body` -- the loop that raises
-# before asking `request.stream()` for another chunk -- actually stops a
-# real, slow-feeding connection. This section runs a real `uvicorn` server on
-# a real, already-bound TCP socket and drives it byte-for-byte instead.
-
-
-class _RawSocketServer:
-    """A real `uvicorn` server bound to an ephemeral loopback port.
-
-    The listening socket is created and bound here, *before* uvicorn ever
-    sees it (`socket.bind(("127.0.0.1", 0))`, then `getsockname()` for the
-    OS-assigned port) so the actual port is known ahead of time without
-    guessing or hardcoding one -- the same reason `port=0` was requested:
-    the test must survive a machine where an arbitrary fixed port is
-    already taken.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._sock.bind(("127.0.0.1", 0))
-        self._sock.listen(128)
-        self.port = self._sock.getsockname()[1]
-
-        config = uvicorn.Config(app, host="127.0.0.1", log_level="warning", lifespan="off")
-        self._server = uvicorn.Server(config)
-        self._loop = asyncio.new_event_loop()
-        self._thread = threading.Thread(
-            target=self._run, name="vantage-test-raw-socket-server", daemon=True
-        )
-
-    def _run(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._server.serve(sockets=[self._sock]))
-
-    def __enter__(self) -> _RawSocketServer:
-        self._thread.start()
-        while not self._server.started:
-            time.sleep(0.001)
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self._server.should_exit = True
-        # A failing assertion above must not leave a listener behind to
-        # poison a later test -- join with a bound, not forever.
-        self._thread.join(timeout=5)
+# already assembled in memory, so it can never observe a socket stopping
+# mid-transfer. This section serves the app from a `LoopbackServer`, a real
+# `uvicorn` server on a real TCP socket, and drives it byte-for-byte instead.
 
 
 class _AsgiCompletionSignal:
@@ -710,47 +636,33 @@ class _UvicornErrorCapture:
         self._logger.setLevel(self._previous_level)
 
 
-@pytest.mark.req(id="RQ-42")
-@pytest.mark.req(id="RQ-3")
 def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
-    """RQ-3 criterion 2 ("its report is truncated in transit ... the
-    database holds none of that session's results rather than a prefix of
-    them") and RQ-42's "Body truncated midway" scenario, proven against a
-    REAL socket -- see the module-level note above for why `TestClient`
-    cannot exercise this.
+    """A report truncated in transit stores nothing -- not a prefix of its
+    results. Proven against a REAL socket; see the section note above for
+    why `TestClient` cannot exercise this.
 
     A raw client connects, sends a `Content-Length` that promises far more
     bytes than it ever writes, then half-closes its own write direction
-    (`shutdown(SHUT_WR)`) without sending the rest -- exactly what a process
-    killed mid-write, or a network partition mid-transfer, looks like from
-    the server's side. Starlette's `request.stream()` detects this and
-    raises a genuine `starlette.requests.ClientDisconnect` from inside the
-    real streaming read loop in `_read_bounded_body` -- not constructed by
-    hand, not injected through a fabricated `receive()`, the actual
-    exception a real disconnect produces.
+    (`shutdown(SHUT_WR)`) -- what a process killed mid-write, or a network
+    partition mid-transfer, looks like from the server's side. Starlette's
+    `request.stream()` then raises a genuine `ClientDisconnect` from inside
+    `_read_bounded_body`'s streaming loop.
 
     **Why the assertion is "no unhandled-exception log", not "a 400
-    response body".** Once uvicorn's own transport has observed the peer
-    disconnect, its ASGI `send()` implementation silently drops every
-    further message (`h11_impl.py`: `if self.disconnected: return`) --
-    this is unconditional ASGI-server behaviour, true whether or not this
-    service catches `ClientDisconnect`, and it means no HTTP response body
-    can ever reach a client that has already gone away, by construction of
-    the protocol. What DOES differ, and is what task 3.8 changes, is
-    whether the disconnect is handled inside this service's own code
-    (silent, clean completion) or left to propagate out of the ASGI
-    application entirely, which is what makes uvicorn log an "Exception in
-    ASGI application" error with a full traceback. RQ-42's "reject and
-    store nothing" is what task 3.7/3.8 can prove end-to-end for a real
-    socket: the response-body half of RQ-42 is already covered, against
-    the same code path, by `test_non_json_body_is_400` and its siblings
-    above -- this test's job is the part only a real socket can prove.
+    response body".** Once uvicorn has observed the peer disconnect, its
+    ASGI `send()` silently drops every further message (`h11_impl.py`:
+    `if self.disconnected: return`), so no response can reach a client that
+    has gone away. What differs is whether the disconnect is handled inside
+    this service (clean completion) or propagates out of the ASGI
+    application, which makes uvicorn log "Exception in ASGI application"
+    with a traceback. The rejection body itself is covered by
+    `test_non_json_body_is_400` and its siblings above.
     """
     app = create_app(store)
     signal = _AsgiCompletionSignal(app)
     error_capture = _UvicornErrorCapture()
 
-    with _RawSocketServer(signal) as server, error_capture:
+    with LoopbackServer(signal) as server, error_capture:
         report_id = "c" * 32
         # Deliberately short: promises 500 bytes via Content-Length, sends a
         # small fraction of that, then stops.
@@ -788,8 +700,8 @@ def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
     # A client that has already disconnected cannot, by construction of the
     # protocol, ever observe a response body -- see the test docstring.
     assert received == b""
-    # RQ-3 criterion 2, the assertion of record: nothing is written for a
-    # truncated session, not a prefix of it.
+    # The assertion of record: nothing is written for a truncated session,
+    # not a prefix of it.
     assert store.count_executions() == 0
     assert not error_capture.records, (
         "an unhandled ClientDisconnect reached uvicorn's ASGI exception "
@@ -797,21 +709,13 @@ def test_truncated_body_raw_socket(store: InMemoryExecutionStore) -> None:
     )
 
 
-@pytest.mark.req(id="RQ-3")
-@pytest.mark.req(id="RQ-42")
 def test_finish_report_truncated_after_an_accepted_start_write_leaves_the_start_row_intact(
     store: InMemoryExecutionStore,
 ) -> None:
-    """`run-recording`'s "Finish report truncated after an accepted
-    start-write" (RQ-3.2) and `session-ingestion`'s matching RQ-42.3
-    scenario. `test_truncated_body_raw_socket` above proves only the
-    no-prior-report case (``count_executions() == 0``); it would be wrong
-    to extend that assertion here, because the start-write's row MUST
-    survive. A start-write is accepted first through the same real app,
-    then a finish report for that same run id is truncated in transit
-    through the identical raw-socket harness -- the row it left behind must
-    still be exactly what the start-write wrote, not removed and not
-    overwritten by a partial finish.
+    """A finish report truncated in transit after an accepted start-write
+    leaves the start row exactly as the start-write wrote it -- not removed
+    and not overwritten by a partial finish. `test_truncated_body_raw_socket`
+    covers the no-prior-report case, where nothing at all may be stored.
     """
     app = create_app(store)
     run_id = "d" * 32
@@ -832,7 +736,7 @@ def test_finish_report_truncated_after_an_accepted_start_write_leaves_the_start_
     signal = _AsgiCompletionSignal(app)
     error_capture = _UvicornErrorCapture()
 
-    with _RawSocketServer(signal) as server, error_capture:
+    with LoopbackServer(signal) as server, error_capture:
         # Deliberately short: promises 500 bytes via Content-Length, sends a
         # small fraction of that, then stops -- same shape as
         # `test_truncated_body_raw_socket`, but a finish report for a run id

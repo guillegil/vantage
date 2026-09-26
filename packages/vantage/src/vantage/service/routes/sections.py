@@ -1,49 +1,56 @@
 """The four sections routes: `GET`/`POST`/`DELETE /api/v1/config/sections`
-and `GET /api/v1/runs/{run_id}/sections` (design.md D85, D87, D88, D89).
+and `GET /api/v1/runs/{run_id}/sections`.
 
-**A section name is never a path segment.** D54 already decided that a
-value which may contain `/` cannot ride in a path segment, and a section
-name may -- so the name travels as a body field on write and as a query
-value on delete, never as `{name}` in the path (design.md D87). All four
-routes live in this one module together with the namespace constant and the
-definition loader, because they share both. `run_id` is not a section name --
-it is the same 32-hex identity segment `routes/read.py` already uses -- so
-the aggregate route's path parameter is not the case D54 speaks to.
+**A section name is never a path segment.** A section name may contain `/`,
+and an encoded slash in a path is decoded before routing, so the name
+travels as a body field on write and as a query value on delete. `run_id` in the aggregate
+route is the same 32-hex identity segment `routes/read.py` uses, so it does
+not have that problem.
 
-**One cheap typing improvement, taken only inside this module.**
-`request.app.state.store` resolves to `Any` at every pre-existing call site;
-each handler here binds it once as `store: ExecutionStore =
-request.app.state.store`, restoring checking inside this module without
-touching a single existing route (design.md D87).
+Every handler reads the store, so each is a plain `def` that FastAPI runs
+in its threadpool (see `app.py`) -- except the upsert, which reads its body
+the way `POST /runs` does (`service/body.py`): the media type from the
+header, then at most `MAX_SECTION_BODY_BYTES` of body on the event loop,
+then the parse, validation and store write in the threadpool. Declared as a
+parameter instead, the body would be read with no bound and parsed on the
+event loop, stalling every other request -- heartbeats included -- for as
+long as a large body takes.
 
-**Section definitions are read fresh on every call, never cached
-(design.md D88).** `_load_definitions` is called once per request by every
-handler that needs the current definitions, including the aggregate below --
-no `app.state` field remembers them between requests, so an edit takes
-effect on the very next read, with no restart and no invalidation logic to
-get wrong.
+**Section definitions are read fresh on every request, never cached.** No
+`app.state` field remembers them between requests, so an edit takes effect
+on the very next read, with no restart and no invalidation logic.
+
+**The section bound is checked by the store, in the write itself.** Counting
+here and then writing would let two requests racing for the last free slot
+both see it free; `upsert_setting`'s `max_keys` makes the count and the
+insert one step.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Path, Query, Request
+from fastapi import APIRouter, Depends, Path, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
+from vantage.core.domain.execution import IDENTITY_PATTERN
 from vantage.core.domain.sections import (
     MAX_SECTIONS,
     SECTION_NAME_MAX_CHARS,
     SECTION_PREFIX_MAX_CHARS,
-    UNASSIGNED,
     SectionDefinition,
     SectionSummary,
+    is_reserved_section_name,
     normalize_prefix,
     summarize_sections,
 )
-from vantage.core.ports.storage import ExecutionStore
+from vantage.core.ports.storage import ExecutionStore, NamespaceFullError
+from vantage.service.body import decode_json, read_bounded_body, require_json_media_type
+from vantage.service.dependencies import get_store
 from vantage.service.errors import (
+    InvalidSectionError,
     InvalidSectionNameError,
     InvalidSectionPrefixError,
     ReservedSectionNameError,
@@ -61,69 +68,109 @@ from vantage.service.schemas import (
     SectionValue,
 )
 
-_IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
-
 router = APIRouter()
 
 TEST_SECTIONS_NAMESPACE = "test_sections"
-"""Service vocabulary, not store vocabulary (design.md D87) -- the store
-takes this as an ordinary namespace parameter and attaches no meaning to it."""
+"""Service vocabulary, not store vocabulary -- the store takes this as an
+ordinary namespace parameter and attaches no meaning to it."""
+
+MAX_SECTION_BODY_BYTES = 64 * 1024
+"""The upsert body's cap. A name and a prefix at their bounds, every
+character written as a 12-byte escaped surrogate pair, take under 14 KiB;
+the rest leaves room for whitespace around them."""
 
 
 def _load_definitions(store: ExecutionStore) -> list[SectionDefinition]:
-    """Every stored section, read fresh on every call (design.md D88) --
-    never cached. Raises `UnreadableSettingError` the moment one row's
-    `value` fails `SectionValue` (design.md D83), naming the row's key and
+    """Every stored section, read fresh on every call -- never cached.
+    Raises `UnreadableSettingError` the moment one row's `value` fails
+    `SectionValue` or its key is a reserved name, naming the row's key and
     never the value."""
     definitions: list[SectionDefinition] = []
     for setting in store.list_settings(TEST_SECTIONS_NAMESPACE):
         try:
             value = SectionValue.model_validate_json(setting.value)
-        except ValidationError as exc:
+            definition = SectionDefinition(name=setting.key, prefix=value.prefix)
+        except ValueError as exc:
+            # Pydantic's `ValidationError` is a `ValueError`, and so is the
+            # domain's refusal of a reserved name a hand-edited row can hold.
             raise UnreadableSettingError(setting.namespace, setting.key) from exc
-        definitions.append(SectionDefinition(name=setting.key, prefix=value.prefix))
+        definitions.append(definition)
     return definitions
 
 
+def _stored_name(raw: str) -> str:
+    """The key a section name is stored under. Upsert and delete share it,
+    so the spelling that created a section also removes it."""
+    return raw.strip()
+
+
+def _encodable(text: str) -> bool:
+    """False for text holding a lone surrogate: JSON can escape one
+    (`\\ud800`), but no store or response serializer can encode it, so it
+    would otherwise surface as a bare `500`."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 @router.get("/config/sections")
-async def list_sections(request: Request) -> SectionListResponse:
-    store: ExecutionStore = request.app.state.store
+def list_sections(store: ExecutionStore = Depends(get_store)) -> SectionListResponse:
     definitions = _load_definitions(store)
     items = [SectionResponse(name=d.name, prefix=d.prefix) for d in definitions]
     return SectionListResponse(items=items)
 
 
-@router.post("/config/sections")
-async def upsert_section(request: Request, payload: SectionUpsertRequest) -> Response:
-    store: ExecutionStore = request.app.state.store
+def _upsert(store: ExecutionStore, body: bytes) -> tuple[bool, SectionResponse]:
+    """Parse, validate and store one complete upsert body, and return
+    whether the name was new with the section as stored. Every step blocks,
+    so `upsert_section` calls this in the threadpool."""
+    try:
+        payload = SectionUpsertRequest.model_validate(decode_json(body))
+    except ValidationError as exc:
+        raise InvalidSectionError.from_errors(exc.errors()) from exc
 
-    name = payload.name.strip()
-    if not name or len(name) > SECTION_NAME_MAX_CHARS:
+    name = _stored_name(payload.name)
+    if not name or len(name) > SECTION_NAME_MAX_CHARS or not _encodable(name):
         raise InvalidSectionNameError()
-    if name.casefold() == UNASSIGNED:
+    if is_reserved_section_name(name):
         raise ReservedSectionNameError()
 
     prefix = payload.prefix.strip()
-    if not prefix or len(prefix) > SECTION_PREFIX_MAX_CHARS:
+    if not prefix or not _encodable(prefix):
         raise InvalidSectionPrefixError()
+    # Bounded after normalization: the coerced trailing `/` is part of what
+    # is stored and listed, and a listed prefix must post back unchanged.
     normalized_prefix = normalize_prefix(prefix)
-
-    existing_names = {definition.name for definition in _load_definitions(store)}
-    if name not in existing_names and len(existing_names) >= MAX_SECTIONS:
-        raise TooManySectionsError()
+    if len(normalized_prefix) > SECTION_PREFIX_MAX_CHARS:
+        raise InvalidSectionPrefixError()
 
     value = SectionValue(prefix=normalized_prefix).model_dump_json()
-    created = store.upsert_setting(
-        TEST_SECTIONS_NAMESPACE, name, value=value, updated_at=datetime.now(timezone.utc)
-    )
-    body = SectionResponse(name=name, prefix=normalized_prefix)
-    return JSONResponse(status_code=201 if created else 200, content=body.model_dump())
+    try:
+        created = store.upsert_setting(
+            TEST_SECTIONS_NAMESPACE,
+            name,
+            value=value,
+            updated_at=datetime.now(timezone.utc),
+            max_keys=MAX_SECTIONS,
+        )
+    except NamespaceFullError as exc:
+        raise TooManySectionsError() from exc
+    return created, SectionResponse(name=name, prefix=normalized_prefix)
+
+
+@router.post("/config/sections")
+async def upsert_section(request: Request, store: ExecutionStore = Depends(get_store)) -> Response:
+    require_json_media_type(request)
+    body = await read_bounded_body(request, MAX_SECTION_BODY_BYTES)
+    created, section = await run_in_threadpool(_upsert, store, body)
+    return JSONResponse(status_code=201 if created else 200, content=section.model_dump())
 
 
 @router.delete("/config/sections", status_code=204)
-async def delete_section(request: Request, name: str = Query(...)) -> Response:
-    store: ExecutionStore = request.app.state.store
-    if not store.delete_setting(TEST_SECTIONS_NAMESPACE, name):
+def delete_section(name: str = Query(...), store: ExecutionStore = Depends(get_store)) -> Response:
+    if not store.delete_setting(TEST_SECTIONS_NAMESPACE, _stored_name(name)):
         raise UnknownSectionError()
     return Response(status_code=204)
 
@@ -143,16 +190,13 @@ def _section_summary_response(summary: SectionSummary) -> SectionSummaryResponse
 
 
 @router.get("/runs/{run_id}/sections")
-async def get_run_sections(
-    request: Request, run_id: str = Path(pattern=_IDENTITY_PATTERN)
+def get_run_sections(
+    run_id: str = Path(pattern=IDENTITY_PATTERN), store: ExecutionStore = Depends(get_store)
 ) -> RunSectionSummaryResponse:
-    """`GET /api/v1/runs/{run_id}/sections` (design.md D85, D87, D88). An
-    unknown `run_id` is `404 unknown_run`, checked the same cheap way
-    `list_results` does (`get_execution`, not a full detail read). Section
-    definitions are loaded fresh through `_load_definitions` -- never cached
-    -- and `store.get_run_case_outcomes` supplies the aggregate's other
-    input; `summarize_sections` does every count and every round, once."""
-    store: ExecutionStore = request.app.state.store
+    """`GET /api/v1/runs/{run_id}/sections`. An unknown `run_id` is
+    `404 unknown_run`, checked the same cheap way `list_results` does
+    (`get_execution`, not a full detail read). `summarize_sections` does
+    every count and every rounding, once."""
     if store.get_execution(run_id) is None:
         raise UnknownRunError()
 
@@ -165,4 +209,4 @@ async def get_run_sections(
     )
 
 
-__all__ = ["TEST_SECTIONS_NAMESPACE", "router"]
+__all__ = ["MAX_SECTION_BODY_BYTES", "TEST_SECTIONS_NAMESPACE", "router"]

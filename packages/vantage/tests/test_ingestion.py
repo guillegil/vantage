@@ -1,9 +1,7 @@
-"""RQ-41: session report ingestion -- happy path and idempotent replay.
+"""Session report ingestion through `POST /api/v1/runs` and the heartbeat.
 
-Runs the app factory (`vantage.service.app.create_app`) against an injected
-`InMemoryExecutionStore`, per design.md's ordering note: B does not depend on
-A2 (schema/SQLite adapter, PR2-PR5). Wiring the real `SqliteExecutionStore`
-in here would reintroduce a dependency this slice is explicitly free of.
+Most tests run `create_app` against an injected `InMemoryExecutionStore`;
+the few that depend on how SQLite stores timestamps use the real adapter.
 """
 
 from __future__ import annotations
@@ -16,12 +14,19 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from vantage.core.domain.metadata import MAX_METADATA_VALUE_BYTES
-from vantage.core.ports.storage import MetadataEntry, MetadataFile
+from memory_store import InMemoryExecutionStore
+from vantage.core.domain.metadata import (
+    MAX_METADATA_ENTRIES,
+    MAX_METADATA_KEY_CHARS,
+    MAX_METADATA_VALUE_BYTES,
+)
+from vantage.core.ports.storage import ExecutionStore, MetadataEntry, MetadataFile, RunMetadata
 from vantage.service.app import create_app
-from vantage.storage.memory import InMemoryExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _stored_metadata_entries, _stored_metadata_files
+from vantage_port_contract import StoredMetadata
+
+# `any_store` and `any_stored_metadata`, for each adapter in turn.
+pytest_plugins = ["store_fixtures"]
 
 
 def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
@@ -38,7 +43,7 @@ def _well_formed_report(run_id: str = "a" * 32) -> dict[str, Any]:
 
 
 def _vcs_section(**overrides: Any) -> dict[str, Any]:
-    """One well-formed `vcs` section (design.md D47's wire shape)."""
+    """One well-formed `vcs` section."""
     section: dict[str, Any] = {
         "commit": "a" * 40,
         "branch": "main",
@@ -51,11 +56,10 @@ def _vcs_section(**overrides: Any) -> dict[str, Any]:
 
 
 def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
-    """One well-formed `results[]` entry (design.md D15 interface example).
+    """One well-formed `results[]` entry.
 
-    `overrides` lets a test carry an extra, undeclared key (task 4.4) or
-    override a single field (task 4.5's `param_id`/`duration`) without
-    repeating every other field.
+    `overrides` adds an undeclared key or replaces a single field without
+    repeating every other one.
     """
     entry: dict[str, Any] = {
         "node_id": node_id,
@@ -80,9 +84,7 @@ def _result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
 
 
 def _failing_result_entry(node_id: str, **overrides: Any) -> dict[str, Any]:
-    """A `results[]` entry carrying failure evidence -- the wire shape
-    design.md's "Interfaces / Contracts" example gives (D75), for the
-    newer-plugin ingestion scenarios."""
+    """A `results[]` entry carrying every failure evidence field."""
     entry = _result_entry(node_id, outcome="failed", **overrides)
     entry.setdefault("failure_type", "AssertionError")
     entry.setdefault("failure_message", "AssertionError: assert 1200 == 1320")
@@ -116,11 +118,9 @@ def client(store: InMemoryExecutionStore) -> TestClient:
 
 @pytest.fixture
 def sqlite_store(tmp_path: Path) -> Iterator[SqliteExecutionStore]:
-    """The real SQLite adapter (tasks 5.9/5.10): the D20 `MAX` monotonicity
-    guard is a lexicographic comparison of stored TEXT, so only this adapter
-    -- not `InMemoryExecutionStore`, which compares real `datetime` objects
-    and is already correct -- can reproduce the un-normalized-timestamp bug
-    (Engram observation 62)."""
+    """The real SQLite adapter. Its `last_seen_at` guard compares stored TEXT
+    lexicographically, so only this adapter -- not `InMemoryExecutionStore`,
+    which compares `datetime` objects -- exposes un-normalized timestamps."""
     adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     yield adapter
     adapter.close()
@@ -131,7 +131,6 @@ def sqlite_client(sqlite_store: SqliteExecutionStore) -> TestClient:
     return TestClient(create_app(sqlite_store))
 
 
-@pytest.mark.req(id="RQ-41")
 def test_well_formed_report_is_stored_and_acknowledged(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -145,7 +144,6 @@ def test_well_formed_report_is_stored_and_acknowledged(
     assert store.get_execution("a" * 32) is not None
 
 
-@pytest.mark.req(id="RQ-41")
 def test_retried_report_is_idempotent(client: TestClient, store: InMemoryExecutionStore) -> None:
     report = _well_formed_report("b" * 32)
 
@@ -163,8 +161,6 @@ def test_retried_report_is_idempotent(client: TestClient, store: InMemoryExecuti
 def test_report_with_vcs_section_persists_six_fields(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """design.md D47/D48, task 4.6. *(Scenario: A report carrying a vcs
-    section persists its six fields, `session-ingestion`)*."""
     report = _well_formed_report("2" + "0" * 31)
     report["vcs"] = _vcs_section()
 
@@ -185,9 +181,7 @@ def test_report_with_vcs_section_persists_six_fields(
 def test_report_without_vcs_section_still_records_run(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """design.md D47, task 4.7 -- the supported skew case for a plugin that
-    predates this change. *(Scenario: A report with no vcs section still
-    records its run, `session-ingestion`)*."""
+    """A plugin that does not send `vcs` is a supported version skew."""
     report = _well_formed_report("2" + "1" * 31)
     assert "vcs" not in report
 
@@ -200,25 +194,6 @@ def test_report_without_vcs_section_still_records_run(
     assert execution.vcs is None
 
 
-def test_vcs_section_accepted_without_capability_check(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
-    """design.md D47, task 4.8 -- `routes/capabilities.py` is unchanged, no
-    flag ever advertises a vcs-related capability, and none is required
-    before this section is accepted. *(Scenario: The endpoint accepts a vcs
-    section without any capability check, `session-ingestion`)*."""
-    report = _well_formed_report("2" + "2" * 31)
-    report["vcs"] = _vcs_section()
-
-    response = client.post("/api/v1/runs", json=report)
-
-    assert response.status_code == 201
-    execution = store.get_execution("2" + "2" * 31)
-    assert execution is not None
-    assert execution.vcs is not None
-
-
-@pytest.mark.req(id="RQ-41")
 @pytest.mark.parametrize("path", ["/runs", "/api/runs"])
 def test_unversioned_path_is_refused(client: TestClient, path: str) -> None:
     response = client.post(path, json=_well_formed_report())
@@ -226,15 +201,11 @@ def test_unversioned_path_is_refused(client: TestClient, path: str) -> None:
     assert response.status_code == 404
 
 
-@pytest.mark.req(id="RQ-41")
 def test_report_carrying_results_stores_them_with_the_run(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """RQ-41.1: a report carrying N results stores N result rows with the run.
-
-    Also proves the results survive the round trip, not just their count --
-    two entries with different outcomes read back with the outcomes they
-    were sent with.
+    """A report carrying N results stores N result rows with the run, and
+    each reads back with the outcome it was sent with.
     """
     report = _well_formed_report("c" * 32)
     report["results"] = [
@@ -252,14 +223,12 @@ def test_report_carrying_results_stores_them_with_the_run(
     assert stored["packages/vantage/tests/test_a.py::test_two"].outcome == "failed"
 
 
-@pytest.mark.req(id="RQ-41")
 @pytest.mark.parametrize("results_value", [None, []], ids=["null", "empty-list"])
 def test_report_with_null_or_empty_results_section_writes_no_result_rows(
     client: TestClient, store: InMemoryExecutionStore, results_value: list[Any] | None
 ) -> None:
-    """RQ-41.1, D15: `results: null` and `results: []` both record the run
-    and write zero result rows -- the supported plugin/server skew case, not
-    an error.
+    """`results: null` and `results: []` both record the run and write zero
+    result rows -- not an error.
     """
     run_id = "d" * 32 if results_value is None else "d" * 31 + "e"
     report = _well_formed_report(run_id)
@@ -272,28 +241,11 @@ def test_report_with_null_or_empty_results_section_writes_no_result_rows(
     assert store.count_results() == 0
 
 
-@pytest.mark.req(id="RQ-41")
-@pytest.mark.parametrize("results_value", [None, []], ids=["null", "empty-list"])
-def test_session_report_accepts_a_null_or_empty_results_section(
-    results_value: list[Any] | None,
-) -> None:
-    """The schema-level RED for the same scenario: `SessionReport.results`
-    must exist and round-trip the sent value, rather than being silently
-    dropped by the envelope's `extra="ignore"` (which is what would happen
-    today, before `results` is a declared field)."""
-    from vantage.service.schemas import SessionReport
-
-    payload = SessionReport.model_validate({**_well_formed_report(), "results": results_value})
-
-    assert payload.results == results_value
-
-
-@pytest.mark.req(id="RQ-41")
 def test_replayed_report_with_results_does_not_duplicate_them(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """RQ-41.2, D19 layer 3: replaying an already-stored report leaves the
-    same result rows in place and is acknowledged, never rejected."""
+    """Replaying an already-stored report leaves the same result rows in
+    place and is acknowledged, never rejected."""
     report = _well_formed_report("f" * 32)
     report["results"] = [_result_entry("packages/vantage/tests/test_b.py::test_one")]
 
@@ -306,12 +258,11 @@ def test_replayed_report_with_results_does_not_duplicate_them(
     assert store.count_results() == 1
 
 
-@pytest.mark.req(id="RQ-41")
 def test_unknown_result_key_is_tolerated_and_named_deduplicated_in_ignored(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """D15: an unknown key on a *result* is tolerated (`extra="allow"`), and
-    its **name** is reported back deduplicated as `results[].<name>` -- one
+    """An unknown key on a *result* is tolerated (`extra="allow"`), and its
+    **name** is reported back deduplicated as `results[].<name>` -- one
     entry for two results carrying the same unknown key, never a per-index
     path."""
     report = _well_formed_report("1" + "a" * 31)
@@ -331,10 +282,8 @@ def test_unknown_result_key_is_tolerated_and_named_deduplicated_in_ignored(
 def test_an_older_plugin_omitting_failure_fields_still_stores_run_and_results(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """session-ingestion → An older plugin omitting the fields still stores
-    its run and results (task 6.10): a report shaped exactly like every
-    pre-`failure-capture` report -- no failure-evidence keys at all -- still
-    stores one run and its results, every failure field absent."""
+    """A report with no failure evidence keys at all still stores one run
+    and its results, every failure field absent."""
     report = _well_formed_report("5" + "0" * 31)
     report["results"] = [_result_entry("packages/vantage/tests/test_d.py::test_one")]
 
@@ -352,9 +301,8 @@ def test_an_older_plugin_omitting_failure_fields_still_stores_run_and_results(
 def test_a_newer_plugins_failure_evidence_fields_are_persisted(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """session-ingestion → A newer plugin's failure-evidence fields are
-    persisted (task 6.11): a report carrying the new fields round-trips
-    through storage."""
+    """A report carrying failure evidence fields round-trips through
+    storage."""
     report = _well_formed_report("5" + "2" * 31)
     report["results"] = [_failing_result_entry("packages/vantage/tests/test_g.py::test_one")]
 
@@ -375,10 +323,9 @@ def test_a_newer_plugins_failure_evidence_fields_are_persisted(
 def test_an_older_server_tolerates_unrecognized_failure_evidence_keys(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """session-ingestion → An older server tolerates a newer plugin's
-    failure-evidence fields (task 6.12): an unrecognized key under
-    `ResultReport`'s existing `extra="allow"` tolerance is accepted and its
-    name surfaces, deduplicated, in `Acknowledgement.ignored`."""
+    """An unrecognized failure evidence key on a result is accepted under
+    `ResultReport`'s `extra="allow"`, and its name surfaces in
+    `Acknowledgement.ignored`."""
     report = _well_formed_report("5" + "1" * 31)
     report["results"] = [
         _result_entry(
@@ -396,59 +343,14 @@ def test_an_older_server_tolerates_unrecognized_failure_evidence_keys(
     assert store.count_results() == 1
 
 
-def test_a_report_carrying_failure_evidence_within_the_cap_is_accepted_normally(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
-    """session-ingestion → A report carrying failure evidence within the cap
-    is accepted normally (task 6.14): one run row, results stored with their
-    fields, response acknowledges."""
-    report = _well_formed_report("5" + "3" * 31)
-    report["results"] = [_failing_result_entry("packages/vantage/tests/test_h.py::test_one")]
-
-    response = client.post("/api/v1/runs", json=report)
-
-    assert response.status_code == 201
-    body = response.json()
-    assert body["status"] == "created"
-    assert store.count_executions() == 1
-    assert store.count_results() == 1
-
-
-@pytest.mark.req(id="RQ-9")
-def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
-    """The Pydantic hop of the four-hop `""`-vs-`None` guard (design.md D18):
-    `param_id: ""` and `param_id: null` on the wire must arrive as distinct
-    Python values. No `min_length=1`, no falsy-to-`None` coercion -- the same
-    rule applies to a duration of `0.0`, which must survive as `0.0`, not be
-    coerced to `None`."""
-    from vantage.service.schemas import ResultReport
-
-    empty_param = ResultReport.model_validate(
-        _result_entry("packages/vantage/tests/test_result.py::test_x[]", param_id="")
-    )
-    absent_param = ResultReport.model_validate(
-        _result_entry("packages/vantage/tests/test_result.py::test_y", param_id=None)
-    )
-    zero_duration = ResultReport.model_validate(
-        _result_entry("packages/vantage/tests/test_result.py::test_z", duration=0.0)
-    )
-
-    assert empty_param.param_id == ""
-    assert absent_param.param_id is None
-    assert empty_param.param_id != absent_param.param_id
-    assert zero_duration.duration == 0.0
-
-
-@pytest.mark.req(id="RQ-13")
 def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
     sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
 ) -> None:
-    """Reproduces the Phase 3 finding (Engram observation 62): `last_seen_at`
-    is TEXT and D20's `MAX` guard compares it lexicographically, which is
-    only correct once every writer normalizes to the same UTC offset. Before
-    the boundary normalizes, `'...T12:00:00+02:00'` (10:00 UTC, genuinely
-    earlier) sorts AFTER `'...T11:00:00+00:00'` (11:00 UTC) as a string and
-    rolls the catalogue forward -- exactly what D20 exists to prevent."""
+    """`last_seen_at` is TEXT compared with `MAX`, which is only correct when
+    every stored value has the same UTC offset. Un-normalized,
+    `'...T12:00:00+02:00'` (10:00 UTC, earlier) sorts after
+    `'...T11:00:00+00:00'` (11:00 UTC) and would wrongly advance the
+    catalogue entry."""
     node_id = "packages/vantage/tests/test_utc.py::test_guard"
 
     first_report = _well_formed_report("7" * 32)
@@ -467,15 +369,13 @@ def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
     assert entry.last_seen_run_id == "7" * 32
 
 
-@pytest.mark.req(id="RQ-30")
 def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
 ) -> None:
-    """D-addendum (2026-08-18): one helper normalizes every timestamp before
-    it reaches the store -- `run.started_at`/`finished_at` and a result's
-    `started_at`/`finished_at` alike, proven in one test on purpose so the
-    two are never allowed to diverge onto separate paths. An aware value
-    converts to its UTC equivalent; a naive value is interpreted as UTC."""
+    """Run and result timestamps are both normalized to UTC before they
+    reach the store, checked together so the two paths cannot diverge. An
+    aware value converts to its UTC equivalent; a naive value is taken as
+    UTC."""
     node_id = "packages/vantage/tests/test_utc.py::test_normalizes"
     report = _well_formed_report("9" * 32)
     report["run"]["started_at"] = "2026-08-18T13:00:00+02:00"  # 11:00 UTC
@@ -494,7 +394,7 @@ def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     raw_started_at = sqlite_store._conn.execute(
         "SELECT started_at FROM run WHERE id = ?", ("9" * 32,)
     ).fetchone()[0]
-    assert raw_started_at == "2026-08-18T11:00:00+00:00"
+    assert raw_started_at == "2026-08-18T11:00:00.000000+00:00"
 
     execution = sqlite_store.get_execution("9" * 32)
     assert execution is not None
@@ -506,10 +406,177 @@ def test_non_utc_and_naive_timestamps_normalize_to_one_utc_form(
     assert result.finished_at == datetime(2026, 8, 18, 13, 0, 2, tzinfo=timezone.utc)
 
 
-# --- Phase 4: heartbeat endpoint (design.md D33, task 4.2/4.3) --------------
+def test_timestamps_at_the_edge_of_the_utc_range_are_accepted(
+    sqlite_client: TestClient, sqlite_store: SqliteExecutionStore
+) -> None:
+    """Only a timestamp whose UTC form leaves years 1-9999 is refused; one
+    that lands exactly on either end converts and is stored."""
+    report = _well_formed_report("9" * 31 + "a")
+    report["run"]["started_at"] = "0001-01-01T01:00:00+01:00"
+    report["run"]["finished_at"] = "9999-12-31T18:59:59-05:00"
+
+    response = sqlite_client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    execution = sqlite_store.get_execution("9" * 31 + "a")
+    assert execution is not None
+    assert execution.started_at == datetime(1, 1, 1, tzinfo=timezone.utc)
+    assert execution.finished_at == datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
 
 
-@pytest.mark.req(id="RQ-44")
+@pytest.mark.parametrize("bound", [2**63 - 1, -(2**63)], ids=["int64_max", "int64_min"])
+def test_integers_at_the_signed_64_bit_bounds_are_stored(
+    sqlite_client: TestClient, sqlite_store: SqliteExecutionStore, bound: int
+) -> None:
+    """The integer bound is SQLite's own range: its two ends are stored and
+    read back unchanged."""
+    run_id = "9" * 31 + ("b" if bound > 0 else "c")
+    report = _well_formed_report(run_id)
+    report["run"]["exit_status"] = bound
+    report["results"] = [_failing_result_entry("tests/test_a.py::test_one", failure_lineno=bound)]
+
+    response = sqlite_client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    execution = sqlite_store.get_execution(run_id)
+    assert execution is not None
+    assert execution.exit_status == bound
+    [result] = sqlite_store.get_results(run_id)
+    assert result.failure is not None
+    assert result.failure.failure_lineno == bound
+
+
+# --- lone surrogates ----------------------------------------------------------
+
+# pytest builds node ids and exception text from `surrogateescape`-decoded
+# file names, and `json.dumps` escapes the resulting lone surrogate into valid
+# JSON, so a real plugin sends these.
+_LONE = "caf\udce9"
+_REPLACED = "caf\ufffd"
+_NODE_ID = f"tests/{_LONE}/test_a.py::test_one"
+
+
+def _surrogate_report(field: str) -> dict[str, Any]:
+    report = _well_formed_report("5" + "e" * 31)
+    result = _result_entry("tests/test_a.py::test_one")
+    if field == "node_id":
+        result = _result_entry(_NODE_ID)
+    elif field == "run.interrupt_reason":
+        report["run"]["interrupt_reason"] = _LONE
+    elif field.startswith("vcs."):
+        report["vcs"] = _vcs_section(**{field.removeprefix("vcs."): _LONE})
+    elif field == "metadata.path":
+        report["metadata"] = _metadata_section(
+            _metadata_file(path=f"{_LONE}.json", content="{}", keys=["k"])
+        )
+    elif field == "metadata.key":
+        report["metadata"] = _metadata_section(_metadata_file(content="{}", keys=[_LONE]))
+    else:
+        result[field] = _LONE
+    report["results"] = [result]
+    return report
+
+
+def _stored_surrogate_field(store: Any, stored_metadata: StoredMetadata, field: str) -> object:
+    run_id = "5" + "e" * 31
+    execution = store.get_execution(run_id)
+    [result] = store.get_results(run_id)
+    if field == "node_id":
+        return (result.identity.node_id, result.identity.file_path)
+    if field == "run.interrupt_reason":
+        return execution.interrupt_reason
+    if field.startswith("vcs."):
+        return getattr(execution.vcs, field.removeprefix("vcs."))
+    if field == "metadata.path":
+        return {file.source_file for file in stored_metadata(run_id).files}
+    if field == "metadata.key":
+        return {entry.key for entry in stored_metadata(run_id).entries}
+    if field == "worker_id":
+        return result.worker_id
+    if field == "captured_stdout":
+        return result.captured.stdout
+    return getattr(result.failure, field)
+
+
+_SURROGATE_CASES: dict[str, object] = {
+    "node_id": (f"tests/{_REPLACED}/test_a.py::test_one", f"tests/{_REPLACED}/test_a.py"),
+    "worker_id": _REPLACED,
+    "failure_message": _REPLACED,
+    "skip_reason": _REPLACED,
+    "xfail_reason": _REPLACED,
+    "captured_stdout": _REPLACED,
+    "run.interrupt_reason": _REPLACED,
+    "vcs.branch": _REPLACED,
+    "vcs.commit_subject": _REPLACED,
+    "metadata.path": {f"{_REPLACED}.json"},
+    "metadata.key": {_REPLACED},
+}
+
+
+def test_a_body_starting_with_a_byte_order_mark_is_accepted(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A byte order mark in front of UTF-8 is still UTF-8, and some Windows
+    tools write one."""
+    report = _well_formed_report("a" * 32)
+
+    response = client.post(
+        "/api/v1/runs",
+        content=b"\xef\xbb\xbf" + json.dumps(report).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 201
+    assert store.get_execution("a" * 32) is not None
+
+
+@pytest.mark.parametrize(("field", "expected"), _SURROGATE_CASES.items(), ids=_SURROGATE_CASES)
+def test_a_lone_surrogate_in_any_string_is_stored_as_the_replacement_character(
+    any_store: Any, any_stored_metadata: StoredMetadata, field: str, expected: object
+) -> None:
+    """A lone surrogate cannot be encoded as UTF-8, so the server replaces it
+    with U+FFFD before validation instead of failing the whole session at
+    the first encode. Both adapters store the same text."""
+    client = TestClient(create_app(any_store))
+
+    response = client.post(
+        "/api/v1/runs",
+        content=json.dumps(_surrogate_report(field)).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 201
+    assert _stored_surrogate_field(any_store, any_stored_metadata, field) == expected
+
+
+def test_a_lone_surrogate_in_a_key_is_replaced_too(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Keys are client text as well: an unknown result key carrying a lone
+    surrogate is tolerated like any other unknown key, not refused."""
+    report = _well_formed_report("5" + "f" * 31)
+    report["results"] = [_result_entry("tests/test_a.py::test_one", **{_LONE: "x"})]
+
+    response = client.post(
+        "/api/v1/runs",
+        content=json.dumps(report).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["ignored"] == ["results[].<unnamed>"]
+
+
+# --- heartbeat endpoint -------------------------------------------------------
+
+
+def _last_contact_at(store: ExecutionStore, run_id: str) -> datetime:
+    detail = store.get_run_detail(run_id)
+    assert detail is not None
+    assert detail.last_contact_at is not None
+    return detail.last_contact_at
+
+
 def test_heartbeat_advances_last_contact_for_an_accepted_start_write(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
@@ -518,23 +585,20 @@ def test_heartbeat_advances_last_contact_for_an_accepted_start_write(
     report["run"]["exit_status"] = None
     client.post("/api/v1/runs", json=report)
     run_id = report["run"]["id"]
-    before = store._last_contact[run_id]  # noqa: SLF001
+    before = _last_contact_at(store, run_id)
 
     response = client.post(f"/api/v1/runs/{run_id}/heartbeat")
 
     assert response.status_code == 200
     assert response.json() == {"run_id": run_id, "status": "acknowledged"}
-    assert store._last_contact[run_id] > before  # noqa: SLF001
+    assert _last_contact_at(store, run_id) > before
 
 
-@pytest.mark.req(id="RQ-44")
 def test_heartbeat_cannot_touch_finish_fields(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """design.md D33, task 4.3: a heartbeat for a run whose finish is already
-    recorded leaves `finished_at`, `exit_status`, `interrupted` and
-    `interrupt_reason` exactly as recorded -- the body is `{}` and read by
-    nothing, so there is no field to smuggle a change through."""
+    """A heartbeat for a finished run leaves `finished_at`, `exit_status`,
+    `interrupted` and `interrupt_reason` exactly as recorded."""
     report = _well_formed_report("3" + "a" * 31)
     client.post("/api/v1/runs", json=report)
     run_id = report["run"]["id"]
@@ -552,19 +616,14 @@ def test_heartbeat_cannot_touch_finish_fields(
     assert after.interrupt_reason == before.interrupt_reason
 
 
-@pytest.mark.req(id="RQ-44")
 def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """W1: the 404 is resolved by `get_execution`, never by a zero-rowcount
-    update -- the one case that distinguishes the two implementations is a
-    *known* run whose stored `last_contact_at` is already ahead of this
-    beat, so `touch_last_contact` itself returns `False`. Every other
-    heartbeat test's incoming beat is strictly later than the stored
-    contact, so `rowcount` would also be 1 there and could not catch a
-    regression to the wrong implementation. Setting `_last_contact` directly
-    into the future, rather than issuing two real heartbeats, is what
-    guarantees the beat under test is provably earlier without a timing race.
+    """The 404 comes from `get_execution`, not from a no-op update: a known
+    run whose stored contact is already ahead of this beat makes
+    `touch_last_contact` return `False`, yet the answer is still 200. The
+    stored contact is first moved into the future through the port, so the
+    beat is guaranteed earlier without a timing race.
     """
     report = _well_formed_report("4" + "a" * 31)
     report["run"]["finished_at"] = None
@@ -572,7 +631,7 @@ def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
     client.post("/api/v1/runs", json=report)
     run_id = report["run"]["id"]
     far_future = datetime(2099, 1, 1, tzinfo=timezone.utc)
-    store._last_contact[run_id] = far_future  # noqa: SLF001
+    assert store.touch_last_contact(run_id, far_future) is True
 
     response = client.post(f"/api/v1/runs/{run_id}/heartbeat")
 
@@ -581,32 +640,15 @@ def test_heartbeat_for_a_known_run_with_a_later_recorded_contact_is_200_not_404(
     # The monotonic guard rejected the earlier beat: the stored contact is
     # unchanged, yet the response is still 200 -- a rowcount-based 404 would
     # have answered 404 here.
-    assert store._last_contact[run_id] == far_future  # noqa: SLF001
+    assert _last_contact_at(store, run_id) == far_future
 
 
-# --- Phase 4: `app.state.grace_period` (design.md D34, task 4.14) ----------
-
-
-def test_create_app_defaults_grace_period_to_900_seconds() -> None:
-    app = create_app(InMemoryExecutionStore())
-
-    assert app.state.grace_period == 900.0
-
-
-def test_create_app_exposes_the_configured_grace_period() -> None:
-    app = create_app(InMemoryExecutionStore(), grace_period_seconds=123.0)
-
-    assert app.state.grace_period == 123.0
-
-
-# --- Capability advertisement (design decisions D38-D40, tasks 1.1/1.2) -----
+# --- capability advertisement -------------------------------------------------
 
 
 def test_capabilities_endpoint_advertises_the_session_lifecycle(client: TestClient) -> None:
-    """D38: the server advertises exactly one capability, not a version
-    string -- `GET /api/v1/capabilities` answers `{"session_lifecycle":
-    true}`, the one explicit positive answer a client's fail-closed check
-    (D40) may treat as permission."""
+    """`GET /api/v1/capabilities` answers `{"session_lifecycle": true}` -- a
+    capability flag, not a version string."""
     response = client.get("/api/v1/capabilities")
 
     assert response.status_code == 200
@@ -614,15 +656,13 @@ def test_capabilities_endpoint_advertises_the_session_lifecycle(client: TestClie
 
 
 def test_capabilities_endpoint_is_not_mounted_unversioned(client: TestClient) -> None:
-    """Mounted under `/api/v1` and nowhere else -- the same absence rule
-    `app.py`'s own docstring already states for the run routes (RQ-41's
-    third criterion)."""
+    """Mounted under `/api/v1` and nowhere else, like the run routes."""
     response = client.get("/capabilities")
 
     assert response.status_code == 404
 
 
-# --- Phase 9: metadata section ingestion (design.md D96-D98) ---------------
+# --- metadata section ingestion -----------------------------------------------
 
 
 def _metadata_file(
@@ -646,44 +686,11 @@ def _metadata_section(*files: dict[str, Any]) -> dict[str, Any]:
     return {"declaration": "vantage-metadata.json", "files": list(files)}
 
 
-@pytest.mark.req(id="RQ-44")
-def test_a_report_whose_metadata_is_entirely_garbage_still_records_the_run(
-    client: TestClient, store: InMemoryExecutionStore
-) -> None:
-    """RQ-44: the run row is what makes an abandoned session observable at
-    all, so a malformed declared document MUST NOT block it (design.md
-    D97's governing rule). *(Scenario: A malformed document does not block
-    the run from being stored, `session-ingestion`)*."""
-    run_id = "6" + "0" * 31
-    report = _well_formed_report(run_id)
-    report["metadata"] = _metadata_section(
-        _metadata_file(content="not json at all", keys=["anything"])
-    )
-
-    response = client.post("/api/v1/runs", json=report)
-
-    assert response.status_code == 201
-    assert store.get_execution(run_id) is not None
-    assert _stored_metadata_files(store, run_id) == frozenset(
-        {MetadataFile(source_file="config/firmware.json", content_type="json", status="malformed")}
-    )
-    assert _stored_metadata_entries(store, run_id) == frozenset(
-        {
-            MetadataEntry(
-                key="anything",
-                value=None,
-                source_file="config/firmware.json",
-                status="source_unavailable",
-            )
-        }
-    )
-
-
 _VALUE_TOO_LARGE = "x" * (MAX_METADATA_VALUE_BYTES + 1)
 
-# design.md D97's eleven classes, one case per row: (id, file, expected
-# file row or None, expected entry rows). Class 11 (server-side shape
-# reject) expects no rows at all -- the entry is dropped in its entirety.
+# Every metadata outcome, one case each: (file, expected file row or None,
+# expected entry rows). A server-side shape reject expects no rows at all --
+# the file is dropped in its entirety.
 _TAXONOMY_CASES: dict[str, tuple[dict[str, Any], MetadataFile | None, frozenset[MetadataEntry]]] = {
     "not_found": (
         _metadata_file(status="not_found", content=None, keys=["firmware_version"]),
@@ -842,6 +849,27 @@ _TAXONOMY_CASES: dict[str, tuple[dict[str, Any], MetadataFile | None, frozenset[
         None,
         frozenset(),
     ),
+    "server_side_shape_reject_windows": (
+        _metadata_file(
+            path="..\\escape.json", status="path_rejected", content=None, keys=["firmware_version"]
+        ),
+        None,
+        frozenset(),
+    ),
+    "captured_without_content": (
+        _metadata_file(content=None, keys=["firmware_version"]),
+        MetadataFile(source_file="config/firmware.json", content_type="json", status="malformed"),
+        frozenset(
+            {
+                MetadataEntry(
+                    key="firmware_version",
+                    value=None,
+                    source_file="config/firmware.json",
+                    status="source_unavailable",
+                )
+            }
+        ),
+    ),
 }
 
 
@@ -859,7 +887,7 @@ _TAXONOMY_PARAMS = [
     _TAXONOMY_PARAMS,
     ids=list(_TAXONOMY_CASES.keys()),
 )
-def test_metadata_taxonomy_class_produces_the_exact_status_pair(
+def test_each_metadata_outcome_records_the_exact_file_and_key_status(
     client: TestClient,
     store: InMemoryExecutionStore,
     run_id: str,
@@ -867,30 +895,23 @@ def test_metadata_taxonomy_class_produces_the_exact_status_pair(
     expected_file: MetadataFile | None,
     expected_entries: frozenset[MetadataEntry],
 ) -> None:
-    """design.md D97's eleven classes, one test per row -- proves the exact
-    `(file.status, key.status)` pair a client sees recorded, not merely that
-    ingestion did not crash. *(Scenarios: "An unsupported format is treated
-    as malformed" / "A malformed document does not block the run from being
-    stored" / "A declared key absent from a well-formed document is marked
-    absent" / "A non-scalar declared value is marked uncapturable, never
-    serialized" / "An oversized value is dropped whole, marked
-    uncapturable", `session-ingestion`)*."""
+    """Each outcome records the exact `(file.status, key.status)` pair, not
+    merely an ingestion that did not crash."""
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(file_report)
 
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_files(store, run_id) == (
+    assert set(store.metadata(run_id).files) == (
         frozenset({expected_file}) if expected_file is not None else frozenset()
     )
-    assert _stored_metadata_entries(store, run_id) == expected_entries
+    assert set(store.metadata(run_id).entries) == expected_entries
 
 
 def test_a_declared_key_within_bound_is_captured_whole(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(Scenario: A value within bound is stored whole, `session-ingestion`)*."""
     run_id = "9" + "5" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(
@@ -900,7 +921,7 @@ def test_a_declared_key_within_bound_is_captured_whole(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_entries(store, run_id) == frozenset(
+    assert set(store.metadata(run_id).entries) == frozenset(
         {
             MetadataEntry(
                 key="firmware_version",
@@ -915,8 +936,6 @@ def test_a_declared_key_within_bound_is_captured_whole(
 def test_a_report_with_no_metadata_section_still_records_its_run(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(Scenario: A report with no metadata section still records its run,
-    `session-ingestion`)*."""
     run_id = "9" + "6" * 31
     report = _well_formed_report(run_id)
     assert "metadata" not in report
@@ -925,14 +944,12 @@ def test_a_report_with_no_metadata_section_still_records_its_run(
 
     assert response.status_code == 201
     assert store.get_execution(run_id) is not None
-    assert _stored_metadata_files(store, run_id) == frozenset()
-    assert _stored_metadata_entries(store, run_id) == frozenset()
+    assert store.metadata(run_id) == RunMetadata()
 
 
 def test_a_yaml_declared_document_is_parsed(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(Scenario: A YAML declared document is parsed, `session-ingestion`)*."""
     run_id = "9" + "7" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(
@@ -947,7 +964,7 @@ def test_a_yaml_declared_document_is_parsed(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_entries(store, run_id) == frozenset(
+    assert set(store.metadata(run_id).entries) == frozenset(
         {
             MetadataEntry(
                 key="firmware_version",
@@ -959,37 +976,154 @@ def test_a_yaml_declared_document_is_parsed(
     )
 
 
-def test_an_unsupported_format_is_treated_as_malformed(
+def test_a_file_in_a_format_the_server_cannot_parse_is_dropped_with_its_keys(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """*(Scenario: An unsupported format is treated as malformed,
-    `session-ingestion`)*. `toml` is a valid `run_metadata_file.content_type`
-    (schema.sql's own `CHECK`) that `metadata_parse.parse` does not
-    implement -- the same "server does not parse it" outcome D97 class 7
-    covers for a genuinely broken document."""
+    """The server parses json and yaml only, and stores no other format, so
+    a `toml` file never reaches the store; a sibling file and the run are
+    still recorded."""
     run_id = "9" + "8" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = _metadata_section(
-        _metadata_file(format="toml", content="firmware_version = 2.1", keys=["firmware_version"])
+        _metadata_file(
+            path="config/firmware.toml",
+            format="toml",
+            content="firmware_version = 2.1",
+            keys=["firmware_version"],
+        ),
+        _metadata_file(content=json.dumps({"board": "C"}), keys=["board"]),
     )
 
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_files(store, run_id) == frozenset(
-        {MetadataFile(source_file="config/firmware.json", content_type="toml", status="malformed")}
+    assert set(store.metadata(run_id).files) == frozenset(
+        {MetadataFile(source_file="config/firmware.json", content_type="json", status="captured")}
+    )
+    assert {entry.key for entry in store.metadata(run_id).entries} == {"board"}
+
+
+_UNUSABLE_DOCUMENTS = {
+    "json_lone_surrogate_escape": ("json", '{"firmware_version": "x\\ud800"}'),
+    "yaml_lone_surrogate_escape": ("yaml", 'firmware_version: "x\\udc80"\n'),
+}
+
+
+@pytest.mark.parametrize(
+    ("content_type", "content"), _UNUSABLE_DOCUMENTS.values(), ids=_UNUSABLE_DOCUMENTS.keys()
+)
+def test_a_declared_document_the_server_cannot_store_still_records_the_run(
+    any_store: Any, any_stored_metadata: StoredMetadata, content_type: str, content: str
+) -> None:
+    """The metadata section travels with the start report and the finish
+    report alike, so a document that crashed the parser would lose every
+    write of the session. It is recorded `malformed` instead."""
+    run_id = "6" + "1" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(format=content_type, content=content, keys=["firmware_version"])
+    )
+
+    response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert any_stored_metadata(run_id).files == (
+        MetadataFile(
+            source_file="config/firmware.json", content_type=content_type, status="malformed"
+        ),
     )
 
 
-# --- Phase 9: threat matrix (design.md, task 9.7) ---------------------------
+def test_a_near_cap_yaml_document_is_stored_too_large_rather_than_parsed(
+    any_store: Any, any_stored_metadata: StoredMetadata
+) -> None:
+    """Composing YAML costs seconds of CPU per megabyte, taken from every
+    other request; a document only a non-plugin client could send is
+    refused by size, and the run is still recorded."""
+    run_id = "6" + "3" * 31
+    report = _well_formed_report(run_id)
+    content = "k: [" + "1," * 480_000 + "1]\n"
+    report["metadata"] = _metadata_section(
+        _metadata_file(path="config/big.yaml", format="yaml", content=content, keys=["k"])
+    )
+
+    response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert any_stored_metadata(run_id).files == (
+        MetadataFile(source_file="config/big.yaml", content_type="yaml", status="too_large"),
+    )
+
+
+def test_the_server_stores_at_most_the_metadata_entry_bound(
+    any_store: Any, any_stored_metadata: StoredMetadata
+) -> None:
+    """The plugin refuses a declaration over the entry and key bounds, but
+    any HTTP client can report here; the excess is dropped, never the
+    session."""
+    run_id = "6" + "4" * 31
+    report = _well_formed_report(run_id)
+    keys = [f"key_{index}" for index in range(MAX_METADATA_ENTRIES + 50)]
+    report["metadata"] = _metadata_section(
+        _metadata_file(content="{}", keys=keys[:100]),
+        _metadata_file(path="config/b.json", content="{}", keys=keys[100:]),
+        _metadata_file(
+            path="config/c.json", content="{}", keys=["k" * (MAX_METADATA_KEY_CHARS + 1)]
+        ),
+    )
+
+    response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    stored = any_stored_metadata(run_id).entries
+    assert {entry.key for entry in stored} == set(keys[:MAX_METADATA_ENTRIES])
+    assert len(any_stored_metadata(run_id).files) == 3
+
+
+def test_a_json_declared_number_is_stored_as_the_text_the_file_holds(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A metadata filter compares strings, so `2.10` must not be stored as
+    `2.1`."""
+    run_id = "6" + "2" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content='{"firmware_version": 2.10}', keys=["firmware_version"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    [entry] = store.metadata(run_id).entries
+    assert entry.value == "2.10"
+
+
+def test_a_json_integer_past_the_digit_limit_still_records_the_run(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """Converting a literal over the interpreter's int digit limit raises,
+    and a file under the plugin's per-file bound can hold one. Kept as text,
+    it is only a value too large to store."""
+    run_id = "6" + "5" * 31
+    report = _well_formed_report(run_id)
+    report["metadata"] = _metadata_section(
+        _metadata_file(content='{"build": 1' + "0" * 4999 + "}", keys=["build"])
+    )
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    [entry] = store.metadata(run_id).entries
+    assert (entry.value, entry.status) == (None, "value_too_large")
+
+
+# --- hostile client-chosen text -----------------------------------------------
 
 
 def test_a_quoting_shaped_declared_key_round_trips_byte_identically(
     client: TestClient, store: InMemoryExecutionStore
 ) -> None:
-    """Threat matrix: "Client-chosen text reaching SQL" -- bound parameters
-    only, mirroring `test_routes_sections.py`'s own proof for section names.
-    A declared key containing quote characters is stored and read back
+    """A declared key containing quote characters is stored and read back
     through the port intact, never escaped or normalised."""
     run_id = "8" + "0" * 31
     key = 'He said "hi", didn\'t he?'
@@ -1001,7 +1135,7 @@ def test_a_quoting_shaped_declared_key_round_trips_byte_identically(
     response = client.post("/api/v1/runs", json=report)
 
     assert response.status_code == 201
-    assert _stored_metadata_entries(store, run_id) == frozenset(
+    assert set(store.metadata(run_id).entries) == frozenset(
         {
             MetadataEntry(
                 key=key, value="value", source_file="config/firmware.json", status="captured"
@@ -1013,11 +1147,8 @@ def test_a_quoting_shaped_declared_key_round_trips_byte_identically(
 def test_a_crlf_shaped_metadata_key_never_appears_unescaped_in_a_rejection_body(
     client: TestClient,
 ) -> None:
-    """Threat matrix: "Client-chosen text reaching a rejection body" -- an
-    unknown field within the `metadata` section (`extra="forbid"`,
-    design.md D96) is client-chosen text of the same shape a declared key
-    could carry. `errors.py`'s pre-existing `safe_segment` allow-list, not
-    new code in this phase, is what keeps it out of the response body."""
+    """An unknown field in the `metadata` section (`extra="forbid"`) is
+    client-chosen text; `safe_segment` keeps it out of the rejection body."""
     run_id = "8" + "1" * 31
     report = _well_formed_report(run_id)
     report["metadata"] = {

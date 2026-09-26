@@ -1,56 +1,43 @@
-"""Where the server's own database and bind address come from (design.md D11).
+"""Where the server's own database and bind address come from.
 
 **Pure -- no filesystem access, ever.** Resolution only computes a path; it
-never stats, creates or opens anything. That is the whole of the
-threat-matrix "Path authority" defence: if resolving *created* the
-directory, then merely asking where the database would go -- to display it,
-to validate a `--database` value that turns out to be a typo -- would
-materialise it as a side effect of asking. Creating anything belongs to
-whoever acts on the resolved path (`service/cli.py`), never to resolution
-itself.
+never stats, creates or opens anything. If resolving created the directory,
+merely asking where the database would go -- to display it, or to validate a
+`--database` value that turns out to be a typo -- would materialise it as a
+side effect. Creating anything belongs to whoever acts on the resolved path
+(`service/cli.py`).
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from enum import Enum
+from datetime import timedelta
 from pathlib import Path
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
 
-# design.md D34: the default grace period is a multiple of the default
-# heartbeat interval, not an invented round number -- the "hint" name marks
-# that `pytest_vantage.recorder._BEAT_INTERVAL_SECONDS` is declared
-# separately, on the other side of the HTTP boundary (RQ-24/ADR-9 forbid
-# sharing code across it); this copy only derives a default, so a divergence
-# between the two changes the multiple, never correctness.
+# The default grace period is a multiple of the plugin's heartbeat interval.
+# "Hint" because `pytest_vantage.recorder._BEAT_INTERVAL_SECONDS` is declared
+# separately: the plugin shares no code with the server. This copy only
+# derives a default, so a divergence changes the multiple, never correctness.
 _BEAT_INTERVAL_HINT_SECONDS = 30.0
 _DEFAULT_GRACE_BEATS = 30
 _DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_BEATS * _BEAT_INTERVAL_HINT_SECONDS  # 900.0
 
-
-class ConfigSource(str, Enum):
-    """Where a resolved value came from. **Never `StrEnum`** -- that is
-    3.11+ and the floor is 3.10 (CLAUDE.md).
-    """
-
-    CLI = "cli"
-    ENV = "env"
-    DEFAULT = "default"
+# Longer than any live session goes quiet, and far inside what `timedelta`
+# can hold -- `create_app` builds one from the grace period.
+_MAX_GRACE_PERIOD_SECONDS = 365 * 24 * 60 * 60.0
 
 
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
-    """Everything `vantage serve` needs to start, already resolved."""
+    """Everything the `vantage` command needs to start, already resolved."""
 
     database_path: Path
-    database_source: ConfigSource
     host: str
     port: int
     grace_period_seconds: float
-    grace_source: ConfigSource
 
 
 def resolve_server_config(
@@ -60,34 +47,30 @@ def resolve_server_config(
     cli_host: str | None,
     cli_port: int | None,
     cli_grace_period: float | None,
-    home: Path,
+    home: Path | None,
     xdg_data_home: str | None,
 ) -> ServerConfig:
     """Resolve the server's database path, bind address, and grace period.
 
     Database precedence: ``--database`` > ``VANTAGE_DATABASE`` >
     ``$XDG_DATA_HOME/vantage/vantage.db``, default
-    ``~/.local/share/vantage/vantage.db``. Environment configuration is
-    allowed here although RQ-2 forbids it on the plugin -- the threat
-    differs, not the mechanism: RQ-2 stops a committed value silently
-    enabling recording in someone else's project, while this server is
+    ``~/.local/share/vantage/vantage.db``. An empty value counts as unset,
+    and a relative ``XDG_DATA_HOME`` is ignored. `home` is `None` when the
+    process has no home directory to find; that refuses only a start that
+    falls back to the default path. The plugin's activation
+    switch is flag-only so shared configuration can never silently turn
+    recording on; the environment is fine here because this server is
     started deliberately by whoever runs it.
 
     Host, port and the grace period each take only a CLI value or a fixed
-    default -- design.md D11/D34 name no environment variable for any of
-    the three.
+    default; none has an environment variable. A value the server cannot run
+    with raises `ServerConfigError` here, before anything is created.
     """
-    database_path, database_source = _resolve_database_path(
-        cli_database, env_database, home, xdg_data_home
-    )
-    grace_period_seconds, grace_source = _resolve_grace_period(cli_grace_period)
     return ServerConfig(
-        database_path=database_path,
-        database_source=database_source,
-        host=cli_host if cli_host is not None else _DEFAULT_HOST,
-        port=cli_port if cli_port is not None else _DEFAULT_PORT,
-        grace_period_seconds=grace_period_seconds,
-        grace_source=grace_source,
+        database_path=_resolve_database_path(cli_database, env_database, home, xdg_data_home),
+        host=_resolve_host(cli_host),
+        port=_resolve_port(cli_port),
+        grace_period_seconds=_resolve_grace_period(cli_grace_period),
     )
 
 
@@ -100,42 +83,82 @@ class ServerConfigError(ValueError):
     """
 
 
-def _resolve_grace_period(cli_grace_period: float | None) -> tuple[float, ConfigSource]:
-    if cli_grace_period is not None:
-        # `argparse type=float` accepts 0, -1, nan and inf. Any of them makes
-        # every unfinished run derive as abandoned the instant it is read,
-        # including sessions heartbeating normally -- a silently useless server
-        # rather than one that refused to start. The plugin already rejects a
-        # nonsensical timeout this way; this is the server-side equivalent.
-        if not math.isfinite(cli_grace_period) or cli_grace_period <= 0:
-            raise ServerConfigError(
-                f"--grace-period must be a positive number of seconds, got {cli_grace_period!r}"
-            )
-        return cli_grace_period, ConfigSource.CLI
-    return _DEFAULT_GRACE_PERIOD_SECONDS, ConfigSource.DEFAULT
+def _resolve_host(cli_host: str | None) -> str:
+    if cli_host is None:
+        return _DEFAULT_HOST
+    # `--host "$VAR"` with the variable unset arrives as "", which asyncio
+    # binds as every interface: the opposite of the loopback default meant.
+    # Whitespace is never part of an address, and a padded one neither
+    # resolves nor compares equal to the loopback default.
+    host = cli_host.strip()
+    if not host:
+        raise ServerConfigError(
+            f"--host must name a bind address, got {cli_host!r}; omit it to bind {_DEFAULT_HOST}"
+        )
+    return host
+
+
+def _resolve_port(cli_port: int | None) -> int:
+    if cli_port is None:
+        return _DEFAULT_PORT
+    # `argparse type=int` accepts any integer, and uvicorn rejects a bad one
+    # only after the database exists. 0 binds a random port no plugin can find.
+    if not 1 <= cli_port <= 65535:
+        raise ServerConfigError(f"--port must be between 1 and 65535, got {cli_port}")
+    return cli_port
+
+
+def _resolve_grace_period(cli_grace_period: float | None) -> float:
+    if cli_grace_period is None:
+        return _DEFAULT_GRACE_PERIOD_SECONDS
+    # `argparse type=float` accepts 0, -1, nan, inf and 1e14. The first two
+    # make every unfinished run abandoned on sight, including sessions
+    # heartbeating normally; the others cannot become a `timedelta` at all.
+    # So does a positive value below half a microsecond, which `timedelta`
+    # rounds to zero. `create_app` refuses all of them, but only after the
+    # database is open, so the refusal comes here first, as one line. The
+    # chained comparison is false for nan, and is checked before the
+    # `timedelta` is built.
+    if not 0 < cli_grace_period <= _MAX_GRACE_PERIOD_SECONDS or timedelta(
+        seconds=cli_grace_period
+    ) <= timedelta(0):
+        raise ServerConfigError(
+            f"--grace-period must be at least one microsecond and at most "
+            f"{_MAX_GRACE_PERIOD_SECONDS:.0f} seconds (365 days), got {cli_grace_period!r}"
+        )
+    return cli_grace_period
 
 
 def _resolve_database_path(
     cli_database: str | None,
     env_database: str | None,
-    home: Path,
+    home: Path | None,
     xdg_data_home: str | None,
-) -> tuple[Path, ConfigSource]:
-    if cli_database is not None:
-        return Path(cli_database), ConfigSource.CLI
-    if env_database is not None:
-        return Path(env_database), ConfigSource.ENV
-    data_home = Path(xdg_data_home) if xdg_data_home else home / ".local" / "share"
-    return data_home / "vantage" / "vantage.db", ConfigSource.DEFAULT
+) -> Path:
+    # An empty value is unset, not `Path("")`: that is the current directory,
+    # and `--database "$VAR"` with the variable unset does not mean "here".
+    if cli_database:
+        return Path(cli_database)
+    if env_database:
+        return Path(env_database)
+    # The XDG Base Directory spec says a relative XDG_DATA_HOME is invalid and
+    # must be ignored; used as-is it would move the database with the cwd.
+    xdg = Path(xdg_data_home) if xdg_data_home else None
+    if xdg is not None and xdg.is_absolute():
+        return xdg / "vantage" / "vantage.db"
+    if home is None:
+        raise ServerConfigError(
+            "there is no home directory to put the default database under; "
+            "pass --database or set VANTAGE_DATABASE"
+        )
+    return home / ".local" / "share" / "vantage" / "vantage.db"
 
 
 DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_PERIOD_SECONDS
-"""Public alias for `service/app.py`'s `create_app` default (design.md D34) --
-so the "30 beats" derivation lives in exactly one place rather than being
-duplicated as a bare literal at the `create_app` call site."""
+"""Public alias for `service/app.py`'s `create_app` default, so the "30 beats"
+derivation lives in one place rather than as a bare literal at the call site."""
 
 __all__ = [
-    "ConfigSource",
     "DEFAULT_GRACE_PERIOD_SECONDS",
     "ServerConfig",
     "ServerConfigError",

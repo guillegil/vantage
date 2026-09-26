@@ -1,13 +1,9 @@
 """Section definitions, longest-prefix-wins derivation, and the per-run
-pass-percentage aggregate (design.md D84, D85).
+pass-percentage aggregate.
 
-Stdlib only (RQ-26) -- no Pydantic, no ORM, matching every other module in
-`vantage.core.domain`. ``UNASSIGNED`` is a module-level plain ``str``,
-never an ``Enum`` and never a one-member class: `liveness.PRESENTATIONS`
-and `result.OUTCOMES` already record why on this project's Python 3.10
-floor -- ``class X(str, Enum)`` changes ``__format__`` between interpreter
-versions -- and a third shape for the same kind of vocabulary is one shape
-too many.
+Stdlib only. ``UNASSIGNED`` is a module-level plain ``str``, never an
+``Enum`` and never a one-member class, for the ``__format__`` reason
+recorded in ``liveness.py``.
 """
 
 from __future__ import annotations
@@ -20,24 +16,41 @@ UNASSIGNED = "unassigned"
 
 SECTION_NAME_MAX_CHARS = 120
 """Bound on a section name -- `LIST_COMMIT_SUBJECT_CHARS`'s display width,
-the same class of value: a label read in a list (design.md D89)."""
+the same class of value: a label read in a list."""
 
 SECTION_PREFIX_MAX_CHARS = 1024
 """Bound on a section prefix -- `MAX_IDENTITY_CHARS`, already the bound on
-a path-shaped client value elsewhere in this codebase (design.md D89)."""
+a path-shaped client value elsewhere in this codebase."""
 
 MAX_SECTIONS = 200
 """Bound on stored sections -- `MAX_PAGE_ITEMS`. The run summary is
 unpaginated, so this cap on stored sections is also the bound on that
-response (design.md D89)."""
+response."""
+
+
+def is_reserved_section_name(name: str) -> bool:
+    """Whether `name` is `UNASSIGNED` in any casing -- one that differs only
+    in case would still read as the unassigned bucket to a person."""
+    return name.casefold() == UNASSIGNED
 
 
 @dataclass(frozen=True, slots=True)
 class SectionDefinition:
-    """One section's name and its normalized prefix."""
+    """One section's name and its normalized prefix.
+
+    A reserved name raises `ValueError`. `derive_section` answers
+    `UNASSIGNED` for a result matching no section, so a section by that
+    name would share the unassigned bucket and be reported twice; refusing
+    it here, rather than summarizing around it, keeps a stored section from
+    silently vanishing out of the run summary.
+    """
 
     name: str
     prefix: str
+
+    def __post_init__(self) -> None:
+        if is_reserved_section_name(self.name):
+            raise ValueError(f"the section name {UNASSIGNED!r} is reserved")
 
 
 def normalize_prefix(prefix: str) -> str:
@@ -82,7 +95,8 @@ class SectionSummary:
     denominator, so `total - measured` is exactly the skipped count.
     `passing` is the numerator. `pass_percentage` is `None`, never `0.0` or
     `100.0`, when `measured == 0` -- an empty bucket and a fully-skipped
-    bucket report the identical wire value.
+    bucket report the identical wire value. Otherwise it reads `100.0` only
+    when every measured result passed and `0.0` only when none did.
     """
 
     name: str
@@ -102,6 +116,20 @@ class RunSectionSummary:
     unassigned: SectionSummary
 
 
+def _pass_percentage(passing: int, measured: int) -> float | None:
+    if not measured:
+        return None
+    percentage = round(100 * passing / measured, 1)
+    # One failure among 2000 rounds to 100.0, and one pass among 2001 to
+    # 0.0 -- what a fully green or fully red bucket reports. Pin a ratio
+    # that only rounds to an end one step inside it, so both ends stay exact.
+    if percentage == 100.0 and passing < measured:
+        return 99.9
+    if percentage == 0.0 and passing > 0:
+        return 0.1
+    return percentage
+
+
 def _summarize_bucket(name: str, outcomes: Sequence[str]) -> SectionSummary:
     total = len(outcomes)
     passed = outcomes.count("passed")
@@ -111,7 +139,7 @@ def _summarize_bucket(name: str, outcomes: Sequence[str]) -> SectionSummary:
     xpassed = outcomes.count("xpassed")
     passing = passed + xfailed
     measured = passed + failed + error + xfailed + xpassed
-    pass_percentage = round(100 * passing / measured, 1) if measured else None
+    pass_percentage = _pass_percentage(passing, measured)
     return SectionSummary(
         name=name,
         total=total,
@@ -130,9 +158,10 @@ def summarize_sections(
 
     Published identities a client can check without trusting the server:
     `sum(item.total for item in items) + unassigned.total` equals the run's
-    result count, and `item.passing / item.measured ==
-    item.pass_percentage / 100` for every bucket with `measured > 0`.
-    Rounding happens once, here.
+    result count, and `abs(100 * item.passing / item.measured -
+    item.pass_percentage) < 0.1` for every bucket with `measured > 0`.
+    Rounding happens once, here, to one decimal; `100.0` still means every
+    measured result passed and `0.0` that none did.
     """
     buckets: dict[str, list[str]] = {section.name: [] for section in sections}
     buckets[UNASSIGNED] = []
@@ -156,6 +185,7 @@ __all__ = [
     "SectionDefinition",
     "SectionSummary",
     "derive_section",
+    "is_reserved_section_name",
     "normalize_prefix",
     "summarize_sections",
 ]

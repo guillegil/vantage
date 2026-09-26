@@ -1,27 +1,45 @@
-# Pre-commit gate (CLAUDE.md's "Quality gates" table).
-#
 # Two stages, matched to the time budget each check fits:
-#   - `pre-commit`  (< 2-3s): ruff format, ruff check --fix, and hygiene
-#     hooks. All of these run on modified files only, which is why they are
-#     fast enough for this stage -- a whole-project pass belongs at
-#     pre-push or CI, never here.
+#   - `pre-commit` (< 2-3s): ruff format, ruff check --fix, and hygiene
+#     hooks, on modified files only. Whole-project passes belong at
+#     pre-push or in CI.
 #   - `pre-push`: `mypy --strict` over the whole project (a type checker
-#     needs the whole project to be correct, not just the files that
-#     changed -- CLAUDE.md's own reasoning for why mypy is not at
-#     pre-commit) plus the fast unit-test suite (~10s locally, one Python
-#     version, no matrix -- the matrix itself belongs to CI, not a local
-#     git hook).
+#     needs every file, not just the changed ones) plus the test suite
+#     minus its `slow`-marked tests, on one Python version. CI runs every
+#     test on the whole version matrix.
+#
+# The project's own tools run from its environment (`uv sync --extra dev`
+# first), so uv.lock pins their versions here exactly as it does in CI.
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+  - repo: local
     hooks:
-      - id: ruff
-        args: [--fix]
+      - id: ruff-check
+        name: ruff check --fix
+        entry: uv run --no-sync ruff check --fix --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
         stages: [pre-commit]
       - id: ruff-format
+        name: ruff format
+        entry: uv run --no-sync ruff format --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
         stages: [pre-commit]
+      - id: mypy-strict
+        name: mypy --strict (whole project)
+        entry: uv run --no-sync mypy .
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+      - id: pytest-not-slow
+        name: pytest (all but slow-marked tests)
+        entry: uv run --no-sync pytest -m "not slow"
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0
@@ -40,18 +58,3 @@ repos:
         stages: [pre-commit]
       - id: mixed-line-ending
         stages: [pre-commit]
-
-  - repo: local
-    hooks:
-      - id: mypy-strict
-        name: mypy --strict (whole project)
-        entry: uv run --extra dev mypy .
-        language: system
-        pass_filenames: false
-        stages: [pre-push]
-      - id: pytest-fast
-        name: pytest (fast unit suite)
-        entry: uv run --extra dev pytest
-        language: system
-        pass_filenames: false
-        stages: [pre-push]

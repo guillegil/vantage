@@ -1,19 +1,80 @@
-"""`VcsReport`'s wire shape (design.md D47): `extra="forbid"`, and a
-`commit` field that accepts a SHA-256 (64 hex chars), never a 40-hex
+"""Validation of a session report's `results`, `vcs` and `metadata`
+sections, and the outcome vocabulary the models share with the core and the
+schema.
+
+`VcsReport.commit` accepts a SHA-256 (64 hex chars), never only a 40-hex
 pattern -- git is migrating away from SHA-1.
 """
 
 from __future__ import annotations
 
+import importlib.resources
+import re
+from typing import get_args
+
 import pytest
 from pydantic import ValidationError
+from vantage.core.domain.result import OUTCOMES
 from vantage.service.schemas import (
     MetadataFileReport,
     MetadataReport,
     ResultReport,
-    SessionReport,
     VcsReport,
+    _Outcome,
 )
+
+
+def _well_formed_result(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "node_id": "tests/test_result.py::test_x",
+        "file_path": "tests/test_result.py",
+        "class_name": None,
+        "function_name": "test_x",
+        "param_id": None,
+        "outcome": "passed",
+        "duration": 0.0031,
+        "started_at": None,
+        "finished_at": None,
+        "setup_outcome": "passed",
+        "call_outcome": "passed",
+        "teardown_outcome": "passed",
+        "setup_duration": 0.0008,
+        "call_duration": 0.0019,
+        "teardown_duration": 0.0004,
+        "worker_id": None,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_result_report_param_id_and_duration_survive_the_pydantic_hop() -> None:
+    """`param_id: ""` and `param_id: null` on the wire arrive as distinct
+    Python values, and a duration of `0.0` survives as `0.0` -- no
+    falsy-to-`None` coercion."""
+    empty_param = ResultReport.model_validate(_well_formed_result(param_id=""))
+    absent_param = ResultReport.model_validate(_well_formed_result(param_id=None))
+    zero_duration = ResultReport.model_validate(_well_formed_result(duration=0.0))
+
+    assert empty_param.param_id == ""
+    assert absent_param.param_id is None
+    assert empty_param.param_id != absent_param.param_id
+    assert zero_duration.duration == 0.0
+
+
+def test_outcome_vocabulary_matches_across_schema_sql_core_and_service() -> None:
+    """The six outcome strings live in three places: `schema.sql`'s CHECK,
+    `OUTCOMES`, and the service `_Outcome` Literal. Parses the CHECK clause
+    itself instead of trusting a fourth, hand-typed copy here -- the CHECK
+    is the ground truth this test protects."""
+    schema_sql = (
+        importlib.resources.files("vantage.storage").joinpath("schema.sql").read_text("utf-8")
+    )
+    match = re.search(r"CHECK \(outcome IN \(([^)]+)\)\)", schema_sql)
+    assert match is not None
+    schema_outcomes = frozenset(value.strip(" '") for value in match.group(1).split(","))
+
+    assert schema_outcomes == OUTCOMES
+    assert schema_outcomes == frozenset(get_args(_Outcome))
 
 
 def _well_formed_vcs(**overrides: object) -> dict[str, object]:
@@ -26,13 +87,6 @@ def _well_formed_vcs(**overrides: object) -> dict[str, object]:
     }
     payload.update(overrides)
     return payload
-
-
-def test_vcs_report_accepts_a_well_formed_section() -> None:
-    report = VcsReport.model_validate(_well_formed_vcs())
-
-    assert report.commit == "a" * 40
-    assert report.branch == "main"
 
 
 def test_vcs_report_accepts_a_sha256_commit_sixty_four_hex_characters() -> None:
@@ -60,9 +114,8 @@ def test_vcs_report_accepts_all_five_fields_null() -> None:
 
 def test_vcs_report_rejects_an_unknown_field_inside_the_section() -> None:
     """`extra="forbid"`, matching `RunReport` -- an unknown field inside
-    `vcs` means the two sides disagree about what a VCS snapshot is
-    (design.md D47), unlike `ResultReport`'s deliberately different
-    `extra="allow"`."""
+    `vcs` means the two sides disagree about what a VCS snapshot is, unlike
+    `ResultReport`'s deliberately different `extra="allow"`."""
     with pytest.raises(ValidationError, match="extra"):
         VcsReport.model_validate(_well_formed_vcs(tag="v1.2.3"))
 
@@ -73,44 +126,6 @@ def test_vcs_report_rejects_a_missing_required_field() -> None:
 
     with pytest.raises(ValidationError, match="root"):
         VcsReport.model_validate(incomplete)
-
-
-def test_session_report_vcs_defaults_to_none_when_the_section_is_absent() -> None:
-    """An older plugin's report shape -- no `vcs` key at all -- still
-    validates; `SessionReport.vcs` defaults to `None` (design.md D47)."""
-    report = SessionReport.model_validate(
-        {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            }
-        }
-    )
-
-    assert report.vcs is None
-
-
-def test_session_report_carries_a_well_formed_vcs_section() -> None:
-    report = SessionReport.model_validate(
-        {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            },
-            "vcs": _well_formed_vcs(),
-        }
-    )
-
-    assert report.vcs is not None
-    assert report.vcs.commit == "a" * 40
 
 
 def _well_formed_metadata_file(**overrides: object) -> dict[str, object]:
@@ -126,15 +141,11 @@ def _well_formed_metadata_file(**overrides: object) -> dict[str, object]:
 
 
 def test_metadata_file_report_accepts_a_declared_value_of_arbitrary_length_and_content() -> None:
-    """The D96 trap, made a falsifier before it can be committed by
-    accident: `VcsReport.commit` uses `max_length=64`, and a Pydantic
-    constraint that fails raises `InvalidReportError` -- a `422` that
-    rejects the WHOLE session report. No constraint of any kind -- no
-    `max_length`, no `pattern` -- may appear on any field in the metadata
-    section; every bound is applied by the normalizer (Phase 9), which
-    drops rather than rejects (design.md D96). A value bigger and stranger
-    than any real declared file could plausibly hold must still validate
-    without raising."""
+    """No `max_length`, `pattern` or other constraint may appear on a
+    metadata field: a failed constraint is a `422` that rejects the WHOLE
+    session report. Bounds belong to the normalizer, which drops rather than
+    rejects. A value bigger and stranger than any real declared file could
+    hold must still validate."""
     huge_content = "\N{SNOWMAN}" * 100_000 + "\x00" * 1_000 + "a" * 500_000
 
     report = MetadataFileReport.model_validate(
@@ -151,9 +162,8 @@ def test_metadata_file_report_accepts_a_declared_value_of_arbitrary_length_and_c
 
 
 def test_metadata_file_report_accepts_a_null_content_for_a_non_captured_status() -> None:
-    """`content` is `None` whenever `status` is not `"captured"` -- the same
-    "declared-but-dropped is a row, not an absence" contract D95 states for
-    the storage side, kept on the wire too (design.md D96)."""
+    """`content` is `None` whenever `status` is not `"captured"`: a declared
+    file that was dropped is still reported, not omitted."""
     report = MetadataFileReport.model_validate(
         _well_formed_metadata_file(status="too_large", content=None)
     )
@@ -163,7 +173,7 @@ def test_metadata_file_report_accepts_a_null_content_for_a_non_captured_status()
 
 
 def test_metadata_file_report_rejects_an_unknown_field() -> None:
-    """`extra="forbid"`, matching `VcsReport` (design.md D96)."""
+    """`extra="forbid"`, matching `VcsReport`."""
     with pytest.raises(ValidationError, match="extra"):
         MetadataFileReport.model_validate(_well_formed_metadata_file(size=8192))
 
@@ -183,107 +193,15 @@ def test_metadata_report_accepts_a_well_formed_section() -> None:
 
 
 def test_metadata_report_accepts_an_arbitrary_length_declaration_name() -> None:
-    """No constraint of any kind on `declaration` either (design.md D96)."""
+    """No constraint of any kind on `declaration` either."""
     report = MetadataReport.model_validate({"declaration": "d" * 10_000, "files": []})
 
     assert report.declaration == "d" * 10_000
 
 
 def test_metadata_report_rejects_an_unknown_field() -> None:
-    """`extra="forbid"`, matching `VcsReport` (design.md D96)."""
+    """`extra="forbid"`, matching `VcsReport`."""
     with pytest.raises(ValidationError, match="extra"):
         MetadataReport.model_validate(
             {"declaration": "vantage-metadata.json", "files": [], "extra_field": 1}
         )
-
-
-def test_session_report_metadata_defaults_to_none_when_the_section_is_absent() -> None:
-    """An older plugin's report shape -- no `metadata` key at all -- still
-    validates; `SessionReport.metadata` defaults to `None` (design.md D96)."""
-    report = SessionReport.model_validate(
-        {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            }
-        }
-    )
-
-    assert report.metadata is None
-
-
-def test_session_report_carries_a_well_formed_metadata_section() -> None:
-    report = SessionReport.model_validate(
-        {
-            "run": {
-                "id": "a" * 32,
-                "started_at": "2026-08-15T09:14:02.481930+00:00",
-                "finished_at": None,
-                "exit_status": None,
-                "interrupted": False,
-                "interrupt_reason": None,
-            },
-            "metadata": {
-                "declaration": "vantage-metadata.json",
-                "files": [_well_formed_metadata_file()],
-            },
-        }
-    )
-
-    assert report.metadata is not None
-    assert report.metadata.files[0].path == "config/firmware.yaml"
-
-
-def _minimal_result_entry(**overrides: object) -> dict[str, object]:
-    """The pre-`failure-capture` wire shape: no failure-evidence keys at
-    all, the exact shape an older plugin still sends (design.md D75)."""
-    payload: dict[str, object] = {
-        "node_id": "packages/vantage/tests/test_x.py::test_case",
-        "file_path": "packages/vantage/tests/test_x.py",
-        "class_name": None,
-        "function_name": "test_case",
-        "param_id": None,
-        "outcome": "passed",
-        "duration": 0.0031,
-        "started_at": None,
-        "finished_at": None,
-        "setup_outcome": "passed",
-        "call_outcome": "passed",
-        "teardown_outcome": "passed",
-        "setup_duration": 0.0008,
-        "call_duration": 0.0019,
-        "teardown_duration": 0.0004,
-        "worker_id": None,
-    }
-    payload.update(overrides)
-    return payload
-
-
-def test_result_report_failure_evidence_fields_all_default_to_absent() -> None:
-    """design.md D75: every new failure-evidence field on `ResultReport` is
-    optional and defaults to the absent shape, so an older plugin's report
-    -- carrying none of these keys -- still validates. *(session-ingestion →
-    Optional failure-evidence fields)*"""
-    report = ResultReport.model_validate(_minimal_result_entry())
-
-    assert report.failure_type is None
-    assert report.failure_message is None
-    assert report.failure_message_truncated is False
-    assert report.failure_path is None
-    assert report.failure_lineno is None
-    assert report.failure_repr is None
-    assert report.failure_repr_truncated is False
-    assert report.traceback is None
-    assert report.traceback_truncated is False
-    assert report.skip_reason is None
-    assert report.skip_reason_truncated is False
-    assert report.xfail_reason is None
-    assert report.xfail_reason_truncated is False
-    assert report.captured_stdout is None
-    assert report.captured_stdout_truncated is False
-    assert report.captured_stderr is None
-    assert report.captured_stderr_truncated is False

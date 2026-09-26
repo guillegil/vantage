@@ -1,8 +1,8 @@
 """One pytest invocation, and its identifier.
 
-Stdlib dataclasses (RQ-26) -- no Pydantic, no ORM, no third-party validation.
+Stdlib dataclasses -- no Pydantic, no ORM, no third-party validation.
 Naming avoids ``Test*`` on purpose: pytest would collect ``TestExecution`` as
-a test class and warn on every run (CLAUDE.md).
+a test class and warn on every run.
 """
 
 from __future__ import annotations
@@ -11,7 +11,12 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-_IDENTITY_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+IDENTITY_PATTERN = r"^[0-9a-f]{32}$"
+"""A run identifier's shape: 32 lowercase hex characters, a dashless `uuid4`.
+Text rather than a compiled pattern, so the service can hand the same value
+to FastAPI and Pydantic as their `pattern`."""
+
+_IDENTITY_RE = re.compile(IDENTITY_PATTERN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,18 +26,17 @@ class Identity:
     value: str
 
     def __post_init__(self) -> None:
-        if not _IDENTITY_PATTERN.fullmatch(self.value):
+        if not _IDENTITY_RE.fullmatch(self.value):
             raise ValueError(f"Identity must be 32 lowercase hex characters, got {self.value!r}")
 
 
 @dataclass(frozen=True, slots=True)
 class VcsContext:
-    """The repository state a session was recorded against (design.md D47, D48).
+    """The repository state a session was recorded against.
 
     `commit_subject_truncated` travels WITH `commit_subject`, never
-    independently -- the same rule the storage adapters' conflict branch
-    encodes as a `CASE` keyed to whether the incoming subject is non-null
-    (design.md D48).
+    independently -- the same rule the SQLite adapter's conflict branch
+    encodes as a `CASE` keyed to whether the incoming subject is non-null.
     """
 
     commit: str | None
@@ -42,36 +46,23 @@ class VcsContext:
     dirty: bool | None
     root: str | None
 
-    def merged_over(self, previous: VcsContext | None) -> VcsContext:
-        """Per-FIELD coalesce: null -> value only, never value -> null.
-
-        `self` is the incoming (just-reported) snapshot, `previous` is what
-        is already stored -- the in-memory mirror of the storage adapters'
-        per-column SQL `COALESCE(excluded.vcs_*, run.vcs_*)` (design.md D48).
-        A partial incoming snapshot -- a detached HEAD, a repository with no
-        commits -- must not null a fuller previous one field by field, which
-        is exactly the bug class `stored.vcs if execution.vcs is None else
-        execution.vcs` (whole-object coalesce) cannot express.
-        """
-        if previous is None:
-            return self
-        return VcsContext(
-            commit=self.commit if self.commit is not None else previous.commit,
-            branch=self.branch if self.branch is not None else previous.branch,
-            commit_subject=self.commit_subject
-            if self.commit_subject is not None
-            else previous.commit_subject,
-            commit_subject_truncated=self.commit_subject_truncated
-            if self.commit_subject is not None
-            else previous.commit_subject_truncated,
-            dirty=self.dirty if self.dirty is not None else previous.dirty,
-            root=self.root if self.root is not None else previous.root,
+    def is_empty(self) -> bool:
+        """True when no value is known: the context of a run recorded
+        outside a repository, which every layer stores and returns as
+        `None` rather than as this object. The truncation flag does not
+        count -- it only describes a subject, and there is none."""
+        return (
+            self.commit is None
+            and self.branch is None
+            and self.commit_subject is None
+            and self.dirty is None
+            and self.root is None
         )
 
 
 @dataclass(frozen=True, slots=True)
 class Execution:
-    """One pytest invocation, as reported by the plugin (design.md, D1)."""
+    """One pytest invocation, as reported by the plugin."""
 
     identity: Identity
     started_at: datetime
@@ -80,5 +71,4 @@ class Execution:
     interrupted: bool
     interrupt_reason: str | None
     vcs: VcsContext | None = None
-    """Appended with a default (design.md D48, tasks.md 3.6) so every
-    pre-existing construction site keeps working unmodified."""
+    """`None` when no repository state was captured."""

@@ -10,29 +10,18 @@ license = "MIT"
 requires-python = ">=3.10,<3.14"
 authors = [{ name = "Guillermo Gil" }]
 
-# The repository's first third-party dependencies (design.md D12). SQLite
-# comes from the standard library (ADR-6), so both are needed only from the
-# ingestion endpoint and the `vantage` CLI onward. `vantage` is the one
-# package RQ-24 does not constrain: it is installed deliberately by someone
-# who wants to run a server.
+# Unlike `pytest-vantage` (pytest and the standard library only), this
+# distribution may take third-party dependencies: it is installed
+# deliberately by someone who wants to run a server. Only `vantage.service`
+# imports them; `vantage.core` and `vantage.storage` use the standard library,
+# SQLite included.
 #
-# `PyYAML` (design.md D97, task 8.5) is declared here, and ONLY here: it is
-# imported exactly once, by `vantage.service.metadata_parse`, to parse a
-# YAML-encoded declared configuration document with `yaml.compose()`. It
-# must never be reachable from `pytest-vantage` (RQ-24 -- the plugin takes
-# pytest and the standard library, nothing else) or from `vantage.core`
-# (RQ-26). A real user installing the published `vantage` wheel alone --
-# not this workspace's dev extras -- needs this import to resolve, which is
-# exactly what the clean-environment install check (CLAUDE.md) proves.
+# `PyYAML` is imported only by `vantage.service.metadata_parse`, to parse
+# YAML metadata documents.
 dependencies = ["fastapi>=0.115", "pyyaml>=6.0", "uvicorn>=0.30"]
 
 [project.scripts]
 vantage = "vantage.service.cli:main"
-
-[project.optional-dependencies]
-# The extra names the wire protocol, not the vendor: Supabase, Neon, RDS and
-# CockroachDB all speak PostgreSQL and all arrive through this one.
-postgres = ["psycopg[binary]>=3.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vantage"]

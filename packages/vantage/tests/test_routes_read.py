@@ -1,35 +1,24 @@
-"""Run list + run detail routes (design.md D57, D59, D61, D62; Phase 4).
+"""The read routes: run list, run detail, results, result detail and test
+history.
 
 Runs the app factory (`vantage.service.app.create_app`) against **both**
 `ExecutionStore` implementations: the `store` fixture is parametrised, so
 every test below executes twice -- once against `InMemoryExecutionStore` and
-once against `SqliteExecutionStore`, the adapter that actually ships.
+once against `SqliteExecutionStore`, the adapter that actually ships. Only
+the SQLite run catches a query or a row decoder in `sqlite_store.py` that
+drops a value on its way to the wire.
 
-**Why both, and not the double alone** (verify round 3, WARNING -- closed):
-these tests were written against the in-memory double only, so the SQLite
-row-to-domain mappers (`_row_to_run_list_entry`, `_row_to_history_entry`,
-`_row_to_vcs_projection`) had no route-level value coverage at all. Mutating
-`_row_to_run_list_entry` to return `finished_at=None` unconditionally left
-the whole package suite green at 284 passed, while a real caller on the real
-adapter would read `finished_at: null` for every run. The port contract
-(`vantage_port_contract.py`) already forces the two adapters to agree beneath
-the port; this fixture extends that discipline to the wire, where the values
-are actually serialised.
-
-Every fixture in this file constructs `Execution`/`VcsContext` directly and
-seeds the store through `record_session`, never through the ingestion route:
-`history-read-api` and `session-liveness` describe what the read path
-returns, not how a session was reported. Grace-period fixtures (4.8-4.11) set
-`last_contact_at` and `create_app`'s `grace_period_seconds` relative to a
-`now` the test itself computes -- no clock control (freezegun, `time.sleep`),
-matching design.md D62's own claim that the demonstration needs none.
+Every fixture constructs `Execution`/`VcsContext` directly and seeds the
+store through `record_session`, never through the ingestion route: these
+tests are about what the read path returns, not how a session was reported.
+Grace-period tests set `last_contact_at` and `create_app`'s
+`grace_period_seconds` relative to a `now` the test itself computes, so no
+clock control (freezegun, `time.sleep`) is needed.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import cast
 
 import pytest
@@ -47,9 +36,10 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.service.app import create_app
-from vantage.storage.memory import InMemoryExecutionStore
-from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _captured, _failure, _result
+
+# `any_store`, for each adapter in turn.
+pytest_plugins = ["store_fixtures"]
 
 _KNOWN_ROOT = "/home/example/very-unique-repo-root-xyz123"
 
@@ -75,8 +65,8 @@ def _instant(wire_value: str) -> datetime:
     assert the value the response carries and not Pydantic's chosen spelling
     of it -- a serializer that switched between `+00:00` and `Z` would
     otherwise fail every timestamp assertion for no behavioural reason. The
-    `Z` substitution is for Python 3.10, whose `fromisoformat` does not
-    accept the military suffix (this project's floor, CLAUDE.md)."""
+    `Z` substitution is for Python 3.10, the oldest supported version, whose
+    `fromisoformat` does not accept the military suffix."""
     return datetime.fromisoformat(wire_value.replace("Z", "+00:00"))
 
 
@@ -123,32 +113,20 @@ def _vcs(
 def _captured_metadata(
     key: str, value: str, *, source_file: str = "config/firmware.yaml"
 ) -> RunMetadata:
-    """One declared, captured `key=value` pair, plus the file row D95
-    requires alongside it (design.md D91, D98) -- the shape `store.list_runs`'
-    `metadata_key`/`metadata_value` filter and its horizon count are read
-    through (design.md D100)."""
+    """One declared, captured `key=value` pair plus the file row that
+    accompanies it -- what `store.list_runs_with_metadata_horizon`'s filter
+    and its horizon count read."""
     return RunMetadata(
         files=(MetadataFile(source_file=source_file, content_type="yaml", status="captured"),),
         entries=(MetadataEntry(key=key, value=value, source_file=source_file, status="captured"),),
     )
 
 
-@pytest.fixture(params=["memory", "sqlite"])
-def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[ExecutionStore]:
-    """Both `ExecutionStore` implementations, one test run each.
-
-    The id of each parametrisation appears in the test id (`[memory]` /
-    `[sqlite]`), so a failure names the adapter that produced it without any
-    further digging. The SQLite adapter gets a fresh database under
-    `tmp_path` per test and is closed afterwards, matching
-    `test_sqlite_store.py`'s own fixture -- these tests share no state and
-    the file never outlives the test that made it."""
-    if request.param == "memory":
-        yield InMemoryExecutionStore()
-        return
-    adapter = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    yield adapter
-    adapter.close()
+@pytest.fixture
+def store(any_store: ExecutionStore) -> ExecutionStore:
+    """`store_fixtures.any_store` under the name every test here uses:
+    each adapter in turn, fresh for each test."""
+    return any_store
 
 
 @pytest.fixture
@@ -162,8 +140,8 @@ def _client_with_grace(store: ExecutionStore, grace_period_seconds: float) -> Te
 
 class _SpyExecutionStore:
     """A spy exposing only `list_history`, `cast` to `ExecutionStore` at its
-    one call site -- task 5.6's route touches no other method, and this
-    test asserts nothing about the rest of the port."""
+    one call site -- the history route calls no other method, and this test
+    asserts nothing about the rest of the port."""
 
     def __init__(self) -> None:
         self.list_history_calls: list[str] = []
@@ -173,30 +151,24 @@ class _SpyExecutionStore:
         return Page(items=(), has_more=False)
 
 
-# --- 4.1 --------------------------------------------------------------
-
-
 def test_run_list_returns_items_and_has_more_envelope(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Bounded pagination, list envelope shape; and
-    Test history -> full VCS context at the list layer)*.
+    """The run list returns an `items`/`has_more` envelope whose items carry
+    each run's fields and VCS context by value.
 
     **Shape and value are different properties and this test holds both.**
     The exact key sets assert the shape a field-by-field response model
     produces, never `from_attributes`'s incidental extras. The value
     assertions then assert that every scalar reaches the wire intact: a
     key-set check alone stays green while `_run_list_item` hardcodes
-    `finished_at=None` or `_vcs_response` hardcodes `dirty=None`, which is
-    exactly how a field could be silently destroyed on the wire.
+    `finished_at=None` or `_vcs_response` hardcodes `dirty=None`.
 
     Every fixture value here is deliberately off the default: `started_at`
-    and `finished_at` are three distinct instants apart, and `exit_status` is
-    `7` rather than the `0` a swap would coincidentally match (verify round
-    2, WARNING-1 -- five of this builder's seven fields were mutable with the
-    suite green). `presentation` and `interrupted` are asserted on varied
-    fixtures by `test_run_list_presentation_and_interruption_are_per_run`,
-    which needs runs this one is not."""
+    and `finished_at` are distinct instants, and `exit_status` is `7` rather
+    than the `0` a swap would coincidentally match. `presentation` and
+    `interrupted` are asserted on varied fixtures by
+    `test_run_list_presentation_and_interruption_are_per_run`."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(1)
     started_at = now - timedelta(hours=1)
@@ -262,23 +234,13 @@ def test_run_list_returns_items_and_has_more_envelope(
 def test_run_list_presentation_and_interruption_are_per_run(
     store: ExecutionStore,
 ) -> None:
-    """*(session-liveness -> Abandoned run is observable, at the list layer;
-    design.md D62 -- `derive_presentation` gets its first caller.)*
+    """The run list derives each run's presentation, including abandoned.
 
-    **The list path calls `derive_presentation` and until verify round 2
-    nothing observed that it did.** Every liveness scenario was demonstrated
-    through run *detail*, so `_run_list_item` could hardcode
-    `presentation="finished"` -- never calling the function whose first
-    caller is the entire point of D62 -- and the whole suite stayed green.
-    One run per branch of the derivation, in one list response, is what makes
-    that mutation fail: a constant cannot be right for four runs at once.
-
-    `interrupted` is asserted here rather than in 4.1 for the same reason a
-    constant needs contradicting fixtures: 4.1's run is not interrupted, so
-    only a run that *is* can catch the flag being hardcoded false. The
-    interrupted run additionally separates the two: it presents as
-    `interrupted` while carrying `interrupted: true`, so neither field can be
-    derived from the other by accident."""
+    The other liveness tests go through run *detail*, so without this one
+    `_run_list_item` could hardcode `presentation="finished"` unnoticed. One
+    run per branch of the derivation, in one list response, makes that fail:
+    a constant cannot be right for four runs at once. Likewise only a run
+    that *is* interrupted can catch `interrupted` being hardcoded false."""
     now = datetime.now(timezone.utc)
     finished_run = _run_id(40)
     interrupted_run = _run_id(41)
@@ -341,24 +303,19 @@ def test_run_list_presentation_and_interruption_are_per_run(
     assert items[abandoned_run]["interrupted"] is False
 
 
-# --- 4.2 --------------------------------------------------------------
-
-
 def test_run_list_response_contains_no_vcs_root_anywhere(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(Lean list projections -> `vcs_root` appears in no run list or run
-    detail response)*. A substring assertion on the raw serialized body.
+    """The repository root appears nowhere in a run list response. A
+    substring assertion on the raw serialized body.
 
-    **Structurally unfalsifiable, like 5.5.** On the list path the source
-    object is a `VcsProjection`, which has no `root` field at all (D59), and
-    both adapters additionally strip the context off the entry itself
-    (`replace(execution, vcs=None)`) -- `_KNOWN_ROOT` has no code path to
-    this body, so this assertion cannot currently fail. Reintroducing `root`
-    on `RunVcsResponse` leaves it green. Kept as a regression guard against
-    a future list entry that carries a full `VcsContext`, not because it
-    proves anything today. **4.6, on the detail path, is the test that
-    carries this scenario.**"""
+    **Structurally unfalsifiable today**, like the history-route
+    counterpart: on the list path the source object is a `VcsProjection`,
+    which has no `root` field at all, and both adapters additionally strip
+    the context off the entry itself (`replace(execution, vcs=None)`). Kept
+    as a regression guard against a future list entry that carries a full
+    `VcsContext`. `test_run_detail_response_contains_no_vcs_root` is the
+    test that can actually fail."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(2)
     store.record_session(
@@ -372,11 +329,8 @@ def test_run_list_response_contains_no_vcs_root_anywhere(
     assert _KNOWN_ROOT not in response.text
 
 
-# --- 4.3 --------------------------------------------------------------
-
-
 def test_run_list_rejects_non_positive_limit(client: TestClient) -> None:
-    """*(D61 -- "not a page size")*."""
+    """Zero and negative limits are not page sizes."""
     zero = client.get("/api/v1/runs", params={"limit": 0})
     negative = client.get("/api/v1/runs", params={"limit": -1})
 
@@ -384,13 +338,9 @@ def test_run_list_rejects_non_positive_limit(client: TestClient) -> None:
     assert negative.status_code == 422
 
 
-# --- 4.4 --------------------------------------------------------------
-
-
 def test_run_list_caps_at_200_at_the_route(client: TestClient, store: ExecutionStore) -> None:
-    """*(Bounded pagination, route level)*. 201 stored runs, no `limit`
-    supplied -- the cap must hold through the HTTP layer, not only the
-    port (task 4.4's own note)."""
+    """201 stored runs, no `limit` supplied -- the cap must hold through the
+    HTTP layer, not only the port."""
     now = datetime.now(timezone.utc)
     for seed in range(201):
         store.record_session(
@@ -414,9 +364,8 @@ def test_run_list_caps_at_200_at_the_route(client: TestClient, store: ExecutionS
 def test_run_list_clamps_an_over_cap_limit_rather_than_rejecting_it(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(Bounded pagination -> A list response never exceeds 200 items)*.
-    The existing cap test supplies no `limit` at all, so it exercises the
-    default and never the branch a caller reaches by asking for more.
+    """A list response never exceeds 200 items, even when a caller asks for
+    more; the no-`limit` cap test only exercises the default.
 
     A caller asking for 500 gets 200 and a 200 status, not a 422: someone
     requesting a large page wants data, not a rejection. This is the
@@ -444,15 +393,48 @@ def test_run_list_clamps_an_over_cap_limit_rather_than_rejecting_it(
     assert body["has_more"] is True
 
 
-# --- 4.5 --------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("path", "params"),
+    [
+        ("/api/v1/runs", {}),
+        ("/api/v1/runs", {"metadata_key": "k", "metadata_value": "v"}),
+        ("/api/v1/runs/{run_id}/results", {}),
+        ("/api/v1/tests/history", {"node_id": "t.py::test_x"}),
+    ],
+    ids=["runs", "runs-filtered", "results", "history"],
+)
+def test_an_offset_beyond_int64_is_422_and_the_int64_maximum_is_an_empty_page(
+    client: TestClient, store: ExecutionStore, path: str, params: dict[str, str]
+) -> None:
+    """SQLite binds an integer as signed 64-bit, so a larger offset would
+    fail inside the query as a bare `500` on one adapter and succeed on the
+    other. It is a shaped `422` on both; the largest bindable offset is a
+    valid, empty page."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(80)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[_result("t.py::test_x")],
+        received_at=now - timedelta(hours=1),
+    )
+    url = path.format(run_id=run_id)
+
+    beyond = client.get(url, params={**params, "offset": 2**63})
+    at_max = client.get(url, params={**params, "offset": 2**63 - 1})
+
+    assert beyond.status_code == 422
+    assert beyond.json()["fields"] == ["query.offset"]
+    assert at_max.status_code == 200
+    assert at_max.json()["items"] == []
+    assert at_max.json()["has_more"] is False
 
 
 def test_run_detail_returns_full_untruncated_subject(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(D58, D59 -- the full record stays reachable via run detail)*. A
-    200-character stored subject, well past the 120-character list display
-    width, must come back whole and untruncated on the detail path."""
+    """The full record stays reachable via run detail: a 200-character
+    stored subject, well past the 120-character list display width, comes
+    back whole and untruncated on the detail path."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(5)
     subject = "s" * 200
@@ -476,24 +458,16 @@ def test_run_detail_returns_full_untruncated_subject(
     assert body["vcs"]["commit_subject_truncated"] is False
 
 
-# --- 4.6 --------------------------------------------------------------
-
-
 def test_run_detail_response_contains_no_vcs_root(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(Lean list projections -> `vcs_root` appears in no run list or run
-    detail response -- the falsifiable half.)*
+    """The repository root appears nowhere in a run detail response.
 
-    **This is the test that carries the scenario.** Same substring shape as
-    4.2 and 5.5, but unlike either of them it can actually fail: the detail
-    path's source object is the full `VcsContext`, which *does* carry
-    `root`, so nothing structural excludes it. The only thing keeping it off
-    the wire is `RunVcsResponse` having no `root` field and `_vcs_response`
-    naming its five fields explicitly, never
-    `model_validate(..., from_attributes=True)`. Add `root` back to
-    `RunVcsResponse` and populate it, and this test goes red while 4.2 and
-    5.5 stay green."""
+    Unlike the list and history counterparts this one can actually fail: the
+    detail path's source object is the full `VcsContext`, which *does* carry
+    `root`. The only thing keeping it off the wire is `RunVcsResponse`
+    having no `root` field and `_vcs_response` naming its five fields
+    explicitly, never `model_validate(..., from_attributes=True)`."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(6)
     store.record_session(
@@ -510,16 +484,14 @@ def test_run_detail_response_contains_no_vcs_root(
 def test_run_detail_carries_every_stored_field_by_value(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Test history -> the full record stays reachable
-    via run detail; design.md D57.)*
+    """Run detail carries the full record: every one of the eight detail
+    fields, asserted by value.
 
-    **Every one of the eight detail fields, asserted by value** (verify round
-    2, WARNING-1 -- six of them could be nulled, shifted or replaced with a
-    constant while the suite stayed green). Two runs rather than one, because
-    a single fixture cannot populate both halves of the record: an orderly
-    run carries `finished_at` and no `interrupt_reason`, a Ctrl-C run carries
-    the reason and no `finished_at`, and a builder that hardcoded either to
-    `None` would still satisfy whichever run happens to be null there.
+    Two runs rather than one, because a single fixture cannot populate both
+    halves of the record: an orderly run carries `finished_at` and no
+    `interrupt_reason`, a Ctrl-C run carries the reason and no
+    `finished_at`, and a builder that hardcoded either to `None` would still
+    satisfy whichever run happens to be null there.
 
     The two runs also disagree on `id`, `started_at` and `exit_status`, so
     `id=<constant>` fails on whichever run it is not, and a `started_at`
@@ -582,14 +554,13 @@ def test_run_detail_carries_every_stored_field_by_value(
     assert orderly["interrupted"] is False
     assert orderly["interrupt_reason"] is None
     assert orderly["presentation"] == "finished"
-    # The detail path's five VCS fields, by value. `orderly["vcs"] is not
-    # None` alone left `_row_to_vcs_context` free to null `commit`, `branch`
-    # and `dirty` with the whole suite green (mutation sweep, 2026-08-22):
-    # detail is the only route that reads a full `VcsContext` rather than a
-    # `VcsProjection`, so nothing else on the wire covers this mapper.
+    # The detail path's five VCS fields, by value: detail is the only route
+    # that reads a full `VcsContext` rather than a `VcsProjection`, so
+    # nothing else on the wire covers how a stored run's full VCS columns
+    # are decoded.
     # `commit_subject_truncated` is `True` here beside an unshortened
     # subject, which only capture-time truncation can produce -- the detail
-    # path never applies display bounding (design.md D58).
+    # path never applies display bounding.
     assert orderly["vcs"] == {
         "commit": _DETAIL_COMMIT,
         "branch": "release/detail-fidelity",
@@ -608,21 +579,14 @@ def test_run_detail_carries_every_stored_field_by_value(
     assert ctrl_c["vcs"] is None
 
 
-# --- 4.7 --------------------------------------------------------------
-
-
 def test_run_detail_unknown_id_is_404(client: TestClient) -> None:
     response = client.get(f"/api/v1/runs/{_run_id(999)}")
 
     assert response.status_code == 404
 
 
-# --- 4.8 --------------------------------------------------------------
-
-
 def test_abandoned_run_reads_back_as_abandoned(store: ExecutionStore) -> None:
-    """*(session-liveness -> Abandoned run is observable -> A run past its
-    grace period reads back as abandoned, Demonstration)*. No clock
+    """A run past its grace period reads back as abandoned. No clock
     control: `last_contact_at` is stamped old relative to a `now` this test
     computes itself, and the app's grace period is configured short."""
     now = datetime.now(timezone.utc)
@@ -641,12 +605,8 @@ def test_abandoned_run_reads_back_as_abandoned(store: ExecutionStore) -> None:
     assert response.json()["presentation"] == "abandoned"
 
 
-# --- 4.9 --------------------------------------------------------------
-
-
 def test_running_run_reads_back_as_running(store: ExecutionStore) -> None:
-    """*(session-liveness -> A run inside its grace period reads back as
-    running)*."""
+    """A run inside its grace period reads back as running."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(9)
     recent_contact = now - timedelta(seconds=5)
@@ -663,15 +623,11 @@ def test_running_run_reads_back_as_running(store: ExecutionStore) -> None:
     assert response.json()["presentation"] == "running"
 
 
-# --- 4.10 -------------------------------------------------------------
-
-
 def test_interrupted_run_reads_back_as_interrupted(store: ExecutionStore) -> None:
-    """*(session-liveness -> A Ctrl-C interrupted run reads back as
-    interrupted, not abandoned)*. `last_contact_at` is stamped just as
-    stale as the abandoned fixture, and the grace period just as short --
-    the only difference is `interrupted=True`, which must win regardless
-    of staleness."""
+    """A Ctrl-C interrupted run reads back as interrupted, not abandoned.
+    `last_contact_at` is stamped just as stale as the abandoned fixture, and
+    the grace period just as short -- the only difference is
+    `interrupted=True`, which must win regardless of staleness."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(10)
     old_contact = now - timedelta(hours=2)
@@ -695,14 +651,10 @@ def test_interrupted_run_reads_back_as_interrupted(store: ExecutionStore) -> Non
     assert response.json()["presentation"] == "interrupted"
 
 
-# --- 4.11 -------------------------------------------------------------
-
-
 def test_abandonment_invents_no_stored_field(store: ExecutionStore) -> None:
-    """*(session-liveness -> Abandonment invents no stored field)*. Reads
-    the row back directly via `store.get_execution`, not through the
-    response body -- a derived presentation must not mutate what was
-    recorded."""
+    """Reading a run as abandoned writes nothing. Reads the row back
+    directly via `store.get_execution`, not through the response body -- a
+    derived presentation must not mutate what was recorded."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(11)
     original_started_at = now - timedelta(hours=2)
@@ -722,14 +674,9 @@ def test_abandonment_invents_no_stored_field(store: ExecutionStore) -> None:
     assert execution.finished_at is None
 
 
-# --- 5.1 --------------------------------------------------------------
-
-
 def test_results_route_returns_paginated_envelope(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Bounded pagination, applied to
-    `GET /api/v1/runs/{run_id}/results`)*."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(20)
     store.record_session(
@@ -750,16 +697,13 @@ def test_results_route_returns_paginated_envelope(
     assert item["outcome"] == "passed"
 
 
-# --- 8.1 ----------------------------------------------------------------
-
 _SENTINEL_TRACEBACK = "SENTINEL-TRACEBACK-8f6c1a"
 
 
 def test_results_route_response_excludes_traceback_and_captured_output_sentinel(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Lean list projections -> List responses
-    exclude traceback and captured output, now Test)*. A distinctive
+    """List responses exclude traceback and captured output. A distinctive
     sentinel planted in the stored traceback, failure repr and captured
     stdout must be absent from the raw list response body -- asserted
     against the raw text, not a parsed model, because a parsed model can
@@ -780,14 +724,10 @@ def test_results_route_response_excludes_traceback_and_captured_output_sentinel(
     assert _SENTINEL_TRACEBACK not in response.text
 
 
-# --- 8.2 ----------------------------------------------------------------
-
-
 def test_results_route_includes_bounded_failure_message_and_disjunction_flag(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Lean list projections; design.md D76)*. A
-    stored message over `LIST_FAILURE_MESSAGE_CHARS` arrives in the list
+    """A stored message over `LIST_FAILURE_MESSAGE_CHARS` arrives in the list
     entry bounded to the first 200 characters, with the disjunction flag
     set."""
     now = datetime.now(timezone.utc)
@@ -808,12 +748,8 @@ def test_results_route_includes_bounded_failure_message_and_disjunction_flag(
     assert item["failure"]["failure_message_truncated"] is True
 
 
-# --- 8.3 ----------------------------------------------------------------
-
-
 def test_result_detail_route_returns_full_record(client: TestClient, store: ExecutionStore) -> None:
-    """*(history-read-api -> Single result detail -> The full record is
-    reachable for a given result)*."""
+    """The single-result route returns the full stored record."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(72)
     node_id = "t.py::test_x"
@@ -839,14 +775,11 @@ def test_result_detail_route_returns_full_record(client: TestClient, store: Exec
     assert body["failure_repr"] == failure.failure_repr
 
 
-# --- 8.4 ----------------------------------------------------------------
-
-
 def test_result_detail_truncation_flag_travels_with_the_field(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(A bounded field's truncation flag travels with it on the
-    single-item endpoint)*."""
+    """A bounded field's truncation flag travels with it on the
+    single-result route."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(73)
     node_id = "t.py::test_x"
@@ -865,9 +798,6 @@ def test_result_detail_truncation_flag_travels_with_the_field(
     assert body["traceback_truncated"] is True
 
 
-# --- 8.5 ----------------------------------------------------------------
-
-
 def test_result_detail_unknown_run_id_is_404_unknown_run_error(client: TestClient) -> None:
     response = client.get(f"/api/v1/runs/{_run_id(999)}/result", params={"node_id": "t.py::test_x"})
 
@@ -875,15 +805,11 @@ def test_result_detail_unknown_run_id_is_404_unknown_run_error(client: TestClien
     assert response.json()["error"] == "unknown_run"
 
 
-# --- 8.6 ----------------------------------------------------------------
-
-
 def test_result_detail_unknown_node_id_is_404_unknown_result_error(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(An unknown result identifier leaves stored data unchanged -- the
-    404 shape half)*. A known run, an unknown `node_id` -- a distinct error
-    kind from `UnknownRunError` (design.md D78)."""
+    """A known run with an unknown `node_id` is a distinct error kind from
+    `UnknownRunError`."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(74)
     store.record_session(
@@ -900,15 +826,12 @@ def test_result_detail_unknown_node_id_is_404_unknown_result_error(
     assert response.json()["error"] == "unknown_result"
 
 
-# --- 8.7 ----------------------------------------------------------------
-
-
 def test_result_detail_unknown_identifier_leaves_stored_data_unchanged(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(An unknown result identifier leaves stored data unchanged)*. The
-    table is read directly via the store, not through the response body --
-    a 404 must not create, alter or remove any row."""
+    """An unknown result identifier leaves stored data unchanged. The table
+    is read directly via the store, not through the response body -- a 404
+    must not create, alter or remove any row."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(75)
     node_id = "t.py::test_x"
@@ -930,34 +853,57 @@ def test_result_detail_unknown_identifier_leaves_stored_data_unchanged(
     assert store.get_run_detail(run_id) == before_detail
 
 
-# --- 8.8 ----------------------------------------------------------------
-
-
-def test_result_detail_overlong_node_id_is_422_not_414(client: TestClient) -> None:
-    """*(D54 inherited)*. An identifier over `MAX_IDENTITY_CHARS` is a
-    `422`, shaped by `InvalidIdentityError` -- never a proxy `414`."""
-    run_id = _run_id(76)
-    over_long = "x" * (MAX_IDENTITY_CHARS + 1)
-
-    response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": over_long})
+def test_result_detail_missing_node_id_is_422(client: TestClient) -> None:
+    response = client.get(f"/api/v1/runs/{_run_id(76)}/result")
 
     assert response.status_code == 422
     assert response.json()["error"] == "invalid_identity"
 
 
+def test_every_listed_node_id_is_readable_through_detail_and_history(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """A stored node id can be longer than `MAX_IDENTITY_CHARS`: pytest
+    never shortens a parametrize id, so a test parametrised with a long SQL
+    string gets one. Whatever `/results` lists must be readable back by
+    that exact value through `/result` and `/tests/history`, or a result's
+    traceback and history are stored but unreachable."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(77)
+    long_node_id = "tests/test_q.py::test_query[" + "SELECT 1 UNION ALL " * 60 + "]"
+    assert len(long_node_id) > MAX_IDENTITY_CHARS
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[
+            _result("tests/test_q.py::test_short"),
+            _result(
+                long_node_id, outcome="failed", failure=_failure(traceback=_SENTINEL_TRACEBACK)
+            ),
+        ],
+        received_at=now - timedelta(hours=1),
+    )
+
+    listed = client.get(f"/api/v1/runs/{run_id}/results").json()["items"]
+
+    assert long_node_id in {item["node_id"] for item in listed}
+    for item in listed:
+        node_id = item["node_id"]
+        detail = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": node_id})
+        history = client.get("/api/v1/tests/history", params={"node_id": node_id})
+        assert detail.status_code == 200
+        assert detail.json()["node_id"] == node_id
+        assert history.status_code == 200
+        assert [entry["run_id"] for entry in history.json()["items"]] == [run_id]
+    long_detail = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": long_node_id})
+    assert long_detail.json()["traceback"] == _SENTINEL_TRACEBACK
+
+
 def test_result_item_carries_every_stored_column_by_value(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Bounded pagination -> the results envelope's
-    item shape; design.md D57 -- `_result_item` is built field by field.)*
-
-    **All sixteen columns, asserted by value.** 5.1 checks `node_id` and
-    `outcome`; verify round 2 mutated the other fourteen -- every phase
-    outcome, every phase duration, the whole decomposed identity -- and the
-    suite stayed green for all of them, including non-null swaps of
-    `file_path` and `function_name`. A dict equality over the item is what
-    closes that: it is the one assertion shape that cannot be satisfied by a
-    builder that drops or transposes a column.
+    """A results item carries all sixteen columns, asserted by value. A dict
+    equality over the item is the one assertion shape that cannot be
+    satisfied by a builder that drops or transposes a column.
 
     Every value is distinct from every other, including across the four
     outcome columns and the four duration columns, so a transposition fails
@@ -1023,37 +969,25 @@ def test_result_item_carries_every_stored_column_by_value(
     }
 
 
-# --- 5.2 --------------------------------------------------------------
-
-
 def test_results_route_unknown_run_id_is_404(client: TestClient) -> None:
-    """*(consistent with run detail's 404 behavior, task 4.7)*."""
+    """Consistent with run detail's `404` for an unknown run."""
     response = client.get(f"/api/v1/runs/{_run_id(999)}/results")
 
     assert response.status_code == 404
 
 
-# --- 5.3 --------------------------------------------------------------
-
-
 def test_history_route_returns_newest_first_with_full_vcs(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Test history -> Executions return newest
-    first, with full VCS context -- route level)*.
+    """Test history returns executions newest first, each with its full VCS
+    context.
 
-    The scenario enumerates six things every entry carries: its commit,
-    branch, commit subject, truncation flag, dirty flag, and duration. All
-    six are asserted here *by value*, on both entries, with deliberately
-    distinct fixtures -- ordering and an exact key set alone leave
-    `_history_entry(duration=None)` and `_vcs_response(commit=None)`
-    undetectable. The two entries disagree on every field, so a swap between
-    them fails as loudly as a null.
-
-    The entry's two timestamps are asserted the same way (verify round 2,
-    WARNING-1): the four fixture instants are all distinct, so neither
-    `started_at` shifted by a constant offset nor `finished_at` nulled nor
-    the pair transposed survives."""
+    Commit, branch, commit subject, truncation flag, dirty flag and duration
+    are asserted *by value* on both entries -- ordering and an exact key set
+    alone leave `_history_entry(duration=None)` and
+    `_vcs_response(commit=None)` undetectable. The two entries disagree on
+    every field, and the four fixture instants are all distinct, so a swap,
+    a constant offset or a null fails as loudly as the others."""
     now = datetime.now(timezone.utc)
     node_id = "tests/test_a.py::test_shared"
     older_run = _run_id(21)
@@ -1134,12 +1068,8 @@ def test_history_route_returns_newest_first_with_full_vcs(
     assert _instant(older["finished_at"]) == older_finished_at
 
 
-# --- 5.4 --------------------------------------------------------------
-
-
 def test_history_route_unknown_node_id_is_empty_not_error(client: TestClient) -> None:
-    """*(Test history -> An unknown test yields empty history, not an
-    error -- route level)*."""
+    """An unknown test yields empty history, not an error."""
     response = client.get(
         "/api/v1/tests/history", params={"node_id": "tests/test_never_ran.py::test_x"}
     )
@@ -1150,17 +1080,13 @@ def test_history_route_unknown_node_id_is_empty_not_error(client: TestClient) ->
     assert body["has_more"] is False
 
 
-# --- 5.5 --------------------------------------------------------------
-
-
 def test_history_route_response_contains_no_vcs_root(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(Test history -> `vcs_root` appears in no history entry)*. Same
-    substring-on-raw-body shape as 4.2/4.6. **Structurally unfalsifiable,
-    like 4.2**: `HistoryEntry.vcs` is a `VcsProjection`, which has no
-    `root` field at all (D59) -- no code path could leak `_KNOWN_ROOT`
-    here. Kept as a regression guard, not because this can currently fail."""
+    """The repository root appears in no history entry. **Structurally
+    unfalsifiable today**, like the run list counterpart:
+    `HistoryEntry.vcs` is a `VcsProjection`, which has no `root` field at
+    all. Kept as a regression guard."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(23)
     node_id = "tests/test_a.py::test_leak_guard"
@@ -1178,17 +1104,13 @@ def test_history_route_response_contains_no_vcs_root(
 def test_history_entry_for_a_non_repository_run_carries_a_null_vcs_key(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(version-control-context -> A non-repository execution has a null VCS
-    context, not an omitted entry -- route level.)*
+    """A run outside a repository still appears in history, with a null VCS
+    context rather than an omitted key.
 
-    The scenario is written about what a caller reads back, and until verify
-    round 2 it was covered only by `test_list_history_null_vcs_entry_present_not_omitted`
-    at the port. This closes it through the surface it describes, the same
-    way `test_absent_repository_run_appears_in_list_undistinguished` already
-    does for the run list. `"vcs" in entry` and `entry["vcs"] is None` are
-    two assertions rather than one because they fail for different reasons:
-    an omitted key and a null value are exactly the distinction the scenario
-    names, and `entry.get("vcs") is None` cannot tell them apart."""
+    `"vcs" in entry` and `entry["vcs"] is None` are two assertions because
+    they fail for different reasons: an omitted key and a null value are
+    exactly the distinction under test, and `entry.get("vcs") is None`
+    cannot tell them apart."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(70)
     node_id = "tests/test_outside_a_repository.py::test_runs_anyway"
@@ -1207,14 +1129,8 @@ def test_history_entry_for_a_non_repository_run_carries_a_null_vcs_key(
     assert entry["vcs"] is None
 
 
-# --- 5.6 --------------------------------------------------------------
-
-
 def test_history_identity_survives_special_characters_intact() -> None:
-    """*(history-read-api -> Test history, design.md D54 -- the
-    load-bearing wire-encoding test for this change.)*
-
-    **What this test proves**: a node id containing `/`, `::`, `[`, `]`
+    """**What this test proves**: a node id containing `/`, `::`, `[`, `]`
     (`tests/test_a.py::TestSuite::test_x[case/1]`), sent percent-encoded as
     a query value by the HTTP client, reaches `store.list_history` as the
     identical, un-mangled string -- the query-parameter transport neither
@@ -1222,19 +1138,12 @@ def test_history_identity_survives_special_characters_intact() -> None:
     store.
 
     **What this test does NOT prove**: that a query parameter is the
-    *correct* routing choice over a `/{identity:path}` path parameter.
-    Measured 2026-08-21 against a live uvicorn server (not this
-    `TestClient`, which runs over httpx's in-process ASGI transport, not
-    uvicorn), both a query parameter and a `/{identity:path}` path
-    parameter round-trip this exact value byte-identical under a bare ASGI
-    transport -- only a plain `/{identity}` path parameter fails, with
-    404. The real disqualifier for `:path` is proxy-dependent slash
-    normalization in front of the application (nginx merges/normalises
-    slashes by default; Apache 404s on `%2F` unless `AllowEncodedSlashes`
-    is on), which an in-process test -- this one included -- structurally
-    cannot observe either way. A `TestSuite` name inside this literal node
-    id is a string value, not a class definition; it does not trigger
-    pytest's `Test*` collection warning (CLAUDE.md).
+    *correct* routing choice over a `/{identity:path}` path parameter. Both
+    round-trip this value intact over a bare ASGI transport; the real
+    disqualifier for `:path` is slash normalization by a proxy in front of
+    the application (nginx merges slashes by default; Apache 404s on `%2F`
+    unless `AllowEncodedSlashes` is on), which an in-process test cannot
+    observe either way.
     """
     store = _SpyExecutionStore()
     client = TestClient(create_app(cast(ExecutionStore, store)))
@@ -1246,9 +1155,6 @@ def test_history_identity_survives_special_characters_intact() -> None:
     assert store.list_history_calls == [node_id]
 
 
-# --- 5.7 --------------------------------------------------------------
-
-
 def test_history_route_missing_node_id_is_422(client: TestClient) -> None:
     response = client.get("/api/v1/tests/history")
 
@@ -1257,43 +1163,18 @@ def test_history_route_missing_node_id_is_422(client: TestClient) -> None:
     assert body["error"] == "invalid_identity"
 
 
-# --- 5.8 --------------------------------------------------------------
-
-
-def test_history_route_overlong_identity_is_422_not_414(client: TestClient) -> None:
-    """*(D54's 1,024-character bound -- a shaped 422, never a
-    proxy-generated 414)*."""
-    overlong = "a" * 1025
-
-    response = client.get("/api/v1/tests/history", params={"node_id": overlong})
-
-    assert response.status_code == 422
-    body = response.json()
-    assert body["error"] == "invalid_identity"
-    assert overlong not in response.text
-
-
-# --- 7.9 --------------------------------------------------------------
-
-
 def test_absent_repository_run_appears_in_list_undistinguished(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(version-control-context -> Absent repository -> Absent repository's
-    run appears in the run list)*. Promotes that scenario from Inspection to
-    Test, through the live `GET /api/v1/runs` endpoint this change adds --
-    the criterion `history-read-api` was deferred to supply.
+    """A run recorded outside a repository appears in the run list,
+    undistinguished in position or omission.
 
-    Asserts the **ordered list**, not a set (verify round 1, SUGGESTION-2):
-    the scenario says the absent-repository run is "in no way distinguished
-    in position or omission," and a `set` comparison cannot observe a
-    positional difference by construction -- it would stay green even if an
-    adapter sorted absent-repository runs to one end regardless of recency.
-    `absent_run_id` is the newer of the two, so ordinary newest-first
-    ordering (design.md D61) already puts it first; this test's only job is
-    to prove that placement is not special-cased for the absent-repository
-    case, not to prove ordering exists (`test_list_runs_orders_newest_first_with_total_tiebreak`
-    already does that)."""
+    Asserts the **ordered list**, not a set: a `set` comparison would stay
+    green even if an adapter sorted absent-repository runs to one end
+    regardless of recency. `absent_run_id` is the newer of the two, so
+    ordinary newest-first ordering puts it first; this test only proves
+    that placement is not special-cased (ordering itself is
+    `test_list_runs_orders_newest_first_with_total_tiebreak`'s job)."""
     now = datetime.now(timezone.utc)
     repo_run_id = _run_id(90)
     absent_run_id = _run_id(91)
@@ -1318,23 +1199,16 @@ def test_absent_repository_run_appears_in_list_undistinguished(
     assert by_id[repo_run_id]["vcs"] is not None
 
 
-# --- verify round 1 -----------------------------------------------------
-
-
 def test_list_response_carries_the_truncation_flag_beside_its_subject(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Lean list projections -> The truncation flag
-    never surfaces independently of its subject -- response level.)*
+    """The truncation flag always travels beside its subject in a list
+    response.
 
-    The scenario is written about responses -- "in any response, list or
-    detail ... in that same response" -- and until this test the only checks
-    were at the port. The flag is a *disjunction* (design.md D60): true when
-    the capture itself was truncated OR when display bounding shortened the
-    subject here. Both halves are asserted on one real body, because a wire
-    that always answers `commit_subject_truncated: false` beside a subject
-    cut to 120 characters misrepresents git -- the exact dishonesty the flag
-    exists to prevent.
+    The flag is a *disjunction*: true when the capture itself was truncated
+    OR when display bounding shortened the subject here. Both halves are
+    asserted on one real body, because `commit_subject_truncated: false`
+    beside a subject cut to 120 characters would misrepresent git.
     """
     now = datetime.now(timezone.utc)
     display_bounded_run = _run_id(30)
@@ -1384,19 +1258,13 @@ def test_list_response_carries_the_truncation_flag_beside_its_subject(
     assert capture_truncated["commit_subject_truncated"] is True
 
 
-# --- 10.1 -----------------------------------------------------------------
-
-
 def test_run_list_metadata_filter_returns_only_matching_runs(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Exact key=value equality filter -> A key=value
-    filter returns matching runs)*. Served by `idx_run_metadata_key_value`,
-    seeked on the full `(key, value)` pair rather than `key` alone
-    (design.md D100, `sdd-verify` CRITICAL-2 --
-    `test_list_runs_by_metadata_uses_the_key_value_index` pins the query
-    plan) -- a run declaring the same key at a different value must not
-    match."""
+    """A `key=value` filter returns only matching runs: a run declaring the
+    same key at a different value must not match. (The query plan, seeking
+    `idx_run_metadata_key_value` on the full pair, is pinned by
+    `test_list_runs_by_metadata_uses_the_key_value_index`.)"""
     now = datetime.now(timezone.utc)
     matching_run = _run_id(100)
     other_value_run = _run_id(101)
@@ -1422,9 +1290,9 @@ def test_run_list_metadata_filter_returns_only_matching_runs(
 
 
 def test_run_list_metadata_filter_requires_both_params_together(client: TestClient) -> None:
-    """*(design.md D100 -- two query parameters, never one `key=value`
-    string: a value may itself contain `=`, D54/D87. Both or neither -- one
-    without the other is `422 invalid_metadata_filter`.)*."""
+    """`metadata_key` and `metadata_value` are both or neither -- one
+    without the other is `422 invalid_metadata_filter`, naming the missing
+    one."""
     key_only = client.get("/api/v1/runs", params={"metadata_key": "firmware_version"})
     value_only = client.get("/api/v1/runs", params={"metadata_value": "2.1"})
 
@@ -1439,8 +1307,7 @@ def test_run_list_metadata_filter_requires_both_params_together(client: TestClie
 def test_run_list_unknown_metadata_key_yields_empty_match_not_an_error(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Exact key=value equality filter -> An unknown
-    key or value yields an empty match, not an error)*."""
+    """An unknown key or value yields an empty match, not an error."""
     now = datetime.now(timezone.utc)
     store.record_session(
         _execution(_run_id(102), started_at=now - timedelta(hours=1), finished_at=now),
@@ -1456,14 +1323,11 @@ def test_run_list_unknown_metadata_key_yields_empty_match_not_an_error(
     assert response.json()["items"] == []
 
 
-# --- 10.4 -----------------------------------------------------------------
-
-
 def test_run_list_metadata_horizon_excludes_and_counts_predating_runs(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(history-read-api -> Exact key=value equality filter -> Runs
-    predating the key are excluded and counted)*."""
+    """Runs predating the key are excluded from the match and counted in
+    the horizon."""
     now = datetime.now(timezone.utc)
     predating_one = _run_id(110)
     predating_two = _run_id(111)
@@ -1498,9 +1362,8 @@ def test_run_list_metadata_horizon_excludes_and_counts_predating_runs(
 def test_run_list_metadata_horizon_equals_total_when_key_never_declared(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(design.md D100, Q2 -- `first_seen` is undefined when no run has
-    ever carried the key, and `predating` is then the total run count: "every
-    run predates this key; it has never been declared.")*."""
+    """When no run has ever carried the key, every run predates it, so
+    `predating` is the total run count."""
     now = datetime.now(timezone.utc)
     for seed in range(3):
         store.record_session(
@@ -1524,8 +1387,7 @@ def test_run_list_metadata_horizon_equals_total_when_key_never_declared(
 def test_run_list_metadata_horizon_is_null_without_a_filter(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(design.md D100 -- `metadata_horizon: null` when no filter is
-    given, so a query with no metadata filter has no horizon to report)*."""
+    """A query with no metadata filter has no horizon to report."""
     now = datetime.now(timezone.utc)
     store.record_session(
         _execution(_run_id(130), started_at=now - timedelta(hours=1), finished_at=now),
@@ -1543,12 +1405,10 @@ def test_run_list_metadata_horizon_is_null_without_a_filter(
 def test_run_list_metadata_horizon_counts_a_declared_but_dropped_key(
     client: TestClient, store: ExecutionStore
 ) -> None:
-    """*(design.md D100 -- `first_seen` is `MIN(started_at)` over runs
-    holding ANY `run_metadata` row for this key, of ANY status. D95's
-    declared-but-dropped row is exactly what makes this observable: a run
-    whose value was captured but exceeded the per-value bound must still
-    count as "the key existed then," never be miscounted as predating its
-    own declaration.)*."""
+    """The key's first appearance is the earliest run holding ANY
+    `run_metadata` row for it, of ANY status. A run whose value exceeded the
+    per-value bound still declared the key, so it must not be counted as
+    predating it."""
     now = datetime.now(timezone.utc)
     predating_run = _run_id(140)
     dropped_run = _run_id(141)

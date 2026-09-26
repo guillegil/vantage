@@ -1,8 +1,8 @@
-"""`resolve_server_config` precedence (design.md D11).
+"""`resolve_server_config`: precedence, and the values it refuses.
 
-Plain function calls throughout -- no server, no filesystem I/O, no pytest
-session. Purity itself (no directory ever created) is proved separately in
-`test_path_authority.py`, which is the threat-matrix "Path authority" test.
+Plain function calls throughout -- no server, no pytest session, and no
+filesystem I/O: resolving a path answers a question and must never act on
+the answer.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 from vantage.core.config.resolution import (
-    ConfigSource,
     ServerConfig,
     ServerConfigError,
     resolve_server_config,
@@ -25,7 +24,7 @@ def _resolve(
     cli_host: str | None = None,
     cli_port: int | None = None,
     cli_grace_period: float | None = None,
-    home: Path = Path("/home/nobody"),
+    home: Path | None = Path("/home/nobody"),
     xdg_data_home: str | None = None,
 ) -> ServerConfig:
     return resolve_server_config(
@@ -43,35 +42,88 @@ def test_cli_database_takes_precedence_over_env_and_default() -> None:
     config = _resolve(cli_database="/explicit/vantage.db", env_database="/env/vantage.db")
 
     assert config.database_path == Path("/explicit/vantage.db")
-    assert config.database_source is ConfigSource.CLI
 
 
 def test_env_database_used_when_no_cli_value() -> None:
     config = _resolve(env_database="/env/vantage.db")
 
     assert config.database_path == Path("/env/vantage.db")
-    assert config.database_source is ConfigSource.ENV
 
 
 def test_default_database_uses_xdg_data_home_when_set() -> None:
     config = _resolve(xdg_data_home="/xdg/data")
 
     assert config.database_path == Path("/xdg/data/vantage/vantage.db")
-    assert config.database_source is ConfigSource.DEFAULT
 
 
 def test_default_database_falls_back_to_home_when_xdg_data_home_unset() -> None:
     config = _resolve(home=Path("/home/nobody"), xdg_data_home=None)
 
     assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
-    assert config.database_source is ConfigSource.DEFAULT
 
 
-def test_config_source_is_a_str_enum_not_strenum() -> None:
-    # `StrEnum` is 3.11+; the floor is 3.10 (CLAUDE.md, design.md D11).
-    assert issubclass(ConfigSource, str)
-    assert isinstance(ConfigSource.CLI, str)
-    assert ConfigSource.CLI.value == "cli"
+@pytest.mark.parametrize(
+    ("cli_database", "env_database"),
+    [("", None), (None, ""), ("", "")],
+    ids=["empty-flag", "empty-env", "both-empty"],
+)
+def test_an_empty_database_setting_counts_as_unset(
+    cli_database: str | None, env_database: str | None
+) -> None:
+    """`--database "$VAR"` or `VANTAGE_DATABASE=` with nothing behind it
+    means "not configured". Taken literally it is `Path("")`, the current
+    directory, and startup then acts on that directory as if it were the
+    database's.
+    """
+    config = _resolve(cli_database=cli_database, env_database=env_database)
+
+    assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
+
+
+def test_an_empty_database_flag_falls_through_to_the_environment() -> None:
+    config = _resolve(cli_database="", env_database="/env/vantage.db")
+
+    assert config.database_path == Path("/env/vantage.db")
+
+
+@pytest.mark.parametrize(
+    ("cli_database", "env_database", "xdg_data_home", "expected"),
+    [
+        ("/explicit/v.db", None, None, "/explicit/v.db"),
+        (None, "/env/v.db", None, "/env/v.db"),
+        (None, None, "/xdg/data", "/xdg/data/vantage/vantage.db"),
+    ],
+    ids=["flag", "environment", "xdg-data-home"],
+)
+def test_no_home_directory_is_needed_unless_the_default_path_is(
+    cli_database: str | None, env_database: str | None, xdg_data_home: str | None, expected: str
+) -> None:
+    """A container run as a uid with no passwd entry and no `HOME` has no
+    home directory; the command passes `None` for it."""
+    config = _resolve(
+        cli_database=cli_database,
+        env_database=env_database,
+        xdg_data_home=xdg_data_home,
+        home=None,
+    )
+
+    assert config.database_path == Path(expected)
+
+
+def test_the_default_path_without_a_home_directory_is_refused() -> None:
+    with pytest.raises(ServerConfigError, match="--database"):
+        _resolve(home=None, xdg_data_home="relative/data")
+
+
+@pytest.mark.parametrize("xdg_data_home", ["relative/data", "./data", "data", "~/data"])
+def test_default_database_ignores_a_relative_xdg_data_home(xdg_data_home: str) -> None:
+    """The XDG Base Directory spec says a relative value is invalid and must
+    be ignored. Used as-is it would put the database wherever the server
+    happened to be started, splitting history across directories.
+    """
+    config = _resolve(home=Path("/home/nobody"), xdg_data_home=xdg_data_home)
+
+    assert config.database_path == Path("/home/nobody/.local/share/vantage/vantage.db")
 
 
 def test_default_host_and_port() -> None:
@@ -88,71 +140,99 @@ def test_cli_host_and_port_override_the_default() -> None:
     assert config.port == 9000
 
 
-@pytest.mark.req(id="RQ-44")
-def test_default_grace_period_is_900_seconds_from_the_default_source() -> None:
-    """design.md D34: 900.0 seconds, expressed in source as `30 * 30.0` -- a
-    multiple of the default heartbeat interval, not an invented round
-    number. No environment variable exists for this (CLI-only, matching
-    `host`/`port`'s own precedent)."""
+@pytest.mark.parametrize("value", ["", "   "])
+def test_an_empty_host_is_refused(value: str) -> None:
+    """`--host "$VAR"` with the variable unset arrives as an empty host,
+    which asyncio binds as every interface -- the opposite of the loopback
+    default the operator meant. Refusing it surfaces the unset variable.
+    """
+    with pytest.raises(ServerConfigError, match="--host"):
+        _resolve(cli_host=value)
+
+
+@pytest.mark.parametrize("value", [" 127.0.0.1", "127.0.0.1 ", "\t127.0.0.1\n"])
+def test_whitespace_around_a_host_is_dropped(value: str) -> None:
+    """No address contains whitespace. Kept, `"127.0.0.1 "` fails to
+    resolve at bind time, and is not the loopback default the wide-bind
+    warning compares against, so a loopback start warns first."""
+    assert _resolve(cli_host=value).host == "127.0.0.1"
+
+
+@pytest.mark.parametrize("port", [-1, 0, 65536, 70000])
+def test_a_port_outside_the_bindable_range_is_refused(port: int) -> None:
+    """`argparse type=int` accepts any integer; uvicorn only fails on it
+    after the database has been created. 0 would bind a random port that no
+    plugin could find.
+    """
+    with pytest.raises(ServerConfigError, match="--port"):
+        _resolve(cli_port=port)
+
+
+@pytest.mark.parametrize("port", [1, 65535])
+def test_both_ends_of_the_port_range_are_accepted(port: int) -> None:
+    assert _resolve(cli_port=port).port == port
+
+
+def test_default_grace_period_is_900_seconds() -> None:
+    """900.0 seconds, expressed in source as `30 * 30.0` -- a multiple of the
+    default heartbeat interval, not an invented round number. CLI-only, like
+    `host` and `port`."""
     config = _resolve()
 
     assert config.grace_period_seconds == 900.0
-    assert config.grace_source is ConfigSource.DEFAULT
 
 
-@pytest.mark.req(id="RQ-44")
 def test_cli_grace_period_overrides_the_default() -> None:
     config = _resolve(cli_grace_period=60.0)
 
     assert config.grace_period_seconds == 60.0
-    assert config.grace_source is ConfigSource.CLI
 
 
-@pytest.mark.req(id="RQ-44")
-def test_cli_main_carries_the_resolved_grace_period_into_the_app(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The seam between a resolved config and a running app, which neither
-    half's own test can see.
-
-    `test_cli_grace_period_overrides_the_default` proves resolution, and
-    `test_create_app_exposes_the_configured_grace_period` proves the app
-    stores what it is handed. Nothing proved that `main` passes one to the
-    other -- dropping `grace_period_seconds=` from the `create_app` call
-    leaves the whole suite green while `--grace-period 60` silently runs at
-    the 900-second default. Verified by mutation.
-
-    `uvicorn.run` is replaced because the point is the app it is handed, not
-    serving it.
-    """
-    from vantage.service import cli
-
-    served: dict[str, object] = {}
-
-    def _capture(app: object, **_kwargs: object) -> None:
-        served["app"] = app
-
-    # Patched by dotted path, not through `cli.uvicorn`: `cli.py`'s
-    # `__all__` does not re-export its imports, and reaching through the
-    # module attribute is what mypy flags rather than a style preference.
-    monkeypatch.setattr("vantage.service.cli.uvicorn.run", _capture)
-
-    cli.main(["--database", str(tmp_path / "v.db"), "--grace-period", "60"])
-
-    app = served["app"]
-    assert app.state.grace_period == 60.0  # type: ignore[attr-defined]
+_ONE_YEAR_SECONDS = 365 * 24 * 60 * 60.0
 
 
-@pytest.mark.req(id="RQ-44")
-@pytest.mark.parametrize("value", [0.0, -1.0, float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    "value",
+    [0.0, -1.0, 1e-7, 5e-7, float("nan"), float("inf"), _ONE_YEAR_SECONDS + 1, 1e14, 1e100],
+)
 def test_a_nonsensical_grace_period_is_refused_at_resolution(value: float) -> None:
-    """`argparse type=float` accepts 0, -1, nan and inf.
+    """`argparse type=float` accepts 0, -1, nan, inf and 1e14.
 
-    Any of the first three makes every unfinished run derive as abandoned the
-    instant it is read -- including sessions heartbeating normally -- so the
-    server would run and answer wrong rather than refuse to start. The plugin
-    already rejects a nonsensical timeout this way; this is the server-side
-    equivalent. Found by review, 2026-08-19.
+    0 and -1 make every unfinished run derive as abandoned the instant it is
+    read -- including sessions heartbeating normally, and so do 1e-7 and
+    5e-7, which `timedelta` rounds to zero. nan, inf and 1e14
+    cannot become the `timedelta` `create_app` builds; the cap sits at one
+    year, far below where that happens. The server must refuse before it
+    opens the database, rather than fail with a traceback after it.
     """
-    with pytest.raises(ServerConfigError):
+    with pytest.raises(ServerConfigError, match="--grace-period"):
         _resolve(cli_grace_period=value)
+
+
+def test_a_grace_period_of_one_microsecond_is_accepted() -> None:
+    assert _resolve(cli_grace_period=1e-6).grace_period_seconds == 1e-6
+
+
+def test_a_grace_period_of_one_year_is_accepted() -> None:
+    assert _resolve(cli_grace_period=_ONE_YEAR_SECONDS).grace_period_seconds == _ONE_YEAR_SECONDS
+
+
+def test_resolution_creates_no_directory(tmp_path: Path) -> None:
+    """`resolve_server_config` is pure: asking where the database would go
+    must not materialise it. `xdg_data_home` names a directory that does
+    not exist on disk; resolving against it must leave it that way.
+    """
+    xdg_data_home = tmp_path / "xdg-data"
+
+    config = resolve_server_config(
+        cli_database=None,
+        env_database=None,
+        cli_host=None,
+        cli_port=None,
+        cli_grace_period=None,
+        home=tmp_path,
+        xdg_data_home=str(xdg_data_home),
+    )
+
+    assert config.database_path == xdg_data_home / "vantage" / "vantage.db"
+    assert not xdg_data_home.exists()

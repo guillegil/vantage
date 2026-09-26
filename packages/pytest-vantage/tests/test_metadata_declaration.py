@@ -1,22 +1,17 @@
-"""`pytest_vantage.metadata.read_declaration` (design.md D92, D94) -- tasks
-6.3/6.4, deferred from PR6 and landed here.
+"""`pytest_vantage.metadata.read_declaration`.
 
-Basename note (PR6's own forward pointer, `tasks.md` Phase 6): neither test
-tree carries an `__init__.py`, so pytest's classic import mode needs every
-basename unique workspace-wide. `packages/vantage/tests/test_metadata.py`
-(PR3, vocabulary) and `packages/pytest-vantage/tests/test_metadata_containment.py`
-(PR6, `resolve_declared_path`) already exist -- this file is the second,
-equally unique name Phase 6's note asked for. `capture_metadata` (tasks
-7.1/7.2) is a later slice, in its own file, for the same reason.
-
-Every fixture is a real filesystem structure under `tmp_path`, matching
-`test_metadata_containment.py` and `test_vcs.py`'s own verification style --
-never a mock of filesystem behaviour.
+Every fixture is a real filesystem structure under `tmp_path`, never a mock
+of filesystem behaviour.
 """
 
 from __future__ import annotations
 
+import codecs
 import json
+import os
+import subprocess
+import sys
+import threading
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,12 +19,10 @@ from types import SimpleNamespace
 import pytest
 from pytest_vantage import metadata
 from pytest_vantage.boundary import VantageWarning
-from vantage.core.domain.metadata import MAX_METADATA_ENTRIES as _SERVER_MAX_METADATA_ENTRIES
-from vantage.core.domain.metadata import MAX_METADATA_KEY_CHARS as _SERVER_MAX_METADATA_KEY_CHARS
 
 
 def _config() -> pytest.Config:
-    # `_warn` only reaches `config.pluginmanager` when `warnings.warn`
+    # `warn` only reaches `config.pluginmanager` when `warnings.warn`
     # itself raises (an active `-W error` filter) -- never the case in
     # these tests, so a bare `SimpleNamespace` is enough, the same
     # duck-typed shape `test_opt_in.py` already passes to `Recorder`.
@@ -40,34 +33,7 @@ def _metadata_warnings(recwarn: pytest.WarningsRecorder) -> list[warnings.Warnin
     return [w for w in recwarn.list if issubclass(w.category, VantageWarning)]
 
 
-# --- mirrored constant (design.md D94) --------------------------------------
-
-
-def test_the_mirrored_entry_bound_matches_the_server() -> None:
-    """design.md D94: `metadata.MAX_METADATA_ENTRIES` mirrors
-    `vantage.core.domain.metadata.MAX_METADATA_ENTRIES` across the RQ-24
-    boundary this plugin cannot import across directly -- the same shape
-    `pytest_vantage.budget._REPORT_BYTES_CAP` already uses for its own
-    server mirror (`test_report_budget.py::test_the_mirrored_cap_matches_
-    the_server`). A divergence here would let the plugin admit a
-    declaration the server's own bound would later reject wholesale, which
-    is a correctness bug, not a cosmetic one -- pinned by a test-only
-    cross-package import, never trusted to stay in sync by convention.
-    """
-    assert metadata.MAX_METADATA_ENTRIES == _SERVER_MAX_METADATA_ENTRIES
-
-
-def test_the_mirrored_key_char_bound_matches_the_server() -> None:
-    """sdd-verify WARNING-1: `metadata.MAX_DECLARED_KEY_CHARS` mirrors
-    `vantage.core.domain.metadata.MAX_METADATA_KEY_CHARS` across the same
-    RQ-24 boundary `MAX_METADATA_ENTRIES` above already mirrors, pinned the
-    same way -- a test-only cross-package import, never trusted to stay in
-    sync by convention alone.
-    """
-    assert metadata.MAX_DECLARED_KEY_CHARS == _SERVER_MAX_METADATA_KEY_CHARS
-
-
-# --- read_declaration: rejection conditions (task 6.3, design.md D92) -------
+# --- read_declaration: rejection conditions ---------------------------------
 
 
 def test_an_absent_declaration_captures_nothing_and_warns_once(
@@ -81,15 +47,177 @@ def test_an_absent_declaration_captures_nothing_and_warns_once(
     assert result is None
     warned = _metadata_warnings(recwarn)
     assert len(warned) == 1
-    assert metadata.DECLARATION_FILENAME in str(warned[0].message)
+    assert f"no {metadata.DECLARATION_FILENAME} found" in str(warned[0].message)
 
 
-def test_a_non_json_declaration_captures_nothing_and_warns_once(
+def test_a_directory_named_like_the_declaration_is_not_reported_as_absent(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    root = tmp_path / "project"
+    (root / metadata.DECLARATION_FILENAME).mkdir(parents=True)
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "not a regular file" in str(warned[0].message)
+
+
+def test_a_declaration_in_a_symlink_loop_is_not_reported_as_absent(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # Unreadable even as root, unlike the permission case below.
+    root = tmp_path / "project"
+    root.mkdir()
+    os.symlink(metadata.DECLARATION_FILENAME, root / metadata.DECLARATION_FILENAME)
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "cannot read" in str(warned[0].message)
+
+
+@pytest.mark.skipif(
+    os.geteuid() == 0 if hasattr(os, "geteuid") else True,
+    reason="chmod 000 is a no-op as root; skip rather than pass vacuously",
+)
+def test_an_unreadable_declaration_is_not_reported_as_absent(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    (root / metadata.DECLARATION_FILENAME).write_text("{not json")
+    declaration = root / metadata.DECLARATION_FILENAME
+    declaration.write_text(json.dumps({"version": 1, "files": []}))
+    os.chmod(declaration, 0o000)
+
+    try:
+        result = metadata.read_declaration(_config(), root)
+    finally:
+        os.chmod(declaration, 0o644)  # noqa: S103 -- restoring the fixture, not granting access
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "cannot read" in str(warned[0].message)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="os.mkfifo is POSIX-only")
+def test_a_fifo_declaration_is_refused_without_blocking(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # Opening a FIFO with no writer blocks, which would hang session start.
+    # Run in a thread so a regression fails the test rather than hanging it.
+    root = tmp_path / "project"
+    root.mkdir()
+    fifo = root / metadata.DECLARATION_FILENAME
+    os.mkfifo(fifo)
+    outcome: list[object] = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(metadata.read_declaration(_config(), root)), daemon=True
+    )
+
+    worker.start()
+    worker.join(timeout=5)
+    blocked = worker.is_alive()
+    if blocked:  # release it: opening the write end unblocks the reader
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(timeout=5)
+
+    assert not blocked, "read_declaration blocked opening a FIFO"
+    assert outcome == [None]
+    assert len(_metadata_warnings(recwarn)) == 1
+
+
+@pytest.mark.skipif(not Path(os.devnull).exists(), reason="needs a null device")
+def test_a_declaration_linked_to_a_device_is_refused_unread(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # The null device stands in for `/dev/zero`, which the same check stops
+    # before a read that would never end.
+    root = tmp_path / "project"
+    root.mkdir()
+    os.symlink(os.devnull, root / metadata.DECLARATION_FILENAME)
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "not a regular file" in str(warned[0].message)
+
+
+@pytest.mark.parametrize(
+    ("padding", "accepted"), [(0, True), (1, False)], ids=["at_the_bound", "one_byte_over"]
+)
+def test_the_declaration_is_read_only_up_to_its_byte_bound(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, padding: int, accepted: bool
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    document = json.dumps({"version": 1, "files": []})
+    # Trailing whitespace is valid JSON, so only the size decides.
+    size = metadata.MAX_DECLARATION_BYTES + padding
+    (root / metadata.DECLARATION_FILENAME).write_text(document.ljust(size))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert (result == ()) is accepted
+    assert len(_metadata_warnings(recwarn)) == (0 if accepted else 1)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is enforced on Linux")
+def test_a_huge_declaration_is_refused_without_being_read_whole(tmp_path: Path) -> None:
+    # A sparse file far larger than the child's capped address space: reading
+    # it whole raises MemoryError there instead of exhausting the host.
+    root = tmp_path / "project"
+    root.mkdir()
+    with (root / metadata.DECLARATION_FILENAME).open("wb") as handle:
+        handle.truncate(4 * 1024**3)
+    script = (
+        "import resource, sys, warnings\n"
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        "from pytest_vantage import metadata\n"
+        "resource.setrlimit(resource.RLIMIT_AS, (1024**3, 1024**3))\n"
+        "with warnings.catch_warnings(record=True) as caught:\n"
+        "    warnings.simplefilter('always')\n"
+        "    result = metadata.read_declaration(SimpleNamespace(), Path(sys.argv[1]))\n"
+        "print(result, len(caught))\n"
+    )
+
+    completed = subprocess.run(  # noqa: S603 -- this interpreter, a literal script
+        [sys.executable, "-c", script, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.split() == ["None", "1"]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"{not json",
+        # Past the interpreter's integer-string digit limit, which `json`
+        # raises as a plain `ValueError`. Without a limit it parses to an
+        # unsupported version, refused all the same.
+        b'{"version": ' + b"1" * 4301 + b', "files": []}',
+        b"[" * 100_000 + b"]" * 100_000,
+        b"\xff{}",
+    ],
+    ids=["syntax_error", "overlong_integer", "nested_too_deep", "not_utf8"],
+)
+def test_a_non_json_declaration_captures_nothing_and_warns_once(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, raw: bytes
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / metadata.DECLARATION_FILENAME).write_bytes(raw)
 
     result = metadata.read_declaration(_config(), root)
 
@@ -111,7 +239,18 @@ def test_a_non_object_declaration_captures_nothing_and_warns_once(
     assert len(_metadata_warnings(recwarn)) == 1
 
 
-@pytest.mark.parametrize("document", [{"files": []}, {"version": 2, "files": []}])
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"files": []},
+        {"version": 2, "files": []},
+        # Equal to 1 in Python, but not the integer 1.
+        {"version": True, "files": []},
+        {"version": 1.0, "files": []},
+        {"version": "1", "files": []},
+    ],
+    ids=["missing", "two", "true", "float", "string"],
+)
 def test_an_unsupported_version_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder, document: dict[str, object]
 ) -> None:
@@ -187,14 +326,42 @@ def test_an_unknown_format_captures_nothing_and_warns_once(
 def test_a_duplicate_stored_key_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
-    # design.md D92: the key space is flat and globally unique per run --
-    # detected purely from the declaration, before any file is opened.
+    # The key space is flat and unique per run -- detected from the
+    # declaration alone, before any file is opened.
     root = tmp_path / "project"
     root.mkdir()
     files = [
         {"path": "a.json", "format": "json", "keys": ["firmware_version"]},
         {"path": "b.json", "format": "json", "keys": ["firmware_version"]},
     ]
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": files}))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    assert len(_metadata_warnings(recwarn)) == 1
+
+
+@pytest.mark.parametrize(
+    ("first", "second"),
+    [
+        ({"path": "g.json", "format": "json"}, {"path": "g.json", "format": "json"}),
+        ({"path": "./g.json", "format": "json"}, {"path": "g.json", "format": "json"}),
+        ({"path": "g.json", "format": "json"}, {"path": "g.json", "format": "yaml"}),
+    ],
+    ids=["same_path", "same_file_spelled_differently", "different_format"],
+)
+def test_a_path_declared_twice_captures_nothing_and_warns_once(
+    tmp_path: Path,
+    recwarn: pytest.WarningsRecorder,
+    first: dict[str, object],
+    second: dict[str, object],
+) -> None:
+    # The server keeps one file entry per path and would silently drop the
+    # second one's status; the plugin would read and charge the file twice.
+    root = tmp_path / "project"
+    root.mkdir()
+    files = [{**first, "keys": ["a"]}, {**second, "keys": ["b"]}]
     (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": files}))
 
     result = metadata.read_declaration(_config(), root)
@@ -221,10 +388,8 @@ def test_a_path_longer_than_the_bound_captures_nothing_and_warns_once(
 def test_a_path_containing_a_nul_byte_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
-    # sdd-verify CRITICAL-1: rejected loudly at the declaration boundary,
-    # before `resolve_declared_path` ever sees it -- see that module's
-    # own `test_a_path_containing_a_nul_byte_is_rejected_not_crashed` for
-    # the crash this prevents downstream.
+    # Refused loudly here, before `resolve_declared_path` ever sees it --
+    # `Path.resolve()` raises `ValueError` on a NUL byte.
     root = tmp_path / "project"
     root.mkdir()
     entry = {"path": "config\x00.json", "format": "json", "keys": ["k"]}
@@ -236,12 +401,73 @@ def test_a_path_containing_a_nul_byte_captures_nothing_and_warns_once(
     assert len(_metadata_warnings(recwarn)) == 1
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "config\\app.json",
+        "\\\\server\\share\\app.json",
+        "C:/config/app.json",
+        "C:app.json",
+        "//server/share/app.json",
+    ],
+    ids=["backslash", "unc-backslashes", "drive-absolute", "drive-relative", "unc-slashes"],
+)
+def test_a_windows_shaped_path_captures_nothing_and_warns_naming_it(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, path: str
+) -> None:
+    """The server drops a path that reads differently on Windows, keys and
+    all, so the plugin refuses the declaration instead of sending an entry
+    that would vanish. `C:/config/app.json` would even resolve here, to a
+    directory named `C:`, and be captured for nothing.
+    """
+    root = tmp_path / "project"
+    (root / "C:" / "config").mkdir(parents=True)
+    (root / "C:" / "config" / "app.json").write_text("{}")
+    entry = {"path": path, "format": "json", "keys": ["k"]}
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": [entry]}))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    (warned,) = _metadata_warnings(recwarn)
+    assert repr(path) in str(warned.message)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/etc/hostname", "../shared/settings.json", "config/../app.json", ".."],
+    ids=["absolute", "parent", "parent-inside", "parent-alone"],
+)
+def test_an_absolute_or_climbing_path_captures_nothing_and_warns_naming_it(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, path: str
+) -> None:
+    """The server drops an absolute path or one with a `..` component, keys
+    and all, so the plugin refuses the declaration instead of sending an
+    entry that would vanish without a word. A monorepo package declaring
+    `../shared/...` learns why its keys are missing.
+    """
+    root = tmp_path / "mono" / "project"
+    (root / "config").mkdir(parents=True)
+    (root / "app.json").write_text("{}")
+    (tmp_path / "mono" / "shared").mkdir()
+    (tmp_path / "mono" / "shared" / "settings.json").write_text("{}")
+    entries = [
+        {"path": "app.json", "format": "json", "keys": ["version"]},
+        {"path": path, "format": "json", "keys": ["region"]},
+    ]
+    (root / metadata.DECLARATION_FILENAME).write_text(json.dumps({"version": 1, "files": entries}))
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    (warned,) = _metadata_warnings(recwarn)
+    assert repr(path) in str(warned.message)
+
+
 def test_a_key_longer_than_the_bound_captures_nothing_and_warns_once(
     tmp_path: Path, recwarn: pytest.WarningsRecorder
 ) -> None:
-    # sdd-verify WARNING-1: `MAX_DECLARED_KEY_CHARS` gates real behaviour --
-    # the whole declaration is refused, exactly like `MAX_DECLARED_PATH_CHARS`
-    # beside it, with no new status class and no schema change.
+    # The whole declaration is refused, exactly like an over-long path.
     root = tmp_path / "project"
     root.mkdir()
     long_key = "k" * (metadata.MAX_DECLARED_KEY_CHARS + 1)
@@ -252,6 +478,37 @@ def test_a_key_longer_than_the_bound_captures_nothing_and_warns_once(
 
     assert result is None
     assert len(_metadata_warnings(recwarn)) == 1
+
+
+@pytest.mark.parametrize("char", ["k", "\u4e2d", "\U0001f600"], ids=["ascii", "cjk", "non_bmp"])
+def test_paths_and_keys_beyond_the_section_budget_capture_nothing_and_warn_once(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder, char: str
+) -> None:
+    # Every entry reaches the wire whatever happens to its file, so a
+    # declaration within every per-item bound can still outgrow the section.
+    root = tmp_path / "project"
+    root.mkdir()
+    keys = [
+        f"{i:03d}{char * (metadata.MAX_DECLARED_KEY_CHARS - 3)}"
+        for i in range(metadata.MAX_METADATA_ENTRIES)
+    ]
+    files = [
+        {
+            "path": f"{i:02d}{char * (metadata.MAX_DECLARED_PATH_CHARS - 7)}.json",
+            "format": "json",
+            "keys": keys[i :: metadata.MAX_DECLARED_FILES],
+        }
+        for i in range(metadata.MAX_DECLARED_FILES)
+    ]
+    document = json.dumps({"version": 1, "files": files}, ensure_ascii=False)
+    (root / metadata.DECLARATION_FILENAME).write_text(document, encoding="utf-8")
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result is None
+    warned = _metadata_warnings(recwarn)
+    assert len(warned) == 1
+    assert "budget" in str(warned[0].message)
 
 
 def test_more_than_the_total_key_bound_captures_nothing_and_warns_once(
@@ -269,7 +526,7 @@ def test_more_than_the_total_key_bound_captures_nothing_and_warns_once(
     assert len(_metadata_warnings(recwarn)) == 1
 
 
-# --- read_declaration: acceptance (task 6.3/6.4) ----------------------------
+# --- read_declaration: valid declarations -----------------------------------
 
 
 def test_a_well_formed_declaration_is_read_with_no_warning(
@@ -293,6 +550,22 @@ def test_a_well_formed_declaration_is_read_with_no_warning(
             path="config/firmware.yaml", format="yaml", keys=("firmware_version", "board_revision")
         ),
     )
+    assert len(_metadata_warnings(recwarn)) == 0
+
+
+def test_a_declaration_saved_with_a_utf8_bom_is_accepted(
+    tmp_path: Path, recwarn: pytest.WarningsRecorder
+) -> None:
+    # Several Windows editors and PowerShell write one by default.
+    root = tmp_path / "project"
+    root.mkdir()
+    files = [{"path": "f.json", "format": "json", "keys": ["k"]}]
+    document = json.dumps({"version": 1, "files": files}).encode()
+    (root / metadata.DECLARATION_FILENAME).write_bytes(codecs.BOM_UTF8 + document)
+
+    result = metadata.read_declaration(_config(), root)
+
+    assert result == (metadata.DeclaredFile(path="f.json", format="json", keys=("k",)),)
     assert len(_metadata_warnings(recwarn)) == 0
 
 
