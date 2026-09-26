@@ -1090,9 +1090,15 @@ def test_a_postgresql_database_not_in_utf8_is_one_line_naming_the_redacted_url(
 
 
 def test_an_unreachable_postgresql_server_is_one_line_without_the_password() -> None:
-    url = f"postgresql://vantage:{_PASSWORD}@127.0.0.1:{_free_loopback_port()}/vantage"
+    # Bound but never listening, and held for the whole test: every connection
+    # is refused at once, and no other process can take the port meanwhile
+    # and answer slowly, which reads as a timeout instead.
+    with contextlib.closing(socket.socket()) as reserved:
+        reserved.bind(("127.0.0.1", 0))
+        port = reserved.getsockname()[1]
+        url = f"postgresql://vantage:{_PASSWORD}@127.0.0.1:{port}/vantage"
 
-    line = _refused(url)
+        line = _refused(url)
 
     assert line.startswith(f"vantage: cannot open the database at {redacted(url)}: "), line
     assert "Connection refused" in line
