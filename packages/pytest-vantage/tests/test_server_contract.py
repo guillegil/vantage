@@ -17,9 +17,11 @@ from types import ModuleType, SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from pytest_vantage import budget, capture, metadata, recorder, transport, vcs
+from pytest_vantage.boundary import VantageWarning
 from vantage.core.config import resolution
 from vantage.core.domain import metadata as core_metadata
 from vantage.core.domain.result import OUTCOMES
+from vantage.core.ports.storage import RunMetadata
 from vantage.service import errors, truncation
 from vantage.service.app import create_app
 from vantage.service.routes import runs as runs_route
@@ -89,45 +91,23 @@ def test_the_file_statuses_are_the_servers_but_malformed() -> None:
     assert set(metadata._FILE_STATUSES) == core_metadata.FILE_STATUSES - {"malformed"}
 
 
-def test_every_file_the_plugin_reads_is_recorded_under_its_declared_path(
-    tmp_path: Path,
-) -> None:
-    """The server re-checks each declared path's shape and drops a file that
-    fails it, with every key it declared. Each shape the plugin reads must
-    pass that check, or a captured file would vanish from the run; the
-    shapes it refuses to read -- absolute, or holding `..` -- are the ones
-    dropped.
-    """
-    root = tmp_path / "project"
-    (root / "config").mkdir(parents=True)
-    (tmp_path / "outside.json").write_text("{}")
-    read = ["top.json", "./dot.json", "config/nested.json", "config/./dot.json", "a b: c.json"]
-    for declared in read:
-        (root / declared).write_text("{}")
-    refused = [str(root / "top.json"), "../outside.json", "config/../top.json"]
+def _declare(root: Path, paths: list[str]) -> None:
     (root / metadata.DECLARATION_FILENAME).write_text(
         json.dumps(
             {
                 "version": 1,
                 "files": [
                     {"path": declared, "format": "json", "keys": [f"key_{index}"]}
-                    for index, declared in enumerate([*read, *refused])
+                    for index, declared in enumerate(paths)
                 ],
             }
         )
     )
-    # `warn` is reached only for a refused declaration, which this is not.
-    config: pytest.Config = SimpleNamespace()  # type: ignore[assignment]
 
-    section = metadata.capture_metadata(config, root)
 
-    assert section is not None
-    statuses = {file.path: file.status for file in section.files}
-    assert statuses == {
-        **dict.fromkeys(read, "captured"),
-        **dict.fromkeys(refused, "path_rejected"),
-    }
-    stored = runs_route._to_run_metadata(
+def _stored_metadata(section: metadata.MetadataSection) -> RunMetadata:
+    """What the server keeps of `section`, sent as `Recorder` sends it."""
+    return runs_route._to_run_metadata(
         MetadataReport.model_validate(
             {
                 "declaration": section.declaration,
@@ -144,8 +124,57 @@ def test_every_file_the_plugin_reads_is_recorded_under_its_declared_path(
             }
         )
     )
+
+
+def test_every_file_the_plugin_reads_is_recorded_under_its_declared_path(
+    tmp_path: Path,
+) -> None:
+    """The server re-checks each declared path's shape and drops a file that
+    fails it, with every key it declared. Each shape the plugin reads must
+    pass that check, or a captured file would vanish from the run.
+    """
+    root = tmp_path / "project"
+    (root / "config").mkdir(parents=True)
+    read = ["top.json", "./dot.json", "config/nested.json", "config/./dot.json", "a b: c.json"]
+    for declared in read:
+        (root / declared).write_text("{}")
+    _declare(root, read)
+    # `warn` is reached only for a refused declaration, which this is not.
+    config: pytest.Config = SimpleNamespace()  # type: ignore[assignment]
+
+    section = metadata.capture_metadata(config, root)
+
+    assert section is not None
+    assert {file.path: file.status for file in section.files} == dict.fromkeys(read, "captured")
+    stored = _stored_metadata(section)
     assert [file.source_file for file in stored.files] == read
     assert {entry.source_file for entry in stored.entries} == set(read)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["/top.json", "../outside.json", "config/../top.json", "config\\top.json", "C:top.json"],
+)
+def test_every_path_shape_the_server_drops_is_refused_with_a_warning(
+    tmp_path: Path, shape: str
+) -> None:
+    """A shape the server drops, keys and all, is never sent: the plugin
+    refuses the declaration naming it, with one warning, so no declared key
+    vanishes from the run unannounced.
+    """
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "top.json").write_text("{}")
+    dropped = metadata.MetadataSection(
+        declaration=metadata.DECLARATION_FILENAME,
+        files=(metadata.CapturedFile(shape, "json", "path_rejected", ("key",), None),),
+    )
+    assert _stored_metadata(dropped) == RunMetadata(files=(), entries=())
+    _declare(root, ["top.json", shape])
+    config: pytest.Config = SimpleNamespace()  # type: ignore[assignment]
+
+    with pytest.warns(VantageWarning, match="metadata will not be captured"):
+        assert metadata.capture_metadata(config, root) is None
 
 
 # --- the acknowledgement ------------------------------------------------------
