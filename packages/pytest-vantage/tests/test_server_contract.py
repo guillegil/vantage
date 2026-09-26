@@ -10,16 +10,20 @@ imports both and compares the copies directly.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import ModuleType
 
 import pytest
-from pytest_vantage import budget, capture, metadata, recorder, vcs
+from fastapi.testclient import TestClient
+from pytest_vantage import budget, capture, metadata, recorder, transport, vcs
 from vantage.core.config import resolution
 from vantage.core.domain import metadata as core_metadata
 from vantage.core.domain.result import OUTCOMES
 from vantage.service import errors, truncation
+from vantage.service.app import create_app
 from vantage.service.routes import runs as runs_route
 from vantage.storage.connection import isoformat_utc as server_isoformat_utc
+from vantage.storage.sqlite_store import SqliteExecutionStore
 
 # --- the report's size ------------------------------------------------------
 
@@ -81,6 +85,37 @@ def test_the_file_statuses_are_the_servers_but_malformed() -> None:
     give, so a status the plugin gains must land in `_FILE_STATUSES`.
     """
     assert set(metadata._FILE_STATUSES) == core_metadata.FILE_STATUSES - {"malformed"}
+
+
+# --- the acknowledgement ------------------------------------------------------
+
+
+def test_the_acknowledgements_the_plugin_accepts_are_the_ones_the_server_sends(
+    tmp_path: Path,
+) -> None:
+    """A report is sent more than once per run -- the start-write, then the
+    finish-write -- and the server answers the first `created` and every
+    later one otherwise. The plugin takes any status it does not know for a
+    failed send and warns, although the server stored the report.
+    """
+    report = {
+        "run": {
+            "id": "a" * 32,
+            "started_at": "2026-08-15T09:14:02.481930+00:00",
+            "finished_at": "2026-08-15T09:14:47.002118+00:00",
+            "exit_status": 0,
+            "interrupted": False,
+            "interrupt_reason": None,
+        }
+    }
+    store = SqliteExecutionStore(tmp_path / "vantage.db")
+    try:
+        client = TestClient(create_app(store))
+        answered = [client.post("/api/v1/runs", json=report).json()["status"] for _ in range(2)]
+    finally:
+        store.close()
+
+    assert set(answered) == transport._ACKNOWLEDGED_STATUSES
 
 
 # --- results ------------------------------------------------------------------

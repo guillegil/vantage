@@ -93,8 +93,9 @@ _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 # The three bounds below mirror `pytest_vantage.metadata`. The two
 # distributions cannot import each other, so each carries its own copy;
-# `test_routes_runs.py` pins them equal. The plugin never exceeds them, so
-# they only ever bind on another HTTP client.
+# `packages/pytest-vantage/tests/test_server_contract.py` pins them equal,
+# with every other value the two sides share. The plugin never exceeds them,
+# so they only ever bind on another HTTP client.
 
 _MAX_DECLARED_PATH_CHARS = 1024
 """Mirrors `MAX_DECLARED_PATH_CHARS`."""

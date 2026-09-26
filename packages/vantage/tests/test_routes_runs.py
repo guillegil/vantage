@@ -9,7 +9,6 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from pytest_vantage import metadata as plugin_metadata
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES, MAX_METADATA_KEY_CHARS
 from vantage.core.domain.result import CapturedOutput
 from vantage.core.ports.storage import EMPTY_RUN_METADATA, MetadataEntry, MetadataFile
@@ -546,12 +545,3 @@ def test_to_run_metadata_keeps_at_most_the_entry_bound_across_files() -> None:
     assert len(result.files) == 2
     assert [entry.key for entry in result.entries] == [*first, "b_0"]
     assert result.entries[0].source_file == "config/a.json"
-
-
-def test_the_mirrored_plugin_bounds_equal_the_plugins_own() -> None:
-    """The two distributions cannot import each other at runtime, so the
-    server carries copies; a plugin bound raised alone would make the
-    server drop files the plugin captured."""
-    assert runs_route._MAX_DECLARED_PATH_CHARS == plugin_metadata.MAX_DECLARED_PATH_CHARS
-    assert runs_route._MAX_DECLARED_FILE_BYTES == plugin_metadata.MAX_DECLARED_FILE_BYTES
-    assert runs_route._MAX_METADATA_SECTION_BYTES == plugin_metadata.MAX_METADATA_SECTION_BYTES

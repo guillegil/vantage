@@ -46,7 +46,8 @@ _CAPABILITIES_PATH = "/api/v1/capabilities"
 MAX_RESPONSE_BYTES = 64 * 1024
 
 # The two statuses the ingestion route acknowledges a report with: the first
-# report of a run, and any later one.
+# report of a run, and any later one. `test_server_contract.py` pins them to
+# the statuses the server answers with.
 _ACKNOWLEDGED_STATUSES = frozenset({"created", "duplicate"})
 
 _T = TypeVar("_T")
