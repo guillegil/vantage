@@ -145,7 +145,8 @@ def _mapping_view(
     node: MappingNode, memo: dict[int, dict[str, str | None]], active: set[int]
 ) -> dict[str, str | None]:
     """`node`'s keys as `safe_load` would see them: an explicit key beats a
-    merged one, and in a sequence merge the earlier source wins.
+    merged one, a later `<<` key beats an earlier one, and in a sequence
+    merge the earlier source wins.
 
     Never `SafeConstructor.flatten_mapping`: it copies the merged pairs into
     every mapping, which doubles per level on `<<: [*a, *a]` chains, and
@@ -165,10 +166,12 @@ def _mapping_view(
     for key_node, value_node in node.value:
         if key_node.tag == _MERGE_TAG:
             sources = value_node.value if isinstance(value_node, SequenceNode) else [value_node]
+            contribution: dict[str, str | None] = {}
             for source in sources:
                 if isinstance(source, MappingNode):
                     for key, value in _mapping_view(source, memo, active).items():
-                        merged.setdefault(key, value)
+                        contribution.setdefault(key, value)
+            merged.update(contribution)
             continue
         if isinstance(key_node, ScalarNode):
             explicit[key_node.value] = (

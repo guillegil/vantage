@@ -295,6 +295,28 @@ def test_yaml_merge_precedence_matches_safe_load() -> None:
     assert {key: _captured(result, key) for key in keys} == {key: expected[key] for key in keys}
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        "a: &x {c: '2'}\n<<: *x\n<<: {c: '3'}\n",
+        "a: &x {c: '2'}\nb: &y {c: '4'}\n<<: [*x, *y]\n<<: {c: '3'}\n",
+        "a: &x {c: '2'}\nb: &y {c: '4', d: '5'}\n<<: {c: '3'}\n<<: [*x, *y]\n",
+    ],
+    ids=["mapping-then-mapping", "sequence-then-mapping", "mapping-then-sequence"],
+)
+def test_yaml_a_later_merge_key_beats_an_earlier_one_as_in_safe_load(content: str) -> None:
+    """Two `<<` keys in one mapping: `safe_load` merges them in order, so
+    the later one's value wins, below the explicit keys. A declared key
+    must be recorded with the value any YAML tool shows for the document."""
+    expected = yaml.safe_load(content)
+
+    result = parse(content, "yaml", ["c", "d"])
+
+    assert _captured(result, "c") == expected["c"]
+    assert result is not None
+    assert result["d"].value == expected.get("d")
+
+
 def test_yaml_nested_merge_bomb_completes_quickly() -> None:
     """Each mapping's merged view is built once, so a chain of mappings that
     each merge the previous one twice stays linear instead of doubling per
