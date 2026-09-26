@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
@@ -1744,6 +1745,52 @@ class ExecutionStoreContract:
         )
 
         assert stored_metadata(identity).entries == (from_file,)
+
+    def test_a_run_holds_at_most_the_entry_bound_of_keys_across_its_reports(
+        self, store: ExecutionStore
+    ) -> None:
+        """Each report is bounded on its way in, but a run may be sent any
+        number of them. The store keeps the first keys up to the bound and
+        drops every new one after it; a key the run already holds takes no
+        second place."""
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        identity = "9" * 32
+
+        def _values(*keys: str, value: str = "v") -> RunMetadata:
+            return RunMetadata(
+                entries=tuple(
+                    MetadataEntry(
+                        key=key,
+                        value=value,
+                        source_file=None,
+                        status="captured",
+                        source="session",
+                        declared=False,
+                    )
+                    for key in keys
+                )
+            )
+
+        first = [f"a{index:03d}" for index in range(MAX_METADATA_ENTRIES - 1)]
+        store.record_session(
+            _start_only_execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=_values(*first),
+        )
+        store.record_session(
+            _execution(identity, started=started),
+            results=(),
+            received_at=started,
+            metadata=_values(first[0], "b000", "b001", value="later"),
+        )
+
+        stored = store.get_run_metadata(identity)
+        assert stored is not None
+        assert [(entry.key, entry.value) for entry in stored] == [
+            *((key, "v") for key in first),
+            ("b000", "later"),
+        ]
 
     def test_a_session_with_no_metadata_argument_persists_no_metadata_rows(
         self, store: ExecutionStore, stored_metadata: StoredMetadata

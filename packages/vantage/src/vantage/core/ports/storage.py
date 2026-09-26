@@ -291,7 +291,9 @@ class ExecutionStore(Protocol):
         was created, False if the id was already stored. Every metadata row
         is written once: the first report to carry a file or a key keeps it,
         whatever a later report says, and whichever source a later row of the
-        same key comes from."""
+        same key comes from. A run holds at most `MAX_METADATA_ENTRIES` keys:
+        once it does, every new key a report carries is dropped, in order,
+        however many reports the run is sent."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:

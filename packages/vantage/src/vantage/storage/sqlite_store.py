@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import TypeVar, cast
 
 from vantage.core.domain.execution import Execution, Identity, VcsContext
+from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
@@ -288,9 +289,16 @@ _INSERT_METADATA_FILE = """
     ON CONFLICT(run_id, source_file) DO NOTHING
 """
 
+# A new key is also dropped once its run holds `MAX_METADATA_ENTRIES` rows:
+# each report is bounded on its way in, but a run can be sent any number of
+# reports, and its metadata is returned whole. The count sees the rows this
+# statement's earlier executions inserted, and is served by the primary
+# key's index. An upsert on a `SELECT` needs a `WHERE` for the parser to
+# tell `ON CONFLICT` from a join's `ON`.
 _INSERT_METADATA_ENTRY = """
     INSERT INTO run_metadata (run_id, key, name, value, status, source, source_file, declared)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    SELECT ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE (SELECT COUNT(*) FROM run_metadata WHERE run_id = ?) < ?
     ON CONFLICT(run_id, key) DO NOTHING
 """
 
@@ -673,6 +681,8 @@ def _metadata_entry_rows(run_id: str, metadata: RunMetadata) -> list[tuple[objec
             entry.source,
             entry.source_file,
             1 if entry.declared else 0,
+            run_id,
+            MAX_METADATA_ENTRIES,
         )
         for entry in metadata.entries
     ]

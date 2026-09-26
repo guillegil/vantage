@@ -80,8 +80,9 @@ MAX_METADATA_ENTRIES = 200
 """Bound on metadata rows per run: the keys of every declared file first,
 then the keys the session reported, in the order first set. The plugin
 refuses a declaration past it and drops the session keys past it, and the
-server drops every row past it that another client sends. It also keeps a
-run's metadata small enough to return whole, in one unpaged response."""
+server drops every row past it that another client sends, in one report or
+spread over several. It also keeps a run's metadata small enough to return
+whole, in one unpaged response."""
 
 
 __all__ = [

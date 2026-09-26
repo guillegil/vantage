@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Concatenate, ParamSpec, TypeVar
 
 from vantage.core.domain.execution import Execution, VcsContext
+from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
@@ -159,12 +160,18 @@ class InMemoryExecutionStore:
             if key not in self._results:
                 self._results[key] = _normalized_result(result)
 
-        # `setdefault` mirrors the SQLite adapter's `ON CONFLICT DO NOTHING`:
-        # a metadata file/entry is written once and never updated.
+        # Mirrors the SQLite adapter's `ON CONFLICT DO NOTHING`: a metadata
+        # file/entry is written once and never updated. A run also stops
+        # taking new keys once it holds `MAX_METADATA_ENTRIES`, however many
+        # reports carry them.
         for metadata_file in metadata.files:
             self._metadata_files.setdefault((identity, metadata_file.source_file), metadata_file)
+        held = sum(1 for run_id, _key in self._metadata_entries if run_id == identity)
         for metadata_entry in metadata.entries:
-            self._metadata_entries.setdefault((identity, metadata_entry.key), metadata_entry)
+            slot = (identity, metadata_entry.key)
+            if slot not in self._metadata_entries and held < MAX_METADATA_ENTRIES:
+                self._metadata_entries[slot] = metadata_entry
+                held += 1
 
         return created
 
