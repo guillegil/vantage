@@ -30,8 +30,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from vantage.service.schemas import RejectionResponse
 
-# The request body cap, enforced while streaming, before the body is fully
-# buffered (`service/routes/runs.py`).
+# The session report's body cap, enforced while streaming, before the body
+# is fully buffered (`service/body.py`).
 MAX_REPORT_BYTES = 1024 * 1024  # 1 MiB
 
 
@@ -130,7 +130,7 @@ class InvalidJsonError(RejectionError):
 class IncompleteBodyError(RejectionError):
     """The client disconnected before sending the whole body.
 
-    Raised by `service/routes/runs.py`'s `_read_bounded_body` when
+    Raised by `service/body.py`'s `read_bounded_body` when
     `request.stream()` raises `ClientDisconnect`. The client is gone and
     never sees this response; converting the disconnect keeps it on the one
     rejection path instead of surfacing as an unhandled ASGI error.
@@ -144,13 +144,14 @@ class IncompleteBodyError(RejectionError):
 
 
 class PayloadTooLargeError(RejectionError):
-    """The body exceeds `MAX_REPORT_BYTES`."""
+    """The body exceeds its route's cap: `MAX_REPORT_BYTES` for a session
+    report."""
 
     status_code = 413
     error = "payload_too_large"
 
-    def __init__(self) -> None:
-        super().__init__(f"The request body exceeds the {MAX_REPORT_BYTES}-byte limit.")
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"The request body exceeds the {limit}-byte limit.")
 
 
 class UnsupportedMediaTypeError(RejectionError):
@@ -175,13 +176,41 @@ class UnsupportedMediaTypeError(RejectionError):
         super().__init__(f"Content-Type must be application/json, got {shown!r}.")
 
 
+class InvalidSectionError(RejectionError):
+    """Valid JSON, but not a `SectionUpsertRequest`: not an object, or a
+    `name` or `prefix` missing or not a string."""
+
+    status_code = 422
+    error = "invalid_section"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidSectionError:
+        return cls(
+            "The submitted section does not match the expected shape.",
+            _fields_from_errors(errors),
+        )
+
+
+class InvalidParameterError(RejectionError):
+    """A path or query parameter fails its declared type or bound, such as
+    a `limit` below 1 or a `run_id` that is not 32 lowercase hex
+    characters. `fields` names each as `query.<name>` or `path.<name>`."""
+
+    status_code = 422
+    error = "invalid_parameter"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidParameterError:
+        return cls("A path or query parameter is not valid.", _fields_from_errors(errors))
+
+
 class InvalidIdentityError(RejectionError):
     """A required `node_id` query value is missing. There is no length
     bound: any node id already stored must stay readable by its exact value.
 
     Chosen by `_handle_request_validation_error` only when every failing
     field is `node_id`, so an unrelated failure (e.g. a malformed `limit`)
-    still gets the generic shape."""
+    is still `InvalidParameterError`."""
 
     status_code = 422
     error = "invalid_identity"
@@ -345,11 +374,12 @@ def register_error_handlers(app: FastAPI) -> None:
     """Wire every rejection this service can raise through the one shape.
 
     Three sources, one output. `RejectionError` is raised by the manual body
-    handling in `service/routes/runs.py` (media type, size cap, JSON parse,
-    schema validation) and by the other routes. `RequestValidationError` is
-    FastAPI's own exception and is handled here too, as a safety net for
-    anything still validated through automatic parameter binding -- neither
-    handler ever forwards a pydantic error dict as-is. Starlette's
+    handling in `service/body.py` (media type, size cap, JSON parse), by the
+    two routes that validate the body they read, and by the other routes.
+    `RequestValidationError` is FastAPI's own exception, raised for a path
+    or query parameter that fails automatic binding -- no route binds its
+    body that way. Neither handler ever forwards a pydantic error dict
+    as-is. Starlette's
     `HTTPException` is what the router raises itself for a path nothing
     serves (404) or a method the path does not take (405); its `detail` is
     replaced from a fixed table, and its headers, which carry a 405's
@@ -358,8 +388,8 @@ def register_error_handlers(app: FastAPI) -> None:
 
     A `RequestValidationError` confined to the `node_id` query parameter
     (`/tests/history`, `/runs/{run_id}/result`) is shaped as
-    `InvalidIdentityError`; every other automatic-binding failure gets the
-    `InvalidReportError` shape.
+    `InvalidIdentityError`; every other one as `InvalidParameterError`, so
+    a client that sent no report is never told its report is malformed.
     """
 
     @app.exception_handler(RejectionError)
@@ -378,7 +408,7 @@ def register_error_handlers(app: FastAPI) -> None:
             for error in errors
         ):
             return _rejection_response(InvalidIdentityError.from_errors(errors))
-        return _rejection_response(InvalidReportError.from_errors(errors))
+        return _rejection_response(InvalidParameterError.from_errors(errors))
 
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http_exception(request: Request, exc: StarletteHTTPException) -> Response:
@@ -397,7 +427,9 @@ __all__ = [
     "InvalidIdentityError",
     "InvalidJsonError",
     "InvalidMetadataFilterError",
+    "InvalidParameterError",
     "InvalidReportError",
+    "InvalidSectionError",
     "InvalidSectionNameError",
     "InvalidSectionPrefixError",
     "PayloadTooLargeError",

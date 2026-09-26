@@ -9,6 +9,7 @@ beneath the port.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -22,7 +23,7 @@ from vantage.core.domain.sections import (
     SECTION_PREFIX_MAX_CHARS,
 )
 from vantage.service.app import create_app
-from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
+from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES, TEST_SECTIONS_NAMESPACE
 from vantage_port_contract import _execution, _result
 
 _SECTIONS = "/api/v1/config/sections"
@@ -66,6 +67,94 @@ def test_posting_an_existing_name_returns_200_not_201(client: TestClient) -> Non
 
 
 # --- POST: rejections --------------------------------------------------------
+
+
+_JSON = {"content-type": "application/json"}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{bad",
+        b'{"name": "a", "prefix": "b"',
+        b'{"name": "\xff", "prefix": "b"}',
+        b'{"name": ' + b"1" * 5000 + b', "prefix": "b"}',
+        b"[" * 20_000 + b"]" * 20_000,
+        b'{"name": "a", "prefix": NaN}',
+    ],
+    ids=["malformed", "cut-short", "not-utf8", "over-the-digit-limit", "deep", "nan"],
+)
+def test_a_body_that_is_not_json_is_400_invalid_json(
+    client: TestClient, store: InMemoryExecutionStore, body: bytes
+) -> None:
+    """The same answer `POST /runs` gives for the same bytes -- not a
+    character offset reported as a field, nor an undocumented `http_error`."""
+    response = client.post(_SECTIONS, content=body, headers=_JSON)
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+
+
+@pytest.mark.parametrize(
+    ("body", "fields"),
+    [({}, ["name", "prefix"]), ({"name": 1, "prefix": "b"}, ["name"]), ([], [])],
+    ids=["empty-object", "name-not-a-string", "not-an-object"],
+)
+def test_json_that_is_not_a_section_is_422_invalid_section(
+    client: TestClient, body: object, fields: list[str]
+) -> None:
+    response = client.post(_SECTIONS, json=body)
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": "invalid_section",
+        "detail": "The submitted section does not match the expected shape.",
+        "fields": fields,
+    }
+
+
+def test_a_body_that_is_not_declared_json_is_415(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    response = client.post(
+        _SECTIONS, content=b'{"name": "a", "prefix": "b"}', headers={"content-type": "text/plain"}
+    )
+
+    assert response.status_code == 415
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+
+
+def test_a_body_over_the_cap_is_413(client: TestClient, store: InMemoryExecutionStore) -> None:
+    padding = b" " * MAX_SECTION_BODY_BYTES
+    response = client.post(
+        _SECTIONS, content=b'{"name": "a", "prefix": "b"}' + padding, headers=_JSON
+    )
+
+    assert response.status_code == 413
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+
+
+def test_the_largest_valid_section_fits_under_the_cap(client: TestClient) -> None:
+    """A name and a prefix at their bounds, every character escaped as a
+    surrogate pair: the most bytes a valid section can take."""
+    wide = "\U0001f600"
+    prefix = wide * (SECTION_PREFIX_MAX_CHARS - 1) + "/"
+    section = {"name": wide * SECTION_NAME_MAX_CHARS, "prefix": prefix}
+    body = json.dumps(section).encode()  # `ensure_ascii` writes each as `\ud83d\ude00`
+    assert len(body) <= MAX_SECTION_BODY_BYTES
+
+    response = client.post(_SECTIONS, content=body, headers=_JSON)
+
+    assert response.status_code == 201
+
+
+def test_a_body_starting_with_a_byte_order_mark_is_accepted(client: TestClient) -> None:
+    response = client.post(
+        _SECTIONS, content=b'\xef\xbb\xbf{"name": "a", "prefix": "b"}', headers=_JSON
+    )
+
+    assert response.status_code == 201
 
 
 def test_an_empty_or_whitespace_only_name_is_rejected(client: TestClient) -> None:

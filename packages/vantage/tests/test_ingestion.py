@@ -513,6 +513,23 @@ _SURROGATE_CASES: dict[str, object] = {
 }
 
 
+def test_a_body_starting_with_a_byte_order_mark_is_accepted(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A byte order mark in front of UTF-8 is still UTF-8, and some Windows
+    tools write one."""
+    report = _well_formed_report("a" * 32)
+
+    response = client.post(
+        "/api/v1/runs",
+        content=b"\xef\xbb\xbf" + json.dumps(report).encode(),
+        headers={"content-type": "application/json"},
+    )
+
+    assert response.status_code == 201
+    assert store.get_execution("a" * 32) is not None
+
+
 @pytest.mark.parametrize(("field", "expected"), _SURROGATE_CASES.items(), ids=_SURROGATE_CASES)
 def test_a_lone_surrogate_in_any_string_is_stored_as_the_replacement_character(
     any_store: Any, any_stored_metadata: StoredMetadata, field: str, expected: object

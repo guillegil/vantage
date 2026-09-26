@@ -120,10 +120,13 @@ class ResultReport(BaseModel):
     parametrised test whose id is the empty string) must arrive intact and
     distinct from `None`. **No `min_length=1`, no validator that coerces a
     falsy value to `None`.** The same goes for the durations: a genuine
-    `0.0` must survive as `0.0`, never `x or None`.
+    `0.0` must survive as `0.0`, never `x or None`. A duration must be
+    finite, though (`allow_inf_nan=False`): `1e400` is valid JSON that
+    parses as infinity, which no JSON response can carry, so it would be
+    stored and then read back as `null`.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", allow_inf_nan=False)
 
     node_id: str
     file_path: str

@@ -8,24 +8,18 @@ the HTTP layer.
 **The media type and size checks run before the body is buffered.** The
 route does not declare `payload: SessionReport` as a parameter, because
 FastAPI would then read and parse the whole body before the first line
-runs. Instead:
-
-1. `Content-Type` is checked from the header alone.
-2. `_read_bounded_body` streams the body and stops the moment the running
-   total exceeds `MAX_REPORT_BYTES`; `Content-Length` is never trusted. A
-   client disconnect mid-transfer becomes `IncompleteBodyError`.
-3. Only a complete, capped body is decoded as UTF-8, parsed as JSON and
-   validated.
-
-Nothing is written unless all three succeed. Only the streaming is `async`:
-step 3, the conversion -- declared YAML metadata included -- and the store
-write run in the threadpool, off the event loop every request shares.
+runs. `service/body.py` checks `Content-Type` from the header, streams the
+body under `MAX_REPORT_BYTES`, and only then parses it. Nothing is written
+unless all three succeed. Only the streaming is `async`: the parse,
+validation, the conversion -- declared YAML metadata included -- and the
+store write run in the threadpool, off the event loop every request shares.
 
 **A lone surrogate is replaced, not rejected.** A `\\udXXX` escape with no
 partner is valid JSON, and pytest produces such text itself from file names
 decoded with `surrogateescape`. It cannot be encoded as UTF-8, so it would
 fail the first encode on the way to storage; rejecting the report instead
-would lose the whole session over one character. `_decode_body` replaces
+would lose the whole session over one character. `_without_any_lone_surrogate`
+replaces
 every one, in keys and values alike, with U+FFFD before validation.
 
 **`results` is optional.** `None` (section absent) and `[]` both mean zero
@@ -35,7 +29,6 @@ result rows, not a rejection; the route always passes a list to
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Sequence
 from datetime import datetime, timezone
@@ -46,7 +39,6 @@ from fastapi import APIRouter, Depends, Path, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from starlette.requests import ClientDisconnect
 
 from vantage.core.domain.execution import IDENTITY_PATTERN, Execution, Identity, VcsContext
 from vantage.core.domain.metadata import (
@@ -64,15 +56,12 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.service import metadata_parse
+from vantage.service.body import decode_json, read_bounded_body, require_json_media_type
 from vantage.service.dependencies import get_store
 from vantage.service.errors import (
     MAX_REPORT_BYTES,
-    IncompleteBodyError,
-    InvalidJsonError,
     InvalidReportError,
-    PayloadTooLargeError,
     UnknownRunError,
-    UnsupportedMediaTypeError,
     safe_segment,
 )
 from vantage.service.schemas import (
@@ -88,7 +77,6 @@ from vantage.service.truncation import truncate
 
 router = APIRouter()
 
-_JSON_MEDIA_TYPE = "application/json"
 _LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 # The three bounds below mirror `pytest_vantage.metadata`. The two
@@ -353,60 +341,18 @@ def _ignored_result_keys(results: Sequence[ResultReport]) -> list[str]:
     return list(seen)
 
 
-def _require_json_media_type(request: Request) -> None:
-    """Reject on the `Content-Type` header alone, before any body byte is read."""
-    content_type = request.headers.get("content-type", "")
-    media_type = content_type.split(";", 1)[0].strip().lower()
-    if media_type != _JSON_MEDIA_TYPE:
-        raise UnsupportedMediaTypeError(media_type)
-
-
-async def _read_bounded_body(request: Request) -> bytes:
-    """Stream the body, aborting as soon as it exceeds the cap.
-
-    `Content-Length` is not relied on: it can be absent, wrong or a lie.
-    The check runs on every chunk received, so the buffer never grows much
-    past `MAX_REPORT_BYTES`.
-
-    A client that disconnects mid-body (a killed process, a dropped
-    connection) surfaces as `ClientDisconnect` from `request.stream()`; it
-    is converted to `IncompleteBodyError` so it takes the same rejection
-    path as everything else instead of escaping the ASGI app unhandled.
-    """
-    buffer = bytearray()
-    try:
-        async for chunk in request.stream():
-            buffer += chunk
-            if len(buffer) > MAX_REPORT_BYTES:
-                # Stop reading now; never ask the stream for another chunk.
-                raise PayloadTooLargeError()
-    except ClientDisconnect as exc:
-        raise IncompleteBodyError() from exc
-    return bytes(buffer)
-
-
 def _without_lone_surrogates(text: str) -> str:
     return text if text.isascii() else _LONE_SURROGATE.sub("\ufffd", text)
 
 
-def _decode_body(body: bytes) -> Any:
-    """Parse `body` as strict UTF-8 JSON, with every lone surrogate replaced.
-
-    Decoding first, strictly, refuses UTF-8-encoded surrogates, which
-    `json.loads(bytes)` would accept. Every parse failure is the same client
-    error: `json.loads` raises `JSONDecodeError`, `UnicodeDecodeError` and
-    the integer digit limit's plain `ValueError`, and `RecursionError` for
-    deep nesting.
+def _without_any_lone_surrogate(payload: Any) -> Any:
+    """`payload`, parsed JSON, with every lone surrogate in its keys and
+    string values replaced by U+FFFD.
 
     The walk is iterative because `json.loads` accepts nesting deeper than
     Python's recursion limit. Valid surrogate pairs were already combined by
     `json.loads`, so any surrogate left is a lone one.
     """
-    try:
-        payload = json.loads(body.decode("utf-8"))
-    except (ValueError, RecursionError) as exc:
-        raise InvalidJsonError() from exc
-
     if isinstance(payload, str):
         return _without_lone_surrogates(payload)
     pending: list[Any] = [payload]
@@ -435,7 +381,7 @@ def _record(store: ExecutionStore, body: bytes) -> tuple[bool, Acknowledgement]:
     """Parse, validate, convert and store one complete report body, and
     return whether the run was new with the acknowledgement to send. Every
     step blocks, so `create_run` calls this in the threadpool."""
-    payload_dict = _decode_body(body)
+    payload_dict = _without_any_lone_surrogate(decode_json(body))
 
     try:
         payload = SessionReport.model_validate(payload_dict)
@@ -461,8 +407,8 @@ def _record(store: ExecutionStore, body: bytes) -> tuple[bool, Acknowledgement]:
 
 @router.post("/runs")
 async def create_run(request: Request, store: ExecutionStore = Depends(get_store)) -> JSONResponse:
-    _require_json_media_type(request)
-    body = await _read_bounded_body(request)
+    require_json_media_type(request)
+    body = await read_bounded_body(request, MAX_REPORT_BYTES)
     created, acknowledgement = await run_in_threadpool(_record, store, body)
     return JSONResponse(
         status_code=201 if created else 200,

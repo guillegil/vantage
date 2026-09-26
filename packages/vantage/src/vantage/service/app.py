@@ -11,8 +11,9 @@ redirect from one, so an unversioned path answers 404.
 disk, on the store's own lock, on another process's write -- and one made on
 the loop would stall every other request until it returned, heartbeats
 included. So every route that reaches the store is a plain `def`, which
-FastAPI runs in its threadpool. `POST /runs` is `async` only to stream its
-body under the size cap, and hands the rest to the threadpool itself. The
+FastAPI runs in its threadpool. `POST /runs` and `POST /config/sections`
+are `async` only to stream their bodies under a size cap, and hand the rest
+to the threadpool themselves (`service/body.py`). The
 capabilities and interface-document routes never block and stay `async`, so
 they answer even while every worker thread waits on the store.
 

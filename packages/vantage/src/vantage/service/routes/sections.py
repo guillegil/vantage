@@ -8,7 +8,13 @@ route is the same 32-hex identity segment `routes/read.py` uses, so it does
 not have that problem.
 
 Every handler reads the store, so each is a plain `def` that FastAPI runs
-in its threadpool (see `app.py`).
+in its threadpool (see `app.py`) -- except the upsert, which reads its body
+the way `POST /runs` does (`service/body.py`): the media type from the
+header, then at most `MAX_SECTION_BODY_BYTES` of body on the event loop,
+then the parse, validation and store write in the threadpool. Declared as a
+parameter instead, the body would be read with no bound and parsed on the
+event loop, stalling every other request -- heartbeats included -- for as
+long as a large body takes.
 
 **Section definitions are read fresh on every request, never cached.** No
 `app.state` field remembers them between requests, so an edit takes effect
@@ -24,8 +30,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Path, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
 
 from vantage.core.domain.execution import IDENTITY_PATTERN
 from vantage.core.domain.sections import (
@@ -39,8 +47,10 @@ from vantage.core.domain.sections import (
     summarize_sections,
 )
 from vantage.core.ports.storage import ExecutionStore, NamespaceFullError
+from vantage.service.body import decode_json, read_bounded_body, require_json_media_type
 from vantage.service.dependencies import get_store
 from vantage.service.errors import (
+    InvalidSectionError,
     InvalidSectionNameError,
     InvalidSectionPrefixError,
     ReservedSectionNameError,
@@ -63,6 +73,11 @@ router = APIRouter()
 TEST_SECTIONS_NAMESPACE = "test_sections"
 """Service vocabulary, not store vocabulary -- the store takes this as an
 ordinary namespace parameter and attaches no meaning to it."""
+
+MAX_SECTION_BODY_BYTES = 64 * 1024
+"""The upsert body's cap. A name and a prefix at their bounds, every
+character written as a 12-byte escaped surrogate pair, take under 14 KiB;
+the rest leaves room for whitespace around them."""
 
 
 def _load_definitions(store: ExecutionStore) -> list[SectionDefinition]:
@@ -107,10 +122,15 @@ def list_sections(store: ExecutionStore = Depends(get_store)) -> SectionListResp
     return SectionListResponse(items=items)
 
 
-@router.post("/config/sections")
-def upsert_section(
-    payload: SectionUpsertRequest, store: ExecutionStore = Depends(get_store)
-) -> Response:
+def _upsert(store: ExecutionStore, body: bytes) -> tuple[bool, SectionResponse]:
+    """Parse, validate and store one complete upsert body, and return
+    whether the name was new with the section as stored. Every step blocks,
+    so `upsert_section` calls this in the threadpool."""
+    try:
+        payload = SectionUpsertRequest.model_validate(decode_json(body))
+    except ValidationError as exc:
+        raise InvalidSectionError.from_errors(exc.errors()) from exc
+
     name = _stored_name(payload.name)
     if not name or len(name) > SECTION_NAME_MAX_CHARS or not _encodable(name):
         raise InvalidSectionNameError()
@@ -137,8 +157,15 @@ def upsert_section(
         )
     except NamespaceFullError as exc:
         raise TooManySectionsError() from exc
-    body = SectionResponse(name=name, prefix=normalized_prefix)
-    return JSONResponse(status_code=201 if created else 200, content=body.model_dump())
+    return created, SectionResponse(name=name, prefix=normalized_prefix)
+
+
+@router.post("/config/sections")
+async def upsert_section(request: Request, store: ExecutionStore = Depends(get_store)) -> Response:
+    require_json_media_type(request)
+    body = await read_bounded_body(request, MAX_SECTION_BODY_BYTES)
+    created, section = await run_in_threadpool(_upsert, store, body)
+    return JSONResponse(status_code=201 if created else 200, content=section.model_dump())
 
 
 @router.delete("/config/sections", status_code=204)
@@ -182,4 +209,4 @@ def get_run_sections(
     )
 
 
-__all__ = ["TEST_SECTIONS_NAMESPACE", "router"]
+__all__ = ["MAX_SECTION_BODY_BYTES", "TEST_SECTIONS_NAMESPACE", "router"]

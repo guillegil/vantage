@@ -21,8 +21,8 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReport'}}}}
       responses:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
-        "200": {description: "Retried; already stored (idempotent replay).", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
-        "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: &rejection {application/json: {schema: {$ref: '#/components/schemas/Rejection'}}}}
+        "200": {description: "The run already existed. This report's finish fields, results and metadata were applied where the run did not have them yet; nothing already stored was replaced.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
+        "400": {description: "The body is not UTF-8 JSON (invalid_json) -- NaN and Infinity are not JSON -- or the client disconnected before sending all of it (incomplete_body).", content: &rejection {application/json: {schema: {$ref: '#/components/schemas/Rejection'}}}}
         "413": {description: "The body exceeds 1 MiB (payload_too_large).", content: *rejection}
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
         "422": {description: "The body does not match SessionReport (invalid_report); fields names each failing field.", content: *rejection}
@@ -38,7 +38,7 @@ paths:
         - {name: metadata_value, in: query, required: false, schema: {type: string}}
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
-        "422": {description: "limit below 1 or offset out of range -- not a page; or metadata_key/metadata_value supplied without its pair.", content: *rejection}
+        "422": {description: "limit below 1 or offset out of range -- not a page (invalid_parameter); or metadata_key/metadata_value supplied without its pair (invalid_metadata_filter).", content: *rejection}
   /runs/{run_id}:
     get:
       operationId: get_run_detail
@@ -49,7 +49,7 @@ paths:
       responses:
         "200": {description: The run., content: {application/json: {schema: {$ref: '#/components/schemas/RunDetailResponse'}}}}
         "404": {description: No run with that id has been recorded., content: *rejection}
-        "422": {description: run_id is not 32 lowercase hex characters., content: *rejection}
+        "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/heartbeat:
     post:
       operationId: heartbeat
@@ -60,7 +60,7 @@ paths:
       responses:
         "200": {description: Acknowledged., content: {application/json: {schema: {$ref: '#/components/schemas/HeartbeatAcknowledgement'}}}}
         "404": {description: No run with that id has been recorded., content: *rejection}
-        "422": {description: run_id is not 32 lowercase hex characters., content: *rejection}
+        "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/results:
     get:
       operationId: list_results
@@ -73,7 +73,7 @@ paths:
       responses:
         "200": {description: A page of results., content: {application/json: {schema: {$ref: '#/components/schemas/ResultsResponse'}}}}
         "404": {description: No run with that id has been recorded., content: *rejection}
-        "422": {description: "limit below 1 or offset out of range -- not a page; or run_id is not 32 lowercase hex characters.", content: *rejection}
+        "422": {description: "limit below 1 or offset out of range -- not a page; or run_id is not 32 lowercase hex characters (invalid_parameter).", content: *rejection}
   /runs/{run_id}/result:
     get:
       operationId: get_result
@@ -86,7 +86,7 @@ paths:
       responses:
         "200": {description: The result., content: {application/json: {schema: {$ref: '#/components/schemas/ResultDetailResponse'}}}}
         "404": {description: "No run with that id has been recorded (unknown_run), or the run has no result with that node_id (unknown_result).", content: *rejection}
-        "422": {description: "node_id missing (invalid_identity); or run_id is not 32 lowercase hex characters.", content: *rejection}
+        "422": {description: "node_id missing (invalid_identity); or run_id is not 32 lowercase hex characters (invalid_parameter).", content: *rejection}
   /tests/history:
     get:
       operationId: list_history
@@ -99,7 +99,7 @@ paths:
         - $ref: '#/components/parameters/offset'
       responses:
         "200": {description: "A page of history entries; empty, not an error, for an unknown node_id.", content: {application/json: {schema: {$ref: '#/components/schemas/HistoryResponse'}}}}
-        "422": {description: "node_id missing (invalid_identity); or limit below 1 or offset out of range.", content: *rejection}
+        "422": {description: "node_id missing (invalid_identity); or limit below 1 or offset out of range (invalid_parameter).", content: *rejection}
   /capabilities:
     get:
       operationId: capabilities
@@ -133,7 +133,10 @@ paths:
       responses:
         "201": {description: Stored, a new section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
         "200": {description: Updated; the name was already stored., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
-        "422": {description: "An invalid or reserved name, an invalid prefix, the stored-section count bound, or a body that does not match SectionUpsertRequest.", content: *rejection}
+        "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
+        "413": {description: "The body exceeds 64 KiB (payload_too_large).", content: *rejection}
+        "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
+        "422": {description: "An invalid name (invalid_section_name) or a reserved one (reserved_section_name), an invalid prefix (invalid_section_prefix), the stored-section count bound (too_many_sections), or a body that does not match SectionUpsertRequest (invalid_section).", content: *rejection}
     delete:
       operationId: delete_section
       tags: [write]
@@ -144,7 +147,7 @@ paths:
       responses:
         "204": {description: Deleted.}
         "404": {description: No section with that name has been stored., content: *rejection}
-        "422": {description: name missing., content: *rejection}
+        "422": {description: name missing (invalid_parameter)., content: *rejection}
   /runs/{run_id}/sections:
     get:
       operationId: get_run_sections
@@ -156,7 +159,7 @@ paths:
       responses:
         "200": {description: The run's section summary., content: {application/json: {schema: {$ref: '#/components/schemas/RunSectionSummaryResponse'}}}}
         "404": {description: No run with that id has been recorded., content: *rejection}
-        "422": {description: run_id is not 32 lowercase hex characters., content: *rejection}
+        "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
         "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
 components:
   parameters:

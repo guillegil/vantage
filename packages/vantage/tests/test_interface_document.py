@@ -35,6 +35,7 @@ from vantage.core.domain.liveness import PRESENTATIONS
 from vantage.core.domain.result import OUTCOMES
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
+from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
 from vantage.service.schemas import (
     Acknowledgement,
     FailureProjectionResponse,
@@ -339,6 +340,24 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
             lambda: client.post("/api/v1/config/sections", json={"name": "", "prefix": "tests"}),
         ),
         (("POST", "/config/sections"), lambda: client.post("/api/v1/config/sections", json={})),
+        (
+            ("POST", "/config/sections"),
+            lambda: client.post(
+                "/api/v1/config/sections", content=b"{}", headers={"content-type": "x/y"}
+            ),
+        ),
+        (
+            ("POST", "/config/sections"),
+            lambda: client.post("/api/v1/config/sections", content=b"{", headers=json_header),
+        ),
+        (
+            ("POST", "/config/sections"),
+            lambda: client.post(
+                "/api/v1/config/sections",
+                content=b" " * (MAX_SECTION_BODY_BYTES + 1),
+                headers=json_header,
+            ),
+        ),
         (
             ("DELETE", "/config/sections"),
             lambda: client.delete("/api/v1/config/sections", params={"name": "never-stored"}),

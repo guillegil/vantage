@@ -6,6 +6,7 @@ Runs the app factory (`vantage.service.app.create_app`) against an injected
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import socket
@@ -19,6 +20,7 @@ from memory_store import InMemoryExecutionStore
 from starlette.types import ASGIApp, Receive, Scope, Send
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
+from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
 
 # `any_store`, for each adapter in turn.
 pytest_plugins = ["store_fixtures"]
@@ -169,6 +171,45 @@ def test_every_unparseable_body_is_400_invalid_json(
     assert store.count_executions() == 0
 
 
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_a_non_json_number_token_is_400_invalid_json(
+    client: TestClient, store: InMemoryExecutionStore, token: str
+) -> None:
+    """`json.loads` accepts these, but they are not JSON, and a value no
+    JSON response can carry would be stored and then read back as `null`."""
+    report = _well_formed_report()
+    report["results"] = [_result_entry("tests/test_a.py::test_one")]
+    body = json.dumps(report).replace('"call_duration": 0.0019', f'"call_duration": {token}')
+    assert token in body
+
+    response = client.post(
+        "/api/v1/runs", content=body.encode(), headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_json"
+    assert store.count_executions() == 0
+
+
+def test_a_duration_too_large_to_be_finite_is_422_naming_the_field(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """`1e400` is valid JSON, but it parses as infinity, which the server
+    could store and never give back."""
+    report = _well_formed_report()
+    report["results"] = [_result_entry("tests/test_a.py::test_one")]
+    body = json.dumps(report).replace('"duration": 0.0031', '"duration": 1e400')
+    assert "1e400" in body
+
+    response = client.post(
+        "/api/v1/runs", content=body.encode(), headers={"content-type": "application/json"}
+    )
+
+    assert response.status_code == 422
+    assert response.json()["fields"] == ["results.0.duration"]
+    assert store.count_executions() == 0
+
+
 def _report_with(field: str, value: object) -> dict[str, Any]:
     """`_well_formed_report` carrying one result, with `value` at the dotted
     `field` (`run.<name>` or `results.0.<name>`)."""
@@ -235,28 +276,61 @@ def test_oversized_body_is_413(client: TestClient, store: InMemoryExecutionStore
     assert store.count_executions() == 0
 
 
-def test_a_report_exceeding_the_size_cap_with_failure_evidence_stores_nothing(
-    client: TestClient, store: InMemoryExecutionStore
+def _post_streamed(app: Any, path: str, chunk: bytes, chunks: int) -> tuple[int | None, int]:
+    """POST `chunks` copies of `chunk` straight through the ASGI interface,
+    one `http.request` message each, and return the status answered and
+    how many chunks the app asked for. `TestClient` cannot show this: it
+    reads the whole body before the app sees any of it."""
+    asked = 0
+    status: int | None = None
+
+    async def receive() -> dict[str, Any]:
+        nonlocal asked
+        asked += 1
+        return {"type": "http.request", "body": chunk, "more_body": asked < chunks}
+
+    async def send(message: dict[str, Any]) -> None:
+        nonlocal status
+        if message["type"] == "http.response.start":
+            status = message["status"]
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "root_path": "",
+        "query_string": b"",
+        "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
+        "client": ("127.0.0.1", 50000),
+        "server": ("testserver", 80),
+    }
+    asyncio.run(app(scope, receive, send))
+    return status, asked
+
+
+@pytest.mark.parametrize(
+    ("path", "cap"),
+    [("/api/v1/runs", MAX_REPORT_BYTES), ("/api/v1/config/sections", MAX_SECTION_BODY_BYTES)],
+    ids=["runs", "sections"],
+)
+def test_reading_a_body_stops_at_the_chunk_that_crosses_the_cap(
+    store: InMemoryExecutionStore, path: str, cap: int
 ) -> None:
-    """A report whose encoded body -- failure evidence included -- exceeds
-    `MAX_REPORT_BYTES` is rejected whole with the same `413`
-    `_read_bounded_body` raises for any oversized field; the run table stays
-    empty."""
-    oversized_report = _well_formed_report()
-    oversized_report["results"] = [
-        _result_entry(
-            "packages/vantage/tests/test_f.py::test_one",
-            outcome="failed",
-            traceback="x" * (MAX_REPORT_BYTES + 1),
-        )
-    ]
+    """The cap bounds memory only if reading stops when it is crossed: a
+    body checked once it is complete would buffer everything a client
+    streams, gigabytes included, before refusing it."""
+    chunk = b" " * 4096
 
-    response = client.post("/api/v1/runs", json=oversized_report)
+    status, asked = _post_streamed(create_app(store), path, chunk, chunks=10_000)
 
-    assert response.status_code == 413
-    body = response.json()
-    assert body["error"] == "payload_too_large"
+    assert status == 413
+    assert asked == cap // len(chunk) + 1
     assert store.count_executions() == 0
+    assert store.list_settings("test_sections") == ()
 
 
 def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
@@ -396,15 +470,35 @@ def test_heartbeat_for_unknown_run_is_404(client: TestClient) -> None:
     assert body["error"] == "unknown_run"
 
 
-def test_heartbeat_for_malformed_run_id_is_422(client: TestClient) -> None:
-    """The malformed id is caught by the path parameter's own pattern and
-    rejected through the shared `register_error_handlers`/
-    `RequestValidationError` path."""
-    response = client.post("/api/v1/runs/not-a-hex-id/heartbeat")
+@pytest.mark.parametrize(
+    ("method", "path", "params", "field"),
+    [
+        ("POST", "/api/v1/runs/not-a-hex-id/heartbeat", {}, "path.run_id"),
+        ("GET", "/api/v1/runs/ABC", {}, "path.run_id"),
+        ("GET", "/api/v1/runs", {"limit": 0}, "query.limit"),
+        ("GET", "/api/v1/runs", {"offset": -1}, "query.offset"),
+        ("GET", f"/api/v1/runs/{'e' * 32}/results", {"limit": "x"}, "query.limit"),
+        ("GET", "/api/v1/tests/history", {"node_id": "n", "limit": 0}, "query.limit"),
+        ("GET", "/api/v1/runs/zzz/sections", {}, "path.run_id"),
+        ("DELETE", "/api/v1/config/sections", {}, "query.name"),
+    ],
+)
+def test_a_bad_path_or_query_parameter_is_422_invalid_parameter(
+    client: TestClient, method: str, path: str, params: dict[str, Any], field: str
+) -> None:
+    """Caught by the parameter's own declaration and rejected through the
+    shared `RequestValidationError` handler. None of these requests carries
+    a report, so none may be told its report is malformed: a client that
+    switches on `error` must tell a bad page parameter from a bad session
+    report."""
+    response = client.request(method, path, params=params)
 
     assert response.status_code == 422
-    body = response.json()
-    assert body["error"] == "invalid_report"
+    assert response.json() == {
+        "error": "invalid_parameter",
+        "detail": "A path or query parameter is not valid.",
+        "fields": [field],
+    }
 
 
 # --- Whole-report rejection and atomicity ----------------------------------
