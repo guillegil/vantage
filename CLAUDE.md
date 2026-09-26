@@ -5,8 +5,9 @@ Guidance for agents working in this repository.
 ## What this is
 
 Vantage records what a pytest suite did, run after run. The pytest plugin
-reports each session over HTTP; the server stores it in SQLite and serves it
-through a JSON read API. Pre-release (0.1.0); nothing is published.
+reports each session over HTTP; the server stores it in SQLite or
+PostgreSQL and serves it through a JSON read API. Pre-release (0.1.0);
+nothing is published.
 
 ## Ground rules
 
@@ -32,10 +33,12 @@ One uv workspace, one lockfile, two distributions:
 | `vantage.service` | `packages/vantage/src/vantage/service` | anything (FastAPI, Pydantic, uvicorn, PyYAML) | — |
 
 - Ports are `typing.Protocol` (`core/ports/storage.py`); adapters satisfy them
-  by shape. The server ships one adapter, `SqliteExecutionStore`.
-  `InMemoryExecutionStore` is a test double (`packages/vantage/tests/memory_store.py`);
-  `vantage_port_contract.py` runs the same contract against both, and they
-  must stay in parity.
+  by shape. The server ships two adapters, `SqliteExecutionStore` and
+  `PostgresExecutionStore` (`vantage.storage.postgres`, the optional
+  `postgres` extra, imported by the `vantage` command only for a
+  `postgresql://` URL). `InMemoryExecutionStore` is a test double
+  (`packages/vantage/tests/memory_store.py`); `vantage_port_contract.py` runs
+  the same contract against all three, and they must stay in parity.
 - Pydantic lives in `vantage.service` only; everything else uses stdlib
   `dataclasses` and hand-written validation.
 - Test-support modules sit in `packages/*/tests` on the root `pythonpath` and
@@ -61,13 +64,27 @@ One uv workspace, one lockfile, two distributions:
   `vantage_metadata` values to the controller through `workeroutput`.
 - **No store call on the event loop.** Store-calling routes are plain `def`;
   `POST /runs` streams its body async, then uses `run_in_threadpool`.
-  `SqliteExecutionStore` serialises every statement behind one lock.
-- **Timestamps** are stored as fixed-width UTC text (`isoformat_utc`), so text
-  order is time order.
-- **Schema:** `storage/schema.sql` is applied whole and stamped with
-  `_SCHEMA_VERSION` (`storage/connection.py`, the only literal, currently 6).
-  Any other stamp is refused; there are no migrations. Changing the schema
-  means bumping that literal. No table or column exists before code writes it.
+- **Concurrency, per adapter.** `SqliteExecutionStore` serialises every
+  statement behind one lock, in one process. `PostgresExecutionStore` must
+  stay safe with several server processes on one database: each call is its
+  own pooled transaction; writes are single conditional statements, row
+  locks (`FOR UPDATE`, catalogue rows in sorted order) or advisory locks,
+  never check-then-act; snapshot reads use `REPEATABLE READ` or one
+  statement; serialization failures and deadlocks are retried, bounded.
+- **No U+0000 reaches a store.** The body decoder replaces it (and a lone
+  surrogate in reports) with U+FFFD; a lookup value holding it matches
+  nothing without asking the store.
+- **Timestamps** are stored as fixed-width UTC text in SQLite
+  (`isoformat_utc`), so text order is time order, and as `timestamptz` in
+  PostgreSQL, read back as UTC.
+- **Schema:** each adapter applies its whole schema at first use and stamps
+  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 6,
+  one version for both). Any other stamp is refused; there are no
+  migrations. Changing either schema means bumping that literal. No table
+  or column exists before code writes it.
+- **Passwords never printed.** A PostgreSQL URL is shown only through
+  `redacted`, and a driver message only through `redact_message`
+  (`core/config/database.py`).
 - **Python 3.10 floor:** no `StrEnum`, `datetime.UTC`, `tomllib`. Vocabularies
   are `frozenset`s of `str`, never enums.
 - No domain class name starts with `Test` (pytest would collect it).

@@ -14,7 +14,7 @@ packages/
 └── vantage/                       published as `vantage`
     ├── src/vantage/
     │   ├── core/                  domain model, storage port, config resolution
-    │   ├── storage/               schema.sql and the SQLite adapter
+    │   ├── storage/               the SQLite adapter, the PostgreSQL one in postgres/
     │   └── service/               FastAPI app, `vantage` command, OpenAPI document
     └── tests/
 ```
@@ -71,8 +71,9 @@ storage on the core, and the core on nothing but the standard library.
   subclassing the protocol itself. It does import the core's domain and
   value types (`Execution`, `Result`, `Page`, `RunListEntry` and the like),
   which it takes and returns; the core imports nothing from any adapter.
-- **`vantage.storage`** holds `SqliteExecutionStore`, the one adapter the
-  server ships.
+- **`vantage.storage`** holds the two adapters the server ships:
+  `SqliteExecutionStore`, and `PostgresExecutionStore` in
+  `vantage.storage.postgres`, which needs the optional `postgres` extra.
 - **`vantage.service`** is the HTTP edge. Pydantic models (`schemas.py`)
   validate what arrives; the routes convert a validated report into core
   dataclasses before calling the store, so no Pydantic type reaches the core
@@ -96,9 +97,11 @@ The plugin reports over HTTP and the server performs every write.
   plugin would.
 - **No schema in the plugin.** Storage can change without a plugin release;
   the plugin and the server only have to agree on the HTTP contract.
-- **One writer.** CI jobs, xdist sessions and developers all report to one
-  server process, which serialises writes on one connection. Nobody shares a
-  database file across machines or network filesystems.
+- **One writer per database.** CI jobs, xdist sessions and developers all
+  report to a server, never to the database. With SQLite one server process
+  serialises writes on one connection, and nobody shares a database file
+  across machines or network filesystems. With PostgreSQL several servers
+  may share one database, and its transactions keep their writes apart.
 - **Liveness needs a listener.** Because the server is told when a session
   starts and hears from it while it runs, it can tell a running session from
   one that was killed.
@@ -324,6 +327,32 @@ where it would see rows not yet committed. Multi-statement writes open with
 `BEGIN IMMEDIATE`. WAL mode and a five-second busy timeout cover a second
 process on the same file, which no in-process lock can reach.
 
+**PostgreSQL's transactions.** `PostgresExecutionStore` holds no lock of its
+own: it keeps a `psycopg_pool.ConnectionPool` (one connection at least, 10
+at most, opened when the store is built), and every store call takes a
+connection and runs as its own transaction, so calls from several threads,
+and from several server processes on one database, run in parallel. A read
+that must describe one moment -- a run page with its metadata horizons, a
+run's metadata with the check that the run exists -- is one statement or
+runs under `REPEATABLE READ`. A write is safe against the same write from
+another process by construction, never by a check first:
+
+- `record_session` is one transaction. The run is inserted with
+  `ON CONFLICT (id) DO UPDATE ... WHERE` the stored run has no exit status
+  and the report has one, and whether it was created comes from that
+  statement's own result. The run row is then locked (`SELECT ... FOR
+  UPDATE`), so concurrent reports of one run take their turn at the
+  per-run metadata bound and the results. Catalogue rows are upserted in
+  sorted node id order, so two reports lock them in the same order and
+  cannot deadlock; results and metadata insert with `ON CONFLICT DO
+  NOTHING`.
+- `upsert_setting` counts and inserts under a transaction-scoped advisory
+  lock keyed on the namespace, so the section bound holds across servers.
+- `touch_last_contact` is one conditional `UPDATE`, and never moves the
+  contact backwards.
+- A transaction that fails with a serialization failure or a deadlock is
+  retried a bounded number of times; any other error propagates.
+
 **No store is ever handed U+0000.** PostgreSQL's `text` cannot hold it,
 and no UTF-8 encoder takes a lone surrogate, so `decode_json`
 (`service/text.py`) replaces every U+0000 in a key or string value of a body
@@ -360,7 +389,10 @@ database carrying any other stamp, older, newer, missing or not a number, is
 refused with `SchemaVersionError` before anything in it changes, and the
 `vantage` command turns that into a one-line refusal. There are no
 migrations: a table or column is added when code writes it, together with a
-bump of `_SCHEMA_VERSION` in `storage/connection.py`.
+bump of `_SCHEMA_VERSION`. Both adapters take the version, and
+`SchemaVersionError`, from one neutral module, `storage/version.py`, which
+holds the only literal: the SQLite file and the PostgreSQL schema are one
+logical schema, and change together.
 
 | Table | Holds |
 | --- | --- |
@@ -406,6 +438,33 @@ and a new database file 0600 before `sqlite3` touches the path; existing
 modes are never rewritten, and a database open to others is reported. List
 queries read a byte prefix of the commit subject and failure message, never
 the whole text.
+
+### PostgreSQL
+
+`vantage.storage.postgres` keeps the same tables, columns, constraints and
+meaning in a schema of its own, named `vantage`, so they never collide with
+anything else in the database. The types are PostgreSQL's own: `timestamptz`
+for every timestamp, `boolean` for the flags, `bigint` for integers and for
+the identity keys, `double precision` for durations and `text` for text,
+`user_setting.value` included, which must come back byte for byte. The
+vocabularies are the same `CHECK` constraints, and the unique keys and
+foreign keys are the same.
+
+- **Creation is guarded.** Opening takes a transaction-scoped advisory lock,
+  so two servers starting on an empty database at once cannot both create
+  it. If `vantage` has no `meta` table, everything is created and stamped in
+  one transaction, which PostgreSQL's transactional DDL makes all or
+  nothing. A different stamp, or tables with no stamp, is refused with
+  `SchemaVersionError` and nothing is changed.
+- **Parity with SQLite is the contract.** The port contract runs against
+  this adapter too, so what differs underneath must not show: text is
+  ordered and compared with `COLLATE "C"`, code point order as in SQLite;
+  timestamps come back aware and are normalised to UTC; paging and
+  `has_more` are computed the same way.
+- **U+0000 never reaches it** from the service (see *Request handling and
+  concurrency*). The adapter still replaces it with U+FFFD in anything it
+  writes, and treats a lookup value holding it as matching nothing, so a
+  caller other than the service cannot make it fail either.
 
 ## Server configuration
 
@@ -481,7 +540,7 @@ a wheel. deptry's per-rule ignores name each one a test imports with an
 | `packages/vantage/tests/importwalk.py` | the AST import walker behind the dependency checks of both distributions |
 | `packages/vantage/tests/memory_store.py` | `InMemoryExecutionStore`, a complete second implementation of the port; the server never uses it |
 | `packages/vantage/tests/vantage_port_contract.py` | `ExecutionStoreContract`, the behaviour every store must have; `test_sqlite_store.py` and `test_memory_store.py` subclass it |
-| `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]` and `[sqlite]`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
+| `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]`, `[sqlite]` and `[postgres]`, the last skipped without `VANTAGE_TEST_POSTGRES_URL`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
 | `packages/vantage/tests/sqlite_rows.py` | reads a run's metadata rows, whose file rows no port method returns, with plain SQL on a separate connection |
 | `packages/vantage/tests/loopback_server.py` | `LoopbackServer`: a real Uvicorn server on a thread, on a `127.0.0.1` port the OS assigns, with bounded start and stop |
 | `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a temporary directory, recording each request's method and path, for the plugin's end-to-end tests |
