@@ -4,23 +4,36 @@ store is closed once the server stops. Also the pieces `main` composes: the
 writable-directory check, the wide-bind warning, and the grace period
 `create_app` builds.
 
-`uvicorn.run` is replaced throughout -- these tests are about what `main`
-does around serving, and none of them binds a socket. It is patched by
-dotted path rather than through `cli.uvicorn`, because `cli.py`'s `__all__`
-does not re-export its imports and mypy flags reaching through the module.
+`uvicorn.Server.run` is replaced in every test that calls `main` in
+process -- these tests are about what `main` does around serving -- and so
+is `_listen`, by a stand-in that records the address asked for and binds an
+ephemeral loopback port instead, so no test holds 8765 or a wide address.
+Both are patched by dotted path rather than through `cli.uvicorn`, because
+`cli.py`'s `__all__` does not re-export its imports and mypy flags reaching
+through the module. One test runs the real command in a subprocess, to stop
+it the way a service manager does.
 """
 
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
+import signal
+import socket
 import sqlite3
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+import uvicorn
 from memory_store import InMemoryExecutionStore
 from vantage.service import cli
 from vantage.service.app import create_app
@@ -37,25 +50,53 @@ _needs_enforced_mode_bits = pytest.mark.skipif(
     reason="needs POSIX directory mode bits that this process cannot bypass",
 )
 
+_REAL_LISTEN = cli._listen
+
 
 @pytest.fixture
-def served(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    """Stands in for `uvicorn.run` and records the app `main` handed it."""
+def listened(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int, socket.socket]]:
+    """Stands in for `_listen`: records each `(host, port)` `main` asked to
+    listen on, and binds an ephemeral loopback port instead, recording the
+    socket it returned."""
+    requested: list[tuple[str, int, socket.socket]] = []
+
+    def _listen(host: str, port: int) -> socket.socket:
+        sock = _REAL_LISTEN("127.0.0.1", 0)
+        requested.append((host, port, sock))
+        return sock
+
+    monkeypatch.setattr("vantage.service.cli._listen", _listen)
+    return requested
+
+
+@pytest.fixture
+def served(
+    monkeypatch: pytest.MonkeyPatch, listened: list[tuple[str, int, socket.socket]]
+) -> dict[str, Any]:
+    """Stands in for `uvicorn.Server.run` and records the app and the
+    sockets `main` handed it."""
     served: dict[str, Any] = {}
 
-    def _run(app: object, **_kwargs: object) -> None:
-        served["app"] = app
+    def _run(server: uvicorn.Server, sockets: list[socket.socket] | None = None) -> None:
+        served["app"] = server.config.app
+        served["sockets"] = sockets
 
-    monkeypatch.setattr("vantage.service.cli.uvicorn.run", _run)
+    monkeypatch.setattr("vantage.service.cli.uvicorn.Server.run", _run)
     return served
 
 
-@pytest.fixture
-def never_served(monkeypatch: pytest.MonkeyPatch) -> None:
+def _refuse_to_serve(monkeypatch: pytest.MonkeyPatch) -> None:
     def _run(*_args: object, **_kwargs: object) -> None:
         raise AssertionError("main started serving a configuration it should refuse")
 
-    monkeypatch.setattr("vantage.service.cli.uvicorn.run", _run)
+    monkeypatch.setattr("vantage.service.cli.uvicorn.Server.run", _run)
+
+
+@pytest.fixture
+def never_served(
+    monkeypatch: pytest.MonkeyPatch, listened: list[tuple[str, int, socket.socket]]
+) -> None:
+    _refuse_to_serve(monkeypatch)
 
 
 def _refusal(capsys: pytest.CaptureFixture[str], argv: list[str]) -> str:
@@ -75,10 +116,11 @@ def _refusal(capsys: pytest.CaptureFixture[str], argv: list[str]) -> str:
     ("setting", "flag"),
     [
         (["--grace-period", "0"], "--grace-period"),
+        (["--grace-period", "1e-7"], "--grace-period"),
         (["--port", "70000"], "--port"),
         (["--host", ""], "--host"),
     ],
-    ids=["grace-period", "port", "empty-host"],
+    ids=["grace-period", "grace-period-below-a-microsecond", "port", "empty-host"],
 )
 def test_an_unusable_setting_is_refused_before_anything_is_created(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], setting: list[str], flag: str
@@ -152,6 +194,85 @@ def test_a_refused_start_does_not_warn_about_a_bind_it_never_makes(
     assert [r.getMessage() for r in caplog.records if r.name == cli.__name__] == []
 
 
+def test_main_listens_where_it_was_told_hands_uvicorn_that_socket_and_warns(
+    tmp_path: Path,
+    served: dict[str, Any],
+    listened: list[tuple[str, int, socket.socket]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The seam between a resolved config and a running server, and the
+    positive control for the refused start that must not warn: a start on a
+    wide address warns that nothing authenticates the requests, and serves
+    on the socket bound for the address asked for."""
+    with caplog.at_level(logging.WARNING, logger=cli.__name__):
+        cli.main(["--database", str(tmp_path / "v.db"), "--host", "0.0.0.0", "--port", "9000"])  # noqa: S104
+
+    ((host, port, bound),) = listened
+    assert (host, port) == ("0.0.0.0", 9000)  # noqa: S104
+    assert served["sockets"] == [bound]
+    warnings = [r.getMessage() for r in caplog.records if r.name == cli.__name__]
+    assert len(warnings) == 1
+    assert "0.0.0.0" in warnings[0]  # noqa: S104
+    assert "authentication" in warnings[0]
+
+
+def test_listen_binds_and_claims_the_address_it_is_given() -> None:
+    sock = _REAL_LISTEN("127.0.0.1", 0)
+    try:
+        host, port = sock.getsockname()
+        assert host == "127.0.0.1"
+        # Claimed, not merely bound: a second socket cannot take the port.
+        with pytest.raises(OSError), contextlib.closing(_REAL_LISTEN("127.0.0.1", port)):
+            pass
+    finally:
+        sock.close()
+
+
+def test_a_port_already_in_use_is_refused_before_anything_is_created(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The most common startup failure: another server on the port. uvicorn
+    binding it would report that in several log lines, exit 3, and only
+    after the database exists."""
+    _refuse_to_serve(monkeypatch)
+    database_dir = tmp_path / "db"
+    with contextlib.closing(socket.socket()) as occupant:
+        occupant.bind(("127.0.0.1", 0))
+        occupant.listen()
+        port = occupant.getsockname()[1]
+
+        err = _refusal(
+            capsys,
+            ["--database", str(database_dir / "v.db"), "--host", "127.0.0.1", "--port", str(port)],
+        )
+
+    assert f"port {port}" in err
+    assert not database_dir.exists()
+
+
+@pytest.mark.usefixtures("never_served")
+def test_main_needs_no_home_directory_when_the_database_is_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A container run as a uid with no passwd entry and no `HOME` has no
+    home directory at all; only the default database path needs one."""
+
+    def _no_home() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr("vantage.service.cli.Path.home", _no_home)
+    monkeypatch.delenv("VANTAGE_DATABASE", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    err = _refusal(capsys, [])
+    assert "--database" in err
+
+    database = tmp_path / "v.db"
+    monkeypatch.setattr("vantage.service.cli.uvicorn.Server.run", lambda *_a, **_k: None)
+    cli.main(["--database", str(database)])
+    assert database.exists()
+
+
 @pytest.mark.usefixtures("served")
 def test_main_reads_the_database_path_from_vantage_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -180,26 +301,100 @@ def test_main_carries_the_resolved_grace_period_into_the_app(
     assert served["app"].state.grace_period == timedelta(seconds=60)
 
 
+@pytest.mark.usefixtures("listened")
 @pytest.mark.parametrize("stops_with", [None, SystemExit(3)], ids=["returns", "exits"])
 def test_main_closes_the_store_when_the_server_stops(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stops_with: SystemExit | None
 ) -> None:
-    """uvicorn exits with status 3 when it cannot bind, so the store must be
-    closed on that path as well as on a normal shutdown."""
+    """uvicorn exits with status 3 when the app fails to start, so the store
+    must be closed on that path as well as on a normal shutdown."""
     served: dict[str, Any] = {}
 
-    def _run(app: Any, **_kwargs: object) -> None:
+    def _run(server: uvicorn.Server, sockets: list[socket.socket] | None = None) -> None:
+        app: Any = server.config.app
         served["store"] = app.state.store
         if stops_with is not None:
             raise stops_with
 
-    monkeypatch.setattr("vantage.service.cli.uvicorn.run", _run)
+    monkeypatch.setattr("vantage.service.cli.uvicorn.Server.run", _run)
 
     with contextlib.suppress(SystemExit):
         cli.main(["--database", str(tmp_path / "v.db")])
 
     with pytest.raises(sqlite3.ProgrammingError, match="closed"):
         served["store"].count_executions()
+
+
+def _free_loopback_port() -> int:
+    with contextlib.closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
+def _wait_until_serving(proc: subprocess.Popen[bytes], base: str) -> None:
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        assert proc.poll() is None, proc.communicate()[1]
+        try:
+            with urllib.request.urlopen(f"{base}/capabilities", timeout=1):  # noqa: S310
+                return
+        except (urllib.error.URLError, OSError):
+            time.sleep(0.05)
+    raise AssertionError("the server never answered")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGTERM is how POSIX service managers stop one")
+def test_a_server_stopped_with_sigterm_leaves_everything_in_the_database_file(
+    tmp_path: Path,
+) -> None:
+    """systemd, docker and kubernetes stop a service with SIGTERM. uvicorn
+    ends the process by raising it again once the app has shut down, so a
+    store closed only after the server returns stays open, and every write
+    stays in the `-wal` file beside the database: a backup that copies the
+    database file alone after the stop gets no tables at all."""
+    database = tmp_path / "db" / "v.db"
+    port = _free_loopback_port()
+    base = f"http://127.0.0.1:{port}/api/v1"
+    command = "from vantage.service.cli import main; main()"
+    proc = subprocess.Popen(  # noqa: S603 -- the interpreter running this test
+        [sys.executable, "-c", command, "--database", str(database), "--port", str(port)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        _wait_until_serving(proc, base)
+        report = {
+            "run": {
+                "id": "a" * 32,
+                "started_at": "2026-08-15T09:14:02.481930+00:00",
+                "finished_at": None,
+                "exit_status": None,
+                "interrupted": False,
+                "interrupt_reason": None,
+            }
+        }
+        request = urllib.request.Request(  # noqa: S310
+            f"{base}/runs",
+            data=json.dumps(report).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+            assert response.status == 201
+
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        assert proc.stderr is not None
+        proc.stderr.close()
+
+    assert sorted(path.name for path in database.parent.iterdir()) == ["v.db"]
+    backup = tmp_path / "backup.db"
+    backup.write_bytes(database.read_bytes())
+    with contextlib.closing(sqlite3.connect(backup)) as conn:
+        assert conn.execute("SELECT id FROM run").fetchall() == [("a" * 32,)]
 
 
 @_needs_enforced_mode_bits

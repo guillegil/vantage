@@ -11,6 +11,7 @@ side effect. Creating anything belongs to whoever acts on the resolved path
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 _DEFAULT_HOST = "127.0.0.1"
@@ -46,7 +47,7 @@ def resolve_server_config(
     cli_host: str | None,
     cli_port: int | None,
     cli_grace_period: float | None,
-    home: Path,
+    home: Path | None,
     xdg_data_home: str | None,
 ) -> ServerConfig:
     """Resolve the server's database path, bind address, and grace period.
@@ -54,7 +55,9 @@ def resolve_server_config(
     Database precedence: ``--database`` > ``VANTAGE_DATABASE`` >
     ``$XDG_DATA_HOME/vantage/vantage.db``, default
     ``~/.local/share/vantage/vantage.db``. An empty value counts as unset,
-    and a relative ``XDG_DATA_HOME`` is ignored. The plugin's activation
+    and a relative ``XDG_DATA_HOME`` is ignored. `home` is `None` when the
+    process has no home directory to find; that refuses only a start that
+    falls back to the default path. The plugin's activation
     switch is flag-only so shared configuration can never silently turn
     recording on; the environment is fine here because this server is
     started deliberately by whoever runs it.
@@ -85,11 +88,14 @@ def _resolve_host(cli_host: str | None) -> str:
         return _DEFAULT_HOST
     # `--host "$VAR"` with the variable unset arrives as "", which asyncio
     # binds as every interface: the opposite of the loopback default meant.
-    if not cli_host.strip():
+    # Whitespace is never part of an address, and a padded one neither
+    # resolves nor compares equal to the loopback default.
+    host = cli_host.strip()
+    if not host:
         raise ServerConfigError(
             f"--host must name a bind address, got {cli_host!r}; omit it to bind {_DEFAULT_HOST}"
         )
-    return cli_host
+    return host
 
 
 def _resolve_port(cli_port: int | None) -> int:
@@ -108,13 +114,17 @@ def _resolve_grace_period(cli_grace_period: float | None) -> float:
     # `argparse type=float` accepts 0, -1, nan, inf and 1e14. The first two
     # make every unfinished run abandoned on sight, including sessions
     # heartbeating normally; the others cannot become a `timedelta` at all.
-    # `create_app` refuses both, but only after the database is open, so the
-    # refusal comes here first, as one line. The chained comparison is false
-    # for nan.
-    if not 0 < cli_grace_period <= _MAX_GRACE_PERIOD_SECONDS:
+    # So does a positive value below half a microsecond, which `timedelta`
+    # rounds to zero. `create_app` refuses all of them, but only after the
+    # database is open, so the refusal comes here first, as one line. The
+    # chained comparison is false for nan, and is checked before the
+    # `timedelta` is built.
+    if not 0 < cli_grace_period <= _MAX_GRACE_PERIOD_SECONDS or timedelta(
+        seconds=cli_grace_period
+    ) <= timedelta(0):
         raise ServerConfigError(
-            f"--grace-period must be more than 0 and at most {_MAX_GRACE_PERIOD_SECONDS:.0f} "
-            f"seconds (365 days), got {cli_grace_period!r}"
+            f"--grace-period must be at least one microsecond and at most "
+            f"{_MAX_GRACE_PERIOD_SECONDS:.0f} seconds (365 days), got {cli_grace_period!r}"
         )
     return cli_grace_period
 
@@ -122,7 +132,7 @@ def _resolve_grace_period(cli_grace_period: float | None) -> float:
 def _resolve_database_path(
     cli_database: str | None,
     env_database: str | None,
-    home: Path,
+    home: Path | None,
     xdg_data_home: str | None,
 ) -> Path:
     # An empty value is unset, not `Path("")`: that is the current directory,
@@ -134,8 +144,14 @@ def _resolve_database_path(
     # The XDG Base Directory spec says a relative XDG_DATA_HOME is invalid and
     # must be ignored; used as-is it would move the database with the cwd.
     xdg = Path(xdg_data_home) if xdg_data_home else None
-    data_home = xdg if xdg is not None and xdg.is_absolute() else home / ".local" / "share"
-    return data_home / "vantage" / "vantage.db"
+    if xdg is not None and xdg.is_absolute():
+        return xdg / "vantage" / "vantage.db"
+    if home is None:
+        raise ServerConfigError(
+            "there is no home directory to put the default database under; "
+            "pass --database or set VANTAGE_DATABASE"
+        )
+    return home / ".local" / "share" / "vantage" / "vantage.db"
 
 
 DEFAULT_GRACE_PERIOD_SECONDS = _DEFAULT_GRACE_PERIOD_SECONDS

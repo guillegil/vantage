@@ -24,7 +24,7 @@ def _resolve(
     cli_host: str | None = None,
     cli_port: int | None = None,
     cli_grace_period: float | None = None,
-    home: Path = Path("/home/nobody"),
+    home: Path | None = Path("/home/nobody"),
     xdg_data_home: str | None = None,
 ) -> ServerConfig:
     return resolve_server_config(
@@ -86,6 +86,35 @@ def test_an_empty_database_flag_falls_through_to_the_environment() -> None:
     assert config.database_path == Path("/env/vantage.db")
 
 
+@pytest.mark.parametrize(
+    ("cli_database", "env_database", "xdg_data_home", "expected"),
+    [
+        ("/explicit/v.db", None, None, "/explicit/v.db"),
+        (None, "/env/v.db", None, "/env/v.db"),
+        (None, None, "/xdg/data", "/xdg/data/vantage/vantage.db"),
+    ],
+    ids=["flag", "environment", "xdg-data-home"],
+)
+def test_no_home_directory_is_needed_unless_the_default_path_is(
+    cli_database: str | None, env_database: str | None, xdg_data_home: str | None, expected: str
+) -> None:
+    """A container run as a uid with no passwd entry and no `HOME` has no
+    home directory; the command passes `None` for it."""
+    config = _resolve(
+        cli_database=cli_database,
+        env_database=env_database,
+        xdg_data_home=xdg_data_home,
+        home=None,
+    )
+
+    assert config.database_path == Path(expected)
+
+
+def test_the_default_path_without_a_home_directory_is_refused() -> None:
+    with pytest.raises(ServerConfigError, match="--database"):
+        _resolve(home=None, xdg_data_home="relative/data")
+
+
 @pytest.mark.parametrize("xdg_data_home", ["relative/data", "./data", "data", "~/data"])
 def test_default_database_ignores_a_relative_xdg_data_home(xdg_data_home: str) -> None:
     """The XDG Base Directory spec says a relative value is invalid and must
@@ -119,6 +148,14 @@ def test_an_empty_host_is_refused(value: str) -> None:
     """
     with pytest.raises(ServerConfigError, match="--host"):
         _resolve(cli_host=value)
+
+
+@pytest.mark.parametrize("value", [" 127.0.0.1", "127.0.0.1 ", "\t127.0.0.1\n"])
+def test_whitespace_around_a_host_is_dropped(value: str) -> None:
+    """No address contains whitespace. Kept, `"127.0.0.1 "` fails to
+    resolve at bind time, and is not the loopback default the wide-bind
+    warning compares against, so a loopback start warns first."""
+    assert _resolve(cli_host=value).host == "127.0.0.1"
 
 
 @pytest.mark.parametrize("port", [-1, 0, 65536, 70000])
@@ -155,19 +192,25 @@ _ONE_YEAR_SECONDS = 365 * 24 * 60 * 60.0
 
 
 @pytest.mark.parametrize(
-    "value", [0.0, -1.0, float("nan"), float("inf"), _ONE_YEAR_SECONDS + 1, 1e14, 1e100]
+    "value",
+    [0.0, -1.0, 1e-7, 5e-7, float("nan"), float("inf"), _ONE_YEAR_SECONDS + 1, 1e14, 1e100],
 )
 def test_a_nonsensical_grace_period_is_refused_at_resolution(value: float) -> None:
     """`argparse type=float` accepts 0, -1, nan, inf and 1e14.
 
     0 and -1 make every unfinished run derive as abandoned the instant it is
-    read -- including sessions heartbeating normally. nan, inf and 1e14
+    read -- including sessions heartbeating normally, and so do 1e-7 and
+    5e-7, which `timedelta` rounds to zero. nan, inf and 1e14
     cannot become the `timedelta` `create_app` builds; the cap sits at one
     year, far below where that happens. The server must refuse before it
     opens the database, rather than fail with a traceback after it.
     """
     with pytest.raises(ServerConfigError, match="--grace-period"):
         _resolve(cli_grace_period=value)
+
+
+def test_a_grace_period_of_one_microsecond_is_accepted() -> None:
+    assert _resolve(cli_grace_period=1e-6).grace_period_seconds == 1e-6
 
 
 def test_a_grace_period_of_one_year_is_accepted() -> None:
