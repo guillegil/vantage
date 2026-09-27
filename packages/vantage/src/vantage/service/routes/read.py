@@ -13,7 +13,9 @@ A run's presentation comes from `derive_presentation` and the app's grace
 period; nothing here reimplements its precedence.
 
 Every route here but the interface document reads the store, so each is a
-plain `def` that FastAPI runs in its threadpool (see `app.py`).
+plain `def` that FastAPI runs in its threadpool (see `app.py`), and needs
+the read scope once the server has a user (`service/access.py`). The
+interface document needs nothing: a client reads it to learn how to ask.
 
 A test's identity travels as a named query parameter (`?node_id=`), never a
 path segment: a node id contains `/`, an encoded slash in a path is decoded
@@ -75,6 +77,7 @@ from vantage.core.ports.storage import (
     RunListEntry,
 )
 from vantage.ingestion.text import NUL, without_nul
+from vantage.service.access import requires_read
 from vantage.service.cursor import MAX_CURSOR_CHARS, decode_cursor, encode_cursor
 from vantage.service.dependencies import get_grace_period, get_store
 from vantage.service.errors import (
@@ -144,6 +147,7 @@ def _run_list_item(entry: RunListEntry, *, now: datetime, grace: timedelta) -> R
             execution, last_contact_at=entry.last_contact_at, now=now, grace=grace
         ),
         vcs=_vcs_response(entry.vcs),
+        recorded_by=entry.recorded_by,
     )
 
 
@@ -162,6 +166,7 @@ def _run_detail_response(
             execution, last_contact_at=detail.last_contact_at, now=now, grace=grace
         ),
         vcs=_vcs_response(execution.vcs),
+        recorded_by=detail.recorded_by,
     )
 
 
@@ -301,7 +306,7 @@ def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
     )
 
 
-@router.get("/runs")
+@router.get("/runs", dependencies=[Depends(requires_read)])
 def list_runs(
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
@@ -364,7 +369,7 @@ def list_runs(
     )
 
 
-@router.get("/runs/{run_id}")
+@router.get("/runs/{run_id}", dependencies=[Depends(requires_read)])
 def get_run_detail(
     run_id: str = Path(pattern=IDENTITY_PATTERN),
     store: ExecutionStore = Depends(get_store),
@@ -380,7 +385,7 @@ def get_run_detail(
     return _run_detail_response(detail, now=datetime.now(timezone.utc), grace=grace)
 
 
-@router.get("/runs/{run_id}/metadata")
+@router.get("/runs/{run_id}/metadata", dependencies=[Depends(requires_read)])
 def get_run_metadata(
     run_id: str = Path(pattern=IDENTITY_PATTERN),
     store: ExecutionStore = Depends(get_store),
@@ -400,7 +405,7 @@ def get_run_metadata(
     )
 
 
-@router.get("/runs/{run_id}/results")
+@router.get("/runs/{run_id}/results", dependencies=[Depends(requires_read)])
 def list_results(
     run_id: str = Path(pattern=IDENTITY_PATTERN),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
@@ -417,7 +422,7 @@ def list_results(
     return ResultsResponse(items=items, has_more=page.has_more)
 
 
-@router.get("/runs/{run_id}/result")
+@router.get("/runs/{run_id}/result", dependencies=[Depends(requires_read)])
 def get_result(
     run_id: str = Path(pattern=IDENTITY_PATTERN),
     node_id: str = Query(...),
@@ -435,7 +440,7 @@ def get_result(
     return _result_detail_response(result)
 
 
-@router.get("/tests/history")
+@router.get("/tests/history", dependencies=[Depends(requires_read)])
 def list_history(
     node_id: str = Query(...),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),

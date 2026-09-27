@@ -159,6 +159,19 @@ def _resolve_database(
     return SqliteTarget(default)
 
 
+def resolve_database(
+    *,
+    cli_database: str | None,
+    env_database: str | None,
+    home: Path | None,
+    xdg_data_home: str | None,
+) -> DatabaseTarget:
+    """The database alone, resolved as `resolve_server_config` resolves it:
+    for the commands that manage the database a server serves without
+    serving it."""
+    return _resolve_database(cli_database, env_database, home, xdg_data_home)
+
+
 def _target(source: str, value: str) -> DatabaseTarget:
     try:
         return database_target(value)
@@ -194,5 +207,6 @@ __all__ = [
     "ServerConfig",
     "ServerConfigError",
     "default_sqlite_path",
+    "resolve_database",
     "resolve_server_config",
 ]

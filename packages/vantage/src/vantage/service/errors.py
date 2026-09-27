@@ -201,6 +201,65 @@ class UnknownRunError(RejectionError):
         super().__init__("No run with that identifier has been recorded.")
 
 
+class RunOfAnotherUserError(RejectionError):
+    """A report or heartbeat for a run another user's token created -- or
+    one created without a token, sent with one, or the other way round.
+    Nothing of it is stored. Answered whether or not the run is finished,
+    so nobody learns more of another user's run than that it exists."""
+
+    status_code = 409
+    error = "foreign_run"
+
+    def __init__(self) -> None:
+        super().__init__("This run was recorded by another user.")
+
+
+class ChallengeError(RejectionError):
+    """A rejection that says how to authenticate, in a `WWW-Authenticate`
+    header as RFC 6750 spells it for a bearer token. The header names the
+    scope a request lacked, never the token it sent."""
+
+    def __init__(self, detail: str, challenge: str) -> None:
+        super().__init__(detail)
+        self.headers = {"WWW-Authenticate": f'Bearer realm="vantage"{challenge}'}
+
+
+class UnauthenticatedError(ChallengeError):
+    """No token on a server that has users, or one that authenticates
+    nothing: malformed, unknown, revoked, or its user's disabled. The last
+    four read alike, so a caller cannot tell a revoked token from one that
+    never existed."""
+
+    status_code = 401
+    error = "unauthenticated"
+
+    @classmethod
+    def missing(cls) -> UnauthenticatedError:
+        return cls("This server requires a token: send Authorization: Bearer <token>.", "")
+
+    @classmethod
+    def invalid(cls) -> UnauthenticatedError:
+        return cls(
+            "The token is not valid: unknown, revoked, or its user is disabled.",
+            ', error="invalid_token"',
+        )
+
+
+class InsufficientScopeError(ChallengeError):
+    """A token that authenticates, but whose grant does not cover the
+    route's scope: it does not hold it, or it is the admin scope and its
+    user is no longer an admin."""
+
+    status_code = 403
+    error = "insufficient_scope"
+
+    def __init__(self, scope: str) -> None:
+        super().__init__(
+            f"The token does not grant the {scope} scope.",
+            f', error="insufficient_scope", scope="{scope}"',
+        )
+
+
 class UnknownResultError(RejectionError):
     """A run is known, but no result matches the `node_id` used against the
     single-result endpoint.
@@ -307,6 +366,7 @@ def _rejection_response(exc: RejectionError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content=_rejection_body(exc.error, exc.detail, exc.fields),
+        headers=exc.headers if isinstance(exc, ChallengeError) else None,
     )
 
 
@@ -371,7 +431,9 @@ def register_error_handlers(app: FastAPI) -> None:
 
 __all__ = [
     "MAX_REPORT_BYTES",
+    "ChallengeError",
     "IncompleteBodyError",
+    "InsufficientScopeError",
     "InvalidIdentityError",
     "InvalidJsonError",
     "InvalidMetadataFilterError",
@@ -383,7 +445,9 @@ __all__ = [
     "PayloadTooLargeError",
     "RejectionError",
     "ReservedSectionNameError",
+    "RunOfAnotherUserError",
     "TooManySectionsError",
+    "UnauthenticatedError",
     "UnknownResultError",
     "UnknownRunError",
     "UnknownSectionError",

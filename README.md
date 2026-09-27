@@ -47,7 +47,7 @@ Python 3.10 to 3.13.
 | Install | Brings | Enough for |
 | --- | --- | --- |
 | `pytest-vantage` | the plugin, and nothing but pytest | recording to a server |
-| `vantage` | the plugin, local storage (with Pydantic and PyYAML) and `vantage push` | every mode, the local ones included |
+| `vantage` | the plugin, local storage (with Pydantic and PyYAML), `vantage push`, and `vantage user` and `vantage token` | every mode, the local ones included |
 | `vantage[server]` | also FastAPI and Uvicorn: the `vantage` server | serving recorded runs, from a local file or a shared database |
 | `vantage[server,postgres]` | also psycopg and its connection pool | a server storing in PostgreSQL |
 
@@ -101,6 +101,7 @@ pytest-xdist; a session is one run however many workers it uses.
 | `--vantage-local-database PATH` | `vantage_local_database` | none | the database `vantage` serves by default | The SQLite file the other three modes store in. |
 | `--vantage-failure-text` | none | none | off | Adds failure text and captured output. |
 | `--vantage-metadata` | none | none | off | Adds values from declared files. |
+| none | none | `VANTAGE_TOKEN` | none | The token a server with users requires (see [Users and tokens](#users-and-tokens)). |
 
 - The server address is resolved as `--vantage-server`, then
   `VANTAGE_SERVER`, then the `vantage_server` ini value, then the default. The
@@ -117,6 +118,14 @@ pytest-xdist; a session is one run however many workers it uses.
   not follow redirects: a 3xx answer counts as a failed report.
 - `--vantage-failure-text` and `--vantage-metadata` do nothing without
   `--vantage`.
+- The token is read from `VANTAGE_TOKEN` alone, and only when `--vantage` is
+  given: a value in a committed configuration file would be read by
+  everyone who checks the project out, and one on the command line by every
+  user of the machine. It goes with every report and heartbeat, never
+  anywhere but the server address, and is never printed. An empty one
+  counts as unset; one that could never be a token (spaces, characters
+  outside printable ASCII, over 512 characters) stops pytest with a usage
+  error that does not repeat it.
 
 ### What is ignored
 
@@ -207,6 +216,10 @@ vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.
   asking for it again later): the run is stored locally and the reports
   the server has not acknowledged are queued. A report that timed out may
   have been stored after all; sending it again stores nothing twice.
+- **The server refuses the token, or its absence** (a 401 or 403): the run
+  is stored and queued in the same way, since `vantage push` with a token
+  the server accepts can deliver it. The queue never holds a token; whoever
+  sends it sends their own.
 - **The final report is refused outright** (any other 4xx, a redirect, an
   answer that does not acknowledge the run): the warning is the usual
   `vantage: error while reporting: ...`, and the run is not queued, since
@@ -216,8 +229,8 @@ vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.
 plugin sends the runs queued for that server, oldest first, within the
 report timeout, and prints one line with the test summary:
 `vantage: sent 3 queued runs to http://ci-vantage:8765 (0 waiting)`. It stops
-when the server is unreachable again, answers a 408 or 429, or the time is
-spent, and says why. A run the server answers with a 5xx stays queued and
+when the server is unreachable again, answers a 408 or 429, refuses the
+token with a 401 or 403, or the time is spent, and says why. A run the server answers with a 5xx stays queued and
 the next is sent; one it refuses with any other 4xx can never succeed, and
 is dropped with a warning naming its run id. Each run is only ever sent to
 the address it was queued for, compared exactly as written, so
@@ -254,6 +267,11 @@ vantage push [--database PATH] [--to URL] [--timeout SECONDS]
 Sends every queued run now, each to the server it was queued for, or only
 those queued for `--to`, written exactly as it was configured. It needs
 `vantage` but not its `server` extra.
+
+- Each run goes with the token in `VANTAGE_TOKEN`, if one is set, as the
+  plugin sends it; one that could never be a token is refused in one line
+  that does not repeat it. A run recorded by another user's token is
+  refused by the server and dropped.
 
 - `--database` is the local database the outbox sits beside, as given to
   `--vantage-local-database`; by default the same default database
@@ -567,7 +585,7 @@ Without a metadata filter, `metadata_horizon` is null.
 **Invalid configuration** (an address that is not `http` or `https`, no
 host, a bad port, a timeout that is not a positive number, an unknown mode,
 a local database that is a PostgreSQL URL or a directory, an ini value of
-the wrong type) stops pytest with a usage error naming the option, exit
+the wrong type, a `VANTAGE_TOKEN` that could never be a token) stops pytest with a usage error naming the option, exit
 status 4, before any test runs: recording was asked for and cannot work. So
 does a mode with a local database where `vantage` is not installed.
 
@@ -583,6 +601,13 @@ still run and the suite's exit status is never changed.
   appears only when the session ends.
 - **The start report or a heartbeat fails:** heartbeats stop; the final
   report is still sent.
+- **The server refuses the token:** the warning says what to fix instead of
+  the bare status: `the server requires a token: set VANTAGE_TOKEN to one
+  with the record scope` (none sent to a server with users), `the server
+  does not accept the token in VANTAGE_TOKEN` (unknown, revoked, its user
+  disabled, or sent to a server without users), `the token in VANTAGE_TOKEN
+  does not grant the record scope`, or `the run was recorded by another
+  user`. The start report and the final report each warn once.
 - **The final report fails** (HTTP error, rejected report): if the start
   report got through, the run stays unfinished on the server and later reads
   as `abandoned`; otherwise nothing is recorded on the server. The backup
@@ -638,8 +663,8 @@ vantage [--database PATH-OR-URL] [--host HOST] [--port PORT] [--grace-period SEC
 
 Serving needs the `server` extra. Without it, `vantage` refuses in one line,
 `vantage: serving needs the server extra: pip install 'vantage[server]'`,
-with exit status 1 and nothing created; `vantage push` and `vantage --help`
-work either way.
+with exit status 1 and nothing created; `vantage push`, `vantage user`,
+`vantage token` and `vantage --help` work either way.
 
 | Setting | Flag | Environment | Default |
 | --- | --- | --- | --- |
@@ -658,10 +683,11 @@ work either way.
 - A missing SQLite database directory is created with mode 0700 and a new
   database file with mode 0600. An existing database file open to its group
   or to others is used as it is, with a warning.
-- **There is no authentication.** Anyone who can reach the port can record
-  runs, change the section definitions and read everything recorded, failure
-  text included. Any `--host` other than `127.0.0.1` logs a warning saying so
-  at startup.
+- **Until the database has a user, there is no authentication.** Anyone
+  who can reach the port can record runs, change the section definitions
+  and read everything recorded, failure text included. Any `--host` other
+  than `127.0.0.1` logs a warning saying so at startup, as long as the
+  database has no user. See [Users and tokens](#users-and-tokens).
 - The server refuses to start, with one `vantage: ...` line on stderr and
   exit status 1, when a setting is unusable (an empty host, a port outside 1
   to 65535, a grace period that is not positive or exceeds 365 days), the
@@ -702,8 +728,55 @@ on the last page, and a cursor is not combined with a non-zero `offset`.
 ```
 GET /api/v1/runs?limit=50
 GET /api/v1/runs?limit=50&cursor=MjAyNi0wOS0yN1QwODowMDowMC4...
-``` The run list also filters by metadata values; see
-[Reading it back](#reading-it-back).
+```
+
+The run list also filters by metadata values; see
+[Reading it back](#reading-it-back). Each run, in the list and on its own,
+says in `recorded_by` which user's token recorded it, or `null` when none
+did.
+
+### Users and tokens
+
+A database with no user needs no token: that is how `vantage` serves a
+local database on a test machine. The first user closes it, and from then
+on every route but `GET /api/v1/capabilities` and
+`GET /api/v1/openapi.yaml` needs `Authorization: Bearer <token>`, a token of
+an enabled user that has not been revoked. Users are disabled, never
+deleted, so a database that has had one stays closed. A server already
+serving the database needs no restart: its next request needs a token.
+
+```bash
+vantage user add alice --admin                 # the first user closes the database
+vantage token create alice                     # prints a token, once
+vantage user add ci
+vantage token create ci --scope record --label nightly
+vantage user list
+vantage token list [USER]
+vantage token revoke 3                         # by the id the list shows
+vantage user update bob --disable              # or --enable, --admin, --no-admin
+```
+
+- Each command takes `--database` and finds the database as the server
+  does: `--database`, then `VANTAGE_DATABASE`, then the default. It needs
+  neither the `server` extra nor a running server. Only `user add` creates a
+  database that is not there yet.
+- A token holds one or more scopes. `read` reads runs, results, history and
+  sections; `record` sends reports and heartbeats, all `pytest-vantage`
+  needs; `admin` changes the section definitions, and only an admin user's
+  token may hold it. It grants nothing once its user stops being one. A token
+  holds `read` and `record` unless `--scope` names others.
+- `token create` prints the token alone on stdout, so
+  `VANTAGE_TOKEN=$(vantage token create ci --scope record)` captures it and
+  nothing else. It is shown once: the database keeps only its SHA-256.
+- A user name is 1 to 64 characters of `a-z`, `0-9`, `.`, `_` and `-`.
+- A disabled user's tokens, and a revoked token, are refused like a token
+  that never existed. So is any token sent to a server without users.
+- The report that creates a run records its token's user, and only that
+  user's token may send the run's later reports and heartbeats. Another
+  user's gets `409 foreign_run`, whether the run is finished or not.
+- A token travels in the clear over plain `http`. Put the server behind
+  HTTPS wherever the network between it and the test machines is not
+  yours.
 
 ### Storing in PostgreSQL
 

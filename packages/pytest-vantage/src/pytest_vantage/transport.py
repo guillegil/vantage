@@ -24,11 +24,23 @@ and anything but an acknowledgement of the report just sent raises like any
 other bad input. ``send`` and ``send_heartbeat`` are "send, or raise" --
 nothing here decides whether a failure is fatal; ``boundary.py`` turns any
 exception into a warning.
+
+A server with users needs a token, which ``send`` and ``send_heartbeat``
+carry as ``Authorization: Bearer`` when given one; the capability probe
+never does, since the server answers it without one. A token only ever
+travels to the address it was configured with, because no redirect is
+followed. When a vantage server refuses who sent a request -- no token or
+one it does not accept (401), one without the record scope (403), or a run
+another user recorded (409) -- the error its body names is turned into an
+`AccessRefusedError` saying what to fix, still an `HTTPError` with the same
+status. The token never appears in it.
 """
 
 from __future__ import annotations
 
+import http.client
 import json
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -51,6 +63,54 @@ MAX_RESPONSE_BYTES = 64 * 1024
 _ACKNOWLEDGED_STATUSES = frozenset({"created", "duplicate"})
 
 _T = TypeVar("_T")
+
+# What a vantage server's rejection body names, for the refusals of who
+# sent a request, and what each means to fix from where the plugin stands.
+_UNAUTHENTICATED = "unauthenticated"
+_INSUFFICIENT_SCOPE = "insufficient_scope"
+_FOREIGN_RUN = "foreign_run"
+_ACCESS_REFUSALS = {401: _UNAUTHENTICATED, 403: _INSUFFICIENT_SCOPE, 409: _FOREIGN_RUN}
+
+# The shape of a token the server could accept: printable ASCII with no
+# space, at most 512 characters. `test_server_contract.py` checks it agrees
+# with the server's `well_formed_token`.
+_TOKEN_RE = re.compile(r"\A[\x21-\x7e]{1,512}\Z")
+
+
+def well_formed_token(text: str) -> bool:
+    """Whether `text` could be a token: anything else would either never
+    authenticate or not fit in a header at all."""
+    return _TOKEN_RE.match(text) is not None
+
+
+class AccessRefusedError(urllib_error.HTTPError):
+    """A vantage server refused who sent the request, with the reason in
+    words: its status and headers are the refusal's, so whatever reads the
+    status of an `HTTPError` reads this one the same."""
+
+    def __init__(self, refused: urllib_error.HTTPError, reason: str) -> None:
+        super().__init__(refused.url, refused.code, refused.msg, refused.headers, None)
+        self.reason_text = reason
+
+    def __str__(self) -> str:
+        return f"HTTP {self.code}: {self.reason_text}"
+
+
+def _refusal_reason(code: int, error: object, *, token: str | None) -> str | None:
+    """What a refusal of who sent a request means, or `None` when `error`
+    is not the one a vantage server gives with `code`."""
+    if _ACCESS_REFUSALS.get(code) != error:
+        return None
+    if error == _UNAUTHENTICATED:
+        if token is None:
+            return "the server requires a token: set VANTAGE_TOKEN to one with the record scope"
+        return (
+            "the server does not accept the token in VANTAGE_TOKEN: it is unknown or revoked, "
+            "or its user is disabled"
+        )
+    if error == _INSUFFICIENT_SCOPE:
+        return "the token in VANTAGE_TOKEN does not grant the record scope"
+    return "the run was recorded by another user"
 
 
 def _build_opener() -> urllib_request.OpenerDirector:
@@ -100,19 +160,31 @@ def run_within(timeout: float, work: Callable[[], _T]) -> _T:
     return outcome[0]
 
 
-def _exchange(http_request: urllib_request.Request, timeout: float) -> bytes:
+def _exchange(
+    http_request: urllib_request.Request, timeout: float, *, token: str | None = None
+) -> bytes:
     """Open ``http_request`` and read at most `MAX_RESPONSE_BYTES` of the
     answer, all within ``timeout`` seconds. A non-2xx status, 3xx included,
-    raises `urllib.error.HTTPError`.
+    raises `urllib.error.HTTPError`, as an `AccessRefusedError` when a
+    vantage server refused who sent it; ``token`` is what was sent, if
+    anything, which the reason depends on.
     """
 
     def attempt() -> bytes:
         try:
             response = _OPENER.open(http_request, timeout=timeout)
         except urllib_error.HTTPError as exc:
-            # The error carries the still-open response; only its status is
-            # needed, so release the connection before handing it on.
-            exc.close()
+            # The error carries the still-open response. Only a refusal of
+            # who sent the request needs its body, for the error it names;
+            # the connection is released before the error is handed on.
+            try:
+                reason = None
+                if exc.code in _ACCESS_REFUSALS:
+                    reason = _refusal_reason(exc.code, _rejection_error(exc), token=token)
+            finally:
+                exc.close()
+            if reason is not None:
+                raise AccessRefusedError(exc, reason) from None
             raise
         with response:
             body: bytes = response.read(MAX_RESPONSE_BYTES)
@@ -121,7 +193,26 @@ def _exchange(http_request: urllib_request.Request, timeout: float) -> bytes:
     return run_within(timeout, attempt)
 
 
-def send(address: str, report: dict[str, object], *, timeout: float) -> None:
+def _rejection_error(refused: urllib_error.HTTPError) -> object:
+    """The `error` a rejection body names, or `None` for a body that is not
+    a JSON object: a proxy's page, or nothing at all."""
+    try:
+        body = json.loads(refused.read(MAX_RESPONSE_BYTES))
+    except (OSError, ValueError, http.client.HTTPException):
+        return None
+    return body.get("error") if isinstance(body, dict) else None
+
+
+def _headers(token: str | None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def send(
+    address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+) -> None:
     """POST ``report`` as JSON to ``{address}/api/v1/runs``.
 
     ``address`` has already passed ``config.resolve_and_validate_address``
@@ -132,17 +223,18 @@ def send(address: str, report: dict[str, object], *, timeout: float) -> None:
     failure, a non-2xx status via ``urllib.error.HTTPError`` -- and on any
     answer that does not acknowledge this report's run: a body that is not
     JSON, or JSON that is not ``{"run_id": <this run>, "status": ...}``.
-    This function catches nothing itself.
+    This function catches nothing itself. ``token``, when given, goes in
+    the ``Authorization`` header.
     """
     url = address.rstrip("/") + _INGESTION_PATH
     body = json.dumps(report).encode("utf-8")
     http_request = urllib_request.Request(  # noqa: S310
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=_headers(token),
         method="POST",
     )
-    acknowledgement = json.loads(_exchange(http_request, timeout))
+    acknowledgement = json.loads(_exchange(http_request, timeout, token=token))
     run = report.get("run")
     run_id = run.get("id") if isinstance(run, dict) else None
     if not (
@@ -153,23 +245,24 @@ def send(address: str, report: dict[str, object], *, timeout: float) -> None:
         raise ValueError(f"{url} answered without acknowledging run {run_id}")
 
 
-def send_heartbeat(address: str, run_id: str, *, timeout: float) -> None:
+def send_heartbeat(address: str, run_id: str, *, timeout: float, token: str | None = None) -> None:
     """POST an empty liveness beat to ``{address}/api/v1/runs/{run_id}/heartbeat``.
 
     Separate from `send` because the two differ in more than their path: the
     body is a meaningless `{}`, the response is not parsed, and the caller
     bounds it by the liveness timeout rather than the report timeout.
 
-    Raises on any transport failure, exactly like `send`.
+    Raises on any transport failure, exactly like `send`, and carries
+    ``token`` as `send` does.
     """
     url = address.rstrip("/") + _INGESTION_PATH + f"/{run_id}" + _HEARTBEAT_PATH_SUFFIX
     http_request = urllib_request.Request(  # noqa: S310
         url,
         data=b"{}",
-        headers={"Content-Type": "application/json"},
+        headers=_headers(token),
         method="POST",
     )
-    _exchange(http_request, timeout)
+    _exchange(http_request, timeout, token=token)
 
 
 @dataclass(frozen=True)
@@ -234,9 +327,11 @@ def fetch_capabilities(address: str, *, timeout: float) -> Capabilities:
 
 __all__ = [
     "MAX_RESPONSE_BYTES",
+    "AccessRefusedError",
     "Capabilities",
     "fetch_capabilities",
     "run_within",
     "send",
     "send_heartbeat",
+    "well_formed_token",
 ]

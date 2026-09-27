@@ -15,8 +15,8 @@
 -- tolerate. The schema itself may exist already, empty, made by whoever
 -- granted the rights to use it.
 --
--- Every text key -- run ids and the columns referring to them, setting
--- names, metadata keys -- is `COLLATE "C"`: byte order, which for UTF-8 is
+-- Every text key -- run ids, user names and the columns referring to them,
+-- setting names, metadata keys -- is `COLLATE "C"`: byte order, which for UTF-8 is
 -- code point order, as SQLite and the in-memory store order text. A
 -- database's default collation is usually a linguistic one.
 --
@@ -39,6 +39,27 @@ CREATE TABLE vantage.meta (
     value text NOT NULL
 );
 
+-- A user name is at most 64 characters, so it is indexed as it is.
+CREATE TABLE vantage.account (
+    name        text COLLATE "C" PRIMARY KEY,
+    admin       boolean NOT NULL,
+    disabled    boolean NOT NULL DEFAULT false,
+    created_at  timestamptz NOT NULL
+);
+
+CREATE TABLE vantage.access_token (
+    id          bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    account     text COLLATE "C" NOT NULL REFERENCES vantage.account (name),
+    digest      text COLLATE "C" NOT NULL UNIQUE,
+    label       text NOT NULL,
+    can_read    boolean NOT NULL,
+    can_record  boolean NOT NULL,
+    can_admin   boolean NOT NULL,
+    created_at  timestamptz NOT NULL,
+    revoked_at  timestamptz NULL,
+    CHECK (can_read OR can_record OR can_admin)
+);
+
 CREATE TABLE vantage.run (
     id                            text COLLATE "C" PRIMARY KEY,
     received_at                   timestamptz NOT NULL,
@@ -53,7 +74,8 @@ CREATE TABLE vantage.run (
     vcs_commit_subject            text NULL,
     vcs_commit_subject_truncated  boolean NOT NULL DEFAULT false,
     vcs_dirty                     boolean NULL,
-    vcs_root                      text NULL
+    vcs_root                      text NULL,
+    recorded_by                   text COLLATE "C" NULL REFERENCES vantage.account (name)
 );
 
 -- The catalogue. `node_id` is unique through `test_case_node_key` below.
@@ -151,6 +173,8 @@ CREATE TABLE vantage.run_metadata (
 -- The `text_key` indexes: the uniqueness the SQLite schema declares on node
 -- ids, metadata keys and declared files, each an upsert's conflict target,
 -- and every lookup by node id or by metadata key and value.
+-- `access_token(digest)`, from its UNIQUE constraint: authenticating a
+-- request.
 CREATE INDEX run_started_at ON vantage.run (started_at, id);
 CREATE INDEX result_run_id ON vantage.result (run_id, id);
 CREATE INDEX result_test_case_id ON vantage.result (test_case_id);

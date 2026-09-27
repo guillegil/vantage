@@ -259,11 +259,13 @@ def test_queued_runs_are_sent_oldest_first_and_deleted_once_acknowledged(
     order: list[tuple[str, object]] = []
     real_send = transport.send
 
-    def _send(address: str, report: dict[str, object], *, timeout: float) -> None:
+    def _send(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
         run = report["run"]
         assert isinstance(run, dict)
         order.append((run["id"], run["exit_status"]))
-        real_send(address, report, timeout=timeout)
+        real_send(address, report, timeout=timeout, token=token)
 
     monkeypatch.setattr(outbox_module, "send", _send)
 

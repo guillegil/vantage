@@ -10,6 +10,11 @@ run arrives exactly as the session would have sent it: each entry only to
 the address it was queued for, deleted once that server acknowledges it,
 dropped when the server refuses it outright.
 
+A server with users needs a token, which comes from `VANTAGE_TOKEN` as it
+does for the plugin, and goes with every run sent; the queue never holds
+one. A 401 or 403 leaves the server's runs queued, for a push with a token
+the server accepts.
+
 Nothing here imports FastAPI or uvicorn: a test machine with `vantage` and
 no `server` extra sends its queue.
 """
@@ -19,6 +24,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import math
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -30,6 +36,7 @@ from pytest_vantage.outbox import (
     outbox_path,
     send_queued,
 )
+from pytest_vantage.transport import well_formed_token
 
 from vantage.core.config.database import (
     PostgresTarget,
@@ -48,7 +55,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         prog="vantage push",
         description=(
             "Send the runs pytest-vantage queued for a server it could not reach, "
-            "each to the server it was queued for."
+            "each to the server it was queued for, with the token in VANTAGE_TOKEN "
+            "if one is set."
         ),
     )
     parser.add_argument(
@@ -131,6 +139,12 @@ def push(argv: Sequence[str]) -> int:
     timeout: float = args.timeout
     if not 0 < timeout < math.inf:
         _refuse(f"--timeout must be a positive number of seconds, got {args.timeout!r}")
+    token = os.environ.get("VANTAGE_TOKEN") or None
+    if token is not None and not well_formed_token(token):
+        _refuse(
+            "VANTAGE_TOKEN is not a token: a token is at most 512 printable ASCII characters, "
+            "with no spaces"
+        )
     path: Path = outbox_path(_database(args.database))
     # Asking what is queued must not create anything.
     if not path.exists():
@@ -151,7 +165,7 @@ def push(argv: Sequence[str]) -> int:
             print("vantage: nothing queued" + ("" if args.to is None else f" for {args.to}"))
             return 0
         try:
-            left = sum(_send(outbox, server, timeout) for server in servers)
+            left = sum(_send(outbox, server, timeout, token) for server in servers)
         except KeyboardInterrupt:
             # `send_queued` has put the run it was sending back in the queue,
             # and deleted every run acknowledged before it.
@@ -165,13 +179,15 @@ def push(argv: Sequence[str]) -> int:
     return 0 if left == 0 else 1
 
 
-def _send(outbox: Outbox, server: str, timeout: float) -> int:
+def _send(outbox: Outbox, server: str, timeout: float, token: str | None) -> int:
     """Send `server`'s queue, print its line, and return how many runs are
     still waiting for it -- at least one when that cannot be told."""
     try:
         # No budget beyond each run's own timeout: someone asked for the
         # queue to go now, and is watching it go.
-        summary: SendSummary = send_queued(outbox, server, timeout=timeout, budget=math.inf)
+        summary: SendSummary = send_queued(
+            outbox, server, timeout=timeout, budget=math.inf, token=token
+        )
     except Exception as exc:
         failed = f"vantage: could not send the runs queued for {server}: {_one_line(exc)}"
         try:

@@ -66,7 +66,7 @@ def sent(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     a copy the plugin no longer uses."""
     reports: list[dict[str, object]] = []
     monkeypatch.setattr(
-        recorder, "send", lambda address, report, *, timeout: reports.append(report)
+        recorder, "send", lambda address, report, *, timeout, token=None: reports.append(report)
     )
     return reports
 

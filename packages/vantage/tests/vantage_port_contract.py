@@ -15,6 +15,15 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from vantage.core.domain.access import (
+    ADMIN_SCOPE,
+    READ_SCOPE,
+    RECORD_SCOPE,
+    Grant,
+    Token,
+    User,
+    token_digest,
+)
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
@@ -27,11 +36,14 @@ from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvid
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
     ExecutionStore,
+    ForeignRunError,
     MetadataEntry,
     MetadataFile,
     NamespaceFullError,
     RunKey,
     RunMetadata,
+    UnknownUserError,
+    UserExistsError,
     UserSetting,
 )
 
@@ -2260,3 +2272,299 @@ class ExecutionStoreContract:
         ]
         assert list(stored.files) == sorted(files, key=lambda file: file.source_file)
         assert stored.entries == ()
+
+    # --- Users, tokens and who recorded a run ---------------------------------
+
+    def test_no_token_is_required_until_a_user_exists_and_then_always(
+        self, store: ExecutionStore
+    ) -> None:
+        """Users are disabled, never deleted, so the first one closes the
+        store for good: disabling every user leaves it closed."""
+        assert store.access_required() is False
+
+        store.create_user("alice", admin=True, created_at=_ACCESS_AT)
+        store.update_user("alice", disabled=True)
+
+        assert store.access_required() is True
+
+    def test_a_created_user_reads_back_as_it_was_created(self, store: ExecutionStore) -> None:
+        created = store.create_user("alice", admin=True, created_at=_ACCESS_AT)
+
+        assert created == User(name="alice", admin=True, disabled=False, created_at=_ACCESS_AT)
+        assert store.get_user("alice") == created
+        assert store.get_user("bob") is None
+
+    def test_users_list_in_code_point_order(self, store: ExecutionStore) -> None:
+        for name in ("b", "a_3", "a.2", "a-1", "0"):
+            store.create_user(name, admin=False, created_at=_ACCESS_AT)
+
+        assert [user.name for user in store.list_users()] == ["0", "a-1", "a.2", "a_3", "b"]
+
+    def test_a_taken_name_is_refused_and_the_user_left_as_it_was(
+        self, store: ExecutionStore
+    ) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+
+        with pytest.raises(UserExistsError):
+            store.create_user("alice", admin=True, created_at=_ACCESS_AT + timedelta(days=1))
+
+        assert store.list_users() == (
+            User(name="alice", admin=False, disabled=False, created_at=_ACCESS_AT),
+        )
+
+    def test_update_user_sets_only_what_it_is_given(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+
+        promoted = store.update_user("alice", admin=True)
+        disabled = store.update_user("alice", disabled=True)
+        unchanged = store.update_user("alice")
+
+        assert promoted is not None and (promoted.admin, promoted.disabled) == (True, False)
+        assert disabled is not None and (disabled.admin, disabled.disabled) == (True, True)
+        assert unchanged == disabled
+        assert store.get_user("alice") == disabled
+
+    def test_update_user_of_nobody_is_none(self, store: ExecutionStore) -> None:
+        assert store.update_user("nobody", admin=True) is None
+        assert store.list_users() == ()
+
+    def test_a_token_reads_back_and_lists_oldest_first_by_user(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=True, created_at=_ACCESS_AT)
+        store.create_user("bob", admin=False, created_at=_ACCESS_AT)
+
+        first = store.create_token(
+            "alice",
+            digest=token_digest("first"),
+            label="laptop",
+            scopes=frozenset({READ_SCOPE, ADMIN_SCOPE}),
+            created_at=_ACCESS_AT,
+        )
+        second = store.create_token(
+            "bob",
+            digest=token_digest("second"),
+            label="",
+            scopes=frozenset({RECORD_SCOPE}),
+            created_at=_ACCESS_AT,
+        )
+        third = store.create_token(
+            "alice",
+            digest=token_digest("third"),
+            label="ci — nightly",
+            scopes=frozenset({READ_SCOPE, RECORD_SCOPE, ADMIN_SCOPE}),
+            created_at=_ACCESS_AT,
+        )
+
+        assert first == Token(
+            id=first.id,
+            user="alice",
+            label="laptop",
+            scopes=frozenset({READ_SCOPE, ADMIN_SCOPE}),
+            created_at=_ACCESS_AT,
+            revoked_at=None,
+        )
+        assert first.id < second.id < third.id
+        assert store.list_tokens() == (first, second, third)
+        assert store.list_tokens(user="alice") == (first, third)
+        assert store.list_tokens(user="carol") == ()
+
+    def test_a_token_of_nobody_is_refused_and_nothing_stored(self, store: ExecutionStore) -> None:
+        with pytest.raises(UnknownUserError):
+            store.create_token(
+                "nobody",
+                digest=token_digest("t"),
+                label="",
+                scopes=frozenset({READ_SCOPE}),
+                created_at=_ACCESS_AT,
+            )
+
+        assert store.list_tokens() == ()
+        assert store.authenticate(token_digest("t")) is None
+
+    def test_a_live_token_grants_its_scopes_as_its_user(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        _token(store, "alice", "secret", scopes={READ_SCOPE, RECORD_SCOPE})
+
+        assert store.authenticate(token_digest("secret")) == Grant(
+            user="alice", admin=False, scopes=frozenset({READ_SCOPE, RECORD_SCOPE})
+        )
+        assert store.authenticate(token_digest("other")) is None
+
+    def test_a_grant_carries_its_users_standing_now(self, store: ExecutionStore) -> None:
+        """An admin token of a user who is no longer an admin still
+        authenticates, but its grant says the user is not one, so the admin
+        scope it holds allows nothing."""
+        store.create_user("alice", admin=True, created_at=_ACCESS_AT)
+        _token(store, "alice", "secret", scopes={ADMIN_SCOPE})
+        store.update_user("alice", admin=False)
+
+        grant = store.authenticate(token_digest("secret"))
+
+        assert grant is not None
+        assert grant.admin is False
+        assert not grant.allows(ADMIN_SCOPE)
+
+    def test_a_disabled_users_tokens_authenticate_nothing_until_enabled(
+        self, store: ExecutionStore
+    ) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        _token(store, "alice", "secret")
+
+        store.update_user("alice", disabled=True)
+        while_disabled = store.authenticate(token_digest("secret"))
+        store.update_user("alice", disabled=False)
+
+        assert while_disabled is None
+        assert store.authenticate(token_digest("secret")) is not None
+
+    def test_a_revoked_token_authenticates_nothing_and_keeps_its_first_revocation(
+        self, store: ExecutionStore
+    ) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        token = _token(store, "alice", "secret")
+        revoked_at = _ACCESS_AT + timedelta(hours=1)
+
+        revoked = store.revoke_token(token.id, revoked_at=revoked_at)
+        again = store.revoke_token(token.id, revoked_at=revoked_at + timedelta(hours=1))
+
+        assert (revoked, again) == (True, False)
+        assert store.authenticate(token_digest("secret")) is None
+        assert store.list_tokens() == (replace(token, revoked_at=revoked_at),)
+
+    def test_revoking_as_a_user_reaches_only_that_users_tokens(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_user("bob", admin=False, created_at=_ACCESS_AT)
+        token = _token(store, "alice", "secret")
+
+        by_bob = store.revoke_token(token.id, revoked_at=_ACCESS_AT, user="bob")
+        by_nobody = store.revoke_token(token.id, revoked_at=_ACCESS_AT, user="nobody")
+        by_alice = store.revoke_token(token.id, revoked_at=_ACCESS_AT, user="alice")
+
+        assert (by_bob, by_nobody, by_alice) == (False, False, True)
+
+    @pytest.mark.parametrize("token_id", [0, -1, 2**63, 2**64])
+    def test_revoking_an_id_no_token_can_have_is_false(
+        self, store: ExecutionStore, token_id: int
+    ) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        _token(store, "alice", "secret")
+
+        assert store.revoke_token(token_id, revoked_at=_ACCESS_AT) is False
+        assert store.authenticate(token_digest("secret")) is not None
+
+    def test_a_run_names_the_user_whose_report_created_it(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        mine, anonymous = "1" * 32, "2" * 32
+        store.record_session(
+            _start_only_execution(mine), results=(), received_at=_ACCESS_AT, recorded_by="alice"
+        )
+        store.record_session(_execution(anonymous), results=(), received_at=_ACCESS_AT)
+
+        mine_detail = store.get_run_detail(mine)
+        anonymous_detail = store.get_run_detail(anonymous)
+        listed = {
+            entry.execution.identity.value: entry.recorded_by
+            for entry in store.list_runs(limit=10, offset=0).items
+        }
+        filtered, _horizon = store.list_runs_with_metadata_horizon(filters=(), limit=10, offset=0)
+
+        assert mine_detail is not None and mine_detail.recorded_by == "alice"
+        assert anonymous_detail is not None and anonymous_detail.recorded_by is None
+        assert listed == {mine: "alice", anonymous: None}
+        assert {entry.recorded_by for entry in filtered.items} == {"alice", None}
+
+    @pytest.mark.parametrize(
+        ("creator", "sender"), [("alice", "bob"), ("alice", None), (None, "alice")]
+    )
+    def test_a_report_from_anyone_but_the_runs_creator_stores_nothing(
+        self, store: ExecutionStore, creator: str | None, sender: str | None
+    ) -> None:
+        """Refused before anything is written: the run is not finished, and
+        neither the report's results nor its metadata are kept."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_user("bob", admin=False, created_at=_ACCESS_AT)
+        run_id = "3" * 32
+        start = _start_only_execution(run_id)
+        store.record_session(start, results=(), received_at=_ACCESS_AT, recorded_by=creator)
+
+        with pytest.raises(ForeignRunError):
+            store.record_session(
+                _execution(run_id),
+                results=(_result("t.py::test_a"),),
+                received_at=_ACCESS_AT,
+                metadata=RunMetadata(
+                    entries=(
+                        MetadataEntry(
+                            key="k",
+                            value="v",
+                            source_file=None,
+                            status="captured",
+                            source="session",
+                        ),
+                    )
+                ),
+                recorded_by=sender,
+            )
+
+        detail = store.get_run_detail(run_id)
+        assert detail is not None
+        assert (detail.execution, detail.recorded_by) == (start, creator)
+        assert store.get_results(run_id) == []
+        assert store.get_run_metadata(run_id) == RunMetadata()
+        assert store.get_catalogue_entry("t.py::test_a") is None
+
+    def test_another_users_replay_of_a_finished_run_is_refused_too(
+        self, store: ExecutionStore
+    ) -> None:
+        """Whose run it is comes before whether it is finished, so nobody
+        else learns a run is finished by getting its duplicate answer."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_user("bob", admin=False, created_at=_ACCESS_AT)
+        execution = _execution("4" * 32)
+        store.record_session(execution, results=(), received_at=_ACCESS_AT, recorded_by="alice")
+
+        with pytest.raises(ForeignRunError):
+            store.record_session(execution, results=(), received_at=_ACCESS_AT, recorded_by="bob")
+
+        assert (
+            store.record_session(execution, results=(), received_at=_ACCESS_AT, recorded_by="alice")
+            is False
+        )
+
+    def test_the_creator_of_a_run_finishes_it(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        run_id = "5" * 32
+        store.record_session(
+            _start_only_execution(run_id), results=(), received_at=_ACCESS_AT, recorded_by="alice"
+        )
+
+        created = store.record_session(
+            _execution(run_id),
+            results=(_result("t.py::test_a"),),
+            received_at=_ACCESS_AT,
+            recorded_by="alice",
+        )
+
+        assert created is False
+        assert store.get_execution(run_id) == _execution(run_id)
+        assert len(store.get_results(run_id)) == 1
+
+
+_ACCESS_AT = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _token(
+    store: ExecutionStore,
+    user: str,
+    token: str,
+    *,
+    scopes: set[str] | None = None,
+) -> Token:
+    """A token of `user` whose text is `token`, holding `scopes` or read and
+    record."""
+    return store.create_token(
+        user,
+        digest=token_digest(token),
+        label="",
+        scopes=frozenset(scopes or {READ_SCOPE, RECORD_SCOPE}),
+        created_at=_ACCESS_AT,
+    )

@@ -18,6 +18,8 @@ server address they were meant for.
   harmless: the server's writes are idempotent.
 - **Bounded.** At most `MAX_ENTRIES` entries and `MAX_REPORT_BYTES` of report
   text; queueing past either drops the oldest entries (`Outbox.evicted`).
+- **No token.** An entry holds the reports, never the token they were sent
+  with: whoever sends the queue sends it with their own.
 """
 
 from __future__ import annotations
@@ -57,6 +59,14 @@ _BUSY_TIMEOUT_SECONDS = 5.0
 # of it, asking for the same request again later. Dropping a run over one
 # would lose every queued run that a burst of sending trips a rate limit with.
 _RETRY_LATER = frozenset({408, 429})
+
+# Unauthorized and Forbidden: a server with users refusing the token sent,
+# or the lack of one. The same sender would be refused every run the same
+# way, so it stops rather than drop them; sent with another token, as
+# `vantage push` sends with its own, they can be taken.
+_RETRY_WITH_ANOTHER_TOKEN = frozenset({401, 403})
+
+_KEPT_FOR_LATER = _RETRY_LATER | _RETRY_WITH_ANOTHER_TOKEN
 
 _SCHEMA = (
     """
@@ -100,11 +110,12 @@ def unreachable(exc: BaseException) -> bool:
 
 def worth_retrying(exc: BaseException) -> bool:
     """Whether sending the same report later could succeed: the server was
-    unreachable, answered 5xx, or asked for the request again later. Any
-    other 4xx, a redirect or an answer that does not acknowledge the run
-    would be the same the next time."""
+    unreachable, answered 5xx, asked for the request again later, or
+    refused the token, which a sender with another one can fix. Any other
+    4xx, a redirect or an answer that does not acknowledge the run would be
+    the same the next time."""
     if isinstance(exc, urllib_error.HTTPError):
-        return exc.code >= 500 or exc.code in _RETRY_LATER
+        return exc.code >= 500 or exc.code in _KEPT_FOR_LATER
     return unreachable(exc)
 
 
@@ -112,7 +123,7 @@ def _rejected(exc: BaseException) -> bool:
     return (
         isinstance(exc, urllib_error.HTTPError)
         and 400 <= exc.code < 500
-        and exc.code not in _RETRY_LATER
+        and exc.code not in _KEPT_FOR_LATER
     )
 
 
@@ -346,17 +357,26 @@ class _OutOfTimeError(Exception):
     pass
 
 
-def send_queued(outbox: Outbox, server: str, *, timeout: float, budget: float) -> SendSummary:
-    """Send `server`'s queued runs, oldest first, each report bounded by
-    `timeout` and all of them by `budget` seconds (`math.inf` for none).
+def send_queued(
+    outbox: Outbox,
+    server: str,
+    *,
+    timeout: float,
+    budget: float,
+    token: str | None = None,
+) -> SendSummary:
+    """Send `server`'s queued runs, oldest first, with `token` if one is
+    given, each report bounded by `timeout` and all of them by `budget`
+    seconds (`math.inf` for none).
 
     An acknowledged run is deleted. One the server rejects with a 4xx other
-    than 408 or 429 could never succeed, and is deleted too, its run id in
-    `dropped`; so is one whose reports no longer read back from the file,
-    in `unreadable`. A 5xx leaves the run queued and goes on to the next,
-    since it may be that run's own problem. Anything else leaves the run
-    queued and stops: an unreachable server, a 408 or 429 asking for it
-    again later, or an answer that is not a vantage server's.
+    than 401, 403, 408 or 429 could never succeed, and is deleted too, its
+    run id in `dropped`; so is one whose reports no longer read back from
+    the file, in `unreadable`. A 5xx leaves the run queued and goes on to
+    the next, since it may be that run's own problem. Anything else leaves
+    the run queued and stops: an unreachable server, a 408 or 429 asking
+    for it again later, a 401 or 403 refusing the token, or an answer that
+    is not a vantage server's.
     """
     deadline = time.monotonic() + budget
     ran_out = f"the {budget:g}s allowed for sending ran out"
@@ -383,7 +403,7 @@ def send_queued(outbox: Outbox, server: str, *, timeout: float, budget: float) -
                     raise _OutOfTimeError
                 bound = min(timeout, remaining)
                 try:
-                    send(server, report, timeout=bound)
+                    send(server, report, timeout=bound, token=token)
                 except TimeoutError:
                     if bound < timeout:
                         raise _OutOfTimeError from None

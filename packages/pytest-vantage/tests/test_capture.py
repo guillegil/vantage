@@ -986,7 +986,9 @@ def test_the_finish_report_carries_the_assembled_results_in_execution_order(
 
     sent: list[dict[str, object]] = []
 
-    def _capture(address: str, report: dict[str, object], *, timeout: float) -> None:
+    def _capture(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
         sent.append(report)
 
     monkeypatch.setattr("pytest_vantage.recorder.send", _capture)

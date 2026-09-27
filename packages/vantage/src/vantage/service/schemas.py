@@ -58,7 +58,8 @@ class RunVcsResponse(BaseModel):
 
 
 class RunListItemResponse(BaseModel):
-    """One entry of `RunListResponse`."""
+    """One entry of `RunListResponse`. `recorded_by` is the user whose token
+    created the run, `None` for one recorded without a token."""
 
     id: str
     started_at: datetime
@@ -67,6 +68,7 @@ class RunListItemResponse(BaseModel):
     interrupted: bool
     presentation: str
     vcs: RunVcsResponse | None
+    recorded_by: str | None
 
 
 class MetadataHorizonResponse(BaseModel):
@@ -94,7 +96,8 @@ class RunListResponse(BaseModel):
 class RunDetailResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}`. Carries
     `interrupt_reason`, which the lean list entry omits -- the detail path
-    keeps the full record reachable."""
+    keeps the full record reachable. `recorded_by` is as on
+    `RunListItemResponse`."""
 
     id: str
     started_at: datetime
@@ -104,6 +107,7 @@ class RunDetailResponse(BaseModel):
     interrupt_reason: str | None
     presentation: str
     vcs: RunVcsResponse | None
+    recorded_by: str | None
 
 
 class MetadataItemResponse(BaseModel):

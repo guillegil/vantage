@@ -510,3 +510,38 @@ def test_vantage_push_sends_a_queued_run_once_its_server_is_back(
     on_server = _read_back(vantage_server.address, run_id)
     assert len(on_server["results"]) == _NODE_IDS
     assert on_server == _read_back(serve_local(database).address, run_id)
+
+
+def test_a_run_refused_for_want_of_a_token_is_kept_and_pushed_with_one(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    serve_local: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session that forgot its token, against a server with users, keeps
+    its run locally and queued; `vantage push` with a token delivers it,
+    recorded as that token's user, as the session would have."""
+    database = pytester.path / "local" / "vantage.db"
+    token = vantage_server.token("alice")
+    _write_session(pytester)
+    session = pytester.runpytest_subprocess(
+        *_RECORD,
+        "--vantage-mode=server+backup",
+        f"--vantage-server={vantage_server.address}",
+        f"--vantage-local-database={database}",
+    )
+    run_id = _recorded_run(session)
+    assert "HTTP 401: the server requires a token" in _output(session)
+    assert "and queued (1 run waiting to be sent)" in _output(session)
+
+    monkeypatch.setenv("VANTAGE_TOKEN", token)
+    sent = _push("--database", str(database))
+
+    assert (sent.returncode, sent.stdout) == (
+        0,
+        f"vantage: sent 1 queued run to {vantage_server.address} (0 waiting)\n",
+    )
+    assert vantage_server.recorded_by(run_id) == "alice"
+    assert len(vantage_server.store.get_results(run_id)) == _NODE_IDS
+    local = serve_local(database)
+    assert _get(local.address, f"/api/v1/runs/{run_id}")["recorded_by"] is None

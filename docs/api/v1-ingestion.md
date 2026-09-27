@@ -14,7 +14,43 @@ It covers three routes:
 The server serves an OpenAPI document for every route, the read API included,
 at `GET /api/v1/openapi.yaml` (source:
 `packages/vantage/src/vantage/service/openapi/v1.yaml`). Every route is under
-`/api/v1`; nothing answers an unversioned path. There is no authentication.
+`/api/v1`; nothing answers an unversioned path.
+
+## Authentication
+
+A server whose database has no user takes every request without a token.
+Once a user exists (`vantage user add`), every route but
+`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml` needs one:
+
+```
+Authorization: Bearer vantage_...
+```
+
+A token belongs to one user and holds one or more scopes: `read`, `record`
+and `admin`. The two ingestion routes need `record`, which is all a token
+for a test runner needs. The server answers:
+
+- No `Authorization` header, on a server with users: `401 unauthenticated`,
+  with `WWW-Authenticate: Bearer realm="vantage"`.
+- A header that carries no bearer token, or a token that is unknown, revoked
+  or of a disabled user, on any server: `401 unauthenticated`, the challenge
+  adding `error="invalid_token"`. A token sent to a server without users is
+  refused the same way, not ignored.
+- A token that does not grant the route's scope: `403 insufficient_scope`,
+  the challenge naming it, as in `scope="record"`.
+
+Neither the body nor the challenge ever holds the token sent. The report
+that creates a run records who sent it: the token's user, or nobody on a
+server without users. The read API shows it as `recorded_by`. Every later
+report and heartbeat of the run must come from the same user, or with no
+token if the first came with none: anything else is `409 foreign_run`, and
+nothing of it is stored. The client chooses the run id, so this is what
+keeps one user's session from finishing, or keeping alive, another's.
+
+`pytest-vantage` reads its token from the `VANTAGE_TOKEN` environment
+variable alone, never from a configuration file or a flag. It sends it with
+every report and heartbeat, only to the address it reports to, since it
+follows no redirect, and never with the capability probe.
 
 ## `GET /api/v1/capabilities`
 
@@ -276,6 +312,10 @@ any of them.
 - **Metadata** is stored once per file path and per key: the first report
   to carry a key decides its value, and later copies are ignored. A run
   holds at most 200 keys over all its reports.
+- **One user per run.** Every report must come from the user whose token
+  sent the first, or with no token if the first came with none
+  (see [Authentication](#authentication)); anything else is
+  `409 foreign_run` and changes nothing, finished run or not.
 - **A finished run is final.** A report arriving once the run has an exit
   status stores nothing: no results, no metadata, no change to the run. A
   client sends the finishing report last, so anything after it is a retry
@@ -291,9 +331,10 @@ run unfinished rather than finished with results missing. Its full sequence
 is: a start report (in progress, no results), heartbeats, any in-progress
 reports with results, and the finishing report. Without the
 `session_lifecycle` capability it sends only the last two. In its backup
-modes, a report that got no answer, a `5xx`, a `408` or a `429` is sent
-again later, unchanged, with the reports after it: by a later session or by
-`vantage push`, from another process, possibly days later. A session that
+modes, a report that got no answer, a `5xx`, a `408`, a `429`, or a `401`
+or `403` refusing its token, is sent again later, unchanged, with the
+reports after it: by a later session or by `vantage push`, from another
+process, possibly days later, and with that sender's token. A session that
 could not reach the server at its start sends no start report at all, and
 its reports arrive only that way.
 
@@ -318,6 +359,8 @@ ignored; `pytest-vantage` sends `{}` as `application/json`.
   A heartbeat for a finished run is harmless.
 - A run the server has never seen answers `404 unknown_run`. A heartbeat never
   creates a run: send a report first.
+- A run another user recorded answers `409 foreign_run`, and its last
+  contact does not move.
 - A `run_id` that is not 32 lowercase hex characters answers
   `422 invalid_report` with `fields: ["path.run_id"]`.
 
@@ -339,9 +382,12 @@ its run `running`.
 | `201` | | The first report of a run. |
 | `400` | `invalid_json` | The body is not strict UTF-8, not JSON, or nested too deeply to parse. |
 | `400` | `incomplete_body` | The client disconnected before sending the whole body. It never sees this answer. |
+| `401` | `unauthenticated` | No token on a server that has users, or a token that is not valid on any server. |
+| `403` | `insufficient_scope` | The token does not grant the `record` scope. |
 | `404` | `unknown_run` | A heartbeat for a run never recorded. |
 | `404` | `not_found` | No route matches the path, unversioned paths included. |
 | `405` | `method_not_allowed` | The path exists but does not take this method. The `Allow` header lists the ones it takes. |
+| `409` | `foreign_run` | A report or heartbeat of a run another user recorded. |
 | `413` | `payload_too_large` | The body passed 1,048,576 bytes. |
 | `415` | `unsupported_media_type` | `Content-Type` is absent or not `application/json`. |
 | `422` | `invalid_report` | The body does not match the shape above, or a heartbeat's `run_id` is malformed. |

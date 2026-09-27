@@ -53,7 +53,8 @@ def _offline_recorder(
     """
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
-        "pytest_vantage.recorder.send", lambda address, report, *, timeout: sent.append(report)
+        "pytest_vantage.recorder.send",
+        lambda address, report, *, timeout, token=None: sent.append(report),
     )
     monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
     recorder = Recorder(
@@ -85,7 +86,9 @@ def test_session_start_sends_a_report_with_no_results_matching_the_finish_writes
     """
     sent: list[dict[str, object]] = []
 
-    def _capture(address: str, report: dict[str, object], *, timeout: float) -> None:
+    def _capture(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
         sent.append(report)
 
     monkeypatch.setattr("pytest_vantage.recorder.send", _capture)
@@ -116,7 +119,9 @@ def test_start_write_uses_the_liveness_timeout_not_the_report_timeout(
     """
     timeouts: list[float] = []
 
-    def _capture(address: str, report: dict[str, object], *, timeout: float) -> None:
+    def _capture(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
         timeouts.append(timeout)
 
     monkeypatch.setattr("pytest_vantage.recorder.send", _capture)
@@ -190,7 +195,7 @@ def test_vcs_section_is_identical_on_both_reports(
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send",
-        lambda address, report, *, timeout: sent.append(report),
+        lambda address, report, *, timeout, token=None: sent.append(report),
     )
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
@@ -242,7 +247,7 @@ def test_metadata_section_is_identical_on_both_reports(
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send",
-        lambda address, report, *, timeout: sent.append(report),
+        lambda address, report, *, timeout, token=None: sent.append(report),
     )
     pytester.makepyfile(test_sample=_PASSING_TEST)
     (pytester.path / "vantage-metadata.json").write_text(
@@ -274,7 +279,7 @@ def test_declared_keys_are_sent_under_vantage_alone_and_no_file_is_read(
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send",
-        lambda address, report, *, timeout: sent.append(report),
+        lambda address, report, *, timeout, token=None: sent.append(report),
     )
     pytester.makepyfile(test_sample=_PASSING_TEST)
     (pytester.path / "settings.json").write_text('{"region": "eu-west-1"}')
@@ -314,9 +319,11 @@ def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
     monkeypatch.setattr("pytest_vantage.recorder.metadata.capture_metadata", _raise)
     sent: list[dict[str, object]] = []
 
-    def _record_then_send(address: str, report: dict[str, object], *, timeout: float) -> None:
+    def _record_then_send(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
         sent.append(report)
-        transport.send(address, report, timeout=timeout)
+        transport.send(address, report, timeout=timeout, token=token)
 
     monkeypatch.setattr("pytest_vantage.recorder.send", _record_then_send)
     pytester.makepyfile(test_sample=_PASSING_TEST)
@@ -348,7 +355,7 @@ def test_no_metadata_section_when_there_is_nothing_to_say(
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send",
-        lambda address, report, *, timeout: sent.append(report),
+        lambda address, report, *, timeout, token=None: sent.append(report),
     )
     pytester.makepyfile(test_sample=_PASSING_TEST)
 

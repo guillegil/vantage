@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
+from vantage.core.domain.access import Grant, Token, User
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.metadata import (
     FILE_STATUSES,
@@ -74,16 +75,22 @@ class RunListEntry:
     it in `vcs`, a `VcsProjection`, so there is exactly one place a list
     entry's VCS data can be read from. A list entry carrying both a
     populated `execution.vcs` and this field would be two answers to one
-    question.
+    question. `recorded_by` is the user whose token created the run, `None`
+    for one recorded without a token.
     """
 
     execution: Execution
     last_contact_at: datetime | None
     vcs: VcsProjection | None
+    recorded_by: str | None = None
 
     @classmethod
     def from_execution(
-        cls, execution: Execution, *, last_contact_at: datetime | None
+        cls,
+        execution: Execution,
+        *,
+        last_contact_at: datetime | None,
+        recorded_by: str | None = None,
     ) -> RunListEntry:
         """The list entry for a stored run, its VCS context moved into the
         lean projection."""
@@ -91,6 +98,7 @@ class RunListEntry:
             execution=replace(execution, vcs=None),
             last_contact_at=last_contact_at,
             vcs=project_vcs(execution.vcs),
+            recorded_by=recorded_by,
         )
 
 
@@ -100,11 +108,12 @@ class RunDetail:
 
     `execution.vcs` is the whole, unbounded `VcsContext` -- the detail path
     keeps the full record reachable, which is the other half of the
-    lean-list rule.
+    lean-list rule. `recorded_by` is as on `RunListEntry`.
     """
 
     execution: Execution
     last_contact_at: datetime | None
+    recorded_by: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,8 +291,23 @@ class NamespaceFullError(Exception):
     `max_keys` it was given."""
 
 
+class ForeignRunError(Exception):
+    """`record_session` refused a report, and wrote nothing: its run was
+    created by another user, or by one when this report has none, or the
+    other way round."""
+
+
+class UserExistsError(Exception):
+    """`create_user` refused a name another user already has."""
+
+
+class UnknownUserError(Exception):
+    """`create_token` was given a user nobody has."""
+
+
 class ExecutionStore(Protocol):
-    """Persists `Execution` rows. Implementations live in `vantage.storage`.
+    """Persists `Execution` rows, and the users and tokens that may read
+    and write them. Implementations live in `vantage.storage`.
 
     The service calls one store from several worker threads at once, so an
     implementation must be safe to share between them.
@@ -305,6 +329,7 @@ class ExecutionStore(Protocol):
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
+        recorded_by: str | None = None,
     ) -> bool:
         """Store the run, its results and its metadata. Return True if a row
         was created, False if the id was already stored. Every metadata row
@@ -313,7 +338,13 @@ class ExecutionStore(Protocol):
         same key comes from. A run holds at most `MAX_METADATA_ENTRIES` keys:
         once it does, every new key a report carries is dropped, in order,
         however many reports the run is sent. A run with an exit status is
-        final: a report reaching it afterwards stores nothing at all."""
+        final: a report reaching it afterwards stores nothing at all.
+
+        `recorded_by` names the user sending the report, an existing one, or
+        is `None` for a report sent without a token. The report that creates
+        a run records it; every later report of the run must come from the
+        same user, or none when it did, or it raises `ForeignRunError` and
+        stores nothing, before looking at whether the run is finished."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:
@@ -464,6 +495,68 @@ class ExecutionStore(Protocol):
         -- the aggregate input `summarize_sections` classifies. Not
         paginated, like `get_results`: this is an aggregate input, not a
         response."""
+        ...
+
+    def access_required(self) -> bool:
+        """Whether any user exists. Users are never deleted, so once this is
+        true it stays true."""
+        ...
+
+    def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
+        """Create an enabled user named `name`, which `check_user_name`
+        accepts, and return it. Raises `UserExistsError`, creating nothing,
+        when the name is taken."""
+        ...
+
+    def get_user(self, name: str) -> User | None:
+        """Return the user named `name`, or None if there is none."""
+        ...
+
+    def list_users(self) -> Sequence[User]:
+        """Return every user, ordered by name in code point order."""
+        ...
+
+    def update_user(
+        self, name: str, *, admin: bool | None = None, disabled: bool | None = None
+    ) -> User | None:
+        """Set whichever of `admin` and `disabled` is given, in one write,
+        and return the user as it now stands, or None if there is no such
+        user."""
+        ...
+
+    def create_token(
+        self,
+        user: str,
+        *,
+        digest: str,
+        label: str,
+        scopes: frozenset[str],
+        created_at: datetime,
+    ) -> Token:
+        """Store a token of `user` by its `digest` (`token_digest`), with
+        `label` and `scopes` already checked (`check_token_label`,
+        `check_scopes`), and return it. Raises `UnknownUserError`, storing
+        nothing, when there is no such user. Whether `user` may hold the
+        admin scope is not checked here: `authenticate` checks it each time
+        the token is used."""
+        ...
+
+    def list_tokens(self, *, user: str | None = None) -> Sequence[Token]:
+        """Return every token, or only `user`'s, revoked ones included,
+        oldest first."""
+        ...
+
+    def revoke_token(self, token_id: int, *, revoked_at: datetime, user: str | None = None) -> bool:
+        """Revoke the token `token_id` -- only if it is `user`'s, when a
+        user is given. Returns False if there is no such token, it is not
+        `user`'s, or it was revoked already, which keeps its first
+        `revoked_at`."""
+        ...
+
+    def authenticate(self, digest: str) -> Grant | None:
+        """Return what the token whose digest is `digest` grants, or None
+        if there is no such token, it was revoked, or its user is disabled.
+        The grant's `admin` is the user's standing now."""
         ...
 
     def close(self) -> None:

@@ -266,6 +266,8 @@ class Recorder:
       mode with a local copy found the server unreachable at the start:
       the run is then recorded all the same, with the lifecycle off and no
       warning about it until the one describing where the run went.
+    - `_token` goes with every report and heartbeat, and with the queued
+      runs this session sends; a server without users needs none.
     """
 
     def __init__(
@@ -279,6 +281,7 @@ class Recorder:
         mode: str = SERVER_MODE,
         local_database: Path | None = None,
         server_reachable: bool = True,
+        token: str | None = None,
     ) -> None:
         if mode not in MODES:
             raise ValueError(f"unknown mode {mode!r}")
@@ -291,6 +294,7 @@ class Recorder:
         self._timeout = timeout
         self._mode = mode
         self._local_database = local_database
+        self._token = token
         self._server_reachable = server_reachable and address is not None
         self._liveness_timeout = resolve_liveness_timeout(timeout)
         # The probe's `Capabilities` carries why the lifecycle is off; a plain
@@ -381,7 +385,7 @@ class Recorder:
                 )
             return
         report = {"run": self._in_progress_run(), **self._sections()}
-        send(self._server(), report, timeout=self._liveness_timeout)
+        send(self._server(), report, timeout=self._liveness_timeout, token=self._token)
         # Beats start only once the server knows the run: a heartbeat for an
         # id it never saw is refused. A beat in flight at the finish is
         # waited for as long as its own deadline, and a little more.
@@ -436,7 +440,9 @@ class Recorder:
     def _beat(self) -> None:
         """One heartbeat, sent from `Heartbeat`'s thread, bounded by the
         liveness timeout like the start-write."""
-        send_heartbeat(self._server(), self._run_id, timeout=self._liveness_timeout)
+        send_heartbeat(
+            self._server(), self._run_id, timeout=self._liveness_timeout, token=self._token
+        )
 
     @liveness_isolated
     def _report_heartbeat_failure(self) -> None:
@@ -554,7 +560,7 @@ class Recorder:
         reports = self._finish_reports(session, int(exitstatus))
         if self._mode == SERVER_MODE:
             for report in reports:
-                send(self._server(), report, timeout=self._timeout)
+                send(self._server(), report, timeout=self._timeout, token=self._token)
         elif self._mode == LOCAL_MODE:
             problem = self._store_locally(reports)
             if problem is not None:
@@ -640,11 +646,12 @@ class Recorder:
         locally when the mode or a failure calls for it, queue what a later
         session could still deliver, and say what happened in one warning.
 
-        Only a failure a retry can fix is queued: no answer, a 5xx, or a
-        408 or 429 asking for the report again later. Any other 4xx, a
-        redirect or an answer that does not acknowledge the run would fail
-        the same way every time. Reports the server has acknowledged are not
-        queued again.
+        Only a failure a retry can fix is queued: no answer, a 5xx, a 408
+        or 429 asking for the report again later, or a 401 or 403 refusing
+        the token, which `vantage push` with another one can deliver. Any
+        other 4xx, a redirect or an answer that does not acknowledge the run
+        would fail the same way every time. Reports the server has
+        acknowledged are not queued again.
         """
         from pytest_vantage.outbox import unreachable, worth_retrying
 
@@ -657,7 +664,7 @@ class Recorder:
         else:
             for index, report in enumerate(reports):
                 try:
-                    send(address, report, timeout=self._timeout)
+                    send(address, report, timeout=self._timeout, token=self._token)
                 except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
                     if worth_retrying(exc):
                         queue_from = index
@@ -754,7 +761,13 @@ class Recorder:
             with Outbox(path) as outbox:
                 if not outbox.waiting(address):
                     return
-                summary = send_queued(outbox, address, timeout=self._timeout, budget=self._timeout)
+                summary = send_queued(
+                    outbox,
+                    address,
+                    timeout=self._timeout,
+                    budget=self._timeout,
+                    token=self._token,
+                )
         except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
             warn(self._config, f"vantage: could not send the runs queued in {path}: {exc}")
             return

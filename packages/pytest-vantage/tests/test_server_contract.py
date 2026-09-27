@@ -21,6 +21,7 @@ from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.metadata import CapturedFile, DeclaredKey, MetadataSection, session_value
 from pytest_vantage.session_metadata import plan_values
 from vantage.core.config import resolution
+from vantage.core.domain import access
 from vantage.core.domain import metadata as core_metadata
 from vantage.core.domain.result import OUTCOMES
 from vantage.core.ports.storage import MetadataEntry, RunMetadata
@@ -383,3 +384,40 @@ def test_the_heartbeat_interval_is_the_one_the_default_grace_period_counts() -> 
     """
     assert recorder._BEAT_INTERVAL_SECONDS == resolution._BEAT_INTERVAL_HINT_SECONDS
     assert recorder._BEAT_INTERVAL_SECONDS < resolution.DEFAULT_GRACE_PERIOD_SECONDS
+
+
+# --- tokens -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "vantage_" + "A" * 43,
+        "x",
+        "!~",
+        "x" * 512,
+        "x" * 513,
+        "",
+        "two words",
+        "tab\there",
+        "café",
+        "del\x7f",
+        "nul\x00",
+    ],
+)
+def test_a_token_the_plugin_sends_is_one_the_server_could_accept(text: str) -> None:
+    """The plugin refuses a `VANTAGE_TOKEN` the server would refuse
+    unasked, and sends every one it could accept."""
+    assert transport.well_formed_token(text) is access.well_formed_token(text)
+
+
+def test_every_refusal_the_plugin_explains_is_the_one_the_server_gives() -> None:
+    """The plugin reads a refusal of who sent a request by its status and
+    the error its body names; each must be the pair the server answers."""
+    refusals = {
+        errors.UnauthenticatedError.status_code: errors.UnauthenticatedError.error,
+        errors.InsufficientScopeError.status_code: errors.InsufficientScopeError.error,
+        errors.RunOfAnotherUserError.status_code: errors.RunOfAnotherUserError.error,
+    }
+
+    assert transport._ACCESS_REFUSALS == refusals

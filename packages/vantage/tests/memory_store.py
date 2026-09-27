@@ -18,7 +18,8 @@ by every run's result of it.
 ``_last_contact`` is a separate dict because ``Execution`` carries no
 ``last_contact_at`` field; that column is a storage concern. It is set on
 the insert branch of ``record_session`` and advanced only by
-``touch_last_contact``, monotonically.
+``touch_last_contact``, monotonically. ``_recorded_by`` is kept apart for
+the same reason, and set on the insert branch only.
 
 The routes call a store from FastAPI's threadpool, so every public method
 holds one lock, as every SQLite adapter call holds its own: a call sees and
@@ -35,12 +36,14 @@ from dataclasses import replace
 from datetime import datetime
 from typing import Concatenate, ParamSpec, TypeVar
 
+from vantage.core.domain.access import Grant, Token, User
 from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
+    ForeignRunError,
     HistoryEntry,
     MetadataEntry,
     MetadataFile,
@@ -51,6 +54,8 @@ from vantage.core.ports.storage import (
     RunKey,
     RunListEntry,
     RunMetadata,
+    UnknownUserError,
+    UserExistsError,
     UserSetting,
 )
 
@@ -125,6 +130,12 @@ class InMemoryExecutionStore:
         self._settings: dict[tuple[str, str], UserSetting] = {}
         self._metadata_files: dict[tuple[str, str], MetadataFile] = {}
         self._metadata_entries: dict[tuple[str, str], MetadataEntry] = {}
+        self._recorded_by: dict[str, str | None] = {}
+        self._users: dict[str, User] = {}
+        # Keyed by id, which counts from 1 like an identity column; revoked
+        # tokens stay.
+        self._tokens: dict[int, Token] = {}
+        self._token_ids: dict[str, int] = {}
 
     @_locked
     def record_session(
@@ -134,11 +145,14 @@ class InMemoryExecutionStore:
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
+        recorded_by: str | None = None,
     ) -> bool:
         # `received_at` is the server's clock, not the client's: it seeds
         # `_last_contact` for a new run and is not part of `Execution`.
         identity = execution.identity.value
         stored = self._executions.get(identity)
+        if stored is not None and self._recorded_by[identity] != recorded_by:
+            raise ForeignRunError(f"run {identity} was recorded by another user")
         if stored is not None and stored.exit_status is not None:
             # A finished run is final: a report reaching it later is a replay
             # and adds nothing, whatever results it carries.
@@ -147,6 +161,7 @@ class InMemoryExecutionStore:
         if stored is None:
             self._executions[identity] = replace(execution, vcs=_normalized_vcs(execution.vcs))
             self._last_contact[identity] = received_at
+            self._recorded_by[identity] = recorded_by
         elif stored.exit_status is None and execution.exit_status is not None:
             # Mirrors the SQLite adapter's `DO UPDATE ... WHERE`: `exit_status`,
             # never `finished_at`, is the discriminator, and `started_at` is
@@ -280,7 +295,9 @@ class InMemoryExecutionStore:
         has_more = len(window) > page_limit
         items = tuple(
             RunListEntry.from_execution(
-                execution, last_contact_at=self._last_contact.get(execution.identity.value)
+                execution,
+                last_contact_at=self._last_contact.get(execution.identity.value),
+                recorded_by=self._recorded_by[execution.identity.value],
             )
             for execution in window[:page_limit]
         )
@@ -349,6 +366,7 @@ class InMemoryExecutionStore:
         return RunDetail(
             execution=execution,
             last_contact_at=self._last_contact.get(execution_id),
+            recorded_by=self._recorded_by[execution_id],
         )
 
     @_locked
@@ -460,6 +478,97 @@ class InMemoryExecutionStore:
         )
 
     @_locked
+    def access_required(self) -> bool:
+        return bool(self._users)
+
+    @_locked
+    def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
+        if name in self._users:
+            raise UserExistsError(f"there is already a user named {name!r}")
+        user = User(name=name, admin=admin, disabled=False, created_at=created_at)
+        self._users[name] = user
+        return user
+
+    @_locked
+    def get_user(self, name: str) -> User | None:
+        return self._users.get(name)
+
+    @_locked
+    def list_users(self) -> Sequence[User]:
+        # `sorted()` compares code points, as the adapters' `ORDER BY name`.
+        return tuple(sorted(self._users.values(), key=lambda user: user.name))
+
+    @_locked
+    def update_user(
+        self, name: str, *, admin: bool | None = None, disabled: bool | None = None
+    ) -> User | None:
+        user = self._users.get(name)
+        if user is None:
+            return None
+        user = replace(
+            user,
+            admin=user.admin if admin is None else admin,
+            disabled=user.disabled if disabled is None else disabled,
+        )
+        self._users[name] = user
+        return user
+
+    @_locked
+    def create_token(
+        self,
+        user: str,
+        *,
+        digest: str,
+        label: str,
+        scopes: frozenset[str],
+        created_at: datetime,
+    ) -> Token:
+        if user not in self._users:
+            raise UnknownUserError(f"there is no user named {user!r}")
+        if digest in self._token_ids:
+            raise ValueError("a token with that digest is stored already")
+        token = Token(
+            id=len(self._tokens) + 1,
+            user=user,
+            label=label,
+            scopes=frozenset(scopes),
+            created_at=created_at,
+            revoked_at=None,
+        )
+        self._tokens[token.id] = token
+        self._token_ids[digest] = token.id
+        return token
+
+    @_locked
+    def list_tokens(self, *, user: str | None = None) -> Sequence[Token]:
+        return tuple(
+            token
+            for _token_id, token in sorted(self._tokens.items())
+            if user is None or token.user == user
+        )
+
+    @_locked
+    def revoke_token(self, token_id: int, *, revoked_at: datetime, user: str | None = None) -> bool:
+        token = self._tokens.get(token_id)
+        if token is None or token.revoked_at is not None:
+            return False
+        if user is not None and token.user != user:
+            return False
+        self._tokens[token_id] = replace(token, revoked_at=revoked_at)
+        return True
+
+    @_locked
+    def authenticate(self, digest: str) -> Grant | None:
+        token_id = self._token_ids.get(digest)
+        if token_id is None:
+            return None
+        token = self._tokens[token_id]
+        user = self._users[token.user]
+        if token.revoked_at is not None or user.disabled:
+            return None
+        return Grant(user=user.name, admin=user.admin, scopes=token.scopes)
+
+    @_locked
     def metadata(self, run_id: str) -> RunMetadata:
         """The metadata files and entries stored for `run_id`, in the order
         they were stored, for a test to inspect without `get_run_metadata`."""
@@ -489,3 +598,7 @@ class InMemoryExecutionStore:
         self._settings.clear()
         self._metadata_files.clear()
         self._metadata_entries.clear()
+        self._recorded_by.clear()
+        self._users.clear()
+        self._tokens.clear()
+        self._token_ids.clear()

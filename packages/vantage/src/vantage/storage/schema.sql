@@ -33,7 +33,41 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 -- ---------------------------------------------------------------------------
--- run -- one row per recorded session.
+-- account -- one row per user; `user` is a reserved word in PostgreSQL. A
+-- user is disabled, never deleted, so every `run.recorded_by` names one,
+-- and a database that has had a user always has one: the server requires
+-- a token from then on. `name` is short and lower case
+-- (`core/domain/access.py`).
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS account (
+    name        TEXT PRIMARY KEY,
+    admin       INTEGER NOT NULL CHECK (admin IN (0, 1)),
+    disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at  TEXT NOT NULL
+);
+
+-- ---------------------------------------------------------------------------
+-- access_token -- one row per token ever made, revoked ones included.
+-- `digest` is the token's SHA-256 in hex; the token itself is never stored.
+-- Each `can_*` column is one scope the token holds, and it holds at least
+-- one.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS access_token (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    account     TEXT NOT NULL REFERENCES account (name),
+    digest      TEXT NOT NULL UNIQUE,
+    label       TEXT NOT NULL,
+    can_read    INTEGER NOT NULL CHECK (can_read IN (0, 1)),
+    can_record  INTEGER NOT NULL CHECK (can_record IN (0, 1)),
+    can_admin   INTEGER NOT NULL CHECK (can_admin IN (0, 1)),
+    created_at  TEXT NOT NULL,
+    revoked_at  TEXT NULL,
+    CHECK (can_read + can_record + can_admin > 0)
+);
+
+-- ---------------------------------------------------------------------------
+-- run -- one row per recorded session. `recorded_by` is the user whose
+-- token created the run, NULL when it was recorded without one.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS run (
     id                            TEXT PRIMARY KEY,
@@ -49,7 +83,8 @@ CREATE TABLE IF NOT EXISTS run (
     vcs_commit_subject            TEXT NULL,
     vcs_commit_subject_truncated  INTEGER NOT NULL DEFAULT 0,
     vcs_dirty                     INTEGER NULL,
-    vcs_root                      TEXT NULL
+    vcs_root                      TEXT NULL,
+    recorded_by                   TEXT NULL REFERENCES account (name)
 );
 
 -- ---------------------------------------------------------------------------
@@ -180,6 +215,8 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 -- lookup by node id.
 -- `run_metadata(key, value)`: filtering runs by metadata key/value pairs,
 -- a full scan without it.
+-- `access_token(digest)`, from its UNIQUE constraint: authenticating a
+-- request.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_started_at
     ON run (started_at);

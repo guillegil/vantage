@@ -447,6 +447,7 @@ def _configure_controller(config: pytest.Config) -> None:
         database=database,
         capabilities=capabilities,
         reachable=reachable,
+        token=settings.token,
     )
 
 
@@ -481,6 +482,7 @@ def _register_recorder(
     database: Path | None,
     capabilities: bool | Capabilities = False,
     reachable: bool = True,
+    token: str | None = None,
 ) -> None:
     """`pytest_configure` has no fault-isolation boundary of its own, so a
     failure constructing the `Recorder` warns once and leaves the session
@@ -498,6 +500,7 @@ def _register_recorder(
             mode=mode,
             local_database=database,
             server_reachable=reachable,
+            token=token,
         )
     except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
         warn(
