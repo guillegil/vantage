@@ -83,7 +83,7 @@ class MetadataHorizonResponse(BaseModel):
 
 
 class RunListResponse(BaseModel):
-    """The response body for `GET /api/v1/runs`. No `total`, which would cost
+    """The response body for `GET /api/v1/projects/{project}/runs`. No `total`, which would cost
     a `COUNT(*)` on every page. `next_cursor` is the `cursor` for the page
     after this one, and `None` on the last page. `metadata_horizon` holds one
     entry per distinct filtered key, in the order first given, and is `None`
@@ -99,7 +99,8 @@ class RunDetailResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}`. Carries
     `interrupt_reason`, which the lean list entry omits -- the detail path
     keeps the full record reachable. `recorded_by` is as on
-    `RunListItemResponse`."""
+    `RunListItemResponse`; `project` is the one the run was created in,
+    whose history and sections the run is read against."""
 
     id: str
     started_at: datetime
@@ -110,6 +111,7 @@ class RunDetailResponse(BaseModel):
     presentation: str
     vcs: RunVcsResponse | None
     recorded_by: str | None
+    project: str
 
 
 class MetadataItemResponse(BaseModel):
@@ -252,7 +254,7 @@ class HistoryEntryResponse(BaseModel):
 
 
 class HistoryResponse(BaseModel):
-    """The response body for `GET /api/v1/tests/history`. `next_cursor`, as
+    """The response body for `GET /api/v1/projects/{project}/tests/history`. `next_cursor`, as
     on `RunListResponse`, is the `cursor` for the page after this one, and
     `None` on the last page."""
 
@@ -273,7 +275,7 @@ class SectionValue(BaseModel):
 
 
 class SectionUpsertRequest(BaseModel):
-    """The request body for `POST /api/v1/config/sections`."""
+    """The request body for `POST /api/v1/projects/{project}/config/sections`."""
 
     name: str
     prefix: str
@@ -288,7 +290,7 @@ class SectionResponse(BaseModel):
 
 
 class SectionListResponse(BaseModel):
-    """The response body for `GET /api/v1/config/sections`."""
+    """The response body for `GET /api/v1/projects/{project}/config/sections`."""
 
     items: list[SectionResponse]
 
@@ -400,3 +402,29 @@ class CreatedTokenResponse(BaseModel):
     scopes: list[str]
     created_at: datetime
     revoked_at: datetime | None
+
+
+# --- Projects ---------------------------------------------------------------
+
+
+class ProjectCreateRequest(BaseModel):
+    """The request body for `POST /api/v1/projects`. The name is checked by
+    the domain's own rule, which the command line applies too."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str
+
+
+class ProjectResponse(BaseModel):
+    """One project."""
+
+    name: str
+    created_at: datetime
+
+
+class ProjectListResponse(BaseModel):
+    """The response body for `GET /api/v1/projects`: every project, by
+    name."""
+
+    items: list[ProjectResponse]

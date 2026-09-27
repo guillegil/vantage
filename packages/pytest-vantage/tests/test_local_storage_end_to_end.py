@@ -127,12 +127,16 @@ def _without_timing(item: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in item.items() if key not in _TIMING}
 
 
-def _run_ids(address: str) -> list[str]:
-    return [item["id"] for item in _get(address, "/api/v1/runs?limit=200")["items"]]
+def _run_ids(address: str, project: str = "default") -> list[str]:
+    return [
+        item["id"] for item in _get(address, f"/api/v1/projects/{project}/runs?limit=200")["items"]
+    ]
 
 
 def _recorded_run(result: pytest.RunResult) -> str:
-    (match,) = re.findall(r"^vantage: recording run ([0-9a-f]{32}) to ", result.stdout.str(), re.M)
+    (match,) = re.findall(
+        r"^vantage: recording run ([0-9a-f]{32}) in project \S+ to ", result.stdout.str(), re.M
+    )
     run_id: str = match
     return run_id
 
@@ -222,7 +226,9 @@ def test_a_backed_up_run_reaches_the_server_once_it_is_back_as_if_sent_directly(
 
     central = vantage_server.address
     assert sorted(_run_ids(central)) == sorted([*queued_ids, direct_id])
-    history = _get(central, "/api/v1/tests/history?node_id=test_session.py::test_fails")
+    history = _get(
+        central, "/api/v1/projects/default/tests/history?node_id=test_session.py::test_fails"
+    )
     assert sorted(item["run_id"] for item in history["items"]) == sorted(_run_ids(central))
     # Only the runs the server could not take are kept locally.
     local = serve_local(database).address
@@ -296,7 +302,10 @@ def test_server_plus_local_keeps_the_same_run_on_the_server_and_in_the_local_dat
     result.assert_outcomes(passed=3, failed=1, skipped=1, xfailed=1, warnings=0)
     run_id = _recorded_run(result)
     result.stdout.fnmatch_lines(
-        [f"vantage: recording run {run_id} to {vantage_server.address} and {database}"]
+        [
+            f"vantage: recording run {run_id} in project default "
+            f"to {vantage_server.address} and {database}"
+        ]
     )
     on_server = _read_back(vantage_server.address, run_id)
     assert len(on_server["results"]) == _NODE_IDS
@@ -324,7 +333,9 @@ def test_local_mode_stores_where_vantage_serves_without_options_and_sends_nothin
 
     stored.assert_outcomes(passed=3, failed=1, skipped=1, xfailed=1, warnings=0)
     run_id = _recorded_run(stored)
-    stored.stdout.fnmatch_lines([f"vantage: recording run {run_id} to {database}"])
+    stored.stdout.fnmatch_lines(
+        [f"vantage: recording run {run_id} in project default to {database}"]
+    )
     assert requests_while_local == []
     assert not outbox_path(database).exists()
     local = serve_local(database).address
@@ -545,3 +556,137 @@ def test_a_run_refused_for_want_of_a_token_is_kept_and_pushed_with_one(
     assert len(vantage_server.store.get_results(run_id)) == _NODE_IDS
     local = serve_local(database)
     assert _get(local.address, f"/api/v1/runs/{run_id}")["recorded_by"] is None
+
+
+# --- Projects -------------------------------------------------------------------------------
+
+
+def _project_names(address: str) -> list[str]:
+    return [item["name"] for item in _get(address, "/api/v1/projects")["items"]]
+
+
+def test_a_run_of_a_project_the_server_lacks_is_kept_until_an_admin_adds_it(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, serve_local: Any
+) -> None:
+    """The server makes no project from a report, but an admin can add one
+    later, so the refused run is worth keeping: stored in the local
+    database, which makes the project itself, and queued. `vantage push`
+    keeps it while the project is missing and delivers it into that
+    project once it exists, reading back as the local database serves it."""
+    database = pytester.path / "local" / "vantage.db"
+    _write_session(pytester)
+
+    session = pytester.runpytest_subprocess(
+        *_RECORD,
+        "--vantage-mode=server+backup",
+        "--vantage-project=firmware",
+        f"--vantage-server={vantage_server.address}",
+        f"--vantage-local-database={database}",
+    )
+
+    # The suite's own verdict: one test failed, nothing else.
+    assert session.ret == 1
+    session.assert_outcomes(passed=3, failed=1, skipped=1, xfailed=1)
+    run_id = _recorded_run(session)
+    output = _output(session)
+    # One warning for the refused start, one for where the run went.
+    refusal = (
+        f"HTTP 404: {vantage_server.address} has no project firmware; "
+        "an admin adds it with: vantage project add firmware"
+    )
+    assert output.count("VantageWarning:") == 2, output
+    assert f"vantage: error while reporting session liveness: {refusal}\n" in output
+    assert (
+        f"vantage: {vantage_server.address} did not take this run ({refusal}); "
+        f"this run was stored in {database} and queued (1 run waiting to be sent)"
+    ) in output
+    assert vantage_server.executions() == []
+    assert _waiting(database) == 1
+
+    missing = _push("--database", str(database))
+    vantage_server.add_project("firmware")
+    sent = _push("--database", str(database))
+
+    assert (missing.returncode, missing.stdout) == (
+        1,
+        f"vantage: sent 0 queued runs to {vantage_server.address}, kept runs of projects "
+        "it does not have (firmware) (1 waiting)\n",
+    )
+    assert (sent.returncode, sent.stdout) == (
+        0,
+        f"vantage: sent 1 queued run to {vantage_server.address} (0 waiting)\n",
+    )
+    assert _waiting(database) == 0
+    assert vantage_server.project_of(run_id) == "firmware"
+    assert _run_ids(vantage_server.address, "firmware") == [run_id]
+    assert _run_ids(vantage_server.address) == []
+    local = serve_local(database).address
+    assert _project_names(local) == ["default", "firmware"]
+    on_server = _read_back(vantage_server.address, run_id)
+    assert on_server["run"]["project"] == "firmware"
+    assert len(on_server["results"]) == _NODE_IDS
+    assert on_server == _read_back(local, run_id)
+
+
+def test_a_later_session_keeps_the_queued_run_of_a_missing_project_and_says_so(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer
+) -> None:
+    """A session whose own run reached the server sends the queue after it;
+    a queued run of a project the server still lacks stays queued, and the
+    session's line names the project rather than reading as a plain
+    failure."""
+    database = pytester.path / "local" / "vantage.db"
+    _write_session(pytester)
+    backup = (
+        "--vantage-mode=server+backup",
+        f"--vantage-server={vantage_server.address}",
+        f"--vantage-local-database={database}",
+    )
+    refused = pytester.runpytest_subprocess(*_RECORD, *backup, "--vantage-project=firmware")
+    assert "and queued (1 run waiting to be sent)" in _output(refused)
+
+    later = pytester.runpytest_subprocess(*_RECORD, *backup)
+
+    assert (
+        f"vantage: sent 0 queued runs to {vantage_server.address} (1 waiting); "
+        "kept runs of projects it does not have: firmware"
+    ) in later.stdout.str()
+    assert _waiting(database) == 1
+    assert _run_ids(vantage_server.address) == [_recorded_run(later)]
+
+
+def test_local_mode_files_the_run_in_its_project_as_a_vantage_app_serves_it(
+    pytester: pytest.Pytester, serve_local: Any
+) -> None:
+    """Nobody administers a database on the test machine but its owner, so
+    the local store makes the project the session names; `vantage` serving
+    the file lists it, and the run, its results and its history are that
+    project's alone."""
+    database = pytester.path / "local" / "vantage.db"
+    _write_session(pytester)
+
+    result = pytester.runpytest_subprocess(
+        *_RECORD,
+        "--vantage-mode=local",
+        "--vantage-project=firmware",
+        f"--vantage-local-database={database}",
+    )
+
+    result.assert_outcomes(passed=3, failed=1, skipped=1, xfailed=1, warnings=0)
+    run_id = _recorded_run(result)
+    result.stdout.fnmatch_lines(
+        [f"vantage: recording run {run_id} in project firmware to {database}"]
+    )
+    local = serve_local(database).address
+    assert _project_names(local) == ["default", "firmware"]
+    assert _run_ids(local, "firmware") == [run_id]
+    assert _run_ids(local) == []
+    stored = _read_back(local, run_id)
+    assert stored["run"]["project"] == "firmware"
+    assert stored["run"]["presentation"] == "finished"
+    assert len(stored["results"]) == _NODE_IDS
+    history = "tests/history?node_id=test_session.py::test_fails"
+    assert [
+        item["run_id"] for item in _get(local, f"/api/v1/projects/firmware/{history}")["items"]
+    ] == [run_id]
+    assert _get(local, f"/api/v1/projects/default/{history}")["items"] == []

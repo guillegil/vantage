@@ -481,7 +481,8 @@ def test_a_result_with_a_long_node_id_can_be_read_back_by_it(
 
         with urllib.request.urlopen(f"{base}/runs/{run_id}/result?{query}", timeout=10) as got:  # noqa: S310
             assert json.loads(got.read())["node_id"] == node_id
-        with urllib.request.urlopen(f"{base}/tests/history?{query}", timeout=10) as got:  # noqa: S310
+        history = f"{base}/projects/default/tests/history?{query}"
+        with urllib.request.urlopen(history, timeout=10) as got:  # noqa: S310
             assert [item["run_id"] for item in json.loads(got.read())["items"]] == [run_id]
 
 
@@ -654,6 +655,48 @@ def test_help_needs_no_server_extra(tmp_path: Path) -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.startswith("usage: vantage")
+
+
+def test_managing_projects_needs_no_server_extra(tmp_path: Path) -> None:
+    """`vantage project` is handed to `manage` before the arguments are
+    parsed as a server's, so it runs where serving cannot."""
+    database = tmp_path / "db" / "v.db"
+    missing = ["fastapi", "starlette", "uvicorn"]
+
+    added = _run_without(
+        missing, ["project", "add", "firmware", "--database", str(database)], home=tmp_path
+    )
+    listed = _run_without(missing, ["project", "list", "--database", str(database)], home=tmp_path)
+
+    assert (added.returncode, added.stderr) == (0, "vantage: added project firmware\n")
+    assert listed.returncode == 0, listed.stderr
+    assert [row.split()[0] for row in listed.stdout.splitlines()] == [
+        "NAME",
+        "default",
+        "firmware",
+    ]
+
+
+@pytest.mark.usefixtures("never_served")
+def test_main_hands_project_to_manage_and_serves_nothing(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vantage.service import manage
+
+    handed: list[list[str]] = []
+
+    def _project(argv: Sequence[str]) -> int:
+        handed.append(list(argv))
+        return 0
+
+    monkeypatch.setattr(manage, "project", _project)
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["project", "list", "--database", str(tmp_path / "v.db")])
+
+    assert exited.value.code == 0
+    assert handed == [["list", "--database", str(tmp_path / "v.db")]]
+    assert capsys.readouterr() == ("", "")
 
 
 @pytest.mark.usefixtures("never_served")

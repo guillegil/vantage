@@ -35,6 +35,7 @@ from pytest_vantage.config import (
     resolve_liveness_timeout,
     resolve_local_database,
     resolve_mode,
+    resolve_project,
     resolve_settings,
 )
 
@@ -130,6 +131,15 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         ),
     )
     group.addoption(
+        "--vantage-project",
+        default=None,
+        metavar="NAME",
+        help=(
+            "The project the run belongs to, one the server has (default: default). "
+            "Configures WHERE, never activates recording."
+        ),
+    )
+    group.addoption(
         "--vantage-failure-text",
         action="store_true",
         default=False,
@@ -169,6 +179,11 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini(
         "vantage_mode",
         help="Same as --vantage-mode. Configures WHERE; never activates recording.",
+        default=None,
+    )
+    parser.addini(
+        "vantage_project",
+        help="Same as --vantage-project. Configures WHERE; never activates recording.",
         default=None,
     )
     parser.addini(
@@ -414,6 +429,8 @@ def _configure_controller(config: pytest.Config) -> None:
         return
     try:
         mode = resolve_mode(config)
+        # Every mode files the run in a project, the local ones included.
+        project = resolve_project(config)
         # Only what the mode uses is read: `local` never reads the address,
         # `server` never the local database.
         settings = None if mode == LOCAL_MODE else resolve_settings(config)
@@ -426,7 +443,9 @@ def _configure_controller(config: pytest.Config) -> None:
         config.pluginmanager.register(EvidenceCollector(config))
     if settings is None:
         # No network at all: no preflight, no probe, no start report.
-        _register_recorder(config, None, _UNUSED_TIMEOUT, mode=mode, database=database)
+        _register_recorder(
+            config, None, _UNUSED_TIMEOUT, mode=mode, database=database, project=project
+        )
         return
     connect_timeout = min(_MAX_CONNECT_TIMEOUT, settings.timeout)
     reachable = _preflight_reachable(settings.address, connect_timeout)
@@ -448,6 +467,7 @@ def _configure_controller(config: pytest.Config) -> None:
         capabilities=capabilities,
         reachable=reachable,
         token=settings.token,
+        project=project,
     )
 
 
@@ -483,6 +503,7 @@ def _register_recorder(
     capabilities: bool | Capabilities = False,
     reachable: bool = True,
     token: str | None = None,
+    project: str,
 ) -> None:
     """`pytest_configure` has no fault-isolation boundary of its own, so a
     failure constructing the `Recorder` warns once and leaves the session
@@ -501,6 +522,7 @@ def _register_recorder(
             local_database=database,
             server_reachable=reachable,
             token=token,
+            project=project,
         )
     except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
         warn(

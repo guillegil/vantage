@@ -1,8 +1,9 @@
 """Reading a JSON request body: media type first, then the bytes under a
 size cap, then a strict parse.
 
-Shared by the routes that take a body: `POST /runs`, `POST /config/sections`,
-`POST /users`, `PATCH /users/{name}` and `POST /tokens`. None declares its
+Shared by the routes that take a body: `POST /runs`, `POST /projects`, a
+project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`
+and `POST /tokens`. None declares its
 body as a parameter, because
 FastAPI would then read the whole body, with no bound, and parse it on the
 event loop every request shares, before the route's first line runs.

@@ -23,6 +23,7 @@ from vantage.core.domain.projection import (
     project_failure,
     project_vcs,
 )
+from vantage.core.domain.projects import Project
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 
 MAX_PAGE_ITEMS = 200
@@ -108,11 +109,13 @@ class RunDetail:
 
     `execution.vcs` is the whole, unbounded `VcsContext` -- the detail path
     keeps the full record reachable, which is the other half of the
-    lean-list rule. `recorded_by` is as on `RunListEntry`.
+    lean-list rule. `project` is the one the run was created in.
+    `recorded_by` is as on `RunListEntry`.
     """
 
     execution: Execution
     last_contact_at: datetime | None
+    project: str
     recorded_by: str | None = None
 
 
@@ -195,11 +198,12 @@ class ResultListEntry:
 
 
 @dataclass(frozen=True, slots=True)
-class UserSetting:
-    """One row of `user_setting`. `value` is JSON TEXT this layer never
-    parses -- the namespace's own Pydantic model in `vantage.service` is the
-    only thing that knows its shape."""
+class ProjectSetting:
+    """One row of `project_setting`: a setting of one project. `value` is
+    JSON TEXT this layer never parses -- the namespace's own Pydantic model
+    in `vantage.service` is the only thing that knows its shape."""
 
+    project: str
     namespace: str
     key: str
     value: str
@@ -291,6 +295,20 @@ class NamespaceFullError(Exception):
     `max_keys` it was given."""
 
 
+class UnknownProjectError(Exception):
+    """`record_session` or `upsert_setting` named a project that does not
+    exist. Nothing was written."""
+
+
+class ProjectExistsError(Exception):
+    """`create_project` refused a name another project has."""
+
+
+class ProjectMismatchError(Exception):
+    """`record_session` refused a report, and wrote nothing: its run was
+    created in another project."""
+
+
 class ForeignRunError(Exception):
     """`record_session` refused a report, and wrote nothing: its run was
     created by another user, or by one when this report has none, or the
@@ -306,8 +324,14 @@ class UnknownUserError(Exception):
 
 
 class ExecutionStore(Protocol):
-    """Persists `Execution` rows, and the users and tokens that may read
-    and write them. Implementations live in `vantage.storage`.
+    """Persists `Execution` rows, the projects they belong to, and the
+    users and tokens that may read and write them. Implementations live in
+    `vantage.storage`.
+
+    `project` is a required keyword wherever a call reads or writes within
+    one: nothing falls back to `default` by itself. A project is never
+    renamed or deleted, so one found stays found; one that does not exist
+    reads as empty, and one named by a value holding U+0000 exists nowhere.
 
     The service calls one store from several worker threads at once, so an
     implementation must be safe to share between them.
@@ -326,6 +350,7 @@ class ExecutionStore(Protocol):
         self,
         execution: Execution,
         *,
+        project: str,
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
@@ -340,11 +365,18 @@ class ExecutionStore(Protocol):
         however many reports the run is sent. A run with an exit status is
         final: a report reaching it afterwards stores nothing at all.
 
+        `project` names an existing project, or it raises
+        `UnknownProjectError` and stores nothing. The report that creates a
+        run records it in `project`, for good.
+
         `recorded_by` names the user sending the report, an existing one, or
         is `None` for a report sent without a token. The report that creates
         a run records it; every later report of the run must come from the
         same user, or none when it did, or it raises `ForeignRunError` and
-        stores nothing, before looking at whether the run is finished."""
+        stores nothing; and name the run's own project, or it raises
+        `ProjectMismatchError` and stores nothing. Both are checked, in that
+        order, before whether the run is finished, so a replay naming
+        another project is refused rather than answered as a duplicate."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:
@@ -372,14 +404,15 @@ class ExecutionStore(Protocol):
         """Return how many result rows are stored across all executions."""
         ...
 
-    def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
-        """Return the catalogue entry for `node_id`, or None if never observed."""
+    def get_catalogue_entry(self, node_id: str, *, project: str) -> CatalogueEntry | None:
+        """Return `project`'s catalogue entry for `node_id`, or None if the
+        project never observed it."""
         ...
 
     def list_runs(
-        self, *, limit: int, offset: int, after: RunKey | None = None
+        self, *, project: str, limit: int, offset: int, after: RunKey | None = None
     ) -> Page[RunListEntry]:
-        """Return a page of runs, newest first.
+        """Return a page of `project`'s runs, newest first.
 
         Ordered `started_at DESC, id DESC` -- the `id` tiebreak makes the
         order total, so a page boundary is deterministic even when two runs
@@ -394,6 +427,7 @@ class ExecutionStore(Protocol):
     def list_runs_with_metadata_horizon(
         self,
         *,
+        project: str,
         filters: Sequence[tuple[str, str]],
         limit: int,
         offset: int,
@@ -403,8 +437,9 @@ class ExecutionStore(Protocol):
         `filters` -- a captured value exactly equal to it, from a file or
         the session alike -- together with, for each distinct key of
         `filters` in the order it first appears, how many runs were recorded
-        before that key first appeared -- over every run, whatever `after`
-        says. The page and the counts are read from one snapshot of the
+        before that key first appeared -- over every run of `project`,
+        whatever `after` says; a key first carried in another project
+        changes nothing here. The page and the counts are read from one snapshot of the
         store: separate reads can straddle a session another process
         records, and then describe two different sets of runs. This is the
         only filtered read of the run list.
@@ -417,8 +452,8 @@ class ExecutionStore(Protocol):
         **any** `run_metadata` row for it, whatever its status or source --
         a row without a value still counts, since without it a run whose
         value was too large to capture would be miscounted as predating the
-        key. When no run has ever carried the key, every run predates it and
-        its count is the total run count."""
+        key. When no run of the project has ever carried the key, every run
+        predates it and its count is the project's run count."""
         ...
 
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
@@ -452,17 +487,24 @@ class ExecutionStore(Protocol):
         ...
 
     def list_history(
-        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+        self,
+        *,
+        project: str,
+        node_id: str,
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> Page[HistoryEntry]:
-        """Return a page of one test's execution history, newest first, in
-        `list_runs`' order and taking `after` as it does. An unknown
+        """Return a page of one test's execution history in `project`,
+        newest first, in `list_runs`' order and taking `after` as it does. An unknown
         `node_id` yields an empty page, never an error. Each entry's VCS
         data is a lean `VcsProjection`, same as `list_runs`."""
         ...
 
-    def list_settings(self, namespace: str) -> Sequence[UserSetting]:
-        """Return every setting stored for `namespace`, ordered by `key` --
-        the same order `summarize_sections` presents its section list in."""
+    def list_settings(self, namespace: str, *, project: str) -> Sequence[ProjectSetting]:
+        """Return every setting `project` stores for `namespace`, ordered by
+        `key` -- the same order `summarize_sections` presents its section
+        list in."""
         ...
 
     def upsert_setting(
@@ -470,24 +512,27 @@ class ExecutionStore(Protocol):
         namespace: str,
         key: str,
         *,
+        project: str,
         value: str,
         updated_at: datetime,
         max_keys: int | None = None,
     ) -> bool:
-        """Create or replace one `(namespace, key)` pair. Returns True only
-        on a true first insert, mirroring `record_session`'s `created`
-        boolean -- the route needs `201` versus `200`.
+        """Create or replace one `(namespace, key)` pair of `project`, an
+        existing one or `UnknownProjectError`. Returns True only on a true
+        first insert, mirroring `record_session`'s `created` boolean -- the
+        route needs `201` versus `200`.
 
         With `max_keys`, a new key is refused with `NamespaceFullError`, and
-        nothing written, when `namespace` already holds that many; replacing
-        an existing key never is. The count and the write are one step, so
-        concurrent callers cannot pass the bound together."""
+        nothing written, when the project's `namespace` already holds that
+        many; replacing an existing key never is. The count and the write
+        are one step, so concurrent callers cannot pass the bound
+        together."""
         ...
 
-    def delete_setting(self, namespace: str, key: str) -> bool:
-        """Delete one `(namespace, key)` pair. Returns False for a key that
-        was not there, mirroring `touch_last_contact`'s boolean -- the route
-        needs `404` versus `204`."""
+    def delete_setting(self, namespace: str, key: str, *, project: str) -> bool:
+        """Delete one `(namespace, key)` pair of `project`. Returns False for
+        a key that was not there, mirroring `touch_last_contact`'s boolean
+        -- the route needs `404` versus `204`."""
         ...
 
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
@@ -495,6 +540,21 @@ class ExecutionStore(Protocol):
         -- the aggregate input `summarize_sections` classifies. Not
         paginated, like `get_results`: this is an aggregate input, not a
         response."""
+        ...
+
+    def create_project(self, name: str, *, created_at: datetime) -> Project:
+        """Create the project `name`, which `check_project_name` accepts,
+        and return it. Raises `ProjectExistsError`, creating nothing, when
+        the name is taken -- `default` included."""
+        ...
+
+    def get_project(self, name: str) -> Project | None:
+        """Return the project `name`, or None if there is none."""
+        ...
+
+    def list_projects(self) -> Sequence[Project]:
+        """Return every project, `default` included, ordered by name in code
+        point order."""
         ...
 
     def access_required(self) -> bool:

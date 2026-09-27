@@ -1,6 +1,13 @@
 """The run list, run detail, run metadata, results, result detail and test
 history routes.
 
+**The run list and a test's history are a project's**, under
+`/projects/{project}/...`: the project in the path is resolved once the
+caller is authorized (`requires_read_project`), and one no project has is
+`404 unknown_project`. Everything addressed by a run id stays where it was:
+a run id names one run across projects, and its detail says which project
+it belongs to, whose history a client then asks for.
+
 **Every response model is built field by field**, never with
 `model_validate(..., from_attributes=True)` or any other whole-object
 mapping, which would silently put `VcsContext.root` (the repository's local
@@ -32,7 +39,7 @@ report can carry (`cli.py`). A missing value is shaped by
 failure evidence or captured output; `get_result` returns every field of one
 stored `Result`, unbounded.
 
-`GET /runs` filters by pairs of `metadata_key` and `metadata_value`: two
+A project's run list filters by pairs of `metadata_key` and `metadata_value`: two
 parameters rather than one `key=value` string because a value may itself
 contain `=`, repeated once per pair, and a run must hold every pair to
 match. A run recorded before a key ever appeared has no value for it and is
@@ -63,6 +70,7 @@ from fastapi import APIRouter, Depends, Path, Query, Response
 from vantage.core.domain.execution import IDENTITY_PATTERN, VcsContext
 from vantage.core.domain.liveness import derive_presentation
 from vantage.core.domain.projection import FailureProjection, VcsProjection
+from vantage.core.domain.projects import Project
 from vantage.core.domain.result import Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
@@ -77,7 +85,7 @@ from vantage.core.ports.storage import (
     RunListEntry,
 )
 from vantage.ingestion.text import NUL, without_nul
-from vantage.service.access import requires_read
+from vantage.service.access import requires_read, requires_read_project
 from vantage.service.cursor import MAX_CURSOR_CHARS, decode_cursor, encode_cursor
 from vantage.service.dependencies import get_grace_period, get_store
 from vantage.service.errors import (
@@ -167,6 +175,7 @@ def _run_detail_response(
         ),
         vcs=_vcs_response(execution.vcs),
         recorded_by=detail.recorded_by,
+        project=detail.project,
     )
 
 
@@ -306,8 +315,9 @@ def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
     )
 
 
-@router.get("/runs", dependencies=[Depends(requires_read)])
+@router.get("/projects/{project}/runs")
 def list_runs(
+    project: Project = Depends(requires_read_project),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
     cursor: str | None = Query(default=None, max_length=MAX_CURSOR_CHARS),
@@ -316,7 +326,9 @@ def list_runs(
     store: ExecutionStore = Depends(get_store),
     grace: timedelta = Depends(get_grace_period),
 ) -> RunListResponse:
-    """`GET /api/v1/runs`. `limit <= 0` is a `422` -- not a page size. The
+    """`GET /api/v1/projects/{project}/runs`: the project's runs, and only
+    them, the metadata filter and its horizon included. `limit <= 0` is a
+    `422` -- not a page size. The
     200-item cap is enforced by the store, not re-clamped here; the default
     `limit` keeps it holding when a caller sends none.
 
@@ -343,6 +355,7 @@ def list_runs(
     if keys:
         stored_keys = [without_nul(key) for key in keys]
         page, predating = store.list_runs_with_metadata_horizon(
+            project=project.name,
             filters=list(zip(stored_keys, map(without_nul, values))),
             limit=limit,
             offset=offset,
@@ -357,7 +370,7 @@ def list_runs(
         if any(NUL in text for text in (*keys, *values)):
             page = Page(items=(), has_more=False)
     else:
-        page = store.list_runs(limit=limit, offset=offset, after=after)
+        page = store.list_runs(project=project.name, limit=limit, offset=offset, after=after)
     now = datetime.now(timezone.utc)
     items = [_run_list_item(entry, now=now, grace=grace) for entry in page.items]
     next_cursor = None
@@ -429,7 +442,7 @@ def get_result(
     store: ExecutionStore = Depends(get_store),
 ) -> ResultDetailResponse:
     """`GET /api/v1/runs/{run_id}/result?node_id=` -- `node_id` is a query
-    value for the same reason as on `/tests/history`. An unknown `run_id` is
+    value for the same reason as on `/projects/{project}/tests/history`. An unknown `run_id` is
     `UnknownRunError`; a known run with no result at that identity is a
     distinct `404`, `UnknownResultError`."""
     if store.get_execution(run_id) is None:
@@ -440,21 +453,26 @@ def get_result(
     return _result_detail_response(result)
 
 
-@router.get("/tests/history", dependencies=[Depends(requires_read)])
+@router.get("/projects/{project}/tests/history")
 def list_history(
+    project: Project = Depends(requires_read_project),
     node_id: str = Query(...),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
     cursor: str | None = Query(default=None, max_length=MAX_CURSOR_CHARS),
     store: ExecutionStore = Depends(get_store),
 ) -> HistoryResponse:
-    """`GET /api/v1/tests/history?node_id=...` -- see the module docstring
-    for why `node_id` is a query value, not a path segment. An unknown
-    `node_id` yields an empty page, not an error."""
+    """`GET /api/v1/projects/{project}/tests/history?node_id=...` -- one
+    test's history in the project, whose catalogue alone says what the node
+    id is. See the module docstring for why `node_id` is a query value, not
+    a path segment. An unknown `node_id` yields an empty page, not an
+    error."""
     after = _run_key(cursor, offset)
     if NUL in node_id:
         return HistoryResponse(items=[], has_more=False, next_cursor=None)
-    page = store.list_history(node_id=node_id, limit=limit, offset=offset, after=after)
+    page = store.list_history(
+        project=project.name, node_id=node_id, limit=limit, offset=offset, after=after
+    )
     items = [_history_entry(entry) for entry in page.items]
     next_cursor = None
     if page.has_more:

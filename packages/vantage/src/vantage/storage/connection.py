@@ -29,6 +29,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 
 _LOGGER = logging.getLogger(__name__)
@@ -43,6 +44,11 @@ _SCHEMA_SENTINEL_TABLE = "meta"
 # `OR IGNORE` keeps a second process racing to create the same fresh
 # database from failing on the row the first one stamped.
 _STAMP_SCHEMA_VERSION = "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)"
+
+# The project of the runs that name none, which every database has from its
+# creation: written with the stamp, not with the best-effort creation
+# metadata, since reports depend on it.
+_CREATE_DEFAULT_PROJECT = "INSERT OR IGNORE INTO project (name, created_at) VALUES (?, ?)"
 
 # How long a connection waits for another's lock before giving up.
 _BUSY_TIMEOUT_SECONDS = 5.0
@@ -187,8 +193,8 @@ def _schema_objects(conn: sqlite3.Connection) -> set[str]:
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
-    """Create the tables and stamp the version in one transaction, so a
-    database never holds the one without the other.
+    """Create the tables, the `default` project and the version stamp in one
+    transaction, so a database never holds some without the others.
 
     `executescript` commits a pending transaction before it runs, never
     after, so `BEGIN IMMEDIATE` opens the script and the parameterised stamp
@@ -202,6 +208,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     schema_sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
     conn.executescript(f"BEGIN IMMEDIATE;\n{schema_sql}")
     conn.execute(_STAMP_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
+    conn.execute(
+        _CREATE_DEFAULT_PROJECT, (DEFAULT_PROJECT, isoformat_utc(datetime.now(timezone.utc)))
+    )
     conn.execute("COMMIT")
 
 

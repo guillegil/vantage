@@ -125,6 +125,10 @@ def _summary_line(summary: SendSummary) -> str:
     unreadable: tuple[str, ...] = getattr(summary, "unreadable", ())
     if unreadable:
         line += f", dropped {len(unreadable)} that could not be read back ({', '.join(unreadable)})"
+    # Absent from a pytest-vantage older than this vantage too.
+    missing: tuple[str, ...] = getattr(summary, "missing_projects", ())
+    if missing:
+        line += f", kept runs of projects it does not have ({', '.join(missing)})"
     if summary.stopped is not None:
         line += f", then stopped: {summary.stopped}"
     return f"vantage: {line} ({summary.waiting} waiting)"

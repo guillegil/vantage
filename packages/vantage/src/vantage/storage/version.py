@@ -13,7 +13,7 @@ from __future__ import annotations
 # Bumped whenever a schema changes shape. The only statement of the version:
 # every adapter stamps it on a database it creates and compares against it
 # on one it opens.
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 
 class SchemaVersionError(RuntimeError):

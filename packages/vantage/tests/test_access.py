@@ -22,6 +22,7 @@ from vantage.core.domain.access import (
     new_token,
     token_digest,
 )
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
@@ -100,8 +101,10 @@ def test_a_server_without_users_serves_every_route_without_a_token(
     client = TestClient(create_app(any_store))
 
     created = client.post("/api/v1/runs", json=_report())
-    listed = client.get("/api/v1/runs")
-    section = client.post("/api/v1/config/sections", json={"name": "Api", "prefix": "tests/api"})
+    listed = client.get("/api/v1/projects/default/runs")
+    section = client.post(
+        "/api/v1/projects/default/config/sections", json={"name": "Api", "prefix": "tests/api"}
+    )
 
     assert created.status_code == 201
     assert listed.status_code == 200
@@ -114,7 +117,9 @@ def test_a_token_sent_to_a_server_without_users_is_refused(any_store: ExecutionS
     anyway is a mistake to report, not a credential to ignore."""
     client = TestClient(create_app(any_store))
 
-    response = client.get("/api/v1/runs", headers={"Authorization": f"Bearer {new_token()}"})
+    response = client.get(
+        "/api/v1/projects/default/runs", headers={"Authorization": f"Bearer {new_token()}"}
+    )
 
     _assert_unauthenticated(response, invalid=True)
 
@@ -125,7 +130,7 @@ def test_once_a_user_exists_a_request_without_a_token_is_refused(
     _user(any_store, "alice")
     client = TestClient(create_app(any_store))
 
-    response = client.get("/api/v1/runs")
+    response = client.get("/api/v1/projects/default/runs")
 
     _assert_unauthenticated(response, invalid=False)
     assert response.json()["detail"] == (
@@ -137,11 +142,11 @@ def test_the_first_user_closes_a_server_already_running(any_store: ExecutionStor
     """`vantage user add` writes to the database a server is serving; the
     very next request needs a token."""
     client = TestClient(create_app(any_store))
-    assert client.get("/api/v1/runs").status_code == 200
+    assert client.get("/api/v1/projects/default/runs").status_code == 200
 
     _user(any_store, "alice")
 
-    _assert_unauthenticated(client.get("/api/v1/runs"), invalid=False)
+    _assert_unauthenticated(client.get("/api/v1/projects/default/runs"), invalid=False)
 
 
 def test_a_closed_server_stops_asking_whether_a_user_exists() -> None:
@@ -158,10 +163,10 @@ def test_a_closed_server_stops_asking_whether_a_user_exists() -> None:
     store.access_required = counting  # type: ignore[method-assign]
     client = TestClient(create_app(store))
 
-    client.get("/api/v1/runs")
+    client.get("/api/v1/projects/default/runs")
     _user(store, "alice")
     for _ in range(3):
-        client.get("/api/v1/runs")
+        client.get("/api/v1/projects/default/runs")
 
     assert asked == [False, True]
 
@@ -185,7 +190,7 @@ def test_a_header_that_carries_no_token_is_refused_as_invalid(
     _user(store, "alice")
     client = TestClient(create_app(store))
 
-    response = client.get("/api/v1/runs", headers={"Authorization": authorization})
+    response = client.get("/api/v1/projects/default/runs", headers={"Authorization": authorization})
 
     _assert_unauthenticated(response, invalid=True)
 
@@ -195,7 +200,9 @@ def test_the_bearer_scheme_is_matched_in_any_case(any_store: ExecutionStore) -> 
     token = _bearer(any_store, "alice", READ_SCOPE)["Authorization"].removeprefix("Bearer ")
     client = TestClient(create_app(any_store))
 
-    response = client.get("/api/v1/runs", headers={"Authorization": f"bEaReR  {token} "})
+    response = client.get(
+        "/api/v1/projects/default/runs", headers={"Authorization": f"bEaReR  {token} "}
+    )
 
     assert response.status_code == 200
 
@@ -212,8 +219,8 @@ def test_a_revoked_token_and_a_disabled_users_token_are_refused_alike(
     any_store.update_user("bob", disabled=True)
     client = TestClient(create_app(any_store))
 
-    by_revoked = client.get("/api/v1/runs", headers=revoked)
-    by_disabled = client.get("/api/v1/runs", headers=disabled)
+    by_revoked = client.get("/api/v1/projects/default/runs", headers=revoked)
+    by_disabled = client.get("/api/v1/projects/default/runs", headers=disabled)
 
     _assert_unauthenticated(by_revoked, invalid=True)
     _assert_unauthenticated(by_disabled, invalid=True)
@@ -223,17 +230,25 @@ def test_a_revoked_token_and_a_disabled_users_token_are_refused_alike(
 @pytest.mark.parametrize(
     ("method", "path", "request_kwargs", "scope"),
     [
-        ("GET", "/api/v1/runs", {}, READ_SCOPE),
-        ("GET", "/api/v1/config/sections", {}, READ_SCOPE),
+        ("GET", "/api/v1/projects/default/runs", {}, READ_SCOPE),
+        ("GET", "/api/v1/projects/default/config/sections", {}, READ_SCOPE),
         ("POST", "/api/v1/runs", {"json": _report()}, RECORD_SCOPE),
         ("POST", f"/api/v1/runs/{_RUN}/heartbeat", {}, RECORD_SCOPE),
         (
             "POST",
-            "/api/v1/config/sections",
+            "/api/v1/projects/default/config/sections",
             {"json": {"name": "Api", "prefix": "tests/api"}},
             ADMIN_SCOPE,
         ),
-        ("DELETE", "/api/v1/config/sections", {"params": {"name": "Api"}}, ADMIN_SCOPE),
+        (
+            "DELETE",
+            "/api/v1/projects/default/config/sections",
+            {"params": {"name": "Api"}},
+            ADMIN_SCOPE,
+        ),
+        ("GET", "/api/v1/projects/default/tests/history", {"params": {"node_id": "n"}}, READ_SCOPE),
+        ("GET", "/api/v1/projects", {}, READ_SCOPE),
+        ("POST", "/api/v1/projects", {"json": {"name": "web"}}, ADMIN_SCOPE),
     ],
 )
 def test_a_token_without_the_routes_scope_is_forbidden(
@@ -253,7 +268,11 @@ def test_a_token_without_the_routes_scope_is_forbidden(
     if path.endswith("/heartbeat"):
         client.post("/api/v1/runs", json=_report(finished=False), headers=holding)
     any_store.upsert_setting(
-        TEST_SECTIONS_NAMESPACE, "Api", value='{"prefix": "tests/api/"}', updated_at=_NOW
+        TEST_SECTIONS_NAMESPACE,
+        "Api",
+        value='{"prefix": "tests/api/"}',
+        updated_at=_NOW,
+        project=DEFAULT_PROJECT,
     )
 
     forbidden = client.request(method, path, headers=lacking, **request_kwargs)
@@ -281,10 +300,14 @@ def test_the_admin_scope_needs_an_admin_user_now(any_store: ExecutionStore) -> N
     client = TestClient(create_app(any_store))
     section = {"name": "Api", "prefix": "tests/api"}
 
-    by_admin = client.post("/api/v1/config/sections", json=section, headers=alices)
-    by_non_admin = client.post("/api/v1/config/sections", json=section, headers=bobs)
+    by_admin = client.post("/api/v1/projects/default/config/sections", json=section, headers=alices)
+    by_non_admin = client.post(
+        "/api/v1/projects/default/config/sections", json=section, headers=bobs
+    )
     any_store.update_user("alice", admin=False)
-    by_former_admin = client.post("/api/v1/config/sections", json=section, headers=alices)
+    by_former_admin = client.post(
+        "/api/v1/projects/default/config/sections", json=section, headers=alices
+    )
 
     assert by_admin.status_code == 201
     assert by_non_admin.status_code == 403
@@ -298,7 +321,7 @@ def test_a_report_records_the_user_whose_token_sent_it(any_store: ExecutionStore
 
     created = client.post("/api/v1/runs", json=_report(), headers=headers)
     detail = client.get(f"/api/v1/runs/{_RUN}", headers=headers)
-    listed = client.get("/api/v1/runs", headers=headers)
+    listed = client.get("/api/v1/projects/default/runs", headers=headers)
 
     assert created.status_code == 201
     assert detail.json()["recorded_by"] == "alice"
@@ -399,8 +422,8 @@ def test_a_token_never_comes_back_in_a_rejection(any_store: ExecutionStore) -> N
     unknown = f"{token[:-4]}abcd"
 
     for response in (
-        client.get("/api/v1/runs", headers=headers),
-        client.get("/api/v1/runs", headers={"Authorization": f"Bearer {unknown}"}),
+        client.get("/api/v1/projects/default/runs", headers=headers),
+        client.get("/api/v1/projects/default/runs", headers={"Authorization": f"Bearer {unknown}"}),
     ):
         assert response.status_code in {401, 403}
         assert token not in response.text and unknown not in response.text
@@ -414,9 +437,11 @@ def test_a_token_revoked_after_a_request_is_refused_on_the_next(
     _user(any_store, "alice")
     headers = _bearer(any_store, "alice", READ_SCOPE)
     client = TestClient(create_app(any_store))
-    assert client.get("/api/v1/runs", headers=headers).status_code == 200
+    assert client.get("/api/v1/projects/default/runs", headers=headers).status_code == 200
 
     (token,) = any_store.list_tokens()
     any_store.revoke_token(token.id, revoked_at=_NOW + timedelta(minutes=1))
 
-    _assert_unauthenticated(client.get("/api/v1/runs", headers=headers), invalid=True)
+    _assert_unauthenticated(
+        client.get("/api/v1/projects/default/runs", headers=headers), invalid=True
+    )

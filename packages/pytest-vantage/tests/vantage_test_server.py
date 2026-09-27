@@ -30,6 +30,7 @@ from sqlite_rows import read_metadata
 from starlette.types import Receive, Scope, Send
 from vantage.core.domain.access import READ_SCOPE, RECORD_SCOPE, new_token, token_digest
 from vantage.core.domain.execution import Execution
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.domain.result import CatalogueEntry, Result
 from vantage.core.ports.storage import MAX_PAGE_ITEMS, RunMetadata
 from vantage.service.app import create_app
@@ -70,14 +71,24 @@ class VantageTestServer(LoopbackServer):
             self.store.close()
 
     def _run_ids(self) -> list[str]:
-        """Every stored run id, newest first. The plugin generates the id,
-        so a test rarely knows it ahead of time; the run list does."""
-        run_ids: list[str] = []
-        while True:
-            page = self.store.list_runs(limit=MAX_PAGE_ITEMS, offset=len(run_ids))
-            run_ids.extend(entry.execution.identity.value for entry in page.items)
-            if not page.has_more:
-                return run_ids
+        """Every stored run id, in every project, newest first. The plugin
+        generates the id, so a test rarely knows it ahead of time; the run
+        lists do."""
+        runs: list[tuple[datetime, str]] = []
+        for project in self.store.list_projects():
+            listed = 0
+            while True:
+                page = self.store.list_runs(
+                    project=project.name, limit=MAX_PAGE_ITEMS, offset=listed
+                )
+                listed += len(page.items)
+                runs.extend(
+                    (entry.execution.started_at, entry.execution.identity.value)
+                    for entry in page.items
+                )
+                if not page.has_more:
+                    break
+        return [run_id for _started_at, run_id in sorted(runs, reverse=True)]
 
     def executions(self) -> list[Execution]:
         """Every execution the server has stored so far, newest first."""
@@ -97,10 +108,22 @@ class VantageTestServer(LoopbackServer):
         particular order."""
         return read_metadata(self._database, run_id)
 
-    def catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
-        """The catalogue entry for one node id, or `None` if the server has
-        never observed it."""
-        return self.store.get_catalogue_entry(node_id)
+    def catalogue_entry(
+        self, node_id: str, project: str = DEFAULT_PROJECT
+    ) -> CatalogueEntry | None:
+        """The catalogue entry for one node id in `project`, or `None` if
+        the server has never observed it there."""
+        return self.store.get_catalogue_entry(node_id, project=project)
+
+    def add_project(self, name: str) -> None:
+        """Make the project `name`, as an admin would."""
+        self.store.create_project(name, created_at=datetime.now(timezone.utc))
+
+    def project_of(self, run_id: str) -> str:
+        """The project the server filed `run_id` in."""
+        detail = self.store.get_run_detail(run_id)
+        assert detail is not None, f"no run {run_id}"
+        return detail.project
 
     def token(self, user: str, *scopes: str) -> str:
         """A new token of `user` holding `scopes`, read and record when none

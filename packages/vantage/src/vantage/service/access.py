@@ -20,6 +20,14 @@ the one thing it could do here is make the first user, which only the
 store says, so a request racing the first `vantage user add` cannot slip
 through between the two, reads included.
 
+**A project in a path is resolved after the caller is authorized**
+(`requires_read_project`, `requires_admin_project`), so a caller who may not
+read learns nothing of which projects exist. A name no project can have
+is answered without asking the store; one that can is looked up, and
+projects are never deleted, so a project found stays found for the rest of
+the request. This is where a check that the caller belongs to the project
+goes, when projects have members.
+
 **A token is checked wherever it is sent.** On an open server no token
 authenticates, since tokens belong to users; a request carrying one is
 refused rather than served as if it carried none, so a client that means
@@ -36,7 +44,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Path, Request
 
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
@@ -45,9 +53,11 @@ from vantage.core.domain.access import (
     token_digest,
     well_formed_token,
 )
+from vantage.core.domain.projects import Project, can_name_a_project
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.errors import (
     InsufficientScopeError,
+    NoSuchProjectError,
     OpenServerError,
     UnauthenticatedError,
 )
@@ -107,7 +117,30 @@ requires_record = _requires(RECORD_SCOPE)
 """Sending a report or a heartbeat."""
 
 requires_admin = _requires(ADMIN_SCOPE)
-"""Changing what every user shares: the section definitions."""
+"""Changing what every user shares that no project path names: adding a
+project."""
+
+
+def _requires_project(scope: str) -> Callable[[Request, str], Project]:
+    def dependency(request: Request, project: str = Path()) -> Project:
+        authorize(request, scope)
+        if not can_name_a_project(project):
+            raise NoSuchProjectError()
+        store: ExecutionStore = request.app.state.store
+        found = store.get_project(project)
+        if found is None:
+            raise NoSuchProjectError()
+        return found
+
+    dependency.__name__ = f"requires_{scope}_project"
+    return dependency
+
+
+requires_read_project = _requires_project(READ_SCOPE)
+"""Reading within the project the path names."""
+
+requires_admin_project = _requires_project(ADMIN_SCOPE)
+"""Changing what the project the path names shares: its sections."""
 
 
 def requires_admin_token(request: Request) -> Caller:
@@ -124,7 +157,9 @@ __all__ = [
     "Caller",
     "authorize",
     "requires_admin",
+    "requires_admin_project",
     "requires_admin_token",
     "requires_read",
+    "requires_read_project",
     "requires_record",
 ]

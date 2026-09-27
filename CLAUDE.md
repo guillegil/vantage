@@ -69,13 +69,15 @@ its `postgres` extra.
   (`pytest_vantage/outbox.py`, stdlib `sqlite3`, `<local database>-outbox`,
   0600). A queued run is sent only to the address it was queued for,
   compared exactly; senders claim an entry before sending it; bounds are
-  1,000 runs and 256 MiB. `vantage push` sends it with the plugin's own code
-  and never needs the `server` extra.
+  1,000 runs and 256 MiB. A run a server refused for its token (401/403)
+  or its project (`404 unknown_project`) is kept; the rest of a refused
+  project's runs are passed over within one send. `vantage push` sends it
+  with the plugin's own code and never needs the `server` extra.
 - **Opt-in only by typed flag.** `--vantage`, `--vantage-failure-text` and
   `--vantage-metadata` count only when present in `config.invocation_params.args`;
   from `addopts`, `PYTEST_ADDOPTS` or an `@file` they are ignored with a warning.
   Ini, env and config may set *where* (server, timeout, mode, local
-  database), never *whether*.
+  database, project), never *whether*.
   Without `--vantage` the plugin reads nothing and sends nothing.
 - **The suite's exit status is never changed by the plugin**, except that an
   invalid vantage setting raises `pytest.UsageError` (exit 4) in
@@ -106,10 +108,19 @@ its `postgres` extra.
   (`isoformat_utc`), so text order is time order, and as `timestamptz` in
   PostgreSQL, read back as UTC.
 - **Schema:** each adapter applies its whole schema at first use and stamps
-  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 7,
+  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 8,
   one version for both). Any other stamp is refused; there are no
   migrations. Changing either schema means bumping that literal. No table
   or column exists before code writes it.
+- **Projects.** Every run belongs to one project, named by the report that
+  creates it (top-level `project`, absent meaning `default`) and never
+  changed (`ProjectMismatchError`, `409 project_mismatch`). `default` exists
+  from a database's creation; no project is renamed or deleted, so a
+  project found stays found. A server never makes a project from a report
+  (`404 unknown_project`); only `vantage project add`, `POST /projects` and
+  the local store do. The catalogue, a test's history, the sections and the
+  run list with its horizon are per project, and `project` is a required
+  keyword on every port call that reads or writes within one.
 - **Access.** A database with no user is open; the first user closes it
   for good, since users are disabled, never deleted. Every route but
   `/capabilities` and `/openapi.yaml` declares its scope through
@@ -121,7 +132,9 @@ its `postgres` extra.
   user whose token created it (`ForeignRunError`, `409 foreign_run`). The
   users and tokens routes (`routes/users.py`) need an admin's token on
   every server and answer `409 open_server` while the database has no
-  user: the first user is the CLI's alone.
+  user: the first user is the CLI's alone. Per-project routes resolve
+  `{project}` through `requires_read_project`/`requires_admin_project`,
+  after authorizing; `POST /projects` needs what changing sections needs.
 - **Passwords never printed.** A PostgreSQL URL is shown only through
   `redacted`, and a driver message only through `redact_message`
   (`core/config/database.py`); the driver's loggers are silenced while the
@@ -146,6 +159,8 @@ vantage --database postgresql://user@host/db # the same, storing in PostgreSQL
 vantage push                                 # send the runs the plugin queued
 vantage user add alice --admin               # the first user closes the database
 vantage token create alice                   # prints a token once; VANTAGE_TOKEN for the plugin
+vantage project add firmware                 # a project runs can name
+pytest --vantage --vantage-project firmware  # a run of that project
 pytest --vantage --vantage-mode local        # record into the local database
 ```
 

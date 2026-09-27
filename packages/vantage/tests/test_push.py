@@ -36,6 +36,7 @@ class _SendSummary:
     waiting: int
     stopped: str | None
     unreadable: tuple[str, ...] = ()
+    missing_projects: tuple[str, ...] = ()
 
 
 @dataclass
@@ -46,6 +47,10 @@ class _Queue:
     unreachable: set[str] = field(default_factory=set)
     refused: set[str] = field(default_factory=set)
     damaged: set[str] = field(default_factory=set)
+    projects: dict[str, str] = field(default_factory=dict)
+    """The project each run names, where it is not `default`."""
+    missing: set[str] = field(default_factory=set)
+    """The projects every server says it does not have."""
     failing: dict[str, BaseException] = field(default_factory=dict)
     fails_to_open: Exception | None = None
     databases: list[Path] = field(default_factory=list)
@@ -93,11 +98,14 @@ class _Queue:
             runs = queue.entries.setdefault(server, [])
             if server in queue.unreachable:
                 return _SendSummary(server, 0, (), len(runs), f"{server} is unreachable")
-            sent = [run for run in runs if run not in queue.refused | queue.damaged]
-            dropped = tuple(run for run in runs if run in queue.refused)
-            unreadable = tuple(run for run in runs if run in queue.damaged)
-            runs.clear()
-            return _SendSummary(server, len(sent), dropped, 0, None, unreadable)
+            kept = [run for run in runs if queue.projects.get(run, "default") in queue.missing]
+            missing = tuple(dict.fromkeys(queue.projects.get(run, "default") for run in kept))
+            done = [run for run in runs if run not in kept]
+            sent = [run for run in done if run not in queue.refused | queue.damaged]
+            dropped = tuple(run for run in done if run in queue.refused)
+            unreadable = tuple(run for run in done if run in queue.damaged)
+            runs[:] = kept
+            return _SendSummary(server, len(sent), dropped, len(kept), None, unreadable, missing)
 
         module = types.ModuleType(_OUTBOX_MODULE)
         module.Outbox = Outbox  # type: ignore[attr-defined]
@@ -303,6 +311,26 @@ def test_runs_that_could_not_be_read_back_are_named_and_not_waiting(
         "vantage: sent 1 queued run to http://alpha:8765, dropped 1 it refused (r1), "
         "dropped 1 that could not be read back (r2) (0 waiting)"
     ]
+
+
+def test_runs_of_projects_the_server_lacks_are_named_by_project_and_left_waiting(
+    queue: _Queue, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Such a run is delivered once an admin adds its project, so the line
+    names what to add and the queue is not done: the status is 1, as for a
+    server still unreachable."""
+    _queued(queue, _default_database(tmp_path), alpha=["r1", "r2", "r3", "r4"])
+    queue.projects.update({"r1": "firmware", "r3": "boards", "r4": "firmware"})
+    queue.missing.update({"firmware", "boards"})
+
+    code, lines, _err = _push(capsys)
+
+    assert code == 1
+    assert lines == [
+        "vantage: sent 1 queued run to http://alpha:8765, "
+        "kept runs of projects it does not have (firmware, boards) (3 waiting)"
+    ]
+    assert queue.entries["http://alpha:8765"] == ["r1", "r3", "r4"]
 
 
 def test_only_the_targeted_server_decides_the_exit_status(

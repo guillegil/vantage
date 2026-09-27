@@ -403,7 +403,9 @@ def test_local_mode_stores_the_run_and_opens_no_connection(
     assert report["run"]["exit_status"] == 0
     assert report["run"]["finished_at"] is not None
     assert [result["node_id"] for result in report["results"]] == ["test_sample.py::test_it"]
-    result.stdout.fnmatch_lines([f"vantage: recording run {report['run']['id']} to {database}"])
+    result.stdout.fnmatch_lines(
+        [f"vantage: recording run {report['run']['id']} in project default to {database}"]
+    )
     assert not outbox_path(database).exists()
 
 
@@ -473,7 +475,10 @@ def test_server_plus_local_sends_and_stores_the_same_run(
     (stored,) = _stored_sessions(database)
     run_id = _run_id_of(stored)
     result.stdout.fnmatch_lines(
-        [f"vantage: recording run {run_id} to {vantage_server.address} and {database}"]
+        [
+            f"vantage: recording run {run_id} in project default "
+            f"to {vantage_server.address} and {database}"
+        ]
     )
     for report in stored:
         send(second_server.address, report, timeout=5.0)
@@ -753,6 +758,39 @@ def test_a_4xx_at_the_finish_is_not_queued_but_the_backup_stores_the_run(
     assert _queued(database) == []
 
 
+@pytest.mark.parametrize(("test_body", "exit_status"), [("assert True", 0), ("assert False", 1)])
+def test_server_mode_with_a_project_the_server_lacks_warns_and_leaves_the_exit_status(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, test_body: str, exit_status: int
+) -> None:
+    """The server refuses the start and the finish for want of the
+    project; each path warns once, naming the command that fixes it, and
+    the suite ends as it would have without the plugin. Server mode keeps
+    nothing, so the run is not stored or queued anywhere."""
+    database = _stand_in(pytester)
+    pytester.makepyfile(test_sample=f"def test_it():\n    {test_body}\n")
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", "--vantage-project=firmware", f"--vantage-server={vantage_server.address}"
+    )
+
+    assert result.ret == exit_status
+    result.stdout.fnmatch_lines(
+        [f"vantage: recording run * in project firmware to {vantage_server.address}"]
+    )
+    output = _output(result)
+    refusal = (
+        f"HTTP 404: {vantage_server.address} has no project firmware; "
+        "an admin adds it with: vantage project add firmware"
+    )
+    assert output.count("VantageWarning:") == 2, output
+    assert f"vantage: error while reporting session liveness: {refusal}\n" in output
+    assert f"vantage: error while reporting: {refusal}\n" in output
+    assert vantage_server.executions() == []
+    assert vantage_server.requests.count(("POST", "/api/v1/runs")) == 2
+    assert not database.exists()
+    assert not outbox_path(database).exists()
+
+
 def test_server_plus_backup_stores_nothing_locally_when_the_server_takes_the_run(
     pytester: pytest.Pytester, vantage_server: VantageTestServer
 ) -> None:
@@ -764,7 +802,9 @@ def test_server_plus_backup_stores_nothing_locally_when_the_server_takes_the_run
     )
 
     result.assert_outcomes(passed=1, warnings=0)
-    result.stdout.fnmatch_lines([f"vantage: recording run * to {vantage_server.address}"])
+    result.stdout.fnmatch_lines(
+        [f"vantage: recording run * in project default to {vantage_server.address}"]
+    )
     assert len(vantage_server.executions()) == 1
     assert not database.exists()
     assert not outbox_path(database).exists()

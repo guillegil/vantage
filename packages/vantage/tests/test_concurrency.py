@@ -27,12 +27,18 @@ from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from vantage.core.domain.access import READ_SCOPE, SCOPES, new_token, token_digest
 from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.projects import DEFAULT_PROJECT, Project
 from vantage.core.domain.result import Result
 from vantage.core.domain.sections import MAX_SECTIONS
-from vantage.core.ports.storage import EMPTY_RUN_METADATA, ExecutionStore, RunMetadata
+from vantage.core.ports.storage import (
+    EMPTY_RUN_METADATA,
+    ExecutionStore,
+    ProjectExistsError,
+    RunMetadata,
+)
 from vantage.service.app import create_app
 from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
-from vantage.storage import sqlite_store
+from vantage.storage import connection, sqlite_store
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _result, _start_only_execution
 
@@ -87,7 +93,10 @@ def test_two_concurrent_sessions_both_leave_a_run_entry(tmp_path: Path) -> None:
 
         def _report(hex_id: str) -> None:
             created[hex_id] = store.record_session(
-                _execution(hex_id), results=(), received_at=datetime.now(timezone.utc)
+                _execution(hex_id),
+                results=(),
+                received_at=datetime.now(timezone.utc),
+                project=DEFAULT_PROJECT,
             )
 
         errors = _run_concurrently([partial(_report, hex_id) for hex_id in ids])
@@ -115,7 +124,10 @@ def test_two_concurrent_two_hundred_test_sessions_leave_four_hundred_results(
         def _report(hex_id: str, prefix: str) -> None:
             results = [_result(f"t.py::test_{prefix}_{i}") for i in range(200)]
             store.record_session(
-                _execution(hex_id), results=results, received_at=datetime.now(timezone.utc)
+                _execution(hex_id),
+                results=results,
+                received_at=datetime.now(timezone.utc),
+                project=DEFAULT_PROJECT,
             )
 
         errors = _run_concurrently(
@@ -143,7 +155,10 @@ def test_ten_simultaneous_sessions_leave_ten_run_entries_and_raise_nothing(
 
         def _report(hex_id: str) -> None:
             store.record_session(
-                _execution(hex_id), results=(), received_at=datetime.now(timezone.utc)
+                _execution(hex_id),
+                results=(),
+                received_at=datetime.now(timezone.utc),
+                project=DEFAULT_PROJECT,
             )
 
         errors = _run_concurrently([partial(_report, hex_id) for hex_id in session_ids])
@@ -164,12 +179,12 @@ def _park_the_writer_inside_its_transaction(
     release = threading.Event()
     resolve = sqlite_store._resolve_test_case_ids
 
-    def _parked(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, int]:
+    def _parked(conn: sqlite3.Connection, project: str, node_ids: Sequence[str]) -> dict[str, int]:
         inside.set()
         release.wait(_JOIN_TIMEOUT_SECONDS)
         if then_fail:
             raise RuntimeError("the write fails after its run row")
-        return resolve(conn, node_ids)
+        return resolve(conn, project, node_ids)
 
     monkeypatch.setattr(sqlite_store, "_resolve_test_case_ids", _parked)
     return inside, release
@@ -192,7 +207,10 @@ def test_a_read_never_sees_another_threads_write_in_progress(
     def _write() -> None:
         with contextlib.suppress(RuntimeError):
             store.record_session(
-                _execution(run_id), results=results, received_at=datetime.now(timezone.utc)
+                _execution(run_id),
+                results=results,
+                received_at=datetime.now(timezone.utc),
+                project=DEFAULT_PROJECT,
             )
 
     def _read() -> None:
@@ -201,7 +219,7 @@ def test_a_read_never_sees_another_threads_write_in_progress(
                 store.get_execution(run_id) is not None,
                 len(store.get_results(run_id)),
                 store.count_executions(),
-                len(store.list_runs(limit=10, offset=0).items),
+                len(store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items),
             )
         )
 
@@ -234,22 +252,37 @@ def test_every_read_returns_rather_than_waiting_on_the_stores_own_lock(tmp_path:
         _execution(run_id),
         results=[_result("t.py::test_a")],
         received_at=datetime.now(timezone.utc),
+        project=DEFAULT_PROJECT,
     )
     reads: list[Callable[[], object]] = [
         partial(store.get_execution, run_id),
         store.count_executions,
         partial(store.get_results, run_id),
         store.count_results,
-        partial(store.get_catalogue_entry, "t.py::test_a"),
-        partial(store.list_runs, limit=10, offset=0),
-        partial(store.list_runs_with_metadata_horizon, filters=[("k", "v")], limit=10, offset=0),
+        partial(store.get_catalogue_entry, "t.py::test_a", project=DEFAULT_PROJECT),
+        partial(store.list_runs, limit=10, offset=0, project=DEFAULT_PROJECT),
+        partial(
+            store.list_runs_with_metadata_horizon,
+            filters=[("k", "v")],
+            limit=10,
+            offset=0,
+            project=DEFAULT_PROJECT,
+        ),
         partial(store.get_run_detail, run_id),
         partial(store.get_run_metadata, run_id),
         partial(store.list_results, run_id, limit=10, offset=0),
         partial(store.get_result, run_id, node_id="t.py::test_a"),
-        partial(store.list_history, node_id="t.py::test_a", limit=10, offset=0),
-        partial(store.list_settings, "test_sections"),
+        partial(
+            store.list_history,
+            node_id="t.py::test_a",
+            limit=10,
+            offset=0,
+            project=DEFAULT_PROJECT,
+        ),
+        partial(store.list_settings, "test_sections", project=DEFAULT_PROJECT),
         partial(store.get_run_case_outcomes, run_id),
+        partial(store.get_project, DEFAULT_PROJECT),
+        store.list_projects,
     ]
     try:
         assert _run_concurrently(reads) == []
@@ -272,6 +305,7 @@ def test_two_stores_on_one_file_both_land_every_session(tmp_path: Path) -> None:
                     _execution(f"{prefix}{i:031x}"),
                     results=[_result(f"t.py::test_{prefix}_{i}_{j}") for j in range(20)],
                     received_at=datetime.now(timezone.utc),
+                    project=DEFAULT_PROJECT,
                 )
 
         errors = _run_concurrently(
@@ -284,6 +318,131 @@ def test_two_stores_on_one_file_both_land_every_session(tmp_path: Path) -> None:
     finally:
         for store in stores:
             store.close()
+
+
+def test_stores_opening_one_empty_database_at_once_leave_one_default_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every opener finds the new file empty and writes the schema, the
+    stamp and `default`; the ones after the first must find `default`
+    written and leave it, not fail on it or add a second."""
+    openers = 4
+    # Each opener waits here until all have looked, so every one of them
+    # finds the file empty and writes the schema, however fast the first is.
+    all_looked = threading.Barrier(openers, timeout=_JOIN_TIMEOUT_SECONDS)
+    look = connection._schema_objects
+
+    def _look_together(conn: sqlite3.Connection) -> set[str]:
+        found = look(conn)
+        all_looked.wait()
+        return found
+
+    monkeypatch.setattr(connection, "_schema_objects", _look_together)
+    db_path = tmp_path / "store" / "vantage.db"
+    opened: list[SqliteExecutionStore] = []
+
+    def _open() -> None:
+        opened.append(SqliteExecutionStore(db_path))
+
+    try:
+        errors = _run_concurrently([_open for _ in range(openers)])
+
+        assert errors == []
+        assert len(opened) == openers
+        for store in opened:
+            assert [project.name for project in store.list_projects()] == [DEFAULT_PROJECT]
+    finally:
+        for store in opened:
+            store.close()
+
+
+def _with_frequent_thread_switches(run: Callable[[], list[BaseException]]) -> list[BaseException]:
+    """`run()`, switching threads far more often than usual. Pure-Python work
+    rarely yields the GIL mid-call at the default interval; switching often is
+    what makes a race in the in-memory adapter likely enough to be caught."""
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        return run()
+    finally:
+        sys.setswitchinterval(interval)
+
+
+def test_racing_to_create_one_project_creates_it_once(any_store: ExecutionStore) -> None:
+    """Checking that the name is free and then writing it would let every
+    racer see it free. Exactly one racer creates the project, every other
+    one is told it exists, and the project is listed once."""
+    racers = 16
+    created: list[Project] = []
+    refused: list[int] = []
+    now = datetime.now(timezone.utc)
+
+    def _create(index: int) -> None:
+        try:
+            created.append(any_store.create_project("firmware", created_at=now))
+        except ProjectExistsError:
+            refused.append(index)
+
+    errors = _with_frequent_thread_switches(
+        lambda: _run_concurrently([partial(_create, index) for index in range(racers)])
+    )
+
+    assert errors == []
+    assert len(created) == 1
+    assert len(refused) == racers - 1
+    assert [project.name for project in any_store.list_projects()] == [DEFAULT_PROJECT, "firmware"]
+
+
+def test_concurrent_reports_of_one_node_id_into_two_projects_keep_a_catalogue_each(
+    any_store: ExecutionStore,
+) -> None:
+    """Two projects run the same tests at once. Each keeps its own catalogue
+    row per node id -- first and last seen within its own runs -- and each
+    project's history holds its own runs alone, every result once: a report
+    that found or wrote the other project's row would mix the two."""
+    now = datetime.now(timezone.utc)
+    any_store.create_project("firmware", created_at=now)
+    node_ids = [f"tests/test_shared.py::test_{index:02d}" for index in range(20)]
+    base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+    runs = {
+        DEFAULT_PROJECT: [f"a{index:031x}" for index in range(4)],
+        "firmware": [f"b{index:031x}" for index in range(4)],
+    }
+    started = {
+        run_id: base + timedelta(minutes=index)
+        for project_runs in runs.values()
+        for index, run_id in enumerate(project_runs)
+    }
+
+    def _report(project: str, run_id: str) -> None:
+        any_store.record_session(
+            _start_only_execution(run_id, started=started[run_id]),
+            results=[_result(node_id) for node_id in node_ids],
+            received_at=now,
+            project=project,
+        )
+
+    errors = _with_frequent_thread_switches(
+        lambda: _run_concurrently(
+            [
+                partial(_report, project, run_id)
+                for project, project_runs in runs.items()
+                for run_id in project_runs
+            ]
+        )
+    )
+
+    assert errors == []
+    assert any_store.count_results() == len(started) * len(node_ids)
+    for project, project_runs in runs.items():
+        for node_id in node_ids:
+            entry = any_store.get_catalogue_entry(node_id, project=project)
+            assert entry is not None
+            assert entry.first_seen_at == started[project_runs[0]]
+            assert entry.last_seen_at == started[project_runs[-1]]
+            assert entry.last_seen_run_id == project_runs[-1]
+            history = any_store.list_history(project=project, node_id=node_id, limit=50, offset=0)
+            assert [item.run_id for item in history.items] == project_runs[::-1]
 
 
 # --- The HTTP layer ------------------------------------------------------------
@@ -321,6 +480,7 @@ class _ParkedWriteStore(InMemoryExecutionStore):
         self,
         execution: Execution,
         *,
+        project: str,
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
@@ -330,6 +490,7 @@ class _ParkedWriteStore(InMemoryExecutionStore):
         self.release.wait(2 * _JOIN_TIMEOUT_SECONDS)
         return super().record_session(
             execution,
+            project=project,
             results=results,
             received_at=received_at,
             metadata=metadata,
@@ -350,6 +511,7 @@ def test_a_slow_store_write_holds_up_no_other_request() -> None:
         _start_only_execution(live_run),
         results=(),
         received_at=datetime.now(timezone.utc),
+        project=DEFAULT_PROJECT,
     )
     answered: dict[str, int] = {}
 
@@ -391,10 +553,12 @@ _HELD_NODE = "tests/test_held.py::test_x"
 _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "create_run": ("POST", "/api/v1/runs", {"json": _report("d" * 32)}, "record_session"),
     "heartbeat": ("POST", f"/api/v1/runs/{_HELD_RUN}/heartbeat", {}, "get_run_detail"),
-    "list_runs": ("GET", "/api/v1/runs", {}, "list_runs"),
+    "list_projects": ("GET", "/api/v1/projects", {}, "list_projects"),
+    "create_project": ("POST", "/api/v1/projects", {"json": {"name": "held"}}, "create_project"),
+    "list_runs": ("GET", "/api/v1/projects/default/runs", {}, "list_runs"),
     "list_runs_by_metadata": (
         "GET",
-        "/api/v1/runs",
+        "/api/v1/projects/default/runs",
         {"params": {"metadata_key": "k", "metadata_value": "v"}},
         "list_runs_with_metadata_horizon",
     ),
@@ -409,30 +573,39 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     ),
     "list_history": (
         "GET",
-        "/api/v1/tests/history",
+        "/api/v1/projects/default/tests/history",
         {"params": {"node_id": _HELD_NODE}},
         "list_history",
     ),
-    "list_sections": ("GET", "/api/v1/config/sections", {}, "list_settings"),
+    "list_sections": ("GET", "/api/v1/projects/default/config/sections", {}, "list_settings"),
     "upsert_section": (
         "POST",
-        "/api/v1/config/sections",
+        "/api/v1/projects/default/config/sections",
         {"json": {"name": "Held", "prefix": "tests/held"}},
         "upsert_setting",
     ),
     "delete_section": (
         "DELETE",
-        "/api/v1/config/sections",
+        "/api/v1/projects/default/config/sections",
         {"params": {"name": "Seeded"}},
         "delete_setting",
     ),
-    "get_run_sections": ("GET", f"/api/v1/runs/{_HELD_RUN}/sections", {}, "get_execution"),
+    "get_run_sections": ("GET", f"/api/v1/runs/{_HELD_RUN}/sections", {}, "get_run_detail"),
     "list_users": ("GET", "/api/v1/users", {}, "list_users"),
     "create_user": ("POST", "/api/v1/users", {"json": {"name": "carol"}}, "create_user"),
     "update_user": ("PATCH", "/api/v1/users/bob", {"json": {"admin": True}}, "update_user"),
     "list_tokens": ("GET", "/api/v1/tokens", {}, "list_tokens"),
     "create_token": ("POST", "/api/v1/tokens", {"json": {"user": "bob"}}, "get_user"),
     "revoke_token": ("POST", "/api/v1/tokens/2/revoke", {}, "revoke_token"),
+}
+
+
+# A route under `/projects/{project}` looks its project up before its own
+# store call, in a dependency of its own, so that lookup is held too.
+_PROJECT_LOOKUPS: dict[str, tuple[str, str, dict[str, Any], str]] = {
+    f"{operation}-project": (method, path, request_kwargs, "get_project")
+    for operation, (method, path, request_kwargs, _held) in _STORE_ROUTES.items()
+    if path.startswith("/api/v1/projects/default/")
 }
 
 
@@ -472,7 +645,9 @@ def _hold(store: InMemoryExecutionStore, method: str) -> tuple[threading.Event, 
 
 
 @pytest.mark.parametrize(
-    ("method", "path", "request_kwargs", "held"), _STORE_ROUTES.values(), ids=_STORE_ROUTES
+    ("method", "path", "request_kwargs", "held"),
+    [*_STORE_ROUTES.values(), *_PROJECT_LOOKUPS.values()],
+    ids=[*_STORE_ROUTES, *_PROJECT_LOOKUPS],
 )
 def test_a_held_store_call_holds_up_no_other_request(
     method: str, path: str, request_kwargs: dict[str, Any], held: str
@@ -501,9 +676,14 @@ def test_a_held_store_call_holds_up_no_other_request(
         results=[_result(_HELD_NODE)],
         received_at=now,
         recorded_by="alice",
+        project=DEFAULT_PROJECT,
     )
     store.upsert_setting(
-        TEST_SECTIONS_NAMESPACE, "Seeded", value='{"prefix": "tests/seeded/"}', updated_at=now
+        TEST_SECTIONS_NAMESPACE,
+        "Seeded",
+        value='{"prefix": "tests/seeded/"}',
+        updated_at=now,
+        project=DEFAULT_PROJECT,
     )
     entered, release = _hold(store, held)
     answered: dict[str, int] = {}
@@ -560,7 +740,9 @@ def test_authenticating_holds_up_no_other_request(held: str) -> None:
     with TestClient(create_app(store)) as client:
 
         def _held_request() -> None:
-            answered["held"] = client.get("/api/v1/runs", headers=headers).status_code
+            answered["held"] = client.get(
+                "/api/v1/projects/default/runs", headers=headers
+            ).status_code
 
         def _capabilities() -> None:
             answered["capabilities"] = client.get("/api/v1/capabilities").status_code
@@ -595,6 +777,7 @@ def test_section_posts_racing_for_the_last_slot_never_pass_the_bound(
             f"Seeded{index:03d}",
             value='{"prefix": "tests/seeded/"}',
             updated_at=now,
+            project=DEFAULT_PROJECT,
         )
     racers = 16
     statuses: list[int] = []
@@ -603,18 +786,64 @@ def test_section_posts_racing_for_the_last_slot_never_pass_the_bound(
 
         def _post(index: int) -> None:
             section = {"name": f"Racer{index}", "prefix": f"tests/racer{index}"}
-            statuses.append(client.post("/api/v1/config/sections", json=section).status_code)
+            response = client.post("/api/v1/projects/default/config/sections", json=section)
+            statuses.append(response.status_code)
 
-        # Pure-Python work rarely yields the GIL mid-request at the default
-        # interval; switching threads far more often is what makes a race
-        # in the in-memory adapter likely enough to be caught.
-        interval = sys.getswitchinterval()
-        sys.setswitchinterval(1e-6)
-        try:
-            errors = _run_concurrently([partial(_post, index) for index in range(racers)])
-        finally:
-            sys.setswitchinterval(interval)
+        errors = _with_frequent_thread_switches(
+            lambda: _run_concurrently([partial(_post, index) for index in range(racers)])
+        )
 
     assert errors == []
     assert sorted(statuses) == [201] + [422] * (racers - 1)
-    assert len(any_store.list_settings(TEST_SECTIONS_NAMESPACE)) == MAX_SECTIONS
+    assert (
+        len(any_store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT))
+        == MAX_SECTIONS
+    )
+
+
+def test_section_posts_racing_for_the_last_slot_fill_each_project_independently(
+    any_store: ExecutionStore,
+) -> None:
+    """Each project has sections of its own, so each has a last slot of its
+    own. With both one short of the bound and posts racing into both, each
+    project gets exactly one racer: a count across projects would find both
+    full and create none, and one that did not make racers take turns would
+    create more than one in a project."""
+    now = datetime.now(timezone.utc)
+    projects = [DEFAULT_PROJECT, "firmware"]
+    any_store.create_project("firmware", created_at=now)
+    for project in projects:
+        for index in range(MAX_SECTIONS - 1):
+            any_store.upsert_setting(
+                TEST_SECTIONS_NAMESPACE,
+                f"Seeded{index:03d}",
+                value='{"prefix": "tests/seeded/"}',
+                updated_at=now,
+                project=project,
+            )
+    racers_per_project = 8
+    statuses: dict[str, list[int]] = {project: [] for project in projects}
+
+    with TestClient(create_app(any_store)) as client:
+
+        def _post(project: str, index: int) -> None:
+            section = {"name": f"Racer{index}", "prefix": f"tests/racer{index}"}
+            response = client.post(f"/api/v1/projects/{project}/config/sections", json=section)
+            statuses[project].append(response.status_code)
+
+        errors = _with_frequent_thread_switches(
+            lambda: _run_concurrently(
+                [
+                    partial(_post, project, index)
+                    for index in range(racers_per_project)
+                    for project in projects
+                ]
+            )
+        )
+
+    assert errors == []
+    for project in projects:
+        assert sorted(statuses[project]) == [201] + [422] * (racers_per_project - 1)
+        assert (
+            len(any_store.list_settings(TEST_SECTIONS_NAMESPACE, project=project)) == MAX_SECTIONS
+        )

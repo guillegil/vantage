@@ -6,11 +6,13 @@ and the local store both call it; what the route adds on top is in
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import pytest
 from memory_store import InMemoryExecutionStore
+from vantage.core.domain.projects import DEFAULT_PROJECT, Project
+from vantage.core.ports.storage import ProjectExistsError, UnknownProjectError
 from vantage.ingestion import Ingested, ingest
 from vantage.ingestion.decode import decode_json
 from vantage.ingestion.errors import InvalidJsonError, InvalidReportError, RejectionError
@@ -137,6 +139,122 @@ def test_received_at_is_the_time_the_caller_gives() -> None:
     detail = store.get_run_detail("a" * 32)
     assert detail is not None
     assert detail.last_contact_at == _RECEIVED_AT
+
+
+def _project_of(store: InMemoryExecutionStore, run_id: str = "a" * 32) -> str:
+    detail = store.get_run_detail(run_id)
+    assert detail is not None
+    return detail.project
+
+
+@pytest.mark.parametrize(
+    "sections",
+    [{}, {"project": None}, {"project": DEFAULT_PROJECT}],
+    ids=["absent", "null", "default"],
+)
+def test_a_report_naming_no_project_is_recorded_in_default(sections: dict[str, Any]) -> None:
+    """A plugin that predates projects, or any client that names none,
+    records where every run went before there were projects."""
+    store = InMemoryExecutionStore()
+
+    ingest(_report(**sections), store, received_at=_RECEIVED_AT)
+
+    assert _project_of(store) == DEFAULT_PROJECT
+    assert [p.name for p in store.list_projects()] == [DEFAULT_PROJECT]
+
+
+def test_a_report_is_recorded_in_the_project_it_names() -> None:
+    store = InMemoryExecutionStore()
+    store.create_project("alpha", created_at=_RECEIVED_AT)
+
+    ingest(_report(project="alpha"), store, received_at=_RECEIVED_AT)
+
+    assert _project_of(store) == "alpha"
+    assert store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items == ()
+
+
+def test_a_report_into_a_project_the_store_lacks_is_refused_and_makes_none() -> None:
+    """Without `create_missing_project` a report never makes a project: on
+    a server only an admin does."""
+    store = InMemoryExecutionStore()
+
+    with pytest.raises(UnknownProjectError):
+        ingest(_report(project="alpha"), store, received_at=_RECEIVED_AT)
+
+    assert store.count_executions() == 0
+    assert store.get_project("alpha") is None
+
+
+@pytest.mark.parametrize(
+    "project",
+    ["", "Bad", "a" * 65, 5, "../x", "a\x00", "a\ufffd"],
+    ids=["empty", "upper-case", "65-chars", "number", "path", "nul", "replacement"],
+)
+def test_a_project_that_is_no_project_name_is_refused_before_the_store_is_touched(
+    project: object,
+) -> None:
+    store = InMemoryExecutionStore()
+
+    with pytest.raises(InvalidReportError) as refused:
+        ingest(
+            _report(project=project), store, received_at=_RECEIVED_AT, create_missing_project=True
+        )
+
+    assert refused.value.fields == ["project"]
+    assert store.count_executions() == 0
+    assert [p.name for p in store.list_projects()] == [DEFAULT_PROJECT]
+
+
+def test_create_missing_project_makes_the_project_once_at_the_first_report() -> None:
+    store = InMemoryExecutionStore()
+    later = _RECEIVED_AT + timedelta(minutes=1)
+
+    first = ingest(
+        _report("a" * 32, project="alpha"),
+        store,
+        received_at=_RECEIVED_AT,
+        create_missing_project=True,
+    )
+    second = ingest(
+        _report("b" * 32, project="alpha"), store, received_at=later, create_missing_project=True
+    )
+
+    assert (first.created, second.created) == (True, True)
+    assert list(store.list_projects()) == [
+        Project(name="alpha", created_at=_RECEIVED_AT),
+        store.get_project(DEFAULT_PROJECT),
+    ]
+    assert (_project_of(store, "a" * 32), _project_of(store, "b" * 32)) == ("alpha", "alpha")
+
+
+def test_create_missing_project_leaves_an_existing_project_as_it_is() -> None:
+    store = InMemoryExecutionStore()
+    existing = store.create_project("alpha", created_at=_RECEIVED_AT - timedelta(days=1))
+
+    ingest(_report(project="alpha"), store, received_at=_RECEIVED_AT, create_missing_project=True)
+
+    assert store.get_project("alpha") == existing
+    assert _project_of(store) == "alpha"
+
+
+def test_create_missing_project_tolerates_another_writer_making_it_first() -> None:
+    """Two sessions storing into one local file can both find the project
+    missing; the one that loses the race records its run all the same."""
+
+    class _RacedStore(InMemoryExecutionStore):
+        def create_project(self, name: str, *, created_at: datetime) -> Project:
+            super().create_project(name, created_at=created_at - timedelta(seconds=1))
+            raise ProjectExistsError(name)
+
+    store = _RacedStore()
+
+    ingested = ingest(
+        _report(project="alpha"), store, received_at=_RECEIVED_AT, create_missing_project=True
+    )
+
+    assert ingested.created is True
+    assert _project_of(store) == "alpha"
+    assert [p.name for p in store.list_projects()] == ["alpha", DEFAULT_PROJECT]
 
 
 def test_decode_json_refuses_what_is_not_strict_json_as_a_plain_exception() -> None:

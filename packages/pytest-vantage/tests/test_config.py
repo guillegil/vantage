@@ -15,7 +15,9 @@ import socket
 
 import pytest
 from pytest_vantage.config import (
+    DEFAULT_PROJECT,
     VantageConfigError,
+    resolve_project,
     resolve_report_timeout,
     resolve_server_address,
     resolve_settings,
@@ -128,7 +130,6 @@ def test_an_ini_value_of_the_wrong_type_is_refused_naming_the_option(
 
 
 # --- Reading the real configuration --------------------------------------------
-# --- Reading the real configuration --------------------------------------------
 
 
 def test_settings_read_the_ini_address_and_timeout(
@@ -174,6 +175,172 @@ def test_a_numeric_timeout_in_the_native_toml_table_is_accepted(
     pytester.makepyprojecttoml(f"[tool.pytest]\nvantage_timeout = {value}\n")
 
     assert resolve_settings(pytester.parseconfig()).timeout == float(value)
+
+
+# --- The project ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("cli", "env", "ini", "expected"),
+    [
+        ("from-cli", "from-env", "from-ini", "from-cli"),
+        (None, "from-env", "from-ini", "from-env"),
+        (None, None, "from-ini", "from-ini"),
+        (None, None, None, DEFAULT_PROJECT),
+    ],
+)
+def test_project_precedence_is_cli_then_environment_then_ini_then_default(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    cli: str | None,
+    env: str | None,
+    ini: str | None,
+    expected: str,
+) -> None:
+    """The address's precedence: the most session-specific source first,
+    and CI's environment over a value committed for everyone."""
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+    if env is not None:
+        monkeypatch.setenv("VANTAGE_PROJECT", env)
+    if ini is not None:
+        pytester.makeini(f"[pytest]\nvantage_project = {ini}\n")
+    args = [f"--vantage-project={cli}"] if cli is not None else []
+
+    assert resolve_project(pytester.parseconfig(*args)) == expected
+
+
+@pytest.mark.parametrize(
+    ("cli", "env", "expected"),
+    [("from-cli", "Not A Project", "from-cli"), (None, "from-env", "from-env")],
+    ids=["command line over a broken environment and ini", "environment over a broken ini"],
+)
+def test_a_project_that_wins_means_the_broken_ones_below_it_are_never_checked(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    cli: str | None,
+    env: str,
+    expected: str,
+) -> None:
+    """Only the winning source is read, so a broken committed value cannot
+    stop a session that overrides it."""
+    monkeypatch.setenv("VANTAGE_PROJECT", env)
+    pytester.makeini("[pytest]\nvantage_project = ../Broken\n")
+    args = [f"--vantage-project={cli}"] if cli is not None else []
+
+    assert resolve_project(pytester.parseconfig(*args)) == expected
+
+
+class _ProjectConfigDouble:
+    """Hands `resolve_project` a command-line value and an ini value of any
+    type, and counts every ini read."""
+
+    def __init__(self, cli: object = None, ini: object = None) -> None:
+        self._cli = cli
+        self._ini = ini
+        self.ini_reads: list[str] = []
+
+    def getoption(self, name: str, default: object = None) -> object:
+        return self._cli if name == "vantage_project" else default
+
+    def getini(self, name: str) -> object:
+        self.ini_reads.append(name)
+        return self._ini
+
+
+@pytest.mark.parametrize(
+    ("cli", "env"), [("from-cli", None), (None, "from-env")], ids=["command line", "environment"]
+)
+def test_the_ini_project_is_not_even_read_when_another_source_wins(
+    monkeypatch: pytest.MonkeyPatch, cli: str | None, env: str | None
+) -> None:
+    """A value pytest cannot convert raises from `getini` itself, so a
+    session that overrides it must never ask."""
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+    if env is not None:
+        monkeypatch.setenv("VANTAGE_PROJECT", env)
+    config = _ProjectConfigDouble(cli=cli, ini=["unused"])
+
+    project = resolve_project(config)  # type: ignore[arg-type]
+
+    assert project == (cli or env)
+    assert config.ini_reads == []
+
+
+def test_an_empty_project_is_unset_at_every_level(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty value passes the choice on rather than naming a project
+    no server could have: `--vantage-project=` falls to the environment,
+    an empty variable to the ini value, an empty ini value to `default`."""
+    monkeypatch.setenv("VANTAGE_PROJECT", "")
+    pytester.makeini("[pytest]\nvantage_project = from-ini\n")
+    assert resolve_project(pytester.parseconfig("--vantage-project=")) == "from-ini"
+
+    monkeypatch.setenv("VANTAGE_PROJECT", "from-env")
+    assert resolve_project(pytester.parseconfig("--vantage-project=")) == "from-env"
+
+    monkeypatch.setenv("VANTAGE_PROJECT", "")
+    pytester.makeini("[pytest]\nvantage_project =\n")
+    assert resolve_project(pytester.parseconfig("--vantage-project=")) == DEFAULT_PROJECT
+
+
+@pytest.mark.parametrize("ini", [["foo"], 5, {"name": "foo"}, True], ids=repr)
+def test_a_non_string_ini_project_is_refused_naming_the_option(
+    monkeypatch: pytest.MonkeyPatch, ini: object
+) -> None:
+    """A TOML list, number or table is no project name: a configuration
+    error naming where it came from, never a `TypeError` from the rule."""
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+
+    with pytest.raises(VantageConfigError, match=r"^vantage_project ini value must be a project"):
+        resolve_project(_ProjectConfigDouble(ini=ini))  # type: ignore[arg-type]
+
+
+_RULE = (
+    "must be a project name: 1 to 64 characters of a-z, 0-9, '.', '_' and '-', "
+    "starting with a letter or a digit"
+)
+
+
+@pytest.mark.parametrize(
+    ("source", "value"),
+    [
+        ("--vantage-project", "Foo"),
+        ("--vantage-project", "a" * 65),
+        ("VANTAGE_PROJECT", "../x"),
+        ("VANTAGE_PROJECT", "-leading-dash"),
+        ("vantage_project ini value", "has space"),
+        ("vantage_project ini value", "caf\u00e9"),
+    ],
+)
+def test_an_invalid_project_is_refused_naming_its_source_and_the_value(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, source: str, value: str
+) -> None:
+    """The message says which of three places to fix and what is there.
+    Nothing is lower-cased or trimmed into shape: `Foo` read as `foo`
+    would file the run in a project nobody named."""
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+    args: list[str] = []
+    if source == "--vantage-project":
+        args = [f"--vantage-project={value}"]
+    elif source == "VANTAGE_PROJECT":
+        monkeypatch.setenv("VANTAGE_PROJECT", value)
+    else:
+        pytester.makeini(f"[pytest]\nvantage_project = {value}\n")
+
+    with pytest.raises(VantageConfigError) as refused:
+        resolve_project(pytester.parseconfig(*args))
+
+    assert str(refused.value) == f"{source} {_RULE} (got {value!r})"
+
+
+@pytest.mark.parametrize("value", ["a" * 64, "0", "a.b_c-d", "9lives"])
+def test_every_name_the_rule_allows_is_taken_as_given(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+
+    assert resolve_project(pytester.parseconfig(f"--vantage-project={value}")) == value
 
 
 # --- The plugin's response to an invalid configuration --------------------------
@@ -223,6 +390,24 @@ _INVALID_CONFIGURATIONS = {
     ),
     "non-numeric timeout in the ini file": ("vantage_timeout = ten", {}, [], "vantage_timeout"),
     "negative timeout in the ini file": ("vantage_timeout = -1", {}, [], "vantage_timeout"),
+    "upper-case project on the command line": (
+        "",
+        {},
+        ["--vantage-project=Foo"],
+        "--vantage-project",
+    ),
+    "path-like project in the environment": (
+        "",
+        {"VANTAGE_PROJECT": "../x"},
+        [],
+        "VANTAGE_PROJECT",
+    ),
+    "over-long project in the ini file": (
+        f"vantage_project = {'a' * 65}",
+        {},
+        [],
+        "vantage_project",
+    ),
 }
 
 
@@ -242,6 +427,7 @@ def test_an_invalid_configuration_is_a_usage_error_naming_the_option(
     """One line naming the option and exit status 4, the same for every
     source and every kind of problem -- never an INTERNALERROR traceback."""
     monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
     for name, value in environment.items():
         monkeypatch.setenv(name, value)
     if ini_line:
@@ -264,7 +450,10 @@ def test_an_invalid_ini_value_is_never_read_without_vantage(
 ) -> None:
     """The differential counterpart: the same committed values do nothing
     at all unless recording was asked for."""
-    pytester.makeini("[pytest]\nvantage_server = ftp://127.0.0.1:1\nvantage_timeout = ten\n")
+    pytester.makeini(
+        "[pytest]\nvantage_server = ftp://127.0.0.1:1\nvantage_timeout = ten\n"
+        "vantage_project = Not/A/Project\n"
+    )
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
     result = pytester.runpytest()

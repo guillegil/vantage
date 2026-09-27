@@ -371,7 +371,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$out"
-          if ! grep -Eq "^vantage: recording run [0-9a-f]{32} to $database\$" <<<"$out"; then
+          if ! grep -Eq "^vantage: recording run [0-9a-f]{32} in project default to $database\$" <<<"$out"; then
             echo "expected the session to record to $database, where vantage serves by default" >&2
             exit 1
           fi
@@ -388,7 +388,7 @@ jobs:
           import sys
           from vantage.storage.sqlite_store import SqliteExecutionStore
           store = SqliteExecutionStore(sys.argv[1])
-          print(len(store.list_runs(limit=10, offset=0).items))
+          print(len(store.list_runs(project="default", limit=10, offset=0).items))
           store.close()
           ' "$database")"
           if [ "$runs" != 1 ]; then

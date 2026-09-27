@@ -404,7 +404,7 @@ def test_runs_are_filtered_by_several_keys_at_once(
 
     both = _get(
         vantage_server,
-        "/runs",
+        "/projects/default/runs",
         [
             ("metadata_key", "fpga.firmware"),
             ("metadata_value", "1.1.0"),
@@ -413,7 +413,9 @@ def test_runs_are_filtered_by_several_keys_at_once(
         ],
     )
     firmware_only = _get(
-        vantage_server, "/runs", [("metadata_key", "fpga.firmware"), ("metadata_value", "1.1.0")]
+        vantage_server,
+        "/projects/default/runs",
+        [("metadata_key", "fpga.firmware"), ("metadata_value", "1.1.0")],
     )
 
     assert [item["id"] for item in both["items"]] == [run_ids[2]]

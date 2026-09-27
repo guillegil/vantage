@@ -16,6 +16,9 @@ malformed ever reaches the socket layer.
 `resolve_mode` and `resolve_local_database` do the same for where a run is
 kept: on the server, in a local SQLite database, or both.
 
+`resolve_project` names the project the run belongs to: where it goes, like
+the address, so the command line, the environment and ini all give it.
+
 `resolve_token` reads the token a server with users needs from the
 ``VANTAGE_TOKEN`` environment variable, and from nowhere else: an ini value
 is committed for everyone who checks the project out to read, and a
@@ -244,6 +247,42 @@ _POSTGRES_SCHEMES = frozenset({"postgresql", "postgres"})
 _URL_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 
 
+DEFAULT_PROJECT = "default"
+"""The project of a run that names none; the server's own is pinned to it
+by `test_server_contract.py`."""
+
+# The server's project-name rule, kept here since the plugin declares
+# nothing of `vantage`; `test_server_contract.py` pins the two together.
+_PROJECT_NAME_PATTERN = r"\A[a-z0-9][a-z0-9._-]{0,63}\Z"
+_PROJECT_NAME_RE = re.compile(_PROJECT_NAME_PATTERN)
+
+
+def resolve_project(config: pytest.Config) -> str:
+    """The project the run belongs to: `--vantage-project` >
+    `VANTAGE_PROJECT` > the `vantage_project` ini value > `default` -- the
+    address's precedence, the most session-specific source first. Only the
+    winning source is read, so a broken committed ini value cannot stop a
+    session that overrides it. An empty value is unset. A name no project
+    can have is refused, naming its source; nothing is lower-cased, which
+    would file the run somewhere else."""
+    cli_project = config.getoption("vantage_project", default=None)
+    env_project = os.environ.get("VANTAGE_PROJECT")
+    if cli_project:
+        option, raw = "--vantage-project", cli_project
+    elif env_project:
+        option, raw = "VANTAGE_PROJECT", env_project
+    else:
+        option, raw = "vantage_project ini value", _read_ini(config, "vantage_project")
+        if raw is None or raw == "":
+            return DEFAULT_PROJECT
+    if not isinstance(raw, str) or not _PROJECT_NAME_RE.match(raw):
+        raise VantageConfigError(
+            f"{option} must be a project name: 1 to 64 characters of a-z, 0-9, '.', '_' "
+            f"and '-', starting with a letter or a digit (got {raw!r})"
+        )
+    return raw
+
+
 def resolve_mode(config: pytest.Config) -> str:
     """Where a recorded run goes: `--vantage-mode` > the `vantage_mode` ini
     value > `server`. Like the address, it says where, never whether, so the
@@ -331,6 +370,7 @@ def resolve_liveness_timeout(report_timeout: float) -> float:
 
 __all__ = [
     "BACKUP_MODE",
+    "DEFAULT_PROJECT",
     "LOCAL_MODE",
     "MODES",
     "SERVER_AND_LOCAL_MODE",
@@ -341,6 +381,7 @@ __all__ = [
     "resolve_liveness_timeout",
     "resolve_local_database",
     "resolve_mode",
+    "resolve_project",
     "resolve_report_timeout",
     "resolve_server_address",
     "resolve_settings",

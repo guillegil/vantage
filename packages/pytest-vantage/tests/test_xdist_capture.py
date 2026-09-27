@@ -69,6 +69,43 @@ def test_six_tests_under_xdist_produce_six_results_and_one_run_entry(
     assert worker_ids == {"gw0", "gw1"}
 
 
+def test_an_xdist_session_is_one_run_in_its_project_with_every_result_catalogued_there(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the controller reads `--vantage-project` and sends, so the
+    workers' results all arrive in the one run it files in `foo`: the
+    catalogue of `foo` holds every test, last seen in that run, and the
+    catalogue of `default` none of them."""
+    pytest.importorskip("xdist")
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+    vantage_server.add_project("foo")
+    pytester.makepyfile(test_six=_SIX_TESTS)
+
+    run = pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={vantage_server.address}",
+        "--vantage-project=foo",
+        "-n",
+        "2",
+    )
+
+    run.assert_outcomes(passed=6)
+    (execution,) = vantage_server.executions()
+    run_id = execution.identity.value
+    assert vantage_server.project_of(run_id) == "foo"
+    results = vantage_server.results()
+    assert {result.worker_id for result in results} == {"gw0", "gw1"}
+    node_ids = [f"test_six.py::test_{n}" for n in range(1, 7)]
+    assert sorted(result.identity.node_id for result in results) == node_ids
+    for node_id in node_ids:
+        entry = vantage_server.catalogue_entry(node_id, project="foo")
+        assert entry is not None, node_id
+        assert entry.last_seen_run_id == run_id
+        assert vantage_server.catalogue_entry(node_id) is None
+
+
 _CRASHES_ITS_WORKER = """
 import os
 

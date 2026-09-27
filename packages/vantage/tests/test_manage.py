@@ -1,5 +1,6 @@
-"""`vantage user` and `vantage token`: managing a database's users and their
-tokens where the database is (`service/manage.py`).
+"""`vantage user`, `vantage token` and `vantage project`: managing a
+database's users, their tokens and its projects where the database is
+(`service/manage.py`).
 
 The commands run in process through `cli.main`, as the `vantage` entry
 point runs them, and every result is read back through a store of its own,
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import pytest
 from vantage.core.domain.access import ADMIN_SCOPE, READ_SCOPE, RECORD_SCOPE, token_digest
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service import cli
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -88,6 +90,19 @@ def test_adding_a_later_user_says_only_that(
     assert carol is not None and carol.admin is False
 
 
+@pytest.mark.parametrize("command", ["user", "project"])
+def test_a_refused_name_creates_no_database(
+    capsys: pytest.CaptureFixture[str], database: Path, command: str
+) -> None:
+    """The name is checked before the database is opened, so a refusal
+    leaves nothing behind, not even an empty database."""
+    status, out, err = _run(capsys, command, "add", "Bad", "--database", str(database))
+
+    assert (status, out) == (1, "")
+    assert err.startswith(f"vantage: a {command} name is 1 to 64 characters")
+    assert not database.parent.exists()
+
+
 @pytest.mark.parametrize(
     ("name", "refusal"),
     [
@@ -147,6 +162,7 @@ def test_listing_users_of_a_database_with_none_prints_nothing(
         ["token", "create", "alice"],
         ["token", "list"],
         ["token", "revoke", "1"],
+        ["project", "list"],
     ],
 )
 def test_no_command_but_adding_a_user_creates_a_database(
@@ -357,6 +373,81 @@ def test_revoking_an_id_no_token_can_have_is_one_line(
     assert err == f"vantage: there is no token {token_id} to revoke, or it is revoked already\n"
 
 
+# --- Projects -------------------------------------------------------------------------
+
+_PROJECT_NAME_RULE = (
+    "vantage: a project name is 1 to 64 characters of a-z, 0-9, '.', '_' and '-', "
+    "starting with a letter or a digit\n"
+)
+
+
+def _project_names(database: Path) -> list[str]:
+    store = SqliteExecutionStore(database)
+    try:
+        return [project.name for project in store.list_projects()]
+    finally:
+        store.close()
+
+
+def test_adding_a_project_creates_a_missing_database_and_says_it_added_it(
+    capsys: pytest.CaptureFixture[str], database: Path
+) -> None:
+    """Setting up a server's projects comes before serving it, as its users
+    do."""
+    status, out, err = _run(capsys, "project", "add", "firmware", "--database", str(database))
+
+    assert (status, out, err) == (0, "", "vantage: added project firmware\n")
+    assert _project_names(database) == [DEFAULT_PROJECT, "firmware"]
+
+
+@pytest.mark.parametrize(
+    ("name", "refusal"),
+    [
+        ("default", "vantage: there is already a project named default\n"),
+        ("firmware", "vantage: there is already a project named firmware\n"),
+        ("Firmware", _PROJECT_NAME_RULE),
+        ("-firmware", _PROJECT_NAME_RULE),
+        ("../firmware", _PROJECT_NAME_RULE),
+        ("f" * 65, _PROJECT_NAME_RULE),
+    ],
+)
+def test_a_project_that_cannot_be_added_is_one_line_and_changes_nothing(
+    capsys: pytest.CaptureFixture[str], database: Path, name: str, refusal: str
+) -> None:
+    _run(capsys, "project", "add", "firmware", "--database", str(database))
+
+    status, out, err = _run(capsys, "project", "add", "--database", str(database), "--", name)
+
+    assert (status, out, err) == (1, "", refusal)
+    assert _project_names(database) == [DEFAULT_PROJECT, "firmware"]
+
+
+def test_projects_list_by_name_with_default_among_them(
+    capsys: pytest.CaptureFixture[str], database: Path
+) -> None:
+    for name in ("zephyr", "boards", "e2e"):
+        _run(capsys, "project", "add", name, "--database", str(database))
+
+    status, out, err = _run(capsys, "project", "list", "--database", str(database))
+
+    assert (status, err) == (0, "")
+    header, *rows = out.splitlines()
+    assert header.split() == ["NAME", "CREATED"]
+    assert [row.split()[0] for row in rows] == ["boards", "default", "e2e", "zephyr"]
+    assert all(len(row.split()) == 2 for row in rows)
+
+
+def test_a_new_database_lists_default_alone(
+    capsys: pytest.CaptureFixture[str], database: Path
+) -> None:
+    SqliteExecutionStore(database).close()
+
+    status, out, _err = _run(capsys, "project", "list", "--database", str(database))
+
+    assert status == 0
+    assert [row.split()[0] for row in out.splitlines()] == ["NAME", DEFAULT_PROJECT]
+
+
 def test_a_postgresql_database_is_managed_the_same_way(
     capsys: pytest.CaptureFixture[str], postgres_url: str
 ) -> None:
@@ -375,6 +466,21 @@ def test_a_postgresql_database_is_managed_the_same_way(
     finally:
         store.close()
     assert grant is not None and grant.user == "alice"
+
+
+def test_a_postgresql_databases_projects_are_managed_the_same_way(
+    capsys: pytest.CaptureFixture[str], postgres_url: str
+) -> None:
+    added = _run(capsys, "project", "add", "firmware", "--database", postgres_url)
+    again = _run(capsys, "project", "add", "firmware", "--database", postgres_url)
+    taken = _run(capsys, "project", "add", "default", "--database", postgres_url)
+    status, out, _err = _run(capsys, "project", "list", "--database", postgres_url)
+
+    assert added == (0, "", "vantage: added project firmware\n")
+    assert again == (1, "", "vantage: there is already a project named firmware\n")
+    assert taken == (1, "", "vantage: there is already a project named default\n")
+    assert status == 0
+    assert [row.split()[0] for row in out.splitlines()] == ["NAME", DEFAULT_PROJECT, "firmware"]
 
 
 def test_managing_users_needs_no_server_extra(tmp_path: Path) -> None:
@@ -402,6 +508,10 @@ def test_managing_users_needs_no_server_extra(tmp_path: Path) -> None:
 
     added = vantage("user", "add", "alice")
     created = vantage("token", "create", "alice")
+    project = vantage("project", "add", "firmware")
+    listed = vantage("project", "list")
 
     assert (added.returncode, created.returncode) == (0, 0), added.stderr + created.stderr
     assert created.stdout.startswith("vantage_")
+    assert (project.returncode, listed.returncode) == (0, 0), project.stderr + listed.stderr
+    assert "firmware" in listed.stdout

@@ -1,5 +1,5 @@
-"""The sections routes: the three CRUD routes for `test_sections` and the
-per-run section summary.
+"""The sections routes: the three CRUD routes for a project's
+`test_sections` and the per-run section summary.
 
 Runs the app factory against an injected `InMemoryExecutionStore`. These
 routes do not depend on the SQLite row-to-domain mappers, and the port
@@ -18,6 +18,7 @@ import httpx2 as httpx
 import pytest
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.domain.sections import (
     MAX_SECTIONS,
     SECTION_NAME_MAX_CHARS,
@@ -31,7 +32,9 @@ from vantage_port_contract import _execution, _result
 # `any_store`, for each adapter in turn.
 pytest_plugins = ["store_fixtures"]
 
-_SECTIONS = "/api/v1/config/sections"
+_SECTIONS = f"/api/v1/projects/{DEFAULT_PROJECT}/config/sections"
+
+_OTHER_PROJECT = "firmware"
 
 _UNKNOWN_RUN_ID = "0" * 32
 
@@ -50,6 +53,14 @@ def client(store: InMemoryExecutionStore) -> TestClient:
 
 def _upsert(client: TestClient, name: str, prefix: str) -> httpx.Response:
     return client.post(_SECTIONS, json={"name": name, "prefix": prefix})
+
+
+def _sections_of(project: str) -> str:
+    return f"/api/v1/projects/{project}/config/sections"
+
+
+def _add_project(store: ExecutionStore, name: str = _OTHER_PROJECT) -> None:
+    store.create_project(name, created_at=datetime.now(timezone.utc))
 
 
 # --- POST: create/update, trailing-slash coercion ---------------------------
@@ -98,7 +109,7 @@ def test_a_body_that_is_not_json_is_400_invalid_json(
 
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_json"
-    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT) == ()
 
 
 @pytest.mark.parametrize(
@@ -127,7 +138,7 @@ def test_a_body_that_is_not_declared_json_is_415(
     )
 
     assert response.status_code == 415
-    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT) == ()
 
 
 def test_a_body_over_the_cap_is_413(client: TestClient, store: InMemoryExecutionStore) -> None:
@@ -137,7 +148,7 @@ def test_a_body_over_the_cap_is_413(client: TestClient, store: InMemoryExecution
     )
 
     assert response.status_code == 413
-    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == ()
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT) == ()
 
 
 def test_the_largest_valid_section_fits_under_the_cap(client: TestClient) -> None:
@@ -241,6 +252,7 @@ def test_an_unreadable_stored_section_can_be_overwritten_in_place(
         "Broken",
         value="not valid json",
         updated_at=datetime.now(timezone.utc),
+        project=DEFAULT_PROJECT,
     )
     assert client.get(_SECTIONS).status_code == 500
 
@@ -343,14 +355,14 @@ def test_a_lone_surrogate_is_rejected_and_nothing_is_stored(
     `500`, and the in-memory store keeps the row and fails every later
     read."""
     _upsert(client, "Billing", "tests/billing")
-    before = store.list_settings(TEST_SECTIONS_NAMESPACE)
+    before = store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT)
 
     response = client.post(_SECTIONS, content=body, headers={"content-type": "application/json"})
 
     assert response.status_code == 422
     assert response.json()["error"] == expected_error
     assert "ud800" not in response.text
-    assert store.list_settings(TEST_SECTIONS_NAMESPACE) == before
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT) == before
     listing = client.get(_SECTIONS)
     assert listing.json() == {"items": [{"name": "Billing", "prefix": "tests/billing/"}]}
 
@@ -382,6 +394,7 @@ def test_deleting_a_name_holding_nul_deletes_nothing(any_store: ExecutionStore) 
         "Check\x00out",
         value='{"prefix": "tests/checkout/"}',
         updated_at=datetime.now(timezone.utc),
+        project=DEFAULT_PROJECT,
     )
     client = TestClient(create_app(any_store))
 
@@ -389,7 +402,7 @@ def test_deleting_a_name_holding_nul_deletes_nothing(any_store: ExecutionStore) 
 
     assert response.status_code == 404
     assert response.json()["error"] == "unknown_section"
-    assert len(any_store.list_settings(TEST_SECTIONS_NAMESPACE)) == 1
+    assert len(any_store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT)) == 1
 
 
 # --- GET /runs/{run_id}/sections: the run aggregate -------------------------
@@ -424,7 +437,10 @@ def test_run_sections_summary_worked_example_yields_94_4_percent(
         for index, outcome in enumerate(outcomes)
     ]
     store.record_session(
-        _execution(run_id, started=_SECTIONED_START), results=results, received_at=_SECTIONED_START
+        _execution(run_id, started=_SECTIONED_START),
+        results=results,
+        received_at=_SECTIONED_START,
+        project=DEFAULT_PROJECT,
     )
 
     response = _run_sections(client, run_id)
@@ -455,7 +471,10 @@ def test_run_sections_summary_totals_reconcile_with_unassigned_results(
         _result("tests/other/test_y.py::test_w", outcome="skipped"),
     ]
     store.record_session(
-        _execution(run_id, started=_SECTIONED_START), results=results, received_at=_SECTIONED_START
+        _execution(run_id, started=_SECTIONED_START),
+        results=results,
+        received_at=_SECTIONED_START,
+        project=DEFAULT_PROJECT,
     )
 
     response = _run_sections(client, run_id)
@@ -477,7 +496,10 @@ def test_renaming_a_section_regroups_history_with_zero_writes(
     run_id = "3" * 32
     results = [_result("tests/billing/test_x.py::test_0")]
     store.record_session(
-        _execution(run_id, started=_SECTIONED_START), results=results, received_at=_SECTIONED_START
+        _execution(run_id, started=_SECTIONED_START),
+        results=results,
+        received_at=_SECTIONED_START,
+        project=DEFAULT_PROJECT,
     )
     before_results = store.get_results(run_id)
     before_execution = store.get_execution(run_id)
@@ -505,10 +527,17 @@ def test_run_sections_summary_malformed_stored_value_is_500(
     (`UnreadableSettingError`), never a traceback."""
     run_id = "4" * 32
     store.record_session(
-        _execution(run_id, started=_SECTIONED_START), results=[], received_at=_SECTIONED_START
+        _execution(run_id, started=_SECTIONED_START),
+        results=[],
+        received_at=_SECTIONED_START,
+        project=DEFAULT_PROJECT,
     )
     store.upsert_setting(
-        TEST_SECTIONS_NAMESPACE, "Broken", value="not valid json", updated_at=_SECTIONED_START
+        TEST_SECTIONS_NAMESPACE,
+        "Broken",
+        value="not valid json",
+        updated_at=_SECTIONED_START,
+        project=DEFAULT_PROJECT,
     )
 
     response = _run_sections(client, run_id)
@@ -530,12 +559,14 @@ def test_a_stored_section_named_unassigned_is_unreadable_not_double_counted(
         _execution(run_id, started=_SECTIONED_START),
         results=[_result("tests/a/test_x.py::test_0"), _result("tests/b/test_y.py::test_0")],
         received_at=_SECTIONED_START,
+        project=DEFAULT_PROJECT,
     )
     store.upsert_setting(
         TEST_SECTIONS_NAMESPACE,
         "unassigned",
         value='{"prefix": "tests/a/"}',
         updated_at=_SECTIONED_START,
+        project=DEFAULT_PROJECT,
     )
 
     summary = _run_sections(client, run_id)
@@ -547,3 +578,161 @@ def test_a_stored_section_named_unassigned_is_unreadable_not_double_counted(
     assert listing.status_code == 500
     assert client.delete(_SECTIONS, params={"name": "unassigned"}).status_code == 204
     assert _run_sections(client, run_id).json()["unassigned"]["total"] == 2
+
+
+# --- Projects: each has its own sections ------------------------------------
+
+
+def test_one_name_is_a_separate_section_in_each_project(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A name taken in one project is new in another, and each project
+    lists only its own definition."""
+    _add_project(store)
+
+    in_default = _upsert(client, "Checkout", "tests/checkout")
+    in_other = client.post(
+        _sections_of(_OTHER_PROJECT), json={"name": "Checkout", "prefix": "firmware/checkout"}
+    )
+
+    assert in_default.status_code == 201
+    assert in_other.status_code == 201
+    assert client.get(_SECTIONS).json() == {
+        "items": [{"name": "Checkout", "prefix": "tests/checkout/"}]
+    }
+    assert client.get(_sections_of(_OTHER_PROJECT)).json() == {
+        "items": [{"name": "Checkout", "prefix": "firmware/checkout/"}]
+    }
+
+
+def test_deleting_a_section_in_one_project_leaves_the_other_projects(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    _add_project(store)
+    _upsert(client, "Checkout", "tests/checkout")
+    client.post(_sections_of(_OTHER_PROJECT), json={"name": "Checkout", "prefix": "tests/checkout"})
+
+    first = client.delete(_sections_of(_OTHER_PROJECT), params={"name": "Checkout"})
+    second = client.delete(_sections_of(_OTHER_PROJECT), params={"name": "Checkout"})
+
+    assert first.status_code == 204
+    assert second.status_code == 404
+    assert second.json()["error"] == "unknown_section"
+    assert client.get(_sections_of(_OTHER_PROJECT)).json() == {"items": []}
+    assert client.get(_SECTIONS).json() == {
+        "items": [{"name": "Checkout", "prefix": "tests/checkout/"}]
+    }
+
+
+def test_the_section_bound_is_counted_per_project(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A full project leaves another all `MAX_SECTIONS` of its own, and
+    filling that one leaves the first as it was."""
+    _add_project(store)
+    for index in range(MAX_SECTIONS):
+        store.upsert_setting(
+            TEST_SECTIONS_NAMESPACE,
+            f"Section{index}",
+            value='{"prefix": "tests/x/"}',
+            updated_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
+    other = _sections_of(_OTHER_PROJECT)
+
+    for index in range(MAX_SECTIONS):
+        response = client.post(other, json={"name": f"Other{index}", "prefix": f"tests/o{index}"})
+        assert response.status_code == 201
+
+    one_too_many = client.post(other, json={"name": "OneTooMany", "prefix": "tests/x"})
+    assert one_too_many.status_code == 422
+    assert one_too_many.json()["error"] == "too_many_sections"
+    assert _upsert(client, "OneTooMany", "tests/x").json()["error"] == "too_many_sections"
+    assert len(store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT)) == (
+        MAX_SECTIONS
+    )
+
+
+def test_run_sections_use_the_sections_of_the_runs_own_project(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A run in another project is summarised with that project's
+    sections: the `default` project's, matching the same node ids, never
+    reach it, and a run in `default` never sees the other project's."""
+    _add_project(store)
+    _upsert(client, "Billing", "tests/billing")
+    client.post(_sections_of(_OTHER_PROJECT), json={"name": "Payments", "prefix": "tests/billing"})
+    results = [_result("tests/billing/test_x.py::test_0"), _result("tests/other/test_y.py::test_0")]
+    other_run, default_run = "6" * 32, "7" * 32
+    store.record_session(
+        _execution(other_run, started=_SECTIONED_START),
+        results=results,
+        received_at=_SECTIONED_START,
+        project=_OTHER_PROJECT,
+    )
+    store.record_session(
+        _execution(default_run, started=_SECTIONED_START),
+        results=results,
+        received_at=_SECTIONED_START,
+        project=DEFAULT_PROJECT,
+    )
+
+    in_other = _run_sections(client, other_run).json()
+    in_default = _run_sections(client, default_run).json()
+
+    assert [(item["name"], item["total"]) for item in in_other["items"]] == [("Payments", 1)]
+    assert in_other["unassigned"]["total"] == 1
+    assert [(item["name"], item["total"]) for item in in_default["items"]] == [("Billing", 1)]
+    assert in_default["unassigned"]["total"] == 1
+
+
+# --- Projects: a project no store holds -------------------------------------
+
+
+_UNKNOWN_PROJECTS = pytest.mark.parametrize(
+    "project", ["nope", "Not-A-Name", "a" * 65], ids=["absent", "upper-case", "too-long"]
+)
+
+
+@_UNKNOWN_PROJECTS
+def test_posting_to_an_unknown_project_is_404_before_the_body_is_read(
+    client: TestClient, store: InMemoryExecutionStore, project: str
+) -> None:
+    """The project is resolved before the body is read, so a body over the
+    cap is not what the answer is about: the route would otherwise say
+    `413`."""
+    oversized = b'{"name": "a", "prefix": "b"}' + b" " * MAX_SECTION_BODY_BYTES
+
+    response = client.post(_sections_of(project), content=oversized, headers=_JSON)
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_project"
+    assert store.list_settings(TEST_SECTIONS_NAMESPACE, project=DEFAULT_PROJECT) == ()
+
+
+@_UNKNOWN_PROJECTS
+def test_listing_or_deleting_in_an_unknown_project_is_404(client: TestClient, project: str) -> None:
+    """Not an empty list, nor `unknown_section`: the project is what is
+    missing."""
+    _upsert(client, "Checkout", "tests/checkout")
+
+    listing = client.get(_sections_of(project))
+    deletion = client.delete(_sections_of(project), params={"name": "Checkout"})
+
+    assert listing.status_code == 404
+    assert listing.json()["error"] == "unknown_project"
+    assert deletion.status_code == 404
+    assert deletion.json()["error"] == "unknown_project"
+    assert client.get(_SECTIONS).json()["items"] == [
+        {"name": "Checkout", "prefix": "tests/checkout/"}
+    ]
+
+
+def test_the_sections_path_without_a_project_is_gone(client: TestClient) -> None:
+    """The routes live only under a project: the old path is no route at
+    all, so a client still using it learns that rather than reaching
+    `default`."""
+    for method in ("GET", "POST", "DELETE"):
+        response = client.request(method, "/api/v1/config/sections")
+        assert response.status_code == 404
+        assert response.json()["error"] == "not_found"

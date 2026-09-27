@@ -11,10 +11,10 @@ redirect from one, so an unversioned path answers 404.
 disk, on the store's own lock, on another process's write -- and one made on
 the loop would stall every other request until it returned, heartbeats
 included. So every route that reaches the store is a plain `def`, which
-FastAPI runs in its threadpool. `POST /runs`, `POST /config/sections`,
-`POST /users`, `PATCH /users/{name}` and `POST /tokens` are `async` only to
-stream their bodies under a size cap, and hand the rest to the threadpool
-themselves (`service/body.py`). The
+FastAPI runs in its threadpool. `POST /runs`, `POST /projects`, a
+project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`
+and `POST /tokens` are `async` only to stream their bodies under a size cap,
+and hand the rest to the threadpool themselves (`service/body.py`). The
 capabilities and interface-document routes never block and stay `async`, so
 they answer even while every worker thread waits on the store.
 
@@ -56,6 +56,7 @@ from vantage.core.config.resolution import DEFAULT_GRACE_PERIOD_SECONDS
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.errors import register_error_handlers
 from vantage.service.routes.capabilities import router as capabilities_router
+from vantage.service.routes.projects import router as projects_router
 from vantage.service.routes.read import router as read_router
 from vantage.service.routes.runs import router as runs_router
 from vantage.service.routes.sections import router as sections_router
@@ -100,5 +101,6 @@ def create_app(
     app.include_router(capabilities_router, prefix="/api/v1")
     app.include_router(sections_router, prefix="/api/v1")
     app.include_router(users_router, prefix="/api/v1")
+    app.include_router(projects_router, prefix="/api/v1")
     register_error_handlers(app)
     return app

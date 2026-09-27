@@ -34,6 +34,11 @@ one it does not accept (401), one without the record scope (403), or a run
 another user recorded (409) -- the error its body names is turned into an
 `AccessRefusedError` saying what to fix, still an `HTTPError` with the same
 status. The token never appears in it.
+
+A report names its project, and a server without it answers
+`404 unknown_project`: `send` turns that into a `ProjectRefusedError`,
+still an `HTTPError` 404, naming the project and how an admin adds it. Any
+other 404 -- a wrong base path's `not_found` -- stays a plain one.
 """
 
 from __future__ import annotations
@@ -71,6 +76,10 @@ _INSUFFICIENT_SCOPE = "insufficient_scope"
 _FOREIGN_RUN = "foreign_run"
 _ACCESS_REFUSALS = {401: _UNAUTHENTICATED, 403: _INSUFFICIENT_SCOPE, 409: _FOREIGN_RUN}
 
+# A server's refusal of a report for a project it does not have.
+# `test_server_contract.py` pins it to the server's `NoSuchProjectError`.
+_UNKNOWN_PROJECT = (404, "unknown_project")
+
 # The shape of a token the server could accept: printable ASCII with no
 # space, at most 512 characters. `test_server_contract.py` checks it agrees
 # with the server's `well_formed_token`.
@@ -81,6 +90,20 @@ def well_formed_token(text: str) -> bool:
     """Whether `text` could be a token: anything else would either never
     authenticate or not fit in a header at all."""
     return _TOKEN_RE.match(text) is not None
+
+
+class ProjectRefusedError(urllib_error.HTTPError):
+    """A vantage server has no project of the name a report gave: a run an
+    admin can let in by adding the project, so it is worth keeping. Its
+    status and headers are the refusal's."""
+
+    def __init__(self, refused: urllib_error.HTTPError, project: str, reason: str) -> None:
+        super().__init__(refused.url, refused.code, refused.msg, refused.headers, None)
+        self.project = project
+        self.reason_text = reason
+
+    def __str__(self) -> str:
+        return f"HTTP {self.code}: {self.reason_text}"
 
 
 class AccessRefusedError(urllib_error.HTTPError):
@@ -161,13 +184,20 @@ def run_within(timeout: float, work: Callable[[], _T]) -> _T:
 
 
 def _exchange(
-    http_request: urllib_request.Request, timeout: float, *, token: str | None = None
+    http_request: urllib_request.Request,
+    timeout: float,
+    *,
+    token: str | None = None,
+    project: str | None = None,
+    address: str | None = None,
 ) -> bytes:
     """Open ``http_request`` and read at most `MAX_RESPONSE_BYTES` of the
     answer, all within ``timeout`` seconds. A non-2xx status, 3xx included,
     raises `urllib.error.HTTPError`, as an `AccessRefusedError` when a
     vantage server refused who sent it; ``token`` is what was sent, if
-    anything, which the reason depends on.
+    anything, which the reason depends on. With ``project``, the report's,
+    a server's `404 unknown_project` raises `ProjectRefusedError` naming it
+    and ``address``.
     """
 
     def attempt() -> bytes:
@@ -179,12 +209,22 @@ def _exchange(
             # the connection is released before the error is handed on.
             try:
                 reason = None
+                missing_project = False
                 if exc.code in _ACCESS_REFUSALS:
                     reason = _refusal_reason(exc.code, _rejection_error(exc), token=token)
+                elif exc.code == _UNKNOWN_PROJECT[0] and project is not None:
+                    missing_project = _rejection_error(exc) == _UNKNOWN_PROJECT[1]
             finally:
                 exc.close()
             if reason is not None:
                 raise AccessRefusedError(exc, reason) from None
+            if missing_project and project is not None:
+                raise ProjectRefusedError(
+                    exc,
+                    project,
+                    f"{address} has no project {project}; an admin adds it with: "
+                    f"vantage project add {project}",
+                ) from None
             raise
         with response:
             body: bytes = response.read(MAX_RESPONSE_BYTES)
@@ -234,7 +274,13 @@ def send(
         headers=_headers(token),
         method="POST",
     )
-    acknowledgement = json.loads(_exchange(http_request, timeout, token=token))
+    project = report.get("project")
+    # A server answers `unknown_project` only for a name its own rule
+    # accepts -- anything else is a 422 -- so the name is safe to show.
+    named = project if isinstance(project, str) else "default"
+    acknowledgement = json.loads(
+        _exchange(http_request, timeout, token=token, project=named, address=address)
+    )
     run = report.get("run")
     run_id = run.get("id") if isinstance(run, dict) else None
     if not (
@@ -329,6 +375,7 @@ __all__ = [
     "MAX_RESPONSE_BYTES",
     "AccessRefusedError",
     "Capabilities",
+    "ProjectRefusedError",
     "fetch_capabilities",
     "run_within",
     "send",

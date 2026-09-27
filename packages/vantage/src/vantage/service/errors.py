@@ -138,7 +138,7 @@ class InvalidIdentityError(RejectionError):
 
 class InvalidMetadataFilterError(InvalidParameterError):
     """The `metadata_key` and `metadata_value` parameters of
-    `GET /api/v1/runs` do not make a filter: they are repeated a different
+    `GET /api/v1/projects/{project}/runs` do not make a filter: they are repeated a different
     number of times, or give more pairs than the route takes.
 
     A pair is two parameters rather than one `key=value` string because a
@@ -164,7 +164,7 @@ class InvalidMetadataFilterError(InvalidParameterError):
 
 
 class InvalidCursorError(InvalidParameterError):
-    """The `cursor` of `GET /api/v1/runs` or `GET /api/v1/tests/history` is
+    """The `cursor` of a project's run list or of a test's history in it is
     not one the server handed out as `next_cursor`, or comes with an offset.
     A cursor already says where the page starts, so an offset past it would
     be a second answer to the same question. `fields` names the parameters
@@ -212,6 +212,66 @@ class RunOfAnotherUserError(RejectionError):
 
     def __init__(self) -> None:
         super().__init__("This run was recorded by another user.")
+
+
+class NoSuchProjectError(RejectionError):
+    """No project has that name, or none can. For a report, `fields` names
+    its `project`; the name itself is never repeated."""
+
+    status_code = 404
+    error = "unknown_project"
+
+    def __init__(self, fields: list[str] | None = None) -> None:
+        super().__init__("No project with that name exists.", fields)
+
+
+class RunOfAnotherProjectError(RejectionError):
+    """A report of a run that was created in another project. A run never
+    moves, so nothing of it is stored."""
+
+    status_code = 409
+    error = "project_mismatch"
+
+    def __init__(self) -> None:
+        super().__init__("This run was recorded in another project.", ["project"])
+
+
+class ProjectNameTakenError(RejectionError):
+    """`POST /projects` for a name another project has, `default` included."""
+
+    status_code = 409
+    error = "project_exists"
+
+    def __init__(self) -> None:
+        super().__init__("A project with that name exists already.", ["name"])
+
+
+class ProjectNameRefusedError(RejectionError):
+    """A name `POST /projects` cannot create. The name is not repeated."""
+
+    status_code = 422
+    error = "invalid_project_name"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A project name is 1 to 64 characters of a-z, 0-9, '.', '_' and '-', starting with "
+            "a letter or a digit.",
+            ["name"],
+        )
+
+
+class InvalidProjectRequestError(RejectionError):
+    """A `POST /projects` body of the wrong shape."""
+
+    status_code = 422
+    error = "invalid_project_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidProjectRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
 
 
 class ChallengeError(RejectionError):
@@ -469,7 +529,8 @@ class InvalidSectionPrefixError(RejectionError):
 
 
 class UnknownSectionError(RejectionError):
-    """`DELETE /api/v1/config/sections` for a name that is not stored."""
+    """`DELETE /api/v1/projects/{project}/config/sections` for a name the
+    project does not store."""
 
     status_code = 404
     error = "unknown_section"
@@ -540,7 +601,7 @@ def register_error_handlers(app: FastAPI) -> None:
     route's own 404, such as `unknown_run`, keeps its code.
 
     A `RequestValidationError` confined to the `node_id` query parameter
-    (`/tests/history`, `/runs/{run_id}/result`) is shaped as
+    (`/projects/{project}/tests/history`, `/runs/{run_id}/result`) is shaped as
     `InvalidIdentityError`; every other one as `InvalidParameterError`, so
     a client that sent no report is never told its report is malformed.
     """
@@ -583,19 +644,24 @@ __all__ = [
     "InvalidJsonError",
     "InvalidMetadataFilterError",
     "InvalidParameterError",
+    "InvalidProjectRequestError",
     "InvalidReportError",
     "InvalidSectionError",
     "InvalidSectionNameError",
     "InvalidSectionPrefixError",
     "InvalidTokenRequestError",
     "InvalidUserRequestError",
+    "NoSuchProjectError",
     "NoSuchUserError",
     "NotAnAdminError",
     "OpenServerError",
     "OwnAccountError",
     "PayloadTooLargeError",
+    "ProjectNameRefusedError",
+    "ProjectNameTakenError",
     "RejectionError",
     "ReservedSectionNameError",
+    "RunOfAnotherProjectError",
     "RunOfAnotherUserError",
     "ScopesRefusedError",
     "TokenLabelRefusedError",

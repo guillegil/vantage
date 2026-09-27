@@ -74,8 +74,9 @@ The checks catch different failures:
 Values both sides must agree on (the 1 MiB body cap, the 64 KiB text-field
 cap, the metadata bounds and statuses, the outcome vocabulary, the timestamp
 format, the heartbeat interval behind the default grace period, the shape of
-a token and the statuses and error codes of the refusals of a token) are
-kept as a copy on each side. `packages/pytest-vantage/tests/test_server_contract.py`
+a token and the statuses and error codes of the refusals of a token, the
+project-name rule, `default` and the status and code of an unknown project)
+are kept as a copy on each side. `packages/pytest-vantage/tests/test_server_contract.py`
 imports both and compares every copy.
 
 ## Clean architecture with Protocol ports
@@ -228,7 +229,8 @@ patterns or lengths.
    seconds in total), the metadata declaration and, if asked, the files it
    names.
 2. **`pytest_sessionstart`: the start report.** A `POST /api/v1/runs` with the
-   run's id and start time, `finished_at` and `exit_status` null, the `vcs`
+   run's id and start time, `finished_at` and `exit_status` null, the
+   `project` (every report names it, `default` included), the `vcs`
    section, `metadata` when the declaration declares keys or files were
    read, and no results. The row exists from this moment, so a session
    killed later still leaves a trace.
@@ -331,14 +333,20 @@ them by mode (`config.MODES`):
 each report with `json.dumps`, as the transport does, decodes it as the
 server decodes a body (lone surrogates and U+0000 replaced), and hands it to
 `ingest`; the sliced reports go in one by one, so a local copy holds exactly
-the rows a server holds. The local database is opened once, at the finish,
+the rows a server holds. The one difference is the project: a server never
+makes one from a report, but `ingest(..., create_missing_project=True)`
+makes the project a report names in the local database, whose only admin is
+its owner, so the local copy of a run a server refused for its project
+still lands. The local database is opened once, at the finish,
 by the xdist controller alone, and closed again: nothing holds it open while
 tests run.
 
 **What is queued.** Sending stops at the first failed report. A failure a
 later attempt can fix -- no connection, a broken one, a timeout, a 5xx, a
-408 or 429 asking for the request again later (`outbox.worth_retrying`) --
-queues that report and the ones after it; the reports the server
+408 or 429 asking for the request again later, a 401 or 403 refusing the
+token, a `404 unknown_project` an admin can fix by adding the project
+(`outbox.worth_retrying`; the transport raises `ProjectRefusedError` for
+the last) -- queues that report and the ones after it; the reports the server
 acknowledged are not queued again, and a replay of any of them would change
 nothing anyway. Any other 4xx, a redirect or an answer that does not
 acknowledge the run would fail the same way next time and is not queued. A server unreachable at the start queues every report. The session
@@ -461,6 +469,46 @@ timed out may still be stored by the server; the plugin cannot know. The
 answer is read to at most 64 KiB and must acknowledge this run's id with
 `created` or `duplicate`, or the report counts as failed.
 
+## Projects
+
+Every run belongs to one project, named by the top-level `project` of the
+report that creates it (absent or null: `default`) and fixed there: the run
+upsert never sets it on conflict, and a later report naming another project
+raises `ProjectMismatchError` (`409 project_mismatch`), checked after the
+recorder and before whether the run is finished, so a replay naming another
+project is refused rather than answered as a duplicate. `project` sits in
+the envelope because `run` refuses an unknown field.
+
+- **Keyed by name, like users.** A `project` row is written by `vantage
+  project add`, `POST /api/v1/projects` and the local store, never by a
+  server from a report (`UnknownProjectError`, `404 unknown_project`).
+  `default` is written in the transaction that creates and stamps the
+  database. Nothing renames or deletes a project, so "it exists" only ever
+  turns true: a route can look one up and then act, and every row naming
+  one keeps naming one.
+- **What is per project.** The catalogue is unique on `(project, node_id)`,
+  and a report resolves its results' catalogue rows within its own project,
+  so two projects never share a test however alike their node ids; a
+  test's history, the run list with its metadata filter, horizon and
+  cursor, and the section definitions (`project_setting`) are each read
+  within one. Everything addressed by a run id is not: a run id names one
+  run across projects, and `get_run_detail` says which project it is in.
+- **The port** takes `project` as a required keyword wherever a call reads
+  or writes within one, so no call silently falls back to `default`; the
+  one default is ingestion's, for an absent field.
+- **Routes.** The run list, a test's history and the sections live under
+  `/api/v1/projects/{project}/`. `requires_read_project` and
+  `requires_admin_project` (`service/access.py`) authorize first, then
+  answer a name no project can have without asking the store, then look
+  the project up; that is where a check that the caller is one of the
+  project's members goes, once projects have members. `POST /projects`
+  needs what changing sections needs.
+- **The plugin** resolves `--vantage-project`, `VANTAGE_PROJECT`, then the
+  `vantage_project` ini value, as it resolves the address, and names the
+  project in every report and in its header. The outbox keeps a run the
+  server refused for its project, and `send_queued` passes over the rest of
+  that project's runs within one call, reporting it in `missing_projects`.
+
 ## Users, tokens and who may do what
 
 A database with no user is open: every route but the users and tokens ones
@@ -543,7 +591,8 @@ every `run.recorded_by` keeps naming an existing user.
 ## Request handling and concurrency
 
 `create_app(store, grace_period_seconds=900)` builds the app, mounts the
-`runs`, `read`, `capabilities`, `sections` and `users` routers under `/api/v1`, and
+`runs`, `read`, `capabilities`, `sections`, `users` and `projects` routers
+under `/api/v1`, and
 registers the error handlers. The `vantage` command runs it under Uvicorn, in
 one process.
 
@@ -556,9 +605,10 @@ would stall every other request, heartbeats included.
   as soon as it passes 1 MiB, never trusting `Content-Length`. Decoding
   (`ingestion/decode.py`) and `vantage.ingestion.ingest` -- validation,
   conversion (YAML parsing of metadata included) and the store write -- then
-  run in the threadpool through `run_in_threadpool`. `POST /config/sections`,
-  `POST /users`, `PATCH /users/{name}` and `POST /tokens` read their bodies
-  the same way, under caps of their own.
+  run in the threadpool through `run_in_threadpool`. `POST /projects`, a
+  project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`
+  and `POST /tokens` read their bodies the same way, under caps of their
+  own.
 - **Every other route that reaches the store is a plain `def`**, which
   FastAPI runs on AnyIO's worker threads (40 by default).
 - **`GET /capabilities` and `GET /openapi.yaml` are `async`** and never block,
@@ -610,17 +660,21 @@ another process by construction, never by a check first:
 
 - `record_session` is one transaction. The run is inserted with
   `ON CONFLICT (id) DO UPDATE ... WHERE` the stored run has no exit status,
-  the report has one and both name the same recorder, and whether it was
-  created comes from that statement's own result. The run row is then
-  locked (`SELECT ... FOR UPDATE`), so concurrent reports of one run take
-  their turn at the per-run metadata bound and the results; a report of
-  another caller's run is refused there, rolling back a transaction that
-  changed nothing. Catalogue rows are upserted in
-  sorted node id order, so two reports lock them in the same order and
-  cannot deadlock; results and metadata insert with `ON CONFLICT DO
+  the report has one and both name the same recorder and project, and
+  whether it was created comes from that statement's own result. The
+  report's project is probed first, and one that does not exist is refused
+  before anything is written; projects are never deleted, so the one found
+  stays. The run row is then locked (`SELECT ... FOR UPDATE`), so concurrent
+  reports of one run take their turn at the per-run metadata bound and the
+  results; a report of another caller's run, or of another project's, is
+  refused there, rolling back a transaction that changed nothing. Catalogue
+  rows are upserted in sorted node id order, one report having one project,
+  so two reports lock them in the same order and cannot deadlock; results and metadata insert with `ON CONFLICT DO
   NOTHING`.
 - `upsert_setting` counts and inserts under a transaction-scoped advisory
-  lock keyed on the namespace, so the section bound holds across servers.
+  lock keyed on the project and the namespace, so the section bound holds
+  per project across servers.
+- `create_project` is one insert that does nothing on a taken name.
 - `touch_last_contact` is one conditional `UPDATE`, and never moves the
   contact backwards.
 - `create_user` is one insert that does nothing on a taken name, and
@@ -638,8 +692,9 @@ another process by construction, never by a check first:
 and no UTF-8 encoder takes a lone surrogate, so `decode_json`
 (`ingestion/decode.py`, with `ingestion/text.py`) replaces every U+0000 in a
 key or string value of a body with U+FFFD, and every lone surrogate too for
-`POST /runs` and the local store; `POST /config/sections` and the users
-and tokens bodies refuse a lone surrogate instead. `metadata_parse`
+`POST /runs` and the local store; a project's `POST .../config/sections`,
+`POST /projects` and the users and tokens bodies refuse a lone surrogate
+instead. `metadata_parse`
 replaces a U+0000 that a declared document spells as an escape the same
 way. Every adapter therefore stores the same text. A value that is only
 looked up with -- a node id, a metadata filter, a section name to delete --
@@ -670,7 +725,8 @@ the repository root the plugin sends.
 
 **`schema.sql` is applied whole, once.** On first open, when the `meta` table
 does not exist, the whole file runs in one `BEGIN IMMEDIATE` transaction that
-also stamps `meta.schema_version` (currently 7). Reopening issues no DDL. A
+also stamps `meta.schema_version` (currently 8) and writes the `default`
+project. Reopening issues no DDL. A
 database carrying any other stamp, older, newer, missing or not a number, is
 refused with `SchemaVersionError` before anything in it changes, and the
 `vantage` command turns that into a one-line refusal. There are no
@@ -682,11 +738,12 @@ logical schema, and change together.
 
 | Table | Holds |
 | --- | --- |
-| `run` | one row per session: times, exit status, interruption, VCS fields, last contact, the user who recorded it |
-| `test_case` | the catalogue: one row per node id ever seen, with first and last sighting |
+| `project` | one row per project, `default` from the database's creation; never renamed or deleted |
+| `run` | one row per session: its project, times, exit status, interruption, VCS fields, last contact, the user who recorded it |
+| `test_case` | the catalogue: one row per node id ever seen in a project, with first and last sighting |
 | `result` | one row per test per run, unique on `(run_id, node_id)` |
 | `run_metadata_file`, `run_metadata` | each declared file's status; each key's status and value, whether a file or the session gave it, its display name, and whether the declaration named it |
-| `user_setting` | namespaced JSON values; section definitions live here |
+| `project_setting` | a project's namespaced JSON values; its section definitions live here |
 | `account`, `access_token` | one row per user, never deleted; one per token ever made, by its digest, with its scopes and when it was revoked |
 | `meta` | the schema version, and when and by whom the database was created |
 
@@ -708,8 +765,9 @@ its row: run, catalogue, results, metadata.
   value.
 - Whether the report created the run comes from an existence probe inside the
   transaction, since SQLite's row count cannot tell an insert from an update.
-  The probe reads who recorded the run first, and refuses another caller's
-  report before anything is written; then the exit status: a report reaching
+  The report's project is probed first, then who recorded the run and its
+  project, refusing another caller's report or another project's before
+  anything is written; then the exit status: a report reaching
   a finished run returns there and stores nothing, since a client sends the
   finish last and anything after it is a replay. PostgreSQL reads it under the run's row
   lock, after an upsert that changed nothing.
@@ -731,6 +789,14 @@ modes are never rewritten, and a database open to others is reported. List
 queries read a byte prefix of the commit subject and failure message, never
 the whole text.
 
+**The run list reads along `run(project, started_at, id)`**, which serves a
+project's order, a cursor's range and the horizon's counts. The filtered
+list and the horizon's first sighting compare the project as `+run.project`,
+which keeps SQLite, with no statistics since nothing runs `ANALYZE`, from
+choosing that index for them: it would scan every run of the project and
+probe the metadata for each, where the key/value index finds the few runs
+that hold a pair. `test_sqlite_store.py` pins the plans.
+
 ### PostgreSQL
 
 `vantage.storage.postgres` keeps the same tables, columns, constraints and
@@ -738,7 +804,7 @@ meaning in a schema of its own, named `vantage`, so they never collide with
 anything else in the database. The types are PostgreSQL's own: `timestamptz`
 for every timestamp, `boolean` for the flags, `bigint` for integers and for
 the identity keys, `double precision` for durations and `text` for text,
-`user_setting.value` included, which must come back byte for byte. The
+`project_setting.value` included, which must come back byte for byte. The
 vocabularies are the same `CHECK` constraints, and the unique keys and
 foreign keys are the same. A btree entry holds at most about 2.7 kB, and a
 node id, a metadata key or value or a declared file path has no bound, so
@@ -849,9 +915,10 @@ fails if one appears. pytest honours `pytest_plugins` in the root
 `conftest.py` and in test modules, but fails collection over one in a
 package-level `conftest.py`, so the workspace has no package-level conftest.
 The root `conftest.py` registers `pytester` and `vantage_test_server` for
-every test, and removes `VANTAGE_TOKEN` from each test's environment, which
-inner sessions and `vantage push` inherit: a token exported for a real
-server would be refused by every test server without users; a test module that needs `store_fixtures` loads it with its own
+every test, and removes `VANTAGE_TOKEN` and `VANTAGE_PROJECT` from each
+test's environment, which inner sessions and `vantage push` inherit: a token
+or a project exported for a real server would be refused by every test
+server without users or with only `default`; a test module that needs `store_fixtures` loads it with its own
 `pytest_plugins = ["store_fixtures"]`.
 
 `pythonpath` puts both `tests/` directories on the import path, so the support

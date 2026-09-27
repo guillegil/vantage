@@ -38,6 +38,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import TupleRow
 from psycopg_pool import ConnectionPool, PoolTimeout
 
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 
 _SCHEMA_SQL_PATH = Path(__file__).with_name("schema.sql")
@@ -324,6 +325,12 @@ def _create_schema(conn: PgConnection) -> None:
     conn.execute(_SCHEMA_SQL_PATH.read_text(encoding="utf-8"))
     stamp = "INSERT INTO vantage.meta (key, value) VALUES (%s, %s)"
     conn.execute(stamp, ("schema_version", str(_SCHEMA_VERSION)))
+    # Every database has the project of the runs that name none from its
+    # creation, in the transaction that stamps it.
+    conn.execute(
+        "INSERT INTO vantage.project (name, created_at) VALUES (%s, %s)",
+        (DEFAULT_PROJECT, datetime.now(timezone.utc)),
+    )
     created_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     conn.execute(stamp, ("created_at", created_at))
     created_by = _server_user()

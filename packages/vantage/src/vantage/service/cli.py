@@ -1,11 +1,12 @@
 """`vantage` -- resolve configuration, fail fast, then serve; `vantage push`
 (`service/push.py`), which sends the runs the plugin queued; and `vantage
-user` and `vantage token` (`service/manage.py`), which manage who may use
-the database.
+user`, `vantage token` and `vantage project` (`service/manage.py`), which
+manage who may use the database and the projects in it.
 
 **Serving needs the `server` extra; nothing else does.** FastAPI and
 uvicorn are imported only once the arguments ask to serve, so `vantage
-push`, `vantage user`, `vantage token` and `--help` work in an install
+push`, `vantage user`, `vantage token`, `vantage project` and `--help` work
+in an install
 without them, and serving without them is one line naming the extra --
 checked before anything is bound or created.
 
@@ -137,8 +138,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         description="Run the vantage server.",
         epilog=(
             "vantage push sends the runs pytest-vantage queued for a server it could not "
-            "reach, vantage user manages the users of the database and vantage token their "
-            "tokens; each one's --help says how."
+            "reach, vantage user manages the users of the database, vantage token their "
+            "tokens and vantage project its projects; each one's --help says how."
         ),
     )
     parser.add_argument(
@@ -318,16 +319,17 @@ def _serve(app: FastAPI, listener: socket.socket, config: ServerConfig) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """`vantage user ...` and `vantage token ...` manage users and tokens,
-    and `vantage push ...` sends the queued runs. Anything else serves:
+    """`vantage user ...`, `vantage token ...` and `vantage project ...`
+    manage users, tokens and projects, and `vantage push ...` sends the
+    queued runs. Anything else serves:
     resolve configuration, refuse anything unusable, warn on a wide bind,
     serve, then close."""
     arguments = sys.argv[1:] if argv is None else argv
-    if arguments[:1] in (["user"], ["token"]):
+    if arguments[:1] in (["user"], ["token"], ["project"]):
         from vantage.service import manage
 
-        command = manage.user if arguments[0] == "user" else manage.token
-        raise SystemExit(command(arguments[1:]))
+        command = {"user": manage.user, "token": manage.token, "project": manage.project}
+        raise SystemExit(command[arguments[0]](arguments[1:]))
     if arguments[:1] == ["push"]:
         try:
             from vantage.service.push import push

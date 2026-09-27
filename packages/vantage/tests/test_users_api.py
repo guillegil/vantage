@@ -344,11 +344,11 @@ def test_enabling_a_user_again_lets_its_tokens_back_in(
     reader = TestClient(admin.app, headers=_bearer(bobs))
 
     admin.patch("/api/v1/users/bob", json={"disabled": True})
-    while_disabled = reader.get("/api/v1/runs")
+    while_disabled = reader.get("/api/v1/projects/default/runs")
     admin.patch("/api/v1/users/bob", json={"disabled": False})
 
     assert while_disabled.status_code == 401
-    assert reader.get("/api/v1/runs").status_code == 200
+    assert reader.get("/api/v1/projects/default/runs").status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -573,11 +573,11 @@ def test_a_token_for_a_disabled_user_is_made_and_works_once_they_are_enabled(
 
     body = admin.post("/api/v1/tokens", json={"user": "bob", "scopes": ["read"]}).json()
     reader = TestClient(admin.app, headers=_bearer(body["token"]))
-    while_disabled = reader.get("/api/v1/runs")
+    while_disabled = reader.get("/api/v1/projects/default/runs")
     any_store.update_user("bob", disabled=False)
 
     assert while_disabled.status_code == 401
-    assert reader.get("/api/v1/runs").status_code == 200
+    assert reader.get("/api/v1/projects/default/runs").status_code == 200
 
 
 def test_tokens_list_oldest_first_for_everyone_or_one_user(
@@ -679,7 +679,7 @@ def test_revoking_answers_the_token_and_again_the_same_first_time(
     assert "token" not in first.json()
     assert any_store.authenticate(token_digest(secret)) is None
     reader = TestClient(admin.app, headers=_bearer(secret))
-    assert reader.get("/api/v1/runs").status_code == 401
+    assert reader.get("/api/v1/projects/default/runs").status_code == 401
 
 
 def test_revoking_a_token_nobody_has_is_unknown_token(admin: TestClient) -> None:

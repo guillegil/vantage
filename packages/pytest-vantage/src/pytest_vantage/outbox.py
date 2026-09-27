@@ -20,6 +20,9 @@ server address they were meant for.
   text; queueing past either drops the oldest entries (`Outbox.evicted`).
 - **No token.** An entry holds the reports, never the token they were sent
   with: whoever sends the queue sends it with their own.
+- **A project the server lacks keeps its runs.** A server that answers
+  `404 unknown_project` takes them once an admin adds the project, so the
+  entry stays, and a sender moves on to runs of other projects.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ from types import TracebackType
 from typing import Any
 from urllib import error as urllib_error
 
-from pytest_vantage.transport import send
+from pytest_vantage.transport import ProjectRefusedError, send
 
 MAX_ENTRIES = 1000
 MAX_REPORT_BYTES = 256 * 1024 * 1024
@@ -110,10 +113,13 @@ def unreachable(exc: BaseException) -> bool:
 
 def worth_retrying(exc: BaseException) -> bool:
     """Whether sending the same report later could succeed: the server was
-    unreachable, answered 5xx, asked for the request again later, or
-    refused the token, which a sender with another one can fix. Any other
-    4xx, a redirect or an answer that does not acknowledge the run would be
-    the same the next time."""
+    unreachable, answered 5xx, asked for the request again later, refused
+    the token, which a sender with another one can fix, or has no project
+    of the report's name yet, which an admin can fix. Any other 4xx, a
+    redirect or an answer that does not acknowledge the run would be the
+    same the next time."""
+    if isinstance(exc, ProjectRefusedError):
+        return True
     if isinstance(exc, urllib_error.HTTPError):
         return exc.code >= 500 or exc.code in _KEPT_FOR_LATER
     return unreachable(exc)
@@ -122,9 +128,17 @@ def worth_retrying(exc: BaseException) -> bool:
 def _rejected(exc: BaseException) -> bool:
     return (
         isinstance(exc, urllib_error.HTTPError)
+        and not isinstance(exc, ProjectRefusedError)
         and 400 <= exc.code < 500
         and exc.code not in _KEPT_FOR_LATER
     )
+
+
+def _project_of(reports: list[dict[str, Any]]) -> str:
+    """The project an entry's run belongs to, as its first report names it;
+    a report from before projects names none, and goes to `default`."""
+    project = reports[0].get("project") if reports else None
+    return project if isinstance(project, str) else "default"
 
 
 def _server_error(exc: BaseException) -> bool:
@@ -148,6 +162,9 @@ class SendSummary:
     unreadable: tuple[str, ...] = ()
     """Run ids of the entries whose reports could not be read back from the
     file, now deleted."""
+    missing_projects: tuple[str, ...] = ()
+    """The projects the server said it does not have, in the order first
+    refused. Their entries stay queued, for once an admin adds them."""
 
 
 @dataclass(frozen=True)
@@ -373,16 +390,19 @@ def send_queued(
     than 401, 403, 408 or 429 could never succeed, and is deleted too, its
     run id in `dropped`; so is one whose reports no longer read back from
     the file, in `unreadable`. A 5xx leaves the run queued and goes on to
-    the next, since it may be that run's own problem. Anything else leaves
-    the run queued and stops: an unreachable server, a 408 or 429 asking
-    for it again later, a 401 or 403 refusing the token, or an answer that
-    is not a vantage server's.
+    the next, since it may be that run's own problem; so does a project
+    the server does not have, named in `missing_projects`, and every later
+    run of that project is passed over without asking again. Anything else
+    leaves the run queued and stops: an unreachable server, a 408 or 429
+    asking for it again later, a 401 or 403 refusing the token, or an
+    answer that is not a vantage server's.
     """
     deadline = time.monotonic() + budget
     ran_out = f"the {budget:g}s allowed for sending ran out"
     sent = 0
     dropped: list[str] = []
     unreadable: list[str] = []
+    missing_projects: list[str] = []
     stopped: str | None = None
     after = 0
     while stopped is None:
@@ -395,6 +415,11 @@ def send_queued(
             # it would stop every sender at the head of the queue.
             outbox._delete(claimed.id)
             unreadable.append(claimed.run_id)
+            continue
+        if _project_of(claimed.reports) in missing_projects:
+            # Refused already in this call: asking again would only upload
+            # the run to hear the same answer.
+            outbox._release(claimed.id, None)
             continue
         try:
             for report in claimed.reports:
@@ -417,6 +442,9 @@ def send_queued(
                 dropped.append(claimed.run_id)
                 continue
             outbox._release(claimed.id, str(exc) or type(exc).__name__)
+            if isinstance(exc, ProjectRefusedError):
+                missing_projects.append(exc.project)
+                continue
             if not _server_error(exc):
                 stopped = (
                     f"{server} is unreachable ({exc})"
@@ -433,7 +461,13 @@ def send_queued(
             outbox._delete(claimed.id)
             sent += 1
     return SendSummary(
-        server, sent, tuple(dropped), outbox.waiting(server), stopped, tuple(unreadable)
+        server,
+        sent,
+        tuple(dropped),
+        outbox.waiting(server),
+        stopped,
+        tuple(unreadable),
+        tuple(missing_projects),
     )
 
 

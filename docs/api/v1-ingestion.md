@@ -95,6 +95,7 @@ is stored in one transaction.
 
 ```
 {
+  "project":  "firmware",
   "run":      {"id": "4f1c...", "started_at": "...", "finished_at": null,
                "exit_status": null, "interrupted": false, "interrupt_reason": null},
   "results":  [ ... ],
@@ -104,10 +105,10 @@ is stored in one transaction.
 }
 ```
 
-Only `run` is required. `results`, `vcs` and `metadata` may be absent or
-`null`; an absent `results` and an empty one both mean no results. Any other
-top-level key is ignored, so a newer client can add a section an older server
-does not know.
+Only `run` is required. `project`, `results`, `vcs` and `metadata` may be
+absent or `null`; an absent `results` and an empty one both mean no results.
+Any other top-level key is ignored, so a newer client can add a section an
+older server does not know.
 
 **Timestamps** are ISO 8601 strings. The server converts each to UTC and takes
 one without an offset as UTC; one that falls outside the years 1 to 9999 once
@@ -117,6 +118,22 @@ converted is rejected. Send them with an offset.
 some near misses instead of rejecting them (a numeric string for an integer,
 `"yes"` or `1` for a boolean, a Unix-time number or a date without a time for
 a timestamp); do not rely on that.
+
+#### `project`
+
+The project the run belongs to: a string of 1 to 64 characters of `a-z`,
+`0-9`, `.`, `_` and `-`, starting with a letter or a digit, or absent or
+`null` for `default`, which every server has. Anything else is
+`422 invalid_report` with `fields: ["project"]`. The server must have the
+project, since it never makes one from a report: one it does not have is
+`404 unknown_project` with `fields: ["project"]`, and nothing is stored.
+Projects are added by an admin (`vantage project add`, or
+`POST /api/v1/projects`).
+
+It is a top-level key rather than a field of `run`, which refuses unknown
+fields: a server that predates projects ignores it, so no server refuses a
+report for carrying it. `pytest-vantage` sends it in every report,
+`default` included.
 
 #### `run`
 
@@ -314,6 +331,11 @@ any of them.
 - **Metadata** is stored once per file path and per key: the first report
   to carry a key decides its value, and later copies are ignored. A run
   holds at most 200 keys over all its reports.
+- **One project per run.** The report that creates a run files it in its
+  project, for good. A later report naming another project is
+  `409 project_mismatch` and changes nothing, finished run or not; it is
+  checked after the user, so another user's report still reads
+  `foreign_run`.
 - **One user per run.** Every report must come from the user whose token
   sent the first, or with no token if the first came with none
   (see [Authentication](#authentication)); anything else is
@@ -333,9 +355,9 @@ run unfinished rather than finished with results missing. Its full sequence
 is: a start report (in progress, no results), heartbeats, any in-progress
 reports with results, and the finishing report. Without the
 `session_lifecycle` capability it sends only the last two. In its backup
-modes, a report that got no answer, a `5xx`, a `408`, a `429`, or a `401`
-or `403` refusing its token, is sent again later, unchanged, with the
-reports after it: by a later session or by `vantage push`, from another
+modes, a report that got no answer, a `5xx`, a `408`, a `429`, a `401`
+or `403` refusing its token, or a `404 unknown_project`, is sent again
+later, unchanged, with the reports after it: by a later session or by `vantage push`, from another
 process, possibly days later, and with that sender's token. A session that
 could not reach the server at its start sends no start report at all, and
 its reports arrive only that way.
@@ -364,7 +386,7 @@ ignored; `pytest-vantage` sends `{}` as `application/json`.
 - A run another user recorded answers `409 foreign_run`, and its last
   contact does not move.
 - A `run_id` that is not 32 lowercase hex characters answers
-  `422 invalid_report` with `fields: ["path.run_id"]`.
+  `422 invalid_parameter` with `fields: ["path.run_id"]`.
 
 The last-contact time is set when a run is created and advanced only by
 heartbeats. The read API presents a run with no finishing report as
@@ -387,12 +409,15 @@ its run `running`.
 | `401` | `unauthenticated` | No token on a server that has users, or a token that is not valid on any server. |
 | `403` | `insufficient_scope` | The token does not grant the `record` scope. |
 | `404` | `unknown_run` | A heartbeat for a run never recorded. |
+| `404` | `unknown_project` | A report naming a project the server does not have. |
 | `404` | `not_found` | No route matches the path, unversioned paths included. |
 | `405` | `method_not_allowed` | The path exists but does not take this method. The `Allow` header lists the ones it takes. |
 | `409` | `foreign_run` | A report or heartbeat of a run another user recorded. |
+| `409` | `project_mismatch` | A report of a run created in another project. |
 | `413` | `payload_too_large` | The body passed 1,048,576 bytes. |
 | `415` | `unsupported_media_type` | `Content-Type` is absent or not `application/json`. |
-| `422` | `invalid_report` | The body does not match the shape above, or a heartbeat's `run_id` is malformed. |
+| `422` | `invalid_report` | The body does not match the shape above. |
+| `422` | `invalid_parameter` | A heartbeat's `run_id` is not 32 lowercase hex characters. |
 | `500` | | The server failed while handling the request (the database was unavailable, for example). The body is plain text, not a rejection. |
 
 ## The rejection body

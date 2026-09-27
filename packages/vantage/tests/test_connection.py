@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.storage.connection import open_database
 from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 
@@ -75,21 +76,81 @@ def test_a_fresh_database_is_stamped_with_the_current_schema_version(tmp_path: P
     assert row == (str(_SCHEMA_VERSION),)
 
 
-def test_the_tables_and_the_version_stamp_commit_together(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_new_database_is_stamped_8_and_holds_the_default_project_alone(
+    tmp_path: Path,
 ) -> None:
-    """A stamp that fails after every table was created leaves no table
-    behind: a database with a schema but no stamp would be refused as
-    'absent' on every later open."""
+    """Version 8 is the schema with projects, and a report naming no project
+    is recorded in `default`, so a new database has that project before
+    anything is written to it -- and no other."""
+    conn = open_database(tmp_path / "store" / "vantage.db")
+    try:
+        stamp = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+        projects = conn.execute("SELECT name, created_at FROM project").fetchall()
+    finally:
+        conn.close()
+
+    assert stamp == ("8",)
+    assert [name for name, _created_at in projects] == [DEFAULT_PROJECT]
+    ((_name, created_at),) = projects
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00", created_at)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["_STAMP_SCHEMA_VERSION", "_CREATE_DEFAULT_PROJECT"],
+    ids=["stamp", "default-project"],
+)
+def test_the_tables_and_the_version_stamp_commit_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, statement: str
+) -> None:
+    """A stamp or a `default` project that fails after every table was
+    created leaves no table behind: a database with a schema but no stamp
+    would be refused as 'absent' on every later open, and one without its
+    `default` project would refuse every report that names none."""
     db_path = tmp_path / "store" / "vantage.db"
     monkeypatch.setattr(
-        "vantage.storage.connection._STAMP_SCHEMA_VERSION",
+        f"vantage.storage.connection.{statement}",
         "INSERT INTO no_such_table (value) VALUES (?)",
     )
 
     with pytest.raises(sqlite3.OperationalError, match="no_such_table"):
         open_database(db_path)
 
+    probe = sqlite3.connect(str(db_path))
+    try:
+        tables = probe.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    finally:
+        probe.close()
+    assert tables == []
+
+
+def test_the_default_project_is_written_in_the_transaction_that_creates_the_tables(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure right after the `default` project was written takes the
+    project, the stamp and every table with it. Written in a transaction of
+    its own, the project would outlive the failure, or the schema would be
+    committed without it."""
+    real_connect = sqlite3.connect
+
+    class _FailingAfterTheProject(sqlite3.Connection):
+        def execute(self, sql: str, *args: Any) -> sqlite3.Cursor:
+            cursor = super().execute(sql, *args)
+            if sql.startswith("INSERT OR IGNORE INTO project"):
+                raise sqlite3.OperationalError("provoked after the default project")
+            return cursor
+
+    def _connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        kwargs.setdefault("factory", _FailingAfterTheProject)
+        return cast(sqlite3.Connection, real_connect(*args, **kwargs))
+
+    monkeypatch.setattr(sqlite3, "connect", _connect)
+    db_path = tmp_path / "store" / "vantage.db"
+
+    with pytest.raises(sqlite3.OperationalError, match="provoked after the default project"):
+        open_database(db_path)
+
+    monkeypatch.undo()
     probe = sqlite3.connect(str(db_path))
     try:
         tables = probe.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
@@ -240,6 +301,32 @@ def test_a_database_holding_another_schema_is_refused_and_left_as_it_was(
 
     assert db_path.read_bytes() == before
     assert sorted(path.name for path in db_path.parent.iterdir()) == ["customers.db"]
+
+
+def test_a_version_7_database_is_refused_and_left_as_it_was(tmp_path: Path) -> None:
+    """A database from the build before projects has runs, a catalogue and
+    settings that belong to no project. It is refused, not given a
+    `project` table or a `default` project: rows would have to be moved
+    into one, which is a migration, and there are none."""
+    db_path = tmp_path / "store" / "vantage.db"
+    db_path.parent.mkdir(parents=True)
+    with contextlib.closing(sqlite3.connect(str(db_path))) as old, old:
+        old.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        old.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '7')")
+        old.execute("CREATE TABLE run (id TEXT PRIMARY KEY, started_at TEXT NOT NULL)")
+        old.execute("INSERT INTO run VALUES (?, '2026-09-01T10:00:00')", ("a" * 32,))
+        old.execute(
+            "CREATE TABLE user_setting (namespace TEXT, key TEXT, value TEXT, updated_at TEXT,"
+            " PRIMARY KEY (namespace, key))"
+        )
+    before = db_path.read_bytes()
+
+    with pytest.raises(SchemaVersionError) as refused:
+        open_database(db_path)
+
+    assert "schema_version is 7, but this build requires schema_version 8;" in str(refused.value)
+    assert db_path.read_bytes() == before
+    assert sorted(path.name for path in db_path.parent.iterdir()) == ["vantage.db"]
 
 
 def test_a_schema_that_fails_partway_is_rolled_back_and_its_lock_released_at_once(

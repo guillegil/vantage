@@ -1385,7 +1385,8 @@ def test_capability_probe_404_sends_no_start_write_and_no_heartbeat(
         "POST /api/v1/runs HTTP/1.1",
     ]
     payload = json.loads(requests_seen[2][1])
-    assert set(payload) == {"run", "results", "vcs"}
+    assert set(payload) == {"project", "run", "results", "vcs"}
+    assert payload["project"] == "default"
     assert set(payload["run"]) == {
         "id",
         "started_at",

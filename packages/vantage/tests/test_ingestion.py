@@ -20,6 +20,7 @@ from vantage.core.domain.metadata import (
     MAX_METADATA_KEY_CHARS,
     MAX_METADATA_VALUE_BYTES,
 )
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import ExecutionStore, MetadataEntry, MetadataFile, RunMetadata
 from vantage.service.app import create_app
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -194,6 +195,88 @@ def test_report_without_vcs_section_still_records_run(
     assert execution.vcs is None
 
 
+def _project_of(store: ExecutionStore, run_id: str) -> str:
+    detail = store.get_run_detail(run_id)
+    assert detail is not None
+    return detail.project
+
+
+@pytest.mark.parametrize(
+    "project", [None, DEFAULT_PROJECT, "alpha"], ids=["null", "default", "named"]
+)
+def test_a_report_is_stored_in_the_project_it_names(any_store: Any, project: str | None) -> None:
+    """On every adapter: the run, its results and its catalogue entries go
+    to the named project, `null` naming `default` as an absent key does."""
+    any_store.create_project("alpha", created_at=datetime(2026, 8, 15, tzinfo=timezone.utc))
+    report = _well_formed_report("a" * 32)
+    report["project"] = project
+    report["results"] = [_result_entry("tests/test_a.py::test_x")]
+    stored_in = DEFAULT_PROJECT if project is None else project
+    elsewhere = "alpha" if stored_in == DEFAULT_PROJECT else DEFAULT_PROJECT
+
+    response = TestClient(create_app(any_store)).post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _project_of(any_store, "a" * 32) == stored_in
+    listed = any_store.list_runs(limit=10, offset=0, project=stored_in).items
+    assert [entry.execution.identity.value for entry in listed] == ["a" * 32]
+    assert any_store.list_runs(limit=10, offset=0, project=elsewhere).items == ()
+    assert any_store.get_catalogue_entry("tests/test_a.py::test_x", project=stored_in) is not None
+    assert any_store.get_catalogue_entry("tests/test_a.py::test_x", project=elsewhere) is None
+
+
+def test_a_report_without_a_project_is_stored_in_default(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """A plugin that predates projects sends no key at all."""
+    report = _well_formed_report("a" * 32)
+    assert "project" not in report
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 201
+    assert _project_of(store, "a" * 32) == DEFAULT_PROJECT
+
+
+def test_a_report_into_a_project_the_server_lacks_is_404_without_its_name(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    """The server never makes a project from a report; the refusal names
+    the field, not the value a client sent."""
+    report = _well_formed_report("a" * 32)
+    report["project"] = "secret-project"
+
+    response = client.post("/api/v1/runs", json=report)
+
+    assert response.status_code == 404
+    body = response.json()
+    assert (body["error"], body["fields"]) == ("unknown_project", ["project"])
+    assert "secret-project" not in response.text
+    assert store.count_executions() == 0
+    assert store.get_project("secret-project") is None
+
+
+def test_a_report_moving_a_run_to_another_project_is_409(
+    client: TestClient, store: InMemoryExecutionStore
+) -> None:
+    store.create_project("alpha", created_at=datetime(2026, 8, 15, tzinfo=timezone.utc))
+    start = _well_formed_report("a" * 32)
+    start["run"].update(finished_at=None, exit_status=None)
+    assert client.post("/api/v1/runs", json=start).status_code == 201
+    finish = _well_formed_report("a" * 32)
+    finish["project"] = "alpha"
+    finish["results"] = [_result_entry("tests/test_a.py::test_x")]
+
+    response = client.post("/api/v1/runs", json=finish)
+
+    assert response.status_code == 409
+    body = response.json()
+    assert (body["error"], body["fields"]) == ("project_mismatch", ["project"])
+    assert "alpha" not in response.text
+    assert _project_of(store, "a" * 32) == DEFAULT_PROJECT
+    assert store.count_results() == 0
+
+
 @pytest.mark.parametrize("path", ["/runs", "/api/runs"])
 def test_unversioned_path_is_refused(client: TestClient, path: str) -> None:
     response = client.post(path, json=_well_formed_report())
@@ -363,7 +446,7 @@ def test_an_older_run_with_a_non_utc_offset_does_not_roll_back_the_catalogue(
     second_report["results"] = [_result_entry(node_id)]
     sqlite_client.post("/api/v1/runs", json=second_report)
 
-    entry = sqlite_store.get_catalogue_entry(node_id)
+    entry = sqlite_store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT)
     assert entry is not None
     assert entry.last_seen_at == datetime(2026, 8, 18, 11, 0, tzinfo=timezone.utc)
     assert entry.last_seen_run_id == "7" * 32

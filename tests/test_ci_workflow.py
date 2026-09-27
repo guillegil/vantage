@@ -440,7 +440,9 @@ _FAKE_PYTHON = """\
 if [ "$1" = -m ]; then eval "$FAKE_SESSION"; exit; fi
 echo "$FAKE_RUNS"
 """
-_HEADER = 'echo "vantage: recording run 0123456789abcdef0123456789abcdef to $DB"\n'
+_HEADER = (
+    'echo "vantage: recording run 0123456789abcdef0123456789abcdef in project default to $DB"\n'
+)
 _STORE = 'mkdir -p "$(dirname "$DB")"; touch "$DB"\n'
 _DEFAULT_DB = 'DB="$HOME/.local/share/vantage/vantage.db"\n'
 

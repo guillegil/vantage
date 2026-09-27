@@ -20,7 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pytest_vantage import transport, vcs
+from pytest_vantage import budget, transport, vcs
+from pytest_vantage.config import DEFAULT_PROJECT
 from pytest_vantage.recorder import _WORKER_INTERRUPT_KEY, Recorder, WorkerInterruptRelay
 from vantage_test_server import (
     VantageTestServer,
@@ -45,7 +46,7 @@ class _ConfigDouble:
 
 
 def _offline_recorder(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, *, project: str = DEFAULT_PROJECT
 ) -> tuple[Recorder, list[dict[str, object]]]:
     """A `Recorder` driven directly, hook by hook, whose every report is
     captured instead of sent. VCS capture is neutralised rather than
@@ -62,6 +63,7 @@ def _offline_recorder(
         "http://127.0.0.1:1",
         1.0,
         lifecycle_available=True,
+        project=project,
     )
     return recorder, sent
 
@@ -133,6 +135,131 @@ def test_start_write_uses_the_liveness_timeout_not_the_report_timeout(
 
     result.assert_outcomes(passed=1)
     assert timeouts == [2.0, 5.0]
+
+
+# --- The project ---------------------------------------------------------------
+
+
+def test_every_report_of_a_run_names_its_project_and_the_header_says_which(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The start report, each in-progress report carrying a slice of the
+    results and the finishing report all name the project: whichever one
+    reaches the server first creates the run, so each must say where it
+    goes. A small cap splits the results over several reports; `send` is
+    spied on and still delivers, so the server files the run as told."""
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+    monkeypatch.setattr(budget, "_REPORT_BYTES_CAP", 4_000)
+    vantage_server.add_project("foo")
+    sent: list[dict[str, object]] = []
+    real_send = transport.send
+
+    def _spy(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
+        sent.append(report)
+        real_send(address, report, timeout=timeout, token=token)
+
+    monkeypatch.setattr("pytest_vantage.recorder.send", _spy)
+    pytester.makepyfile(
+        test_many="""
+import pytest
+
+
+@pytest.mark.parametrize("n", range(30))
+def test_p(n):
+    assert True
+"""
+    )
+
+    result = pytester.runpytest(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-project=foo"
+    )
+
+    result.assert_outcomes(passed=30)
+    start, *slices, finish = sent
+    assert slices, "the cap did not split the results"
+    assert "results" not in start
+    assert all(report["run"]["finished_at"] is None for report in slices)  # type: ignore[index]
+    assert finish["run"]["finished_at"] is not None  # type: ignore[index]
+    assert [report["project"] for report in sent] == ["foo"] * len(sent)
+    run_id = start["run"]["id"]  # type: ignore[index]
+    assert vantage_server.project_of(run_id) == "foo"
+    assert len(vantage_server.results()) == 30
+    result.stdout.fnmatch_lines(
+        [f"vantage: recording run {run_id} in project foo to {vantage_server.address}"]
+    )
+
+
+def test_a_run_naming_no_project_says_so_and_goes_to_default(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`default` is named like any other project, in the header and in the
+    report, rather than left for the server to assume."""
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=1)
+    (execution,) = vantage_server.executions()
+    run_id = execution.identity.value
+    assert vantage_server.project_of(run_id) == DEFAULT_PROJECT
+    result.stdout.fnmatch_lines(
+        [f"vantage: recording run {run_id} in project default to {vantage_server.address}"]
+    )
+
+
+def _passed(node_id: str, when: str) -> pytest.TestReport:
+    return pytest.TestReport(
+        nodeid=node_id,
+        location=("test_budget.py", 0, node_id),
+        keywords={},
+        outcome="passed",
+        longrepr=None,
+        when=when,  # type: ignore[arg-type]
+    )
+
+
+def test_the_longest_project_name_is_counted_against_the_report_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 64-character name costs every report some eighty bytes. The split
+    must count them: over one result's cost of consecutive caps, every
+    amount of room a full slice can leave comes round once, including the
+    ones too small for the name, so a budget that forgot it overshoots
+    somewhere in the sweep. Every report must fit, and together carry
+    every result."""
+    project = "p" * 64
+    node_ids = [f"test_budget.py::test_{index:02d}" for index in range(12)]
+    first_cap = 2_000
+    probe, probe_sent = _offline_recorder(monkeypatch, project=project)
+    for node_id in node_ids:
+        for when in ("setup", "call", "teardown"):
+            probe.pytest_runtest_logreport(_passed(node_id, when))
+    probe.pytest_sessionfinish(session=_A_SESSION_RUN_TO_ITS_END, exitstatus=0)  # type: ignore[arg-type]
+    (whole,) = probe_sent
+    one_result = len(json.dumps(whole["results"][0]).encode()) + len(", ")  # type: ignore[index]
+
+    for cap in range(first_cap, first_cap + one_result):
+        monkeypatch.setattr(budget, "_REPORT_BYTES_CAP", cap)
+        recorder, sent = _offline_recorder(monkeypatch, project=project)
+        for node_id in node_ids:
+            for when in ("setup", "call", "teardown"):
+                recorder.pytest_runtest_logreport(_passed(node_id, when))
+
+        recorder.pytest_sessionfinish(session=_A_SESSION_RUN_TO_ITS_END, exitstatus=0)  # type: ignore[arg-type]
+
+        assert len(sent) > 1, cap
+        assert all(report["project"] == project for report in sent), cap
+        sizes = [len(json.dumps(report).encode()) for report in sent]
+        assert max(sizes) <= cap, (cap, sizes)
+        carried = [entry["node_id"] for report in sent for entry in report["results"]]  # type: ignore[attr-defined]
+        assert carried == node_ids, cap
 
 
 # --- Registration ----------------------------------------------------------

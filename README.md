@@ -47,7 +47,7 @@ Python 3.10 to 3.13.
 | Install | Brings | Enough for |
 | --- | --- | --- |
 | `pytest-vantage` | the plugin, and nothing but pytest | recording to a server |
-| `vantage` | the plugin, local storage (with Pydantic and PyYAML), `vantage push`, and `vantage user` and `vantage token` | every mode, the local ones included |
+| `vantage` | the plugin, local storage (with Pydantic and PyYAML), `vantage push`, and `vantage user`, `vantage token` and `vantage project` | every mode, the local ones included |
 | `vantage[server]` | also FastAPI and Uvicorn: the `vantage` server | serving recorded runs, from a local file or a shared database |
 | `vantage[server,postgres]` | also psycopg and its connection pool | a server storing in PostgreSQL |
 
@@ -82,12 +82,13 @@ pytest --vantage --vantage-failure-text         # also record failure text
 pytest --vantage --vantage-metadata             # also record declared configuration
 pytest --vantage --vantage-mode local           # keep it in a local database, no server
 pytest --vantage --vantage-mode server+backup   # and locally what the server cannot take
+pytest --vantage --vantage-project firmware     # a run of the firmware project
 pytest                                          # records nothing
 ```
 
 At the start of a recorded session pytest prints
-`vantage: recording run <id> to <address>` (or to the local database, or to
-both; see [Where runs go](#where-runs-go)). Recording works under
+`vantage: recording run <id> in project <name> to <address>` (or to the
+local database, or to both; see [Where runs go](#where-runs-go)). Recording works under
 pytest-xdist; a session is one run however many workers it uses.
 
 ### Options
@@ -99,6 +100,7 @@ pytest-xdist; a session is one run however many workers it uses.
 | `--vantage-timeout SECONDS` | `vantage_timeout` | none | `10` | Upper bound on each report request, start to finish. |
 | `--vantage-mode MODE` | `vantage_mode` | none | `server` | Where the run goes: `server`, `local`, `server+backup` or `server+local`. |
 | `--vantage-local-database PATH` | `vantage_local_database` | none | the database `vantage` serves by default | The SQLite file the other three modes store in. |
+| `--vantage-project NAME` | `vantage_project` | `VANTAGE_PROJECT` | `default` | The project the run belongs to (see [Projects](#projects)). |
 | `--vantage-failure-text` | none | none | off | Adds failure text and captured output. |
 | `--vantage-metadata` | none | none | off | Adds values from declared files. |
 | none | none | `VANTAGE_TOKEN` | none | The token a server with users requires (see [Users and tokens](#users-and-tokens)). |
@@ -118,6 +120,11 @@ pytest-xdist; a session is one run however many workers it uses.
   not follow redirects: a 3xx answer counts as a failed report.
 - `--vantage-failure-text` and `--vantage-metadata` do nothing without
   `--vantage`.
+- The project is resolved as `--vantage-project`, then `VANTAGE_PROJECT`,
+  then the `vantage_project` ini value, then `default`. A committed ini
+  value names a repository's project once for everyone. A name no project
+  can have (see [Projects](#projects)) stops pytest with a usage error; the
+  server must have the project, or it refuses the run.
 - The token is read from `VANTAGE_TOKEN` alone, and only when `--vantage` is
   given: a value in a committed configuration file would be read by
   everyone who checks the project out, and one on the command line by every
@@ -137,9 +144,9 @@ therefore cannot start recording, or start capturing failure text or reading
 files, for everyone who checks the project out. Arguments after a bare `--`
 never count.
 
-`--vantage-server`, `--vantage-timeout`, `--vantage-mode` and
-`--vantage-local-database` are honoured wherever they come from: they say
-where and how, never whether.
+`--vantage-server`, `--vantage-timeout`, `--vantage-mode`,
+`--vantage-local-database` and `--vantage-project` are honoured wherever
+they come from: they say where and how, never whether.
 
 ### What is not recorded
 
@@ -190,13 +197,15 @@ is ignored, and `VANTAGE_DATABASE` is not read). So on that machine
 
 **`local` mode** makes no reachability check, capability probe, start report
 or heartbeat, and never reads the server address. The header reads
-`vantage: recording run <id> to <database>`. A run it cannot store (the path
+`vantage: recording run <id> in project <name> to <database>`. The local
+database has no admin but its owner, so a project the run names is made
+there if it is missing. A run it cannot store (the path
 cannot be written, the disk is full, the database is from another schema
 version) produces one warning ending `the run is lost`.
 
 **`server+local`** reports to the server exactly as `server` does and also
 stores every run locally; the header reads
-`vantage: recording run <id> to <address> and <database>`. A local database
+`vantage: recording run <id> in project <name> to <address> and <database>`. A local database
 that cannot take the run costs one warning and never the server's copy.
 
 ### When the server cannot take the run
@@ -220,6 +229,10 @@ vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.
   is stored and queued in the same way, since `vantage push` with a token
   the server accepts can deliver it. The queue never holds a token; whoever
   sends it sends their own.
+- **The server has no project of the run's name** (`404 unknown_project`):
+  the run is stored and queued too, and the warning names the command an
+  admin adds it with. Once the project exists, the queue delivers the run
+  into it.
 - **The final report is refused outright** (any other 4xx, a redirect, an
   answer that does not acknowledge the run): the warning is the usual
   `vantage: error while reporting: ...`, and the run is not queued, since
@@ -235,7 +248,11 @@ the next is sent; one it refuses with any other 4xx can never succeed, and
 is dropped with a warning naming its run id. Each run is only ever sent to
 the address it was queued for, compared exactly as written, so
 `http://ci-vantage:8765` and `http://ci-vantage:8765/` are two different
-servers to the queue. `vantage push` sends the queue on demand.
+servers to the queue. A run of a project the server does not have stays
+queued, and the rest of that project's runs are not tried again until the
+next send; the line says so with `; kept runs of projects it does not
+have: ...`, before any `; stopped: ...`.
+`vantage push` sends the queue on demand.
 
 Under pytest-xdist only the controller stores or queues a run.
 
@@ -272,6 +289,8 @@ those queued for `--to`, written exactly as it was configured. It needs
   plugin sends it; one that could never be a token is refused in one line
   that does not repeat it. A run recorded by another user's token is
   refused by the server and dropped.
+- A run of a project the server does not have stays queued, and the line
+  names the project: `, kept runs of projects it does not have (firmware)`.
 
 - `--database` is the local database the outbox sits beside, as given to
   `--vantage-local-database`; by default the same default database
@@ -559,19 +578,19 @@ file the declaration named, sorted by path:
 - A run that recorded no metadata has no items and no files; a run id never
   recorded answers `404`. The lists are not paged.
 
-The run list filters by up to 16 keys at once. Repeat `metadata_key` and
+A project's run list filters by up to 16 keys at once. Repeat `metadata_key` and
 `metadata_value` once per key; each value pairs with the key in the same
 position, and a run must hold every pair to be listed:
 
 ```
-GET /api/v1/runs?metadata_key=fpga.firmware&metadata_value=1.1.0&metadata_key=fmc.hardware&metadata_value=5.2.0
+GET /api/v1/projects/default/runs?metadata_key=fpga.firmware&metadata_value=1.1.0&metadata_key=fmc.hardware&metadata_value=5.2.0
 ```
 
 A pair matches a `captured` value spelt exactly the same, from a file or
 the session. Giving the two parameters a different number of times, or more
 than 16 pairs, answers `422`. A run recorded before any run held a key
 cannot match it, so the answer's `metadata_horizon` says, for each filtered
-key in the order given, how many runs predate it:
+key in the order given, how many of the project's runs predate it:
 
 ```json
 "metadata_horizon": [{"key": "fpga.firmware", "predating": 12},
@@ -663,8 +682,8 @@ vantage [--database PATH-OR-URL] [--host HOST] [--port PORT] [--grace-period SEC
 
 Serving needs the `server` extra. Without it, `vantage` refuses in one line,
 `vantage: serving needs the server extra: pip install 'vantage[server]'`,
-with exit status 1 and nothing created; `vantage push`, `vantage user`,
-`vantage token` and `vantage --help` work either way.
+with exit status 1 and nothing created; `vantage push`, `vantage project`,
+`vantage user`, `vantage token` and `vantage --help` work either way.
 
 | Setting | Flag | Environment | Default |
 | --- | --- | --- | --- |
@@ -706,14 +725,16 @@ side:
 
 | Route | Returns |
 | --- | --- |
-| `GET /api/v1/runs` | Runs, newest first, each `running`, `finished`, `interrupted` or `abandoned` |
-| `GET /api/v1/runs/{run_id}` | One run |
+| `GET /api/v1/projects` | Every project, `default` included |
+| `POST /api/v1/projects` | Adds one: `{"name": "firmware"}` |
+| `GET /api/v1/projects/{project}/runs` | The project's runs, newest first, each `running`, `finished`, `interrupted` or `abandoned` |
+| `GET /api/v1/runs/{run_id}` | One run, and the project it belongs to |
 | `GET /api/v1/runs/{run_id}/metadata` | One run's metadata, from declared files and from the session, and each declared file's status |
 | `GET /api/v1/runs/{run_id}/results` | One run's results, with a short failure summary |
 | `GET /api/v1/runs/{run_id}/result?node_id=...` | One result in full, failure text included |
-| `GET /api/v1/tests/history?node_id=...` | One test across runs, newest first |
-| `GET`, `POST`, `DELETE /api/v1/config/sections` | Named file-path prefixes that group results |
-| `GET /api/v1/runs/{run_id}/sections` | One run's pass rate per section |
+| `GET /api/v1/projects/{project}/tests/history?node_id=...` | One test across the project's runs, newest first |
+| `GET`, `POST`, `DELETE /api/v1/projects/{project}/config/sections` | The project's named file-path prefixes that group results |
+| `GET /api/v1/runs/{run_id}/sections` | One run's pass rate per section of its project |
 
 The run list, a run's results and a test's history are paged: they take
 `limit` (at most 200 per page) and `offset`, and say in `has_more` whether
@@ -728,14 +749,45 @@ the previous one listed, whatever was recorded since. `next_cursor` is null
 on the last page, and a cursor is not combined with a non-zero `offset`.
 
 ```
-GET /api/v1/runs?limit=50
-GET /api/v1/runs?limit=50&cursor=MjAyNi0wOS0yN1QwODowMDowMC4...
+GET /api/v1/projects/default/runs?limit=50
+GET /api/v1/projects/default/runs?limit=50&cursor=MjAyNi0wOS0yN1QwODowMDowMC4...
 ```
 
 The run list also filters by metadata values; see
 [Reading it back](#reading-it-back). Each run, in the list and on its own,
 says in `recorded_by` which user's token recorded it, or `null` when none
 did.
+
+### Projects
+
+Every run belongs to a project: the one its session names with
+`--vantage-project`, `VANTAGE_PROJECT` or `vantage_project`, or `default`,
+which every database has. Each project has its own run list, its own
+catalogue of tests, so a test's history never mixes two projects however
+alike their node ids, and its own section definitions. A run never moves
+to another project.
+
+```bash
+vantage project add firmware                   # an admin adds it, before runs name it
+vantage project list
+```
+
+- A project name is 1 to 64 characters of `a-z`, `0-9`, `.`, `_` and `-`,
+  starting with a letter or a digit. Nothing about a project changes once it
+  is made: it is never renamed or deleted.
+- A server never makes a project from a report: one naming a project the
+  server does not have is refused with `404 unknown_project`, and a backup
+  mode keeps the run until the project is added (see
+  [When the server cannot take the run](#when-the-server-cannot-take-the-run)).
+  The local store is the exception: it makes the project a run names, since
+  a database on a test machine has nobody else to.
+- `vantage project add` finds the database as the server does, like
+  `vantage user`, and creates a SQLite database that is not there yet.
+  `POST /api/v1/projects` does the same over HTTP with an admin's token, or
+  for anyone while the database has no user.
+- The run list, a test's history and the sections live under
+  `/api/v1/projects/{project}/`; a project nobody has answers `404`. Every
+  route that names a run id reads the run whatever its project.
 
 ### Users and tokens
 
@@ -760,12 +812,13 @@ vantage user update bob --disable              # or --enable, --admin, --no-admi
 
 - Each command takes `--database` and finds the database as the server
   does: `--database`, then `VANTAGE_DATABASE`, then the default. It needs
-  neither the `server` extra nor a running server. Only `user add` creates a
-  database that is not there yet.
-- A token holds one or more scopes. `read` reads runs, results, history and
-  sections; `record` sends reports and heartbeats, all `pytest-vantage`
-  needs; `admin` changes the section definitions and manages users and
-  tokens, and only an admin user's token may hold it. It grants nothing once
+  neither the `server` extra nor a running server. Only `user add` and
+  `project add` create a database that is not there yet.
+- A token holds one or more scopes. `read` reads projects, runs, results,
+  history and sections; `record` sends reports and heartbeats, all
+  `pytest-vantage` needs; `admin` adds projects, changes the section
+  definitions and manages users and tokens, and only an admin user's token
+  may hold it. It grants nothing once
   its user stops being one. A token holds `read` and `record` unless
   `--scope` names others.
 - `token create` prints the token alone on stdout, so

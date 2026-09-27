@@ -32,6 +32,7 @@ from vantage.core.domain.projection import (
     project_failure,
     project_vcs,
 )
+from vantage.core.domain.projects import DEFAULT_PROJECT, Project
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
@@ -40,11 +41,14 @@ from vantage.core.ports.storage import (
     MetadataEntry,
     MetadataFile,
     NamespaceFullError,
+    ProjectExistsError,
+    ProjectMismatchError,
+    ProjectSetting,
     RunKey,
     RunMetadata,
+    UnknownProjectError,
     UnknownUserError,
     UserExistsError,
-    UserSetting,
 )
 
 
@@ -226,7 +230,7 @@ class ExecutionStoreContract:
         execution = _execution("a" * 32)
 
         created = store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc)
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
         )
 
         assert created is True
@@ -234,10 +238,12 @@ class ExecutionStoreContract:
 
     def test_replaying_the_same_id_reports_no_new_row(self, store: ExecutionStore) -> None:
         execution = _execution("b" * 32)
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         created_again = store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc)
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
         )
 
         assert created_again is False
@@ -245,7 +251,9 @@ class ExecutionStoreContract:
 
     def test_get_execution_returns_what_was_stored(self, store: ExecutionStore) -> None:
         execution = _execution("c" * 32, finished=False)
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         found = store.get_execution(execution.identity.value)
 
@@ -259,7 +267,10 @@ class ExecutionStoreContract:
         results = (_result("t.py::test_a"), _result("t.py::test_b"))
 
         created = store.record_session(
-            execution, results=results, received_at=datetime.now(timezone.utc)
+            execution,
+            results=results,
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         assert created is True
@@ -270,10 +281,18 @@ class ExecutionStoreContract:
     ) -> None:
         execution = _execution("f" * 32)
         results = (_result("t.py::test_a"), _result("t.py::test_b"))
-        store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution,
+            results=results,
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
 
         replayed = store.record_session(
-            execution, results=results, received_at=datetime.now(timezone.utc)
+            execution,
+            results=results,
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         assert replayed is False
@@ -286,11 +305,15 @@ class ExecutionStoreContract:
         identity = "1" + "0" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
-        store.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         finish = _execution(identity, finished=True, started=started)
         results = (_result("t.py::test_a"),)
-        store.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
+        store.record_session(
+            finish, results=results, received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         stored = store.get_execution(identity)
         assert stored is not None
@@ -309,10 +332,14 @@ class ExecutionStoreContract:
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         finish = _execution(identity, finished=True, started=started)
         results = (_result("t.py::test_a"),)
-        store.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
+        store.record_session(
+            finish, results=results, received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         late_start = _start_only_execution(identity, started=started)
-        store.record_session(late_start, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            late_start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         stored = store.get_execution(identity)
         assert stored == finish
@@ -324,7 +351,12 @@ class ExecutionStoreContract:
         identity = "1" + "2" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         first_finish = _execution(identity, finished=True, started=started)
-        store.record_session(first_finish, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            first_finish,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
 
         second_finish = Execution(
             identity=Identity(identity),
@@ -334,7 +366,12 @@ class ExecutionStoreContract:
             interrupted=True,
             interrupt_reason="a-different-reason",
         )
-        store.record_session(second_finish, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            second_finish,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
 
         stored = store.get_execution(identity)
         assert stored == first_finish
@@ -348,13 +385,16 @@ class ExecutionStoreContract:
         identity = "1" + "4" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
-        store.record_session(start, results=(), received_at=started)
-        store.record_session(start, results=(_result("t.py::test_a"),), received_at=started)
+        store.record_session(start, results=(), received_at=started, project=DEFAULT_PROJECT)
+        store.record_session(
+            start, results=(_result("t.py::test_a"),), received_at=started, project=DEFAULT_PROJECT
+        )
 
         store.record_session(
             _execution(identity, started=started),
             results=(_result("t.py::test_b"),),
             received_at=started,
+            project=DEFAULT_PROJECT,
         )
 
         stored = {result.identity.node_id for result in store.get_results(identity)}
@@ -367,19 +407,24 @@ class ExecutionStoreContract:
         identity = "1" + "5" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         finish = _execution(identity, started=started)
-        store.record_session(finish, results=(_result("t.py::test_a"),), received_at=started)
+        store.record_session(
+            finish, results=(_result("t.py::test_a"),), received_at=started, project=DEFAULT_PROJECT
+        )
 
-        store.record_session(finish, results=(_result("t.py::test_b"),), received_at=started)
+        store.record_session(
+            finish, results=(_result("t.py::test_b"),), received_at=started, project=DEFAULT_PROJECT
+        )
         store.record_session(
             _start_only_execution(identity, started=started),
             results=(_result("t.py::test_c"),),
             received_at=started,
+            project=DEFAULT_PROJECT,
         )
 
         stored = [result.identity.node_id for result in store.get_results(identity)]
         assert stored == ["t.py::test_a"]
-        assert store.get_catalogue_entry("t.py::test_b") is None
-        assert store.get_catalogue_entry("t.py::test_c") is None
+        assert store.get_catalogue_entry("t.py::test_b", project=DEFAULT_PROJECT) is None
+        assert store.get_catalogue_entry("t.py::test_c", project=DEFAULT_PROJECT) is None
 
     def test_a_report_after_the_finish_adds_no_metadata(
         self, store: ExecutionStore, stored_metadata: StoredMetadata
@@ -397,9 +442,13 @@ class ExecutionStoreContract:
             entries=(MetadataEntry(key="k2", value="v2", source_file="b.yaml", status="captured"),),
         )
         finish = _execution(identity, started=started)
-        store.record_session(finish, results=(), received_at=started, metadata=first)
+        store.record_session(
+            finish, results=(), received_at=started, metadata=first, project=DEFAULT_PROJECT
+        )
 
-        store.record_session(finish, results=(), received_at=started, metadata=later)
+        store.record_session(
+            finish, results=(), received_at=started, metadata=later, project=DEFAULT_PROJECT
+        )
 
         stored = stored_metadata(identity)
         assert set(stored.files) == set(first.files)
@@ -412,10 +461,17 @@ class ExecutionStoreContract:
         identity = "1" + "3" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         first_start = _start_only_execution(identity, started=started)
-        store.record_session(first_start, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            first_start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         second_start = _start_only_execution(identity, started=started + timedelta(seconds=5))
-        store.record_session(second_start, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            second_start,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
 
         stored = store.get_execution(identity)
         assert stored == first_start
@@ -429,18 +485,18 @@ class ExecutionStoreContract:
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
         created_by_start = store.record_session(
-            start, results=(), received_at=datetime.now(timezone.utc)
+            start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
         )
         assert created_by_start is True
 
         finish = _execution(identity, finished=True, started=started)
         created_by_finish = store.record_session(
-            finish, results=(), received_at=datetime.now(timezone.utc)
+            finish, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
         )
         assert created_by_finish is False
 
         created_by_duplicate = store.record_session(
-            finish, results=(), received_at=datetime.now(timezone.utc)
+            finish, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
         )
         assert created_by_duplicate is False
 
@@ -462,6 +518,7 @@ class ExecutionStoreContract:
             execution,
             results=(never_ran_call, instant),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         stored = {r.identity.node_id: r for r in store.get_results(execution.identity.value)}
@@ -479,6 +536,7 @@ class ExecutionStoreContract:
             execution,
             results=(empty_param, no_param),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         stored = store.get_results(execution.identity.value)
@@ -498,9 +556,10 @@ class ExecutionStoreContract:
             first_execution,
             results=(_result(node_id),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        entry_after_first = store.get_catalogue_entry(node_id)
+        entry_after_first = store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT)
         assert entry_after_first is not None
         assert entry_after_first.first_seen_at == first_execution.started_at
         assert entry_after_first.last_seen_at == first_execution.started_at
@@ -513,9 +572,10 @@ class ExecutionStoreContract:
             second_execution,
             results=(_result(node_id),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        entry_after_second = store.get_catalogue_entry(node_id)
+        entry_after_second = store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT)
         assert entry_after_second is not None
         assert entry_after_second.first_seen_at == first_execution.started_at
         assert entry_after_second.last_seen_at == second_execution.started_at
@@ -530,6 +590,7 @@ class ExecutionStoreContract:
             later_execution,
             results=(_result(node_id),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         older_execution = _execution(
@@ -539,9 +600,10 @@ class ExecutionStoreContract:
             older_execution,
             results=(_result(node_id),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        entry = store.get_catalogue_entry(node_id)
+        entry = store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT)
         assert entry is not None
         assert entry.last_seen_at == later_execution.started_at
         assert entry.last_seen_run_id == later_execution.identity.value
@@ -557,13 +619,19 @@ class ExecutionStoreContract:
         short_job = _execution("a" * 32, started=started)
         long_job = _execution("b" * 32, started=started - timedelta(minutes=30))
         store.record_session(
-            short_job, results=(_result(node_id),), received_at=datetime.now(timezone.utc)
+            short_job,
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
-            long_job, results=(_result(node_id),), received_at=datetime.now(timezone.utc)
+            long_job,
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        entry = store.get_catalogue_entry(node_id)
+        entry = store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT)
 
         assert entry is not None
         assert entry.first_seen_at == long_job.started_at
@@ -580,8 +648,9 @@ class ExecutionStoreContract:
             first_execution,
             results=(_result(stable_node_id),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
-        entry_before = store.get_catalogue_entry(stable_node_id)
+        entry_before = store.get_catalogue_entry(stable_node_id, project=DEFAULT_PROJECT)
         assert entry_before is not None
 
         second_execution = _execution("9" + "2" * 31)
@@ -589,9 +658,10 @@ class ExecutionStoreContract:
             second_execution,
             results=(_result(other_node_id),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        entry_after = store.get_catalogue_entry(stable_node_id)
+        entry_after = store.get_catalogue_entry(stable_node_id, project=DEFAULT_PROJECT)
         assert entry_after == entry_before
 
     def test_every_run_reads_a_node_ids_identity_from_its_newest_report(
@@ -622,7 +692,9 @@ class ExecutionStoreContract:
             (_execution("3" * 32, started=started - timedelta(days=1)), _reported("c.py", "L")),
         ]
         for execution, result in runs:
-            store.record_session(execution, results=(result,), received_at=started)
+            store.record_session(
+                execution, results=(result,), received_at=started, project=DEFAULT_PROJECT
+            )
 
         newest = runs[1][1].identity
         for execution, _result_reported in runs:
@@ -645,7 +717,7 @@ class ExecutionStoreContract:
         identity = "2" + "0" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
-        store.record_session(start, results=(), received_at=started)
+        store.record_session(start, results=(), received_at=started, project=DEFAULT_PROJECT)
 
         first_contact = started + timedelta(seconds=30)
         assert store.touch_last_contact(identity, first_contact) is True
@@ -683,10 +755,14 @@ class ExecutionStoreContract:
         identity = "2" + "1" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started, vcs=_vcs())
-        store.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         finish = _execution(identity, finished=True, started=started, vcs=None)
-        store.record_session(finish, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            finish, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         stored = store.get_execution(identity)
         assert stored is not None
@@ -710,6 +786,7 @@ class ExecutionStoreContract:
             _start_only_execution(identity, started=started, vcs=full),
             results=(),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         # A strict subset: only the commit survives, as a detached-HEAD or
@@ -719,6 +796,7 @@ class ExecutionStoreContract:
             _execution(identity, finished=True, started=started, vcs=partial),
             results=(),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         stored = store.get_execution(identity)
@@ -755,6 +833,7 @@ class ExecutionStoreContract:
             _start_only_execution(identity, started=started, vcs=start_vcs),
             results=(),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
         finish_vcs = _vcs(
             commit=None,
@@ -768,6 +847,7 @@ class ExecutionStoreContract:
             _execution(identity, finished=True, started=started, vcs=finish_vcs),
             results=(),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         stored = store.get_execution(identity)
@@ -787,10 +867,14 @@ class ExecutionStoreContract:
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         snapshot = _vcs(commit="b" * 40)
         start = _start_only_execution(identity, started=started, vcs=snapshot)
-        store.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         finish = _execution(identity, finished=True, started=started, vcs=snapshot)
-        store.record_session(finish, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            finish, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         stored = store.get_execution(identity)
         assert stored is not None
@@ -806,10 +890,14 @@ class ExecutionStoreContract:
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         finish_snapshot = _vcs(commit="c" * 40)
         finish = _execution(identity, finished=True, started=started, vcs=finish_snapshot)
-        store.record_session(finish, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            finish, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         late_start = _start_only_execution(identity, started=started, vcs=_vcs(commit="d" * 40))
-        store.record_session(late_start, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            late_start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         stored = store.get_execution(identity)
         assert stored == finish
@@ -837,8 +925,12 @@ class ExecutionStoreContract:
                 root=None,
             ),
         )
-        store.record_session(absent, results=(), received_at=datetime.now(timezone.utc))
-        store.record_session(all_null, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            absent, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
+        store.record_session(
+            all_null, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         stored_absent = store.get_execution(absent_id)
         stored_all_null = store.get_execution(all_null_id)
@@ -859,15 +951,23 @@ class ExecutionStoreContract:
         newer = datetime(2026, 9, 1, 10, 0, 0, tzinfo=timezone.utc)
         older = datetime(2026, 9, 1, 11, 30, 0, tzinfo=timezone(timedelta(hours=2)))
         store.record_session(
-            _execution("a" * 32, started=newer), results=(_result(node_id),), received_at=newer
+            _execution("a" * 32, started=newer),
+            results=(_result(node_id),),
+            received_at=newer,
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
-            _execution("b" * 32, started=older), results=(_result(node_id),), received_at=newer
+            _execution("b" * 32, started=older),
+            results=(_result(node_id),),
+            received_at=newer,
+            project=DEFAULT_PROJECT,
         )
 
-        runs = store.list_runs(limit=10, offset=0).items
-        history = store.list_history(node_id=node_id, limit=10, offset=0).items
-        entry = store.get_catalogue_entry(node_id)
+        runs = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items
+        history = store.list_history(
+            node_id=node_id, limit=10, offset=0, project=DEFAULT_PROJECT
+        ).items
+        entry = store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT)
 
         assert [run.execution.identity.value for run in runs] == ["a" * 32, "b" * 32]
         assert [item.run_id for item in history] == ["a" * 32, "b" * 32]
@@ -881,10 +981,20 @@ class ExecutionStoreContract:
         order is total, not merely partial -- a page boundary can never fall
         inside the tie group."""
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
-        store.record_session(_execution("a" * 32, started=started), results=(), received_at=started)
-        store.record_session(_execution("b" * 32, started=started), results=(), received_at=started)
+        store.record_session(
+            _execution("a" * 32, started=started),
+            results=(),
+            received_at=started,
+            project=DEFAULT_PROJECT,
+        )
+        store.record_session(
+            _execution("b" * 32, started=started),
+            results=(),
+            received_at=started,
+            project=DEFAULT_PROJECT,
+        )
 
-        page = store.list_runs(limit=10, offset=0)
+        page = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT)
 
         assert [entry.execution.identity.value for entry in page.items] == [
             "b" * 32,
@@ -904,10 +1014,18 @@ class ExecutionStoreContract:
             ("d" * 32, tied + timedelta(microseconds=1)),
         ):
             store.record_session(
-                _execution(identity, started=started), results=(), received_at=base
+                _execution(identity, started=started),
+                results=(),
+                received_at=base,
+                project=DEFAULT_PROJECT,
             )
 
-        page = store.list_runs(limit=10, offset=0, after=RunKey(started_at=tied, run_id="c" * 32))
+        page = store.list_runs(
+            limit=10,
+            offset=0,
+            after=RunKey(started_at=tied, run_id="c" * 32),
+            project=DEFAULT_PROJECT,
+        )
 
         assert [entry.execution.identity.value for entry in page.items] == ["b" * 32, "a" * 32]
         assert page.has_more is False
@@ -924,15 +1042,19 @@ class ExecutionStoreContract:
                 _execution(f"{i:032x}", started=base + timedelta(seconds=i)),
                 results=(),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
-        first = store.list_runs(limit=2, offset=0)
+        first = store.list_runs(limit=2, offset=0, project=DEFAULT_PROJECT)
         last = first.items[-1].execution
         store.record_session(
-            _execution("f" * 32, started=base + timedelta(seconds=10)), results=(), received_at=base
+            _execution("f" * 32, started=base + timedelta(seconds=10)),
+            results=(),
+            received_at=base,
+            project=DEFAULT_PROJECT,
         )
 
         after = RunKey(started_at=last.started_at, run_id=last.identity.value)
-        second = store.list_runs(limit=2, offset=0, after=after)
+        second = store.list_runs(limit=2, offset=0, after=after, project=DEFAULT_PROJECT)
 
         assert [entry.execution.identity.value for entry in second.items] == [
             f"{1:032x}",
@@ -961,6 +1083,7 @@ class ExecutionStoreContract:
                         ),
                     )
                 ),
+                project=DEFAULT_PROJECT,
             )
 
         page, predating = store.list_runs_with_metadata_horizon(
@@ -968,6 +1091,7 @@ class ExecutionStoreContract:
             limit=10,
             offset=0,
             after=RunKey(started_at=base + timedelta(seconds=3), run_id=f"{3:032x}"),
+            project=DEFAULT_PROJECT,
         )
 
         assert [entry.execution.identity.value for entry in page.items] == [
@@ -986,9 +1110,10 @@ class ExecutionStoreContract:
                 _execution(identity, started=base + timedelta(seconds=i)),
                 results=(),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
 
-        page = store.list_runs(limit=MAX_PAGE_ITEMS * 5, offset=0)
+        page = store.list_runs(limit=MAX_PAGE_ITEMS * 5, offset=0, project=DEFAULT_PROJECT)
 
         assert len(page.items) == MAX_PAGE_ITEMS
         assert page.has_more is True
@@ -1006,18 +1131,20 @@ class ExecutionStoreContract:
                 _execution(identity, started=base + timedelta(seconds=i)),
                 results=(),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
 
-        exhausted = store.list_runs(limit=MAX_PAGE_ITEMS, offset=0)
+        exhausted = store.list_runs(limit=MAX_PAGE_ITEMS, offset=0, project=DEFAULT_PROJECT)
         assert exhausted.has_more is False
 
         store.record_session(
             _execution(f"{MAX_PAGE_ITEMS:032x}", started=base + timedelta(seconds=MAX_PAGE_ITEMS)),
             results=(),
             received_at=base,
+            project=DEFAULT_PROJECT,
         )
 
-        truncated = store.list_runs(limit=MAX_PAGE_ITEMS, offset=0)
+        truncated = store.list_runs(limit=MAX_PAGE_ITEMS, offset=0, project=DEFAULT_PROJECT)
         assert truncated.has_more is True
 
     def test_list_runs_honors_a_smaller_requested_page_size(self, store: ExecutionStore) -> None:
@@ -1030,9 +1157,10 @@ class ExecutionStoreContract:
                 _execution(identity, started=base + timedelta(seconds=i)),
                 results=(),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
 
-        page = store.list_runs(limit=3, offset=0)
+        page = store.list_runs(limit=3, offset=0, project=DEFAULT_PROJECT)
 
         assert len(page.items) == 3
         assert page.has_more is True
@@ -1048,19 +1176,22 @@ class ExecutionStoreContract:
             _execution("a" * 32, started=base, vcs=_vcs()),
             results=(),
             received_at=base,
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
             _execution("b" * 32, started=base + timedelta(seconds=1), vcs=None),
             results=(),
             received_at=base,
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
             _execution("c" * 32, started=base + timedelta(seconds=2), vcs=_vcs()),
             results=(),
             received_at=base,
+            project=DEFAULT_PROJECT,
         )
 
-        page = store.list_runs(limit=10, offset=0)
+        page = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT)
 
         assert [entry.execution.identity.value for entry in page.items] == [
             "c" * 32,
@@ -1081,9 +1212,10 @@ class ExecutionStoreContract:
             ),
             results=(),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        page = store.list_runs(limit=10, offset=0)
+        page = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT)
 
         entry = page.items[0]
         assert entry.vcs is not None
@@ -1102,9 +1234,10 @@ class ExecutionStoreContract:
             ),
             results=(),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        page = store.list_runs(limit=10, offset=0)
+        page = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT)
 
         entry = page.items[0]
         assert entry.vcs is not None
@@ -1129,11 +1262,14 @@ class ExecutionStoreContract:
             _execution("a" * 32, started=started, vcs=vcs),
             results=(_result("t.py::test_x", outcome="failed", failure=failure),),
             received_at=started,
+            project=DEFAULT_PROJECT,
         )
 
         (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
-        (run_entry,) = store.list_runs(limit=10, offset=0).items
-        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items
+        (history_entry,) = store.list_history(
+            node_id="t.py::test_x", limit=10, offset=0, project=DEFAULT_PROJECT
+        ).items
 
         assert result_entry.failure == project_failure(failure)
         assert result_entry.failure is not None
@@ -1164,11 +1300,14 @@ class ExecutionStoreContract:
             _execution("a" * 32, vcs=vcs),
             results=(_result("t.py::test_x", outcome="failed", failure=failure),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
-        (run_entry,) = store.list_runs(limit=10, offset=0).items
-        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items
+        (history_entry,) = store.list_history(
+            node_id="t.py::test_x", limit=10, offset=0, project=DEFAULT_PROJECT
+        ).items
         detail = store.get_run_detail("a" * 32)
 
         assert result_entry.failure == project_failure(failure)
@@ -1192,10 +1331,11 @@ class ExecutionStoreContract:
             _execution("a" * 32, vcs=vcs),
             results=(_result("t.py::test_x", outcome="failed", failure=failure),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         (result_entry,) = store.list_results("a" * 32, limit=10, offset=0).items
-        (run_entry,) = store.list_runs(limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items
 
         assert result_entry.failure == project_failure(failure)
         assert run_entry.vcs == project_vcs(vcs)
@@ -1210,9 +1350,10 @@ class ExecutionStoreContract:
             ),
             results=(),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        page = store.list_runs(limit=10, offset=0)
+        page = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT)
 
         entry = page.items[0]
         assert entry.vcs is not None
@@ -1227,7 +1368,9 @@ class ExecutionStoreContract:
         execution = _execution(
             "a" * 32, vcs=_vcs(commit_subject=subject, commit_subject_truncated=False)
         )
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         detail = store.get_run_detail("a" * 32)
 
@@ -1252,14 +1395,16 @@ class ExecutionStoreContract:
             _execution("a" * 32, started=older, vcs=_vcs(branch="feature", dirty=True)),
             results=(_result(node_id, duration=0.5),),
             received_at=older,
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
             _execution("b" * 32, started=newer, vcs=_vcs(branch="main", dirty=False)),
             results=(_result(node_id, duration=0.75),),
             received_at=newer,
+            project=DEFAULT_PROJECT,
         )
 
-        page = store.list_history(node_id=node_id, limit=10, offset=0)
+        page = store.list_history(node_id=node_id, limit=10, offset=0, project=DEFAULT_PROJECT)
 
         assert [entry.run_id for entry in page.items] == ["b" * 32, "a" * 32]
         newest, oldest = page.items
@@ -1285,6 +1430,7 @@ class ExecutionStoreContract:
                 _execution(f"{i:032x}", started=base + timedelta(seconds=i)),
                 results=(_result(node_id),),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
 
         page = store.list_history(
@@ -1292,6 +1438,7 @@ class ExecutionStoreContract:
             limit=10,
             offset=0,
             after=RunKey(started_at=base + timedelta(seconds=2), run_id=f"{2:032x}"),
+            project=DEFAULT_PROJECT,
         )
 
         assert [entry.run_id for entry in page.items] == [f"{1:032x}", f"{0:032x}"]
@@ -1299,7 +1446,9 @@ class ExecutionStoreContract:
 
     def test_list_history_unknown_node_id_is_empty_not_error(self, store: ExecutionStore) -> None:
         """An unknown test identity yields an empty history, not an error."""
-        page = store.list_history(node_id="t.py::test_never_ran", limit=10, offset=0)
+        page = store.list_history(
+            node_id="t.py::test_never_ran", limit=10, offset=0, project=DEFAULT_PROJECT
+        )
 
         assert page.items == ()
         assert page.has_more is False
@@ -1312,9 +1461,10 @@ class ExecutionStoreContract:
             _execution("a" * 32, vcs=None),
             results=(_result(node_id),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
-        page = store.list_history(node_id=node_id, limit=10, offset=0)
+        page = store.list_history(node_id=node_id, limit=10, offset=0, project=DEFAULT_PROJECT)
 
         assert len(page.items) == 1
         assert page.items[0].vcs is None
@@ -1330,9 +1480,12 @@ class ExecutionStoreContract:
                 _execution(identity, started=base + timedelta(seconds=i)),
                 results=(_result(node_id),),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
 
-        exhausted = store.list_history(node_id=node_id, limit=MAX_PAGE_ITEMS, offset=0)
+        exhausted = store.list_history(
+            node_id=node_id, limit=MAX_PAGE_ITEMS, offset=0, project=DEFAULT_PROJECT
+        )
         assert len(exhausted.items) == MAX_PAGE_ITEMS
         assert exhausted.has_more is False
 
@@ -1340,9 +1493,12 @@ class ExecutionStoreContract:
             _execution(f"{MAX_PAGE_ITEMS:032x}", started=base + timedelta(seconds=MAX_PAGE_ITEMS)),
             results=(_result(node_id),),
             received_at=base,
+            project=DEFAULT_PROJECT,
         )
 
-        truncated = store.list_history(node_id=node_id, limit=MAX_PAGE_ITEMS, offset=0)
+        truncated = store.list_history(
+            node_id=node_id, limit=MAX_PAGE_ITEMS, offset=0, project=DEFAULT_PROJECT
+        )
         assert len(truncated.items) == MAX_PAGE_ITEMS
         assert truncated.has_more is True
 
@@ -1351,7 +1507,12 @@ class ExecutionStoreContract:
         `limit`/`offset`/`has_more` over one run's results."""
         execution = _execution("a" * 32)
         results = tuple(_result(f"t.py::test_{i}") for i in range(5))
-        store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution,
+            results=results,
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
 
         page = store.list_results(execution.identity.value, limit=3, offset=0)
         assert len(page.items) == 3
@@ -1363,7 +1524,9 @@ class ExecutionStoreContract:
 
     def test_list_results_empty_for_a_run_with_no_results(self, store: ExecutionStore) -> None:
         execution = _execution("a" * 32)
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         page = store.list_results(execution.identity.value, limit=10, offset=0)
 
@@ -1385,6 +1548,7 @@ class ExecutionStoreContract:
             execution,
             results=(_result("t.py::test_failing", outcome="failed", failure=failure),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         page = store.list_results(execution.identity.value, limit=10, offset=0)
@@ -1424,6 +1588,7 @@ class ExecutionStoreContract:
             execution,
             results=(_result("t.py::test_x", outcome="failed", failure=failure),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         (entry,) = store.list_results(execution.identity.value, limit=10, offset=0).items
@@ -1452,6 +1617,7 @@ class ExecutionStoreContract:
             execution,
             results=(_result("t.py::test_x", failure=empty),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         found = store.get_result(execution.identity.value, node_id="t.py::test_x")
@@ -1475,10 +1641,13 @@ class ExecutionStoreContract:
             _execution("a" * 32, started=started, vcs=root_only),
             results=(_result("t.py::test_x"),),
             received_at=started,
+            project=DEFAULT_PROJECT,
         )
 
-        (run_entry,) = store.list_runs(limit=10, offset=0).items
-        (history_entry,) = store.list_history(node_id="t.py::test_x", limit=10, offset=0).items
+        (run_entry,) = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items
+        (history_entry,) = store.list_history(
+            node_id="t.py::test_x", limit=10, offset=0, project=DEFAULT_PROJECT
+        ).items
         detail = store.get_run_detail("a" * 32)
 
         assert detail is not None
@@ -1499,6 +1668,7 @@ class ExecutionStoreContract:
                 _result("t.py::test_x", outcome="failed", failure=failure, captured=captured),
             ),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         found = store.get_result(execution.identity.value, node_id="t.py::test_x")
@@ -1510,7 +1680,9 @@ class ExecutionStoreContract:
 
     def test_get_result_returns_none_for_unknown_node_id_miss(self, store: ExecutionStore) -> None:
         execution = _execution("a" * 32)
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         assert store.get_result(execution.identity.value, node_id="t.py::test_never_ran") is None
 
@@ -1524,6 +1696,7 @@ class ExecutionStoreContract:
             execution,
             results=(_result("t.py::test_x", outcome="failed", failure=failure),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         found = store.get_result(execution.identity.value, node_id="t.py::test_x")
@@ -1544,6 +1717,7 @@ class ExecutionStoreContract:
             execution,
             results=(_result("t.py::test_x"),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         found = store.get_result(execution.identity.value, node_id="t.py::test_x")
@@ -1566,6 +1740,7 @@ class ExecutionStoreContract:
             execution,
             results=(_result("t.py::test_x", captured=empty_captured),),
             received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         found = store.get_result(execution.identity.value, node_id="t.py::test_x")
@@ -1578,19 +1753,24 @@ class ExecutionStoreContract:
     # -- settings: namespaced persistence, create/replace/delete --
 
     def test_list_settings_is_empty_for_an_unknown_namespace(self, store: ExecutionStore) -> None:
-        assert store.list_settings("test_sections") == ()
+        assert store.list_settings("test_sections", project=DEFAULT_PROJECT) == ()
 
     def test_upsert_setting_creates_a_new_pair(self, store: ExecutionStore) -> None:
         now = datetime.now(timezone.utc)
 
         created = store.upsert_setting(
-            "test_sections", "Billing", value='{"prefix": "tests/billing/"}', updated_at=now
+            "test_sections",
+            "Billing",
+            value='{"prefix": "tests/billing/"}',
+            updated_at=now,
+            project=DEFAULT_PROJECT,
         )
 
         assert created is True
-        settings = store.list_settings("test_sections")
+        settings = store.list_settings("test_sections", project=DEFAULT_PROJECT)
         assert len(settings) == 1
-        assert settings[0] == UserSetting(
+        assert settings[0] == ProjectSetting(
+            project=DEFAULT_PROJECT,
             namespace="test_sections",
             key="Billing",
             value='{"prefix": "tests/billing/"}',
@@ -1602,12 +1782,16 @@ class ExecutionStoreContract:
     ) -> None:
         first = datetime.now(timezone.utc)
         second = first + timedelta(seconds=1)
-        store.upsert_setting("test_sections", "Billing", value="a", updated_at=first)
+        store.upsert_setting(
+            "test_sections", "Billing", value="a", updated_at=first, project=DEFAULT_PROJECT
+        )
 
-        replaced = store.upsert_setting("test_sections", "Billing", value="b", updated_at=second)
+        replaced = store.upsert_setting(
+            "test_sections", "Billing", value="b", updated_at=second, project=DEFAULT_PROJECT
+        )
 
         assert replaced is False
-        settings = store.list_settings("test_sections")
+        settings = store.list_settings("test_sections", project=DEFAULT_PROJECT)
         assert len(settings) == 1
         assert settings[0].value == "b"
 
@@ -1615,31 +1799,43 @@ class ExecutionStoreContract:
         self, store: ExecutionStore
     ) -> None:
         now = datetime.now(timezone.utc)
-        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+        store.upsert_setting(
+            "test_sections", "Billing", value="a", updated_at=now, project=DEFAULT_PROJECT
+        )
 
-        deleted = store.delete_setting("test_sections", "Billing")
+        deleted = store.delete_setting("test_sections", "Billing", project=DEFAULT_PROJECT)
 
         assert deleted is True
-        assert store.list_settings("test_sections") == ()
+        assert store.list_settings("test_sections", project=DEFAULT_PROJECT) == ()
 
     def test_delete_setting_for_an_absent_key_reports_false(self, store: ExecutionStore) -> None:
-        assert store.delete_setting("test_sections", "never-stored") is False
+        assert (
+            store.delete_setting("test_sections", "never-stored", project=DEFAULT_PROJECT) is False
+        )
 
     def test_list_settings_orders_by_key(self, store: ExecutionStore) -> None:
         now = datetime.now(timezone.utc)
-        store.upsert_setting("test_sections", "Checkout", value="b", updated_at=now)
-        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+        store.upsert_setting(
+            "test_sections", "Checkout", value="b", updated_at=now, project=DEFAULT_PROJECT
+        )
+        store.upsert_setting(
+            "test_sections", "Billing", value="a", updated_at=now, project=DEFAULT_PROJECT
+        )
 
-        settings = store.list_settings("test_sections")
+        settings = store.list_settings("test_sections", project=DEFAULT_PROJECT)
 
         assert [setting.key for setting in settings] == ["Billing", "Checkout"]
 
     def test_list_settings_only_returns_its_own_namespace(self, store: ExecutionStore) -> None:
         now = datetime.now(timezone.utc)
-        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
-        store.upsert_setting("other_namespace", "Billing", value="b", updated_at=now)
+        store.upsert_setting(
+            "test_sections", "Billing", value="a", updated_at=now, project=DEFAULT_PROJECT
+        )
+        store.upsert_setting(
+            "other_namespace", "Billing", value="b", updated_at=now, project=DEFAULT_PROJECT
+        )
 
-        settings = store.list_settings("test_sections")
+        settings = store.list_settings("test_sections", project=DEFAULT_PROJECT)
 
         assert len(settings) == 1
         assert settings[0].value == "a"
@@ -1648,13 +1844,26 @@ class ExecutionStoreContract:
         self, store: ExecutionStore
     ) -> None:
         now = datetime.now(timezone.utc)
-        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
-        store.upsert_setting("test_sections", "Checkout", value="b", updated_at=now)
+        store.upsert_setting(
+            "test_sections", "Billing", value="a", updated_at=now, project=DEFAULT_PROJECT
+        )
+        store.upsert_setting(
+            "test_sections", "Checkout", value="b", updated_at=now, project=DEFAULT_PROJECT
+        )
 
         with pytest.raises(NamespaceFullError):
-            store.upsert_setting("test_sections", "Accounts", value="c", updated_at=now, max_keys=2)
+            store.upsert_setting(
+                "test_sections",
+                "Accounts",
+                value="c",
+                updated_at=now,
+                max_keys=2,
+                project=DEFAULT_PROJECT,
+            )
 
-        assert [setting.key for setting in store.list_settings("test_sections")] == [
+        assert [
+            setting.key for setting in store.list_settings("test_sections", project=DEFAULT_PROJECT)
+        ] == [
             "Billing",
             "Checkout",
         ]
@@ -1663,23 +1872,40 @@ class ExecutionStoreContract:
         self, store: ExecutionStore
     ) -> None:
         now = datetime.now(timezone.utc)
-        store.upsert_setting("test_sections", "Billing", value="a", updated_at=now)
+        store.upsert_setting(
+            "test_sections", "Billing", value="a", updated_at=now, project=DEFAULT_PROJECT
+        )
 
         created = store.upsert_setting(
-            "test_sections", "Billing", value="b", updated_at=now, max_keys=1
+            "test_sections",
+            "Billing",
+            value="b",
+            updated_at=now,
+            max_keys=1,
+            project=DEFAULT_PROJECT,
         )
 
         assert created is False
-        assert [setting.value for setting in store.list_settings("test_sections")] == ["b"]
+        assert [
+            setting.value
+            for setting in store.list_settings("test_sections", project=DEFAULT_PROJECT)
+        ] == ["b"]
 
     def test_max_keys_counts_only_the_keys_of_its_own_namespace(
         self, store: ExecutionStore
     ) -> None:
         now = datetime.now(timezone.utc)
-        store.upsert_setting("other_namespace", "Billing", value="a", updated_at=now)
+        store.upsert_setting(
+            "other_namespace", "Billing", value="a", updated_at=now, project=DEFAULT_PROJECT
+        )
 
         created = store.upsert_setting(
-            "test_sections", "Billing", value="b", updated_at=now, max_keys=1
+            "test_sections",
+            "Billing",
+            value="b",
+            updated_at=now,
+            max_keys=1,
+            project=DEFAULT_PROJECT,
         )
 
         assert created is True
@@ -1688,7 +1914,9 @@ class ExecutionStoreContract:
         self, store: ExecutionStore
     ) -> None:
         execution = _execution("a" * 32)
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         assert store.get_run_case_outcomes(execution.identity.value) == ()
 
@@ -1700,7 +1928,12 @@ class ExecutionStoreContract:
             _result("t.py::test_a", outcome="passed"),
             _result("t.py::test_b", outcome="failed"),
         )
-        store.record_session(execution, results=results, received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution,
+            results=results,
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
 
         outcomes = store.get_run_case_outcomes(execution.identity.value)
 
@@ -1729,7 +1962,11 @@ class ExecutionStoreContract:
         )
 
         store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
 
         stored = stored_metadata(execution.identity.value)
@@ -1760,7 +1997,11 @@ class ExecutionStoreContract:
         )
 
         store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
 
         stored = stored_metadata(execution.identity.value)
@@ -1784,11 +2025,19 @@ class ExecutionStoreContract:
             entries=(MetadataEntry(key="k", value="v2", source_file="a.yaml", status="captured"),),
         )
         store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=first
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=first,
+            project=DEFAULT_PROJECT,
         )
 
         store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=second
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=second,
+            project=DEFAULT_PROJECT,
         )
 
         stored = set(stored_metadata(execution.identity.value).entries)
@@ -1811,17 +2060,29 @@ class ExecutionStoreContract:
         pair_identity = "6" * 32
         start = _start_only_execution(pair_identity, started=started)
         store.record_session(
-            start, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+            start,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
         finish = _execution(pair_identity, started=started)
         store.record_session(
-            finish, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+            finish,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
 
         finish_only_identity = "7" * 32
         finish_only = _execution(finish_only_identity, started=started)
         store.record_session(
-            finish_only, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+            finish_only,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
 
         pair = stored_metadata(pair_identity)
@@ -1884,7 +2145,11 @@ class ExecutionStoreContract:
         )
 
         store.record_session(
-            execution, results=(), received_at=datetime.now(timezone.utc), metadata=metadata
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
 
         stored = stored_metadata(execution.identity.value)
@@ -1912,6 +2177,7 @@ class ExecutionStoreContract:
                 ),
                 entries=(from_file,),
             ),
+            project=DEFAULT_PROJECT,
         )
 
         store.record_session(
@@ -1930,6 +2196,7 @@ class ExecutionStoreContract:
                     ),
                 ),
             ),
+            project=DEFAULT_PROJECT,
         )
 
         assert stored_metadata(identity).entries == (from_file,)
@@ -1965,12 +2232,14 @@ class ExecutionStoreContract:
             results=(),
             received_at=started,
             metadata=_values(*first),
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
             _execution(identity, started=started),
             results=(),
             received_at=started,
             metadata=_values(first[0], "b000", "b001", value="later"),
+            project=DEFAULT_PROJECT,
         )
 
         stored = store.get_run_metadata(identity)
@@ -1987,7 +2256,9 @@ class ExecutionStoreContract:
         `EMPTY_RUN_METADATA`) writes zero rows to either table."""
         execution = _execution("8" * 32)
 
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         assert stored_metadata(execution.identity.value) == RunMetadata()
 
@@ -2000,10 +2271,11 @@ class ExecutionStoreContract:
                 _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
                 results=(),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
 
         page, predating = store.list_runs_with_metadata_horizon(
-            filters=[("fw", "2.1")], limit=10, offset=0
+            filters=[("fw", "2.1")], limit=10, offset=0, project=DEFAULT_PROJECT
         )
 
         assert page.items == ()
@@ -2031,28 +2303,32 @@ class ExecutionStoreContract:
                 _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
                 results=(),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
         store.record_session(
             _execution("a" * 32, started=base + timedelta(minutes=5)),
             results=(),
             received_at=base,
             metadata=_declaring(None, "value_too_large"),
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
             _execution("b" * 32, started=base + timedelta(minutes=6)),
             results=(),
             received_at=base,
             metadata=_declaring("2.1", "captured"),
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
             _execution("c" * 32, started=base + timedelta(minutes=7)),
             results=(),
             received_at=base,
             metadata=_declaring("2.1", "captured"),
+            project=DEFAULT_PROJECT,
         )
 
         page, predating = store.list_runs_with_metadata_horizon(
-            filters=[("fw", "2.1")], limit=1, offset=0
+            filters=[("fw", "2.1")], limit=1, offset=0, project=DEFAULT_PROJECT
         )
 
         assert [entry.execution.identity.value for entry in page.items] == ["c" * 32]
@@ -2094,10 +2370,14 @@ class ExecutionStoreContract:
                 results=(),
                 received_at=base,
                 metadata=metadata,
+                project=DEFAULT_PROJECT,
             )
 
         page, predating = store.list_runs_with_metadata_horizon(
-            filters=[("fw", "1.1.0"), ("fmc", "5.2.0"), ("fw", "1.1.0")], limit=10, offset=0
+            filters=[("fw", "1.1.0"), ("fmc", "5.2.0"), ("fw", "1.1.0")],
+            limit=10,
+            offset=0,
+            project=DEFAULT_PROJECT,
         )
 
         assert [entry.execution.identity.value for entry in page.items] == ["4" * 32, "2" * 32]
@@ -2115,10 +2395,11 @@ class ExecutionStoreContract:
                     MetadataEntry(key="fw", value="2.1", source_file="m.json", status="captured"),
                 ),
             ),
+            project=DEFAULT_PROJECT,
         )
 
         page, predating = store.list_runs_with_metadata_horizon(
-            filters=[("fw", "2.1"), ("fw", "2.2")], limit=10, offset=0
+            filters=[("fw", "2.1"), ("fw", "2.2")], limit=10, offset=0, project=DEFAULT_PROJECT
         )
 
         assert page.items == ()
@@ -2131,11 +2412,14 @@ class ExecutionStoreContract:
                 _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
                 results=(),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
 
-        page, predating = store.list_runs_with_metadata_horizon(filters=[], limit=10, offset=0)
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[], limit=10, offset=0, project=DEFAULT_PROJECT
+        )
 
-        assert page == store.list_runs(limit=10, offset=0)
+        assert page == store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT)
         assert predating == ()
 
     # -- get_run_metadata --
@@ -2147,7 +2431,9 @@ class ExecutionStoreContract:
         self, store: ExecutionStore
     ) -> None:
         execution = _execution("5" * 32)
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         stored = store.get_run_metadata(execution.identity.value)
 
@@ -2204,6 +2490,7 @@ class ExecutionStoreContract:
             results=(),
             received_at=datetime.now(timezone.utc),
             metadata=RunMetadata(files=files, entries=entries),
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
             other,
@@ -2215,6 +2502,7 @@ class ExecutionStoreContract:
                     MetadataEntry(key="b", value="2", source_file="m.json", status="captured"),
                 ),
             ),
+            project=DEFAULT_PROJECT,
         )
 
         stored = store.get_run_metadata(execution.identity.value)
@@ -2251,6 +2539,7 @@ class ExecutionStoreContract:
             results=(),
             received_at=datetime.now(timezone.utc),
             metadata=RunMetadata(files=files),
+            project=DEFAULT_PROJECT,
         )
         store.record_session(
             other,
@@ -2259,6 +2548,7 @@ class ExecutionStoreContract:
             metadata=RunMetadata(
                 files=(MetadataFile(source_file="c.yaml", content_type="yaml", status="captured"),),
             ),
+            project=DEFAULT_PROJECT,
         )
 
         stored = store.get_run_metadata(execution.identity.value)
@@ -2476,17 +2766,25 @@ class ExecutionStoreContract:
         store.create_user("alice", admin=False, created_at=_ACCESS_AT)
         mine, anonymous = "1" * 32, "2" * 32
         store.record_session(
-            _start_only_execution(mine), results=(), received_at=_ACCESS_AT, recorded_by="alice"
+            _start_only_execution(mine),
+            results=(),
+            received_at=_ACCESS_AT,
+            recorded_by="alice",
+            project=DEFAULT_PROJECT,
         )
-        store.record_session(_execution(anonymous), results=(), received_at=_ACCESS_AT)
+        store.record_session(
+            _execution(anonymous), results=(), received_at=_ACCESS_AT, project=DEFAULT_PROJECT
+        )
 
         mine_detail = store.get_run_detail(mine)
         anonymous_detail = store.get_run_detail(anonymous)
         listed = {
             entry.execution.identity.value: entry.recorded_by
-            for entry in store.list_runs(limit=10, offset=0).items
+            for entry in store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items
         }
-        filtered, _horizon = store.list_runs_with_metadata_horizon(filters=(), limit=10, offset=0)
+        filtered, _horizon = store.list_runs_with_metadata_horizon(
+            filters=(), limit=10, offset=0, project=DEFAULT_PROJECT
+        )
 
         assert mine_detail is not None and mine_detail.recorded_by == "alice"
         assert anonymous_detail is not None and anonymous_detail.recorded_by is None
@@ -2505,7 +2803,9 @@ class ExecutionStoreContract:
         store.create_user("bob", admin=False, created_at=_ACCESS_AT)
         run_id = "3" * 32
         start = _start_only_execution(run_id)
-        store.record_session(start, results=(), received_at=_ACCESS_AT, recorded_by=creator)
+        store.record_session(
+            start, results=(), received_at=_ACCESS_AT, recorded_by=creator, project=DEFAULT_PROJECT
+        )
 
         with pytest.raises(ForeignRunError):
             store.record_session(
@@ -2524,6 +2824,7 @@ class ExecutionStoreContract:
                     )
                 ),
                 recorded_by=sender,
+                project=DEFAULT_PROJECT,
             )
 
         detail = store.get_run_detail(run_id)
@@ -2531,7 +2832,7 @@ class ExecutionStoreContract:
         assert (detail.execution, detail.recorded_by) == (start, creator)
         assert store.get_results(run_id) == []
         assert store.get_run_metadata(run_id) == RunMetadata()
-        assert store.get_catalogue_entry("t.py::test_a") is None
+        assert store.get_catalogue_entry("t.py::test_a", project=DEFAULT_PROJECT) is None
 
     def test_another_users_replay_of_a_finished_run_is_refused_too(
         self, store: ExecutionStore
@@ -2541,13 +2842,31 @@ class ExecutionStoreContract:
         store.create_user("alice", admin=False, created_at=_ACCESS_AT)
         store.create_user("bob", admin=False, created_at=_ACCESS_AT)
         execution = _execution("4" * 32)
-        store.record_session(execution, results=(), received_at=_ACCESS_AT, recorded_by="alice")
+        store.record_session(
+            execution,
+            results=(),
+            received_at=_ACCESS_AT,
+            recorded_by="alice",
+            project=DEFAULT_PROJECT,
+        )
 
         with pytest.raises(ForeignRunError):
-            store.record_session(execution, results=(), received_at=_ACCESS_AT, recorded_by="bob")
+            store.record_session(
+                execution,
+                results=(),
+                received_at=_ACCESS_AT,
+                recorded_by="bob",
+                project=DEFAULT_PROJECT,
+            )
 
         assert (
-            store.record_session(execution, results=(), received_at=_ACCESS_AT, recorded_by="alice")
+            store.record_session(
+                execution,
+                results=(),
+                received_at=_ACCESS_AT,
+                recorded_by="alice",
+                project=DEFAULT_PROJECT,
+            )
             is False
         )
 
@@ -2555,7 +2874,11 @@ class ExecutionStoreContract:
         store.create_user("alice", admin=False, created_at=_ACCESS_AT)
         run_id = "5" * 32
         store.record_session(
-            _start_only_execution(run_id), results=(), received_at=_ACCESS_AT, recorded_by="alice"
+            _start_only_execution(run_id),
+            results=(),
+            received_at=_ACCESS_AT,
+            recorded_by="alice",
+            project=DEFAULT_PROJECT,
         )
 
         created = store.record_session(
@@ -2563,14 +2886,440 @@ class ExecutionStoreContract:
             results=(_result("t.py::test_a"),),
             received_at=_ACCESS_AT,
             recorded_by="alice",
+            project=DEFAULT_PROJECT,
         )
 
         assert created is False
         assert store.get_execution(run_id) == _execution(run_id)
         assert len(store.get_results(run_id)) == 1
 
+    # --- Projects ----------------------------------------------------------------
+
+    def test_a_new_store_holds_the_default_project_alone(self, store: ExecutionStore) -> None:
+        """Every database has `default` from creation, for the runs whose
+        report names no project; nothing else exists until someone makes it."""
+        projects = store.list_projects()
+
+        assert [project.name for project in projects] == [DEFAULT_PROJECT]
+        assert store.get_project(DEFAULT_PROJECT) == projects[0]
+
+    def test_created_projects_read_back_and_list_in_code_point_order(
+        self, store: ExecutionStore
+    ) -> None:
+        """Code point order, not a locale's: `-`, `.` and `_` sort by their
+        code points, before every letter, whatever the database collates by."""
+        created = [
+            store.create_project(name, created_at=_ACCESS_AT + timedelta(minutes=i))
+            for i, name in enumerate(("zeta", "b", "a_3", "a.2", "a-1", "0"))
+        ]
+
+        assert created[0] == Project(name="zeta", created_at=_ACCESS_AT)
+        assert [store.get_project(project.name) for project in created] == created
+        assert [project.name for project in store.list_projects()] == [
+            "0",
+            "a-1",
+            "a.2",
+            "a_3",
+            "b",
+            DEFAULT_PROJECT,
+            "zeta",
+        ]
+
+    @pytest.mark.parametrize("name", [DEFAULT_PROJECT, "alpha"])
+    def test_a_taken_project_name_is_refused_and_changes_nothing(
+        self, store: ExecutionStore, name: str
+    ) -> None:
+        store.create_project("alpha", created_at=_ACCESS_AT)
+        before = list(store.list_projects())
+
+        with pytest.raises(ProjectExistsError):
+            store.create_project(name, created_at=_ACCESS_AT + timedelta(days=1))
+
+        assert list(store.list_projects()) == before
+
+    @pytest.mark.parametrize("name", ["nope", "alpha\x00", "\x00", "Alpha"])
+    def test_a_name_no_project_has_reads_back_as_none(
+        self, store: ExecutionStore, name: str
+    ) -> None:
+        """A U+0000 names no project on any adapter, whatever it trails;
+        names differ by case, so `Alpha` is not `alpha`."""
+        store.create_project("alpha", created_at=_ACCESS_AT)
+
+        assert store.get_project(name) is None
+
+    @pytest.mark.parametrize("project", ["nope", "default\x00"])
+    def test_a_report_into_an_unknown_project_is_refused_and_stores_nothing(
+        self, store: ExecutionStore, project: str
+    ) -> None:
+        """Refused before anything is written, and the store never makes the
+        project itself: only whoever manages the store does."""
+        node_id = "t.py::test_a"
+
+        with pytest.raises(UnknownProjectError):
+            store.record_session(
+                _execution("1" * 32),
+                results=(_result(node_id),),
+                received_at=_ACCESS_AT,
+                metadata=_session_metadata(("k", "v")),
+                project=project,
+            )
+
+        assert store.count_executions() == 0
+        assert store.count_results() == 0
+        assert store.get_run_detail("1" * 32) is None
+        assert store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT) is None
+        assert store.get_catalogue_entry(node_id, project=project) is None
+        assert [p.name for p in store.list_projects()] == [DEFAULT_PROJECT]
+
+    def test_one_node_id_in_two_projects_is_two_catalogue_entries(
+        self, store: ExecutionStore
+    ) -> None:
+        """Two projects never share a test, however alike their node ids: a
+        newer run of the node id in one leaves the other's entry, identity
+        and last run as they were."""
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.create_project("b", created_at=_ACCESS_AT)
+        node_id = "tests/a.py::T::test_x"
+        in_a = _identified(node_id, "tests/a.py", "T")
+        in_b = _identified(node_id, "b.py", None)
+        run_a = _execution("a" * 32, started=_ACCESS_AT)
+        run_b = _execution("b" * 32, started=_ACCESS_AT + timedelta(days=1))
+        store.record_session(run_a, results=(in_a,), received_at=_ACCESS_AT, project="a")
+        entry_of_a = store.get_catalogue_entry(node_id, project="a")
+
+        store.record_session(run_b, results=(in_b,), received_at=_ACCESS_AT, project="b")
+
+        entry_of_b = store.get_catalogue_entry(node_id, project="b")
+        assert entry_of_a is not None and entry_of_b is not None
+        assert store.get_catalogue_entry(node_id, project="a") == entry_of_a
+        assert (entry_of_a.identity, entry_of_a.last_seen_run_id) == (in_a.identity, "a" * 32)
+        assert (entry_of_b.identity, entry_of_b.last_seen_run_id) == (in_b.identity, "b" * 32)
+        assert entry_of_b.first_seen_at == run_b.started_at
+        assert store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT) is None
+
+    def test_a_projects_results_read_its_own_catalogue_row(self, store: ExecutionStore) -> None:
+        """Recorded in A, then B, then A again: a result is attached to the
+        catalogue row of its run's project, never to another project's row
+        of the same node id, so A's runs read A's identity and A's history
+        holds A's runs alone."""
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.create_project("b", created_at=_ACCESS_AT)
+        node_id = "tests/a.py::T::test_x"
+        in_a = _identified(node_id, "tests/a.py", "T")
+        in_b = _identified(node_id, "b.py", None)
+        recorded = [
+            ("1" * 32, "a", in_a, _ACCESS_AT),
+            ("2" * 32, "b", in_b, _ACCESS_AT + timedelta(hours=1)),
+            ("3" * 32, "a", in_a, _ACCESS_AT + timedelta(hours=2)),
+        ]
+        for run_id, project, result, started in recorded:
+            store.record_session(
+                _execution(run_id, started=started),
+                results=(result,),
+                received_at=started,
+                project=project,
+            )
+
+        for run_id, _project, result, _started in recorded:
+            found = store.get_result(run_id, node_id=node_id)
+            (listed,) = store.list_results(run_id, limit=10, offset=0).items
+            assert found is not None and found.identity == result.identity, run_id
+            assert listed.identity == result.identity, run_id
+            assert [r.identity for r in store.get_results(run_id)] == [result.identity]
+        history_of_a = store.list_history(node_id=node_id, limit=10, offset=0, project="a")
+        history_of_b = store.list_history(node_id=node_id, limit=10, offset=0, project="b")
+        assert [entry.run_id for entry in history_of_a.items] == ["3" * 32, "1" * 32]
+        assert [entry.run_id for entry in history_of_b.items] == ["2" * 32]
+        entry_of_a = store.get_catalogue_entry(node_id, project="a")
+        assert entry_of_a is not None
+        assert (entry_of_a.first_seen_at, entry_of_a.last_seen_run_id) == (_ACCESS_AT, "3" * 32)
+
+    def test_the_run_list_holds_its_own_projects_runs_alone(self, store: ExecutionStore) -> None:
+        """With or without a cursor, and filtered or not; a cursor naming
+        another project's run only bounds the order, as any key does."""
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.create_project("b", created_at=_ACCESS_AT)
+        runs = [("a0", "a"), ("b0", "b"), ("d0", DEFAULT_PROJECT), ("a1", "a"), ("b1", "b")]
+        for i, (name, project) in enumerate(runs):
+            store.record_session(
+                _execution(name * 16, started=_ACCESS_AT + timedelta(minutes=i)),
+                results=(),
+                received_at=_ACCESS_AT,
+                project=project,
+            )
+
+        def _ids(project: str, after: RunKey | None = None) -> list[str]:
+            page = store.list_runs(limit=10, offset=0, after=after, project=project)
+            filtered, _horizon = store.list_runs_with_metadata_horizon(
+                filters=(), limit=10, offset=0, after=after, project=project
+            )
+            ids = [entry.execution.identity.value for entry in page.items]
+            assert [entry.execution.identity.value for entry in filtered.items] == ids
+            return ids
+
+        after_b0 = RunKey(started_at=_ACCESS_AT + timedelta(minutes=1), run_id="b0" * 16)
+        assert _ids("a") == ["a1" * 16, "a0" * 16]
+        assert _ids("b") == ["b1" * 16, "b0" * 16]
+        assert _ids(DEFAULT_PROJECT) == ["d0" * 16]
+        assert _ids("a", after=after_b0) == ["a0" * 16]
+        assert _ids("b", after=after_b0) == []
+
+    @pytest.mark.parametrize("project", ["nope", "default\x00"])
+    def test_a_project_that_does_not_exist_reads_empty(
+        self, store: ExecutionStore, project: str
+    ) -> None:
+        node_id = "t.py::test_a"
+        store.record_session(
+            _execution("1" * 32),
+            results=(_result(node_id),),
+            received_at=_ACCESS_AT,
+            metadata=_session_metadata(("fw", "2.1")),
+            project=DEFAULT_PROJECT,
+        )
+        store.upsert_setting(
+            "test_sections", "Billing", value="a", updated_at=_ACCESS_AT, project=DEFAULT_PROJECT
+        )
+
+        runs = store.list_runs(limit=10, offset=0, project=project)
+        filtered, predating = store.list_runs_with_metadata_horizon(
+            filters=[("fw", "2.1")], limit=10, offset=0, project=project
+        )
+        history = store.list_history(node_id=node_id, limit=10, offset=0, project=project)
+
+        assert (runs.items, runs.has_more) == ((), False)
+        assert (filtered.items, filtered.has_more, predating) == ((), False, (0,))
+        assert (history.items, history.has_more) == ((), False)
+        assert store.get_catalogue_entry(node_id, project=project) is None
+        assert tuple(store.list_settings("test_sections", project=project)) == ()
+        assert store.delete_setting("test_sections", "Billing", project=project) is False
+        assert len(store.list_settings("test_sections", project=DEFAULT_PROJECT)) == 1
+
+    def test_the_horizon_of_a_key_is_counted_within_the_project(
+        self, store: ExecutionStore
+    ) -> None:
+        """B carries both keys before A exists in time: A's `fw` horizon
+        counts A's runs before A first carried it, not B's older runs nor
+        B's earlier declaration, and a key only B carries leaves A's count
+        at A's run count."""
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.create_project("b", created_at=_ACCESS_AT)
+        runs = [
+            ("b0", "b", None),
+            ("b1", "b", _session_metadata(("fw", "2.1"), ("only_b", "x"))),
+            ("b2", "b", None),
+            ("a0", "a", None),
+            ("a1", "a", None),
+            ("a2", "a", _session_metadata(("fw", "2.1"))),
+        ]
+        for i, (name, project, metadata) in enumerate(runs):
+            store.record_session(
+                _execution(name * 16, started=_ACCESS_AT + timedelta(minutes=i)),
+                results=(),
+                received_at=_ACCESS_AT,
+                metadata=metadata if metadata is not None else RunMetadata(),
+                project=project,
+            )
+
+        def _horizon(project: str, key: str, value: str) -> tuple[list[str], tuple[int, ...]]:
+            page, predating = store.list_runs_with_metadata_horizon(
+                filters=[(key, value)], limit=10, offset=0, project=project
+            )
+            return [entry.execution.identity.value for entry in page.items], predating
+
+        assert _horizon("a", "fw", "2.1") == (["a2" * 16], (2,))
+        assert _horizon("a", "only_b", "x") == ([], (3,))
+        assert _horizon("b", "fw", "2.1") == (["b1" * 16], (1,))
+
+    @pytest.mark.parametrize("finished", [False, True], ids=["unfinished", "finished"])
+    def test_a_report_naming_another_project_than_its_runs_stores_nothing(
+        self, store: ExecutionStore, finished: bool
+    ) -> None:
+        """A run stays in the project that created it. A report naming
+        another is refused before anything is written -- even for a
+        finished run, whose replay would otherwise be answered as a
+        duplicate, hiding that it went to the wrong project."""
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.create_project("b", created_at=_ACCESS_AT)
+        run_id = "6" * 32
+        first = _execution(run_id) if finished else _start_only_execution(run_id)
+        store.record_session(first, results=(), received_at=_ACCESS_AT, project="a")
+
+        with pytest.raises(ProjectMismatchError):
+            store.record_session(
+                _execution(run_id),
+                results=(_result("t.py::test_a"),),
+                received_at=_ACCESS_AT + timedelta(hours=1),
+                metadata=_session_metadata(("k", "v")),
+                project="b",
+            )
+
+        detail = store.get_run_detail(run_id)
+        assert detail is not None
+        assert (detail.execution, detail.project) == (first, "a")
+        assert detail.last_contact_at == _ACCESS_AT
+        assert store.get_results(run_id) == []
+        assert store.get_run_metadata(run_id) == RunMetadata()
+        assert store.get_catalogue_entry("t.py::test_a", project="a") is None
+        assert store.get_catalogue_entry("t.py::test_a", project="b") is None
+        assert store.list_runs(limit=10, offset=0, project="b").items == ()
+
+    def test_a_run_detail_names_the_project_that_created_it(self, store: ExecutionStore) -> None:
+        store.create_project("a", created_at=_ACCESS_AT)
+        run_id = "7" * 32
+        store.record_session(
+            _start_only_execution(run_id), results=(), received_at=_ACCESS_AT, project="a"
+        )
+        finished = store.record_session(
+            _execution(run_id),
+            results=(_result("t.py::test_a"),),
+            received_at=_ACCESS_AT,
+            project="a",
+        )
+        store.record_session(
+            _execution("8" * 32), results=(), received_at=_ACCESS_AT, project=DEFAULT_PROJECT
+        )
+
+        in_a = store.get_run_detail(run_id)
+        in_default = store.get_run_detail("8" * 32)
+
+        assert finished is False
+        assert in_a is not None and in_a.project == "a"
+        assert in_a.execution == _execution(run_id)
+        assert in_default is not None and in_default.project == DEFAULT_PROJECT
+
+    def test_an_unknown_project_is_refused_before_another_user_and_that_before_a_mismatch(
+        self, store: ExecutionStore
+    ) -> None:
+        """Each refusal is checked before the next: a report into no
+        project says so whoever sends it, and another user's report learns
+        nothing of which project the run is in."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_user("bob", admin=False, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.create_project("b", created_at=_ACCESS_AT)
+        execution = _execution("9" * 32)
+        store.record_session(
+            execution, results=(), received_at=_ACCESS_AT, recorded_by="alice", project="a"
+        )
+
+        def _report(sender: str, project: str) -> bool:
+            return store.record_session(
+                execution,
+                results=(_result("t.py::test_a"),),
+                received_at=_ACCESS_AT,
+                recorded_by=sender,
+                project=project,
+            )
+
+        with pytest.raises(UnknownProjectError):
+            _report("bob", "nope")
+        with pytest.raises(UnknownProjectError):
+            _report("alice", "nope")
+        with pytest.raises(ForeignRunError):
+            _report("bob", "b")
+        with pytest.raises(ProjectMismatchError):
+            _report("alice", "b")
+        assert _report("alice", "a") is False
+        assert store.get_results("9" * 32) == []
+
+    def test_one_setting_key_in_two_projects_is_two_settings(self, store: ExecutionStore) -> None:
+        store.create_project("a", created_at=_ACCESS_AT)
+        later = _ACCESS_AT + timedelta(minutes=1)
+
+        in_default = store.upsert_setting(
+            "test_sections", "Billing", value="d", updated_at=_ACCESS_AT, project=DEFAULT_PROJECT
+        )
+        in_a = store.upsert_setting(
+            "test_sections", "Billing", value="a", updated_at=later, project="a"
+        )
+
+        assert (in_default, in_a) == (True, True)
+        assert tuple(store.list_settings("test_sections", project=DEFAULT_PROJECT)) == (
+            ProjectSetting(DEFAULT_PROJECT, "test_sections", "Billing", "d", _ACCESS_AT),
+        )
+        assert tuple(store.list_settings("test_sections", project="a")) == (
+            ProjectSetting("a", "test_sections", "Billing", "a", later),
+        )
+
+    def test_max_keys_counts_only_the_keys_of_its_own_project(self, store: ExecutionStore) -> None:
+        store.create_project("a", created_at=_ACCESS_AT)
+        for key in ("Billing", "Checkout"):
+            store.upsert_setting(
+                "test_sections", key, value="d", updated_at=_ACCESS_AT, project=DEFAULT_PROJECT
+            )
+
+        def _add(key: str) -> bool:
+            return store.upsert_setting(
+                "test_sections", key, value="a", updated_at=_ACCESS_AT, max_keys=2, project="a"
+            )
+
+        assert (_add("Accounts"), _add("Billing")) == (True, True)
+        with pytest.raises(NamespaceFullError):
+            _add("Checkout")
+        assert [s.key for s in store.list_settings("test_sections", project="a")] == [
+            "Accounts",
+            "Billing",
+        ]
+
+    def test_deleting_a_setting_in_one_project_leaves_the_others(
+        self, store: ExecutionStore
+    ) -> None:
+        store.create_project("a", created_at=_ACCESS_AT)
+        for project in (DEFAULT_PROJECT, "a"):
+            store.upsert_setting(
+                "test_sections", "Billing", value=project, updated_at=_ACCESS_AT, project=project
+            )
+
+        deleted = store.delete_setting("test_sections", "Billing", project="a")
+        again = store.delete_setting("test_sections", "Billing", project="a")
+
+        assert (deleted, again) == (True, False)
+        assert tuple(store.list_settings("test_sections", project="a")) == ()
+        assert [s.value for s in store.list_settings("test_sections", project=DEFAULT_PROJECT)] == [
+            DEFAULT_PROJECT
+        ]
+
+    @pytest.mark.parametrize("project", ["nope", "default\x00"])
+    def test_a_setting_of_an_unknown_project_is_refused_and_stores_nothing(
+        self, store: ExecutionStore, project: str
+    ) -> None:
+        with pytest.raises(UnknownProjectError):
+            store.upsert_setting(
+                "test_sections", "Billing", value="a", updated_at=_ACCESS_AT, project=project
+            )
+
+        assert tuple(store.list_settings("test_sections", project=project)) == ()
+        assert tuple(store.list_settings("test_sections", project=DEFAULT_PROJECT)) == ()
+        assert [p.name for p in store.list_projects()] == [DEFAULT_PROJECT]
+
 
 _ACCESS_AT = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _session_metadata(*pairs: tuple[str, str]) -> RunMetadata:
+    """A run's metadata holding each `(key, value)` as the session reported
+    it."""
+    return RunMetadata(
+        entries=tuple(
+            MetadataEntry(
+                key=key, value=value, source_file=None, status="captured", source="session"
+            )
+            for key, value in pairs
+        )
+    )
+
+
+def _identified(node_id: str, file_path: str, class_name: str | None) -> Result:
+    """A result of `node_id` decomposed into `file_path` and `class_name`,
+    so which catalogue row a result reads shows in its identity."""
+    identity = CaseIdentity(
+        node_id=node_id,
+        file_path=file_path,
+        class_name=class_name,
+        function_name=node_id.rsplit("::", 1)[-1],
+        param_id=None,
+    )
+    return replace(_result(node_id), identity=identity)
 
 
 def _token(

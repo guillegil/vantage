@@ -50,6 +50,7 @@ from vantage.core.domain.metadata import (
     METADATA_CONTENT_TYPES,
     METADATA_SOURCES,
 )
+from vantage.core.domain.projects import DEFAULT_PROJECT, PROJECT_NAME_PATTERN
 from vantage.core.domain.result import OUTCOMES
 from vantage.core.ports.storage import ExecutionStore
 from vantage.ingestion.schemas import (
@@ -64,6 +65,7 @@ from vantage.ingestion.schemas import (
 )
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
+from vantage.service.routes.projects import MAX_PROJECTS_BODY_BYTES
 from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
 from vantage.service.routes.users import MAX_USERS_BODY_BYTES
 from vantage.service.schemas import (
@@ -76,6 +78,9 @@ from vantage.service.schemas import (
     MetadataFileResponse,
     MetadataHorizonResponse,
     MetadataItemResponse,
+    ProjectCreateRequest,
+    ProjectListResponse,
+    ProjectResponse,
     RejectionResponse,
     ResultDetailResponse,
     ResultListItemResponse,
@@ -264,6 +269,9 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     client = TestClient(create_app(store), headers=_admin(store))
     run = f"/api/v1/runs/{'6' * 32}"
+    # A project the first binding makes, which the report is recorded in and
+    # the per-project paths read, so each is asked of a project but `default`.
+    project = "/api/v1/projects/interface-probe"
     minted: dict[str, Any] = {}
 
     def mint() -> httpx.Response:
@@ -272,7 +280,7 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
         return response
 
     node_id = "tests/test_interface_document_probe.py::test_x"
-    report = _report(run.rsplit("/", 1)[-1])
+    report = {**_report(run.rsplit("/", 1)[-1]), "project": "interface-probe"}
     # A single passing result, present so `GET /runs/{run_id}/result` has
     # something to bind against.
     report["results"] = [
@@ -297,11 +305,17 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
     ]
 
     # Ordered so the fixture data a later binding needs already exists --
-    # the run must be reported before it can be read back or heartbeat'd.
+    # the project must be made before a run is reported in it, and the run
+    # reported before it can be read back or heartbeat'd.
     ordered_bindings: list[tuple[tuple[str, str], _Call]] = [
+        (
+            ("POST", "/projects"),
+            lambda: client.post("/api/v1/projects", json={"name": "interface-probe"}),
+        ),
+        (("GET", "/projects"), lambda: client.get("/api/v1/projects")),
         (("POST", "/runs"), lambda: client.post("/api/v1/runs", json=report)),
         (("POST", "/runs/{run_id}/heartbeat"), lambda: client.post(f"{run}/heartbeat")),
-        (("GET", "/runs"), lambda: client.get("/api/v1/runs")),
+        (("GET", "/projects/{project}/runs"), lambda: client.get(f"{project}/runs")),
         (("GET", "/runs/{run_id}"), lambda: client.get(run)),
         (("GET", "/runs/{run_id}/metadata"), lambda: client.get(f"{run}/metadata")),
         (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{run}/results")),
@@ -310,26 +324,29 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
             lambda: client.get(f"{run}/result", params={"node_id": node_id}),
         ),
         (
-            ("GET", "/tests/history"),
-            lambda: client.get("/api/v1/tests/history", params={"node_id": node_id}),
+            ("GET", "/projects/{project}/tests/history"),
+            lambda: client.get(f"{project}/tests/history", params={"node_id": node_id}),
         ),
         (("GET", "/capabilities"), lambda: client.get("/api/v1/capabilities")),
         (("GET", "/openapi.yaml"), lambda: client.get("/api/v1/openapi.yaml")),
         (
-            ("POST", "/config/sections"),
+            ("POST", "/projects/{project}/config/sections"),
             lambda: client.post(
-                "/api/v1/config/sections",
+                f"{project}/config/sections",
                 json={"name": "InterfaceProbe", "prefix": "tests/interface-probe"},
             ),
         ),
-        (("GET", "/config/sections"), lambda: client.get("/api/v1/config/sections")),
+        (
+            ("GET", "/projects/{project}/config/sections"),
+            lambda: client.get(f"{project}/config/sections"),
+        ),
         (
             ("GET", "/runs/{run_id}/sections"),
             lambda: client.get(f"{run}/sections"),
         ),
         (
-            ("DELETE", "/config/sections"),
-            lambda: client.delete("/api/v1/config/sections", params={"name": "InterfaceProbe"}),
+            ("DELETE", "/projects/{project}/config/sections"),
+            lambda: client.delete(f"{project}/config/sections", params={"name": "InterfaceProbe"}),
         ),
         (("POST", "/users"), lambda: client.post("/api/v1/users", json={"name": "probe"})),
         (
@@ -366,6 +383,73 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
     known_shape = f"/api/v1/runs/{'7' * 32}"
     malformed = "/api/v1/runs/NOT-AN-ID"
     node = {"node_id": "tests/test_a.py::test_one"}
+    default = f"/api/v1/projects/{DEFAULT_PROJECT}"
+    # A name no project has, and one no project can have: both are 404.
+    missing = ("/api/v1/projects/ghost", "/api/v1/projects/NOT-A-NAME")
+    sections = f"{default}/config/sections"
+    section = {"name": "Probe", "prefix": "tests"}
+
+    def mismatch() -> httpx.Response:
+        """A run recorded in `default`, then reported again naming another
+        project."""
+        run_id = "8" * 32
+        assert client.post("/api/v1/projects", json={"name": "elsewhere"}).status_code == 201
+        assert client.post("/api/v1/runs", json=_report(run_id)).status_code == 201
+        return client.post("/api/v1/runs", json={**_report(run_id), "project": "elsewhere"})
+
+    per_project: list[tuple[tuple[str, str], _Call]] = []
+    for path in missing:
+        per_project += [
+            (("GET", "/projects/{project}/runs"), partial(client.get, f"{path}/runs")),
+            (
+                ("GET", "/projects/{project}/tests/history"),
+                partial(client.get, f"{path}/tests/history", params=node),
+            ),
+            (
+                ("GET", "/projects/{project}/config/sections"),
+                partial(client.get, f"{path}/config/sections"),
+            ),
+            (
+                ("POST", "/projects/{project}/config/sections"),
+                partial(client.post, f"{path}/config/sections", json=section),
+            ),
+            (
+                ("DELETE", "/projects/{project}/config/sections"),
+                partial(client.delete, f"{path}/config/sections", params={"name": "Probe"}),
+            ),
+        ]
+    projects_body: list[tuple[tuple[str, str], _Call]] = [
+        (
+            ("POST", "/projects"),
+            partial(
+                client.post, "/api/v1/projects", content=b"{}", headers={"content-type": "x/y"}
+            ),
+        ),
+        (
+            ("POST", "/projects"),
+            partial(client.post, "/api/v1/projects", content=b"{", headers=json_header),
+        ),
+        (
+            ("POST", "/projects"),
+            partial(
+                client.post,
+                "/api/v1/projects",
+                content=b" " * (MAX_PROJECTS_BODY_BYTES + 1),
+                headers=json_header,
+            ),
+        ),
+        (
+            ("POST", "/projects"),
+            partial(client.post, "/api/v1/projects", content=b"[]", headers=json_header),
+        ),
+        (("POST", "/projects"), partial(client.post, "/api/v1/projects", json={})),
+        (("POST", "/projects"), partial(client.post, "/api/v1/projects", json={"name": 1})),
+        (("POST", "/projects"), partial(client.post, "/api/v1/projects", json={"name": "Bad"})),
+        (
+            ("POST", "/projects"),
+            partial(client.post, "/api/v1/projects", json={"name": DEFAULT_PROJECT}),
+        ),
+    ]
     return [
         (
             ("POST", "/runs"),
@@ -382,8 +466,25 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
             ("POST", "/runs"),
             lambda: client.post("/api/v1/runs", content=b"{}", headers=json_header),
         ),
-        (("GET", "/runs"), lambda: client.get("/api/v1/runs", params={"limit": 0})),
-        (("GET", "/runs"), lambda: client.get("/api/v1/runs", params={"metadata_key": "k"})),
+        (
+            ("POST", "/runs"),
+            lambda: client.post("/api/v1/runs", json={**_report("a" * 32), "project": "Bad"}),
+        ),
+        (
+            ("POST", "/runs"),
+            lambda: client.post("/api/v1/runs", json={**_report("b" * 32), "project": "ghost"}),
+        ),
+        (("POST", "/runs"), mismatch),
+        *projects_body,
+        *per_project,
+        (
+            ("GET", "/projects/{project}/runs"),
+            lambda: client.get(f"{default}/runs", params={"limit": 0}),
+        ),
+        (
+            ("GET", "/projects/{project}/runs"),
+            lambda: client.get(f"{default}/runs", params={"metadata_key": "k"}),
+        ),
         (("GET", "/runs/{run_id}"), lambda: client.get(known_shape)),
         (("GET", "/runs/{run_id}"), lambda: client.get(malformed)),
         (("GET", "/runs/{run_id}/metadata"), lambda: client.get(f"{known_shape}/metadata")),
@@ -402,37 +503,36 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
         ),
         (("GET", "/runs/{run_id}/result"), lambda: client.get(f"{malformed}/result", params=node)),
         (("GET", "/runs/{run_id}/result"), lambda: client.get(f"{known_shape}/result")),
-        (("GET", "/tests/history"), lambda: client.get("/api/v1/tests/history")),
+        (
+            ("GET", "/projects/{project}/tests/history"),
+            lambda: client.get(f"{default}/tests/history"),
+        ),
         (("GET", "/runs/{run_id}/sections"), lambda: client.get(f"{known_shape}/sections")),
         (("GET", "/runs/{run_id}/sections"), lambda: client.get(f"{malformed}/sections")),
         (
-            ("POST", "/config/sections"),
-            lambda: client.post("/api/v1/config/sections", json={"name": "", "prefix": "tests"}),
+            ("POST", "/projects/{project}/config/sections"),
+            lambda: client.post(sections, json={"name": "", "prefix": "tests"}),
         ),
-        (("POST", "/config/sections"), lambda: client.post("/api/v1/config/sections", json={})),
+        (("POST", "/projects/{project}/config/sections"), lambda: client.post(sections, json={})),
         (
-            ("POST", "/config/sections"),
+            ("POST", "/projects/{project}/config/sections"),
+            lambda: client.post(sections, content=b"{}", headers={"content-type": "x/y"}),
+        ),
+        (
+            ("POST", "/projects/{project}/config/sections"),
+            lambda: client.post(sections, content=b"{", headers=json_header),
+        ),
+        (
+            ("POST", "/projects/{project}/config/sections"),
             lambda: client.post(
-                "/api/v1/config/sections", content=b"{}", headers={"content-type": "x/y"}
+                sections, content=b" " * (MAX_SECTION_BODY_BYTES + 1), headers=json_header
             ),
         ),
         (
-            ("POST", "/config/sections"),
-            lambda: client.post("/api/v1/config/sections", content=b"{", headers=json_header),
+            ("DELETE", "/projects/{project}/config/sections"),
+            lambda: client.delete(sections, params={"name": "never-stored"}),
         ),
-        (
-            ("POST", "/config/sections"),
-            lambda: client.post(
-                "/api/v1/config/sections",
-                content=b" " * (MAX_SECTION_BODY_BYTES + 1),
-                headers=json_header,
-            ),
-        ),
-        (
-            ("DELETE", "/config/sections"),
-            lambda: client.delete("/api/v1/config/sections", params={"name": "never-stored"}),
-        ),
-        (("DELETE", "/config/sections"), lambda: client.delete("/api/v1/config/sections")),
+        (("DELETE", "/projects/{project}/config/sections"), lambda: client.delete(sections)),
         (("GET", "/users"), lambda: client.get("/api/v1/users")),
         (("POST", "/users"), lambda: client.post("/api/v1/users", json={"name": "a"})),
         (
@@ -509,12 +609,14 @@ def test_every_status_the_server_answers_is_documented() -> None:
     and on one whose admin manages users. Half 2 removes one code from a
     copy of the document and proves the check reports it."""
     client = TestClient(create_app(InMemoryExecutionStore()))
-    observed = {(*key, call().status_code) for key, call in _probes(client)}
+    answers = [(key, call()) for key, call in _probes(client)]
     closed = InMemoryExecutionStore()
     admin = _admin(closed)
     closed.create_user("bob", admin=False, created_at=datetime.now(timezone.utc))
     admin_client = TestClient(create_app(closed), headers=admin)
-    observed |= {(*key, call().status_code) for key, call in _users_probes(admin_client)}
+    answers += [(key, call()) for key, call in _users_probes(admin_client)]
+    observed = {(*key, response.status_code) for key, response in answers}
+    errors = {(*key, response.json()["error"]) for key, response in answers}
     assert all(status >= 400 for _, _, status in observed)
     assert {status for method, path, status in observed if path.startswith("/users")} == {
         400,
@@ -524,6 +626,24 @@ def test_every_status_the_server_answers_is_documented() -> None:
         415,
         422,
     }
+    # Every rejection a project can earn is probed, as the error it is.
+    assert {status for _, path, status in observed if path == "/projects"} == {
+        400,
+        409,
+        413,
+        415,
+        422,
+    }
+    assert {
+        ("POST", "/projects", "project_exists"),
+        ("POST", "/projects", "invalid_project_name"),
+        ("POST", "/projects", "invalid_project_request"),
+        ("POST", "/runs", "unknown_project"),
+        ("POST", "/runs", "project_mismatch"),
+        ("POST", "/runs", "invalid_report"),
+    } <= errors
+    nested = {key for key in _declared_operations(_parsed_document()) if "{project}" in key[1]}
+    assert {(*key, "unknown_project") for key in nested} <= errors
 
     assert _undocumented_statuses(_parsed_document(), observed) == set()
 
@@ -533,19 +653,22 @@ def test_every_status_the_server_answers_is_documented() -> None:
 
 
 _ACCESS_RUN = "5" * 32
+_ACCESS_PROJECT = "access-probe"
 
 
 def _access_requests(
     client: TestClient, headers: dict[str, str], *, victim: int = 1
 ) -> dict[tuple[str, str], _Call]:
     """One request per documented operation, sending `headers`, in an order
-    where each finds what it needs: the run reported first, the section
-    posted before it is deleted. The users bindings add `carol`, demote and
-    mint a token for `bob`, and revoke the token `victim`."""
+    where each finds what it needs: the project made first, the run
+    reported in it next, the section posted before it is deleted. The users
+    bindings add `carol`, demote and mint a token for `bob`, and revoke the
+    token `victim`."""
     run = f"/api/v1/runs/{_ACCESS_RUN}"
+    project = f"/api/v1/projects/{_ACCESS_PROJECT}"
     node = {"node_id": "tests/test_a.py::test_one"}
     section = {"name": "AccessProbe", "prefix": "tests/access-probe"}
-    report = _report(_ACCESS_RUN)
+    report = {**_report(_ACCESS_RUN), "project": _ACCESS_PROJECT}
     report["results"] = [
         {
             "node_id": node["node_id"],
@@ -567,29 +690,35 @@ def _access_requests(
         }
     ]
     return {
+        ("POST", "/projects"): lambda: client.post(
+            "/api/v1/projects", json={"name": _ACCESS_PROJECT}, headers=headers
+        ),
+        ("GET", "/projects"): lambda: client.get("/api/v1/projects", headers=headers),
         ("POST", "/runs"): lambda: client.post("/api/v1/runs", json=report, headers=headers),
         ("POST", "/runs/{run_id}/heartbeat"): lambda: client.post(
             f"{run}/heartbeat", headers=headers
         ),
-        ("GET", "/runs"): lambda: client.get("/api/v1/runs", headers=headers),
+        ("GET", "/projects/{project}/runs"): lambda: client.get(f"{project}/runs", headers=headers),
         ("GET", "/runs/{run_id}"): lambda: client.get(run, headers=headers),
         ("GET", "/runs/{run_id}/metadata"): lambda: client.get(f"{run}/metadata", headers=headers),
         ("GET", "/runs/{run_id}/results"): lambda: client.get(f"{run}/results", headers=headers),
         ("GET", "/runs/{run_id}/result"): lambda: client.get(
             f"{run}/result", params=node, headers=headers
         ),
-        ("GET", "/tests/history"): lambda: client.get(
-            "/api/v1/tests/history", params=node, headers=headers
+        ("GET", "/projects/{project}/tests/history"): lambda: client.get(
+            f"{project}/tests/history", params=node, headers=headers
         ),
         ("GET", "/runs/{run_id}/sections"): lambda: client.get(f"{run}/sections", headers=headers),
         ("GET", "/capabilities"): lambda: client.get("/api/v1/capabilities", headers=headers),
         ("GET", "/openapi.yaml"): lambda: client.get("/api/v1/openapi.yaml", headers=headers),
-        ("POST", "/config/sections"): lambda: client.post(
-            "/api/v1/config/sections", json=section, headers=headers
+        ("POST", "/projects/{project}/config/sections"): lambda: client.post(
+            f"{project}/config/sections", json=section, headers=headers
         ),
-        ("GET", "/config/sections"): lambda: client.get("/api/v1/config/sections", headers=headers),
-        ("DELETE", "/config/sections"): lambda: client.delete(
-            "/api/v1/config/sections", params={"name": section["name"]}, headers=headers
+        ("GET", "/projects/{project}/config/sections"): lambda: client.get(
+            f"{project}/config/sections", headers=headers
+        ),
+        ("DELETE", "/projects/{project}/config/sections"): lambda: client.delete(
+            f"{project}/config/sections", params={"name": section["name"]}, headers=headers
         ),
         ("POST", "/users"): lambda: client.post(
             "/api/v1/users", json={"name": "carol"}, headers=headers
@@ -615,7 +744,8 @@ def _users_operation(operation: Mapping[str, Any]) -> bool:
 def test_an_open_server_serves_every_path_but_the_users_ones() -> None:
     """Driven by the document, with no token and no user: every operation
     tagged `users` answers `409 open_server`, and every other one serves
-    anyone, as before the server had users. Nothing asked makes a user."""
+    anyone, as before the server had users -- making a project included,
+    as changing sections is. Nothing asked makes a user."""
     store = InMemoryExecutionStore()
     client = TestClient(create_app(store))
     document = _parsed_document()
@@ -633,6 +763,7 @@ def test_an_open_server_serves_every_path_but_the_users_ones() -> None:
             assert 200 <= response.status_code < 300, (method, path, response.text)
 
     assert store.access_required() is False
+    assert store.get_project(_ACCESS_PROJECT) is not None
     assert _undocumented_statuses(document, {key for key in observed if key[2] >= 400}) == set()
 
 
@@ -724,11 +855,13 @@ def test_every_admin_operation_refuses_a_non_admins_token_holding_every_scope() 
         if _documented_scope(document["paths"][key[1]][key[0].lower()]) == ADMIN_SCOPE
     ]
 
-    assert len(admin_operations) == 8
+    assert len(admin_operations) == 9
+    assert ("POST", "/projects") in admin_operations
     for key in admin_operations:
         response = requests[key]()
         assert response.status_code == 403, (key, response.text)
     assert [user.name for user in store.list_users()] == ["bob"]
+    assert [project.name for project in store.list_projects()] == [DEFAULT_PROJECT]
 
 
 def test_every_response_declares_its_body() -> None:
@@ -798,8 +931,9 @@ def test_every_documented_integer_bound_is_the_one_the_server_enforces(tmp_path:
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     client = TestClient(create_app(store), headers=_admin(store))
     try:
-        assert client.get("/api/v1/runs", params={"offset": offset["maximum"]}).status_code == 200
-        past = client.get("/api/v1/runs", params={"offset": offset["maximum"] + 1})
+        runs = f"/api/v1/projects/{DEFAULT_PROJECT}/runs"
+        assert client.get(runs, params={"offset": offset["maximum"]}).status_code == 200
+        past = client.get(runs, params={"offset": offset["maximum"] + 1})
         assert past.status_code == 422
         revoke = "/api/v1/tokens/{}/revoke"
         assert client.post(revoke.format(token_id["maximum"])).status_code == 404
@@ -854,6 +988,17 @@ def test_the_documented_user_name_pattern_is_the_domains() -> None:
     assert declared == USER_NAME_PATTERN.replace("\\A", "^").replace("\\Z", "$")
 
 
+def test_the_documented_project_name_patterns_are_the_domains() -> None:
+    """Both places a client sends a project name, a new project and a
+    report's `project`, declare the domain's rule, anchors spelt as JSON
+    Schema spells them."""
+    schemas = _declared_schemas()
+    expected = PROJECT_NAME_PATTERN.replace("\\A", "^").replace("\\Z", "$")
+
+    assert schemas["ProjectCreateRequest"]["properties"]["name"]["pattern"] == expected
+    assert schemas["SessionReport"]["properties"]["project"]["pattern"] == expected
+
+
 # --- Schema checks ----------------------------------------------------------
 
 # `v1.yaml`'s schema name -> the model that produces or accepts that shape.
@@ -877,6 +1022,7 @@ _REQUEST_SCHEMAS: dict[str, type[BaseModel]] = {
     "UserCreateRequest": UserCreateRequest,
     "UserUpdateRequest": UserUpdateRequest,
     "TokenCreateRequest": TokenCreateRequest,
+    "ProjectCreateRequest": ProjectCreateRequest,
 }
 _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "Rejection": RejectionResponse,
@@ -905,6 +1051,8 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "TokenResponse": TokenResponse,
     "TokenListResponse": TokenListResponse,
     "CreatedTokenResponse": CreatedTokenResponse,
+    "ProjectResponse": ProjectResponse,
+    "ProjectListResponse": ProjectListResponse,
 }
 _BOUND_MODELS: dict[str, type[BaseModel]] = {**_REQUEST_SCHEMAS, **_RESPONSE_SCHEMAS}
 

@@ -14,6 +14,7 @@ import sqlite3
 import stat
 import threading
 import time
+import urllib.error
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,7 +23,8 @@ from typing import Any
 import pytest
 from pytest_vantage import outbox as outbox_module
 from pytest_vantage import transport
-from pytest_vantage.outbox import Outbox, OutboxError, outbox_path, send_queued
+from pytest_vantage.outbox import Outbox, OutboxError, outbox_path, send_queued, worth_retrying
+from pytest_vantage.transport import ProjectRefusedError
 from vantage.core.domain.execution import Execution
 from vantage.service.errors import RejectionError
 from vantage_test_server import VantageTestServer
@@ -53,9 +55,12 @@ def _result(node_id: str) -> dict[str, object]:
     }
 
 
-def _run_reports(run_id: str | None = None, *, tests: int = 1) -> list[dict[str, object]]:
+def _run_reports(
+    run_id: str | None = None, *, tests: int = 1, project: str | None = None
+) -> list[dict[str, object]]:
     """One session's reports as the plugin sends them: an in-progress report
-    with the first result, then the finishing report with the rest."""
+    with the first result, then the finishing report with the rest. With no
+    `project`, they name none, as a run queued before projects did."""
     run_id = run_id or uuid.uuid4().hex
     run = {
         "id": run_id,
@@ -68,9 +73,10 @@ def _run_reports(run_id: str | None = None, *, tests: int = 1) -> list[dict[str,
     finished = {**run, "finished_at": _FINISHED, "exit_status": 0}
     results = [_result(f"test_sample.py::test_{index}") for index in range(tests)]
     vcs = {"commit": None, "branch": None, "commit_subject": None, "dirty": None, "root": None}
+    named = {} if project is None else {"project": project}
     return [
-        {"run": run, "results": results[:1], "vcs": vcs},
-        {"run": finished, "results": results[1:], "vcs": vcs},
+        {"run": run, "results": results[:1], "vcs": vcs, **named},
+        {"run": finished, "results": results[1:], "vcs": vcs, **named},
     ]
 
 
@@ -379,6 +385,129 @@ def test_a_run_answered_with_a_5xx_stays_queued_and_the_rest_are_sent(
     assert _column(box.path, "attempts") == [1]
     assert "503" in _column(box.path, "last_error")[0]
     assert _column(box.path, "claimed_until") == [None]
+
+
+# --- A project the server does not have ------------------------------------------
+
+
+def _http_error(status: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("http://x/api/v1/runs", status, "no", {}, None)  # type: ignore[arg-type]
+
+
+def test_a_run_refused_for_its_project_is_worth_keeping_and_no_other_404_is() -> None:
+    """An admin can add the project, and the same reports are then taken;
+    a 404 for anything else, such as a wrong base path, would be the same
+    next time."""
+    refused = ProjectRefusedError(_http_error(404), "missing", "no project missing")
+
+    assert worth_retrying(refused) is True
+    assert outbox_module._rejected(refused) is False
+    assert worth_retrying(_http_error(404)) is False
+    assert outbox_module._rejected(_http_error(404)) is True
+
+
+def test_runs_of_a_project_the_server_lacks_stay_queued_and_cost_one_request(
+    box: Outbox, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first run of a missing project is refused, kept with its attempt
+    counted and the reason; sending moves on, since other runs may name
+    projects the server has, and passes over the same project's later runs
+    without uploading each to hear the same answer. Once an admin adds the
+    projects, the next send delivers every run into its own."""
+    first_a = _run_reports(project="missing-a")
+    no_project = _run_reports()
+    second_a = _run_reports(project="missing-a")
+    only_b = _run_reports(project="missing-b")
+    named_default = _run_reports(project="default")
+    runs = [first_a, no_project, second_a, only_b, named_default]
+    for reports in runs:
+        box.enqueue(vantage_server.address, _run_id(reports), reports)
+    asked: list[str] = []
+    real_send = transport.send
+
+    def _send(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
+        run = report["run"]
+        assert isinstance(run, dict)
+        asked.append(run["id"])
+        real_send(address, report, timeout=timeout, token=token)
+
+    monkeypatch.setattr(outbox_module, "send", _send)
+
+    summary = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0)
+
+    assert (summary.sent, summary.dropped, summary.waiting, summary.stopped) == (2, (), 3, None)
+    assert summary.missing_projects == ("missing-a", "missing-b")
+    assert set(_stored(vantage_server)) == {_run_id(no_project), _run_id(named_default)}
+    assert _run_id(second_a) not in asked
+    assert asked.count(_run_id(first_a)) == 1
+    assert asked.count(_run_id(only_b)) == 1
+    assert _column(box.path, "run_id") == [_run_id(first_a), _run_id(second_a), _run_id(only_b)]
+    assert _column(box.path, "attempts") == [1, 0, 1]
+    assert _column(box.path, "claimed_until") == [None, None, None]
+    first_error, second_error, b_error = _column(box.path, "last_error")
+    assert "vantage project add missing-a" in first_error
+    assert second_error is None
+    assert "vantage project add missing-b" in b_error
+
+    vantage_server.add_project("missing-a")
+    vantage_server.add_project("missing-b")
+    retried = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0)
+
+    assert (retried.sent, retried.waiting, retried.missing_projects) == (3, 0, ())
+    assert {run_id: vantage_server.project_of(run_id) for run_id in _stored(vantage_server)} == {
+        _run_id(first_a): "missing-a",
+        _run_id(no_project): "default",
+        _run_id(second_a): "missing-a",
+        _run_id(only_b): "missing-b",
+        _run_id(named_default): "default",
+    }
+
+
+class _NotFoundError(RejectionError):
+    """A 404 that is not about the project."""
+
+    status_code = 404
+    error = "not_found"
+
+
+def test_a_404_that_is_not_about_the_project_still_drops_the_run(
+    box: Outbox, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only `unknown_project` is kept: any other 404 is a rejection like
+    the rest of the 4xx, and the next run is sent."""
+    rejected, accepted = _run_reports(project="default"), _run_reports(project="default")
+    _refuse_run(vantage_server, monkeypatch, _run_id(rejected), _NotFoundError("gone"))
+    box.enqueue(vantage_server.address, _run_id(rejected), rejected)
+    box.enqueue(vantage_server.address, _run_id(accepted), accepted)
+
+    summary = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0)
+
+    assert summary.dropped == (_run_id(rejected),)
+    assert (summary.sent, summary.waiting, summary.missing_projects) == (1, 0, ())
+    assert set(_stored(vantage_server)) == {_run_id(accepted)}
+
+
+def test_a_run_the_server_holds_in_another_project_is_dropped(
+    box: Outbox, vantage_server: VantageTestServer
+) -> None:
+    """A run never moves: the server answers `409 project_mismatch` to a
+    report filing it elsewhere, and asking again would be answered the
+    same. The run stays where it was first stored."""
+    vantage_server.add_project("elsewhere")
+    run_id = uuid.uuid4().hex
+    stored = _run_reports(run_id, project="default")
+    box.enqueue(vantage_server.address, run_id, stored)
+    assert send_queued(box, vantage_server.address, timeout=5.0, budget=30.0).sent == 1
+    moved = _run_reports(run_id, project="elsewhere")
+    box.enqueue(vantage_server.address, run_id, moved)
+
+    summary = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0)
+
+    assert (summary.sent, summary.dropped, summary.waiting) == (0, (run_id,), 0)
+    assert summary.missing_projects == ()
+    assert vantage_server.project_of(run_id) == "default"
 
 
 class _RetryLaterError(RejectionError):

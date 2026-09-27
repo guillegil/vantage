@@ -1,5 +1,6 @@
-"""`vantage user` and `vantage token` -- manage the users of a database and
-their tokens, where the database is, without a server.
+"""`vantage user`, `vantage token` and `vantage project` -- manage the users
+of a database, their tokens and its projects, where the database is,
+without a server.
 
 **The database is found as the server finds it**: `--database`, then
 `VANTAGE_DATABASE`, then the default path, SQLite or PostgreSQL alike, and
@@ -7,11 +8,11 @@ it is opened the way `vantage` opens it, so every refusal is the same one
 line. A server may be serving it meanwhile: the first user added closes that
 server at its next request (`service/access.py`).
 
-**Only `user add` creates a database.** Setting up a server's users comes
-before serving it, so adding the first user to a SQLite path nothing holds
-yet creates the database there. Every other command needs one to exist,
-and answers a missing SQLite file in one line rather than leaving an empty
-database behind.
+**Only `user add` and `project add` create a database.** Setting up a
+server's users and projects comes before serving it, so adding one to a
+SQLite path nothing holds yet creates the database there. Every other
+command needs one to exist, and answers a missing SQLite file in one line
+rather than leaving an empty database behind.
 
 **A token is printed once, alone, on stdout**, so `$(vantage token create
 ...)` captures it and nothing else; what the command did goes to stderr.
@@ -47,7 +48,13 @@ from vantage.core.domain.access import (
     new_token,
     token_digest,
 )
-from vantage.core.ports.storage import ExecutionStore, UnknownUserError, UserExistsError
+from vantage.core.domain.projects import InvalidProjectNameError, check_project_name
+from vantage.core.ports.storage import (
+    ExecutionStore,
+    ProjectExistsError,
+    UnknownUserError,
+    UserExistsError,
+)
 
 
 def _refuse(message: str) -> NoReturn:
@@ -194,10 +201,60 @@ def _token_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _project_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="vantage project",
+        description=(
+            "Manage the projects of a vantage database. Every run belongs to one; a run that "
+            "names none belongs to default, which every database has."
+        ),
+    )
+    commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
+    add = commands.add_parser("add", help="Add a project, for runs to name.")
+    add.add_argument("name", help="1 to 64 characters of a-z, 0-9, '.', '_' and '-'.")
+    _add_database_option(add)
+    listing = commands.add_parser("list", help="List every project.")
+    _add_database_option(listing)
+    return parser
+
+
+def project(argv: Sequence[str]) -> int:
+    """`vantage project ...`: 0 when done, 1 with one line on stderr when
+    it could not be. Nothing about a project changes once it is made."""
+    args = _project_parser().parse_args(list(argv))
+    if args.command == "add":
+        # Before the database is opened: a refused name creates nothing.
+        try:
+            check_project_name(args.name)
+        except InvalidProjectNameError as exc:
+            _refuse(str(exc))
+    store = _open(args.database, create=args.command == "add")
+    try:
+        if args.command == "add":
+            try:
+                store.create_project(args.name, created_at=datetime.now(timezone.utc))
+            except ProjectExistsError:
+                _refuse(f"there is already a project named {args.name}")
+            _say(f"added project {args.name}")
+        else:
+            rows = [[found.name, _instant(found.created_at)] for found in store.list_projects()]
+            print(_table(["NAME", "CREATED"], rows))
+    finally:
+        with contextlib.suppress(Exception):
+            store.close()
+    return 0
+
+
 def user(argv: Sequence[str]) -> int:
     """`vantage user ...`: 0 when done, 1 with one line on stderr when it
     could not be."""
     args = _user_parser().parse_args(list(argv))
+    if args.command == "add":
+        # Before the database is opened: a refused name creates nothing.
+        try:
+            check_user_name(args.name)
+        except InvalidUserNameError as exc:
+            _refuse(str(exc))
     store = _open(args.database, create=args.command == "add")
     try:
         if args.command == "add":
@@ -215,10 +272,6 @@ def user(argv: Sequence[str]) -> int:
 
 
 def _add_user(store: ExecutionStore, name: str, *, admin: bool) -> None:
-    try:
-        check_user_name(name)
-    except InvalidUserNameError as exc:
-        _refuse(str(exc))
     first = not store.access_required()
     try:
         store.create_user(name, admin=admin, created_at=datetime.now(timezone.utc))
@@ -299,4 +352,4 @@ def _create_token(
         _say(f"{name} is disabled, so the token authenticates nothing until they are enabled")
 
 
-__all__ = ["token", "user"]
+__all__ = ["project", "token", "user"]

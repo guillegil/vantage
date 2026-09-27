@@ -39,6 +39,7 @@ from pytest_vantage.plugin import (
     _metadata_capture_requested,
 )
 from pytest_vantage.recorder import Recorder
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage_test_server import VantageTestServer
 from warnings_summary import vantage_warnings
 
@@ -377,6 +378,51 @@ def test_a_typed_vantage_records_to_the_ini_address(
     assert len(vantage_server.executions()) == 1
 
 
+# --- Where, not whether: the project -------------------------------------------
+
+
+@pytest.mark.parametrize("source", _ADDOPTS_SOURCES)
+def test_a_project_from_addopts_is_honoured_without_a_warning(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    vantage_server: VantageTestServer,
+    source: str,
+) -> None:
+    """`--vantage-project` says where a run goes, like `--vantage-server`,
+    so a committed `addopts` is a fine place for it: an activated session
+    files its run there, and nothing is said about untyped flags."""
+    monkeypatch.delenv("VANTAGE_SERVER", raising=False)
+    monkeypatch.delenv("VANTAGE_PROJECT", raising=False)
+    vantage_server.add_project("from-addopts")
+    pytester.makepyfile(test_sample=_SAMPLE_TEST)
+    _put_in_addopts(source, "--vantage-project=from-addopts", pytester, monkeypatch)
+
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=1)
+    assert vantage_warnings(result) == []
+    (execution,) = vantage_server.executions()
+    assert vantage_server.project_of(execution.identity.value) == "from-addopts"
+
+
+def test_an_invalid_project_in_the_environment_is_never_read_without_vantage(
+    pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `VANTAGE_PROJECT` exported for other sessions is inert until
+    recording is asked for; with `--vantage` typed, the same value is the
+    usage error it ought to be."""
+    monkeypatch.setenv("VANTAGE_PROJECT", "Not A Project")
+    pytester.makepyfile(test_sample=_SAMPLE_TEST)
+
+    unrecorded = pytester.runpytest()
+    recorded = pytester.runpytest("--vantage")
+
+    assert unrecorded.ret == pytest.ExitCode.OK
+    unrecorded.assert_outcomes(passed=1, warnings=0)
+    assert recorded.ret == pytest.ExitCode.USAGE_ERROR
+    assert any("VANTAGE_PROJECT" in line for line in recorded.stderr.lines)
+
+
 # --- The capture opt-ins have no ini or environment equivalent -----------------
 
 _CAPTURE_SOURCES = {
@@ -421,7 +467,7 @@ def test_capture_is_enabled_only_by_its_typed_flag(
     result.assert_outcomes(failed=1)
     (stored,) = vantage_server.results()
     page, _predating = vantage_server.store.list_runs_with_metadata_horizon(
-        filters=[("db_password", "s3cr3t-db")], limit=1, offset=0
+        filters=[("db_password", "s3cr3t-db")], limit=1, offset=0, project=DEFAULT_PROJECT
     )
     runs_storing_the_declared_secret = page.items
     if kind == "typed":

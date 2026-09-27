@@ -5,7 +5,9 @@ The plugin hands a finished session's reports here when it records
 locally. Each report goes through the server's own ingestion, encoded as
 the plugin's HTTP client encodes it and decoded as the server decodes a
 body, so a run stored here reads back exactly as the same run sent to a
-server, and `vantage` run with no options on that machine serves it.
+server, and `vantage` run with no options on that machine serves it. The
+one difference: a project a report names is made here when the database
+lacks it, since nobody administers a file on a test machine but its owner.
 
 Everything here raises `LocalStoreError`, whose message is one line, for
 any failure: the plugin turns it into its single warning and the session
@@ -127,7 +129,15 @@ def _store(store: SqliteExecutionStore, database: Path, report: Mapping[str, obj
         # Read the way the server reads a body: lone surrogates and U+0000
         # become U+FFFD, and what JSON cannot carry is refused.
         payload = decode_json(body, replace_lone_surrogates=True)
-        ingest(payload, store, received_at=datetime.now(timezone.utc))
+        # The database is its owner's, and nobody else makes its projects:
+        # one a report names is made on first use, so the local copy of a
+        # run a server refused for its project still lands.
+        ingest(
+            payload,
+            store,
+            received_at=datetime.now(timezone.utc),
+            create_missing_project=True,
+        )
     except RejectionError as exc:
         fields = f" ({', '.join(exc.fields)})" if exc.fields else ""
         raise LocalStoreError(
