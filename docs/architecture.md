@@ -229,12 +229,21 @@ patterns or lengths.
    section, `metadata` when the declaration declares keys or files were
    read, and no results. The row exists from this moment, so a session
    killed later still leaves a trace.
-3. **`pytest_runtest_logreport`: accumulate and beat.** Every setup, call and
-   teardown report is kept in memory, keyed by node id and xdist worker.
-   After each one, if 30 seconds have passed since the last beat (or since
-   the session started), the plugin sends
-   `POST /api/v1/runs/{id}/heartbeat`. Beats are driven by test activity,
-   not a timer thread, and measured on the monotonic clock.
+3. **The heartbeat, and `pytest_runtest_logreport`: accumulate.** Once the
+   start report got through, a daemon thread (`Heartbeat`, registered as a
+   plugin of its own) sends `POST /api/v1/runs/{id}/heartbeat` every 30
+   seconds until the session finishes, whatever the tests are doing: a test
+   quieter than the grace period keeps its run `running`, and so does one
+   that hangs, since a beat says the process is alive, not that tests are
+   moving. The thread never warns, since warnings belong to pytest's main
+   thread. At its first failure it stops and keeps the exception, and the
+   `Recorder` raises it at the next test report or at the finish, under
+   `liveness_isolated`: one warning. `Heartbeat.pytest_sessionfinish` is
+   `tryfirst`, so the thread has stopped, a beat in flight included, before
+   the finish report is sent, even when the `Recorder`'s own hooks have
+   latched off; `pytest_unconfigure` stops one whose session never
+   finished. Every setup, call and teardown report is kept in memory, keyed
+   by node id and xdist worker.
    `pytest_collectreport` keeps each collector that failed, by node id; it
    becomes one `error` result with no phases in the finish write, since
    pytest counts it as an error and a run must not read as all passing
@@ -396,7 +405,7 @@ switch off another:
 | Decorator | Wraps | After a failure |
 | --- | --- | --- |
 | `fault_isolated` | the report header and the finish write | every later wrapped hook is skipped |
-| `liveness_isolated` | the start report and heartbeats | heartbeats stop; the finish write is unaffected |
+| `liveness_isolated` | the start report, and reporting a heartbeat's failure | heartbeats stop; the finish write is unaffected |
 | `accumulation_isolated` | accumulating test and collection reports, recording an interrupt | warns once, keeps accumulating |
 
 - `EvidenceCollector` wraps `pytest_runtest_makereport` as a hookwrapper,

@@ -39,7 +39,6 @@ Never imports `pytest_vantage.plugin`, which imports this module.
 from __future__ import annotations
 
 import sys
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,6 +66,7 @@ from pytest_vantage.config import (
     SERVER_MODE,
     resolve_liveness_timeout,
 )
+from pytest_vantage.heartbeat import Heartbeat
 from pytest_vantage.session_metadata import (
     ReportedValues,
     SessionMetadata,
@@ -120,12 +120,9 @@ def _capture_metadata(
         return None
 
 
-# Beats are activity-driven, not a timer thread: one is only attempted from
-# `pytest_runtest_logreport`, at most this often. A suite of 1,000 ~10 ms
-# tests finishes well inside one interval and sends none. The limit that
-# comes with it: nothing is sent while one test, fixture or collection runs,
-# so a stretch without a report longer than the server's grace period reads
-# as abandoned until the next report arrives.
+# How far apart `Heartbeat`'s timer thread beats, from one interval after the
+# start report until the session finishes, whatever the tests are doing. A
+# suite that finishes inside one interval sends none.
 _BEAT_INTERVAL_SECONDS = 30.0
 
 # `pytest.ExitCode.INTERNAL_ERROR`: pytest itself broke, so the session has
@@ -241,9 +238,10 @@ class Recorder:
     - `_liveness_timeout` bounds the small start-write and heartbeat
       requests, which must not wait as long as the full finish-write report
       is allowed to.
-    - `_last_beat_at` starts at construction: the start-write already
-      refreshes the server's last-contact time, so the first beat is due one
-      full interval later, not at the first test.
+    - `_heartbeat` is the `Heartbeat` whose thread beats once the
+      start-write got through, and `None` until then or without one. Its
+      thread never warns; `_report_heartbeat_failure` does, on pytest's main
+      thread.
     - `_lifecycle_available` is what the plugin's capability probe found.
       When `False`, the server cannot accept a start-write or heartbeat, so
       neither is sent; `pytest_sessionfinish` records exactly as it would
@@ -312,7 +310,7 @@ class Recorder:
         self._collection_errors: dict[str, pytest.CollectReport] = {}
         self._stop: BaseException | None = None
         self._worker_interruption: str | None = None
-        self._last_beat_at = time.monotonic()
+        self._heartbeat: Heartbeat | None = None
         self._vcs = _capture_vcs(Path(str(config.rootpath)))
         if self._vcs.warning is not None:
             warn(config, f"vantage: {self._vcs.warning}")
@@ -384,6 +382,16 @@ class Recorder:
             return
         report = {"run": self._in_progress_run(), **self._sections()}
         send(self._server(), report, timeout=self._liveness_timeout)
+        # Beats start only once the server knows the run: a heartbeat for an
+        # id it never saw is refused. A beat in flight at the finish is
+        # waited for as long as its own deadline, and a little more.
+        self._heartbeat = Heartbeat(
+            self._beat,
+            interval=_BEAT_INTERVAL_SECONDS,
+            join_timeout=self._liveness_timeout + 1.0,
+        )
+        self._config.pluginmanager.register(self._heartbeat)
+        self._heartbeat.start()
 
     def _server(self) -> str:
         if self._address is None:
@@ -407,11 +415,12 @@ class Recorder:
     @accumulation_isolated
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
         """The one hook xdist forwards to the controller. Accumulates first,
-        always, then offers a beat opportunity through `_maybe_beat`, which
-        is isolated separately so a beat failure latches only liveness.
+        always, then reports a heartbeat that failed since the last report
+        through `_report_heartbeat_failure`, which is isolated separately so
+        it latches only liveness.
         """
         accumulate(self._results, report)
-        self._maybe_beat()
+        self._report_heartbeat_failure()
 
     @accumulation_isolated
     def pytest_collectreport(self, report: pytest.CollectReport) -> None:
@@ -424,25 +433,22 @@ class Recorder:
         if report.failed:
             self._collection_errors.setdefault(report.nodeid, report)
 
-    @liveness_isolated
-    def _maybe_beat(self) -> None:
-        """Send a heartbeat if `_BEAT_INTERVAL_SECONDS` has elapsed since the
-        last one.
-
-        `_last_beat_at` is assigned before the send, so a failing or slow send
-        costs one stall per interval, not one per test. `time.monotonic()`,
-        never wall clock, so a clock step cannot cause a burst of beats or
-        suppress them. The `_lifecycle_available` check is normally redundant
-        (`pytest_sessionstart` has already latched `_liveness_disabled`) but
-        keeps this method correct on its own regardless of call order.
-        """
-        if not self._lifecycle_available or not self._server_reachable:
-            return
-        now = time.monotonic()
-        if now - self._last_beat_at < _BEAT_INTERVAL_SECONDS:
-            return
-        self._last_beat_at = now
+    def _beat(self) -> None:
+        """One heartbeat, sent from `Heartbeat`'s thread, bounded by the
+        liveness timeout like the start-write."""
         send_heartbeat(self._server(), self._run_id, timeout=self._liveness_timeout)
+
+    @liveness_isolated
+    def _report_heartbeat_failure(self) -> None:
+        """Raises what made the heartbeat thread stop, if it has, here on
+        pytest's main thread, where `liveness_isolated` warns about it once
+        and latches: the thread cannot warn itself. Called at each test
+        report and at the finish, so a failure while one long test runs is
+        reported when it ends."""
+        heartbeat = self._heartbeat
+        if heartbeat is not None and heartbeat.failure is not None:
+            failure, heartbeat.failure = heartbeat.failure, None
+            raise failure
 
     @accumulation_isolated
     def pytest_keyboard_interrupt(self, excinfo: pytest.ExceptionInfo[BaseException]) -> None:
@@ -541,6 +547,10 @@ class Recorder:
 
     @fault_isolated
     def pytest_sessionfinish(self, session: pytest.Session, exitstatus: int) -> None:
+        # `Heartbeat.pytest_sessionfinish` is `tryfirst`: the thread has
+        # stopped, so no beat follows the finish report, and whatever ended
+        # it is final.
+        self._report_heartbeat_failure()
         reports = self._finish_reports(session, int(exitstatus))
         if self._mode == SERVER_MODE:
             for report in reports:

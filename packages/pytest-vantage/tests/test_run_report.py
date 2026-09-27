@@ -14,12 +14,12 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import pytest_vantage.recorder as recorder_module
 from pytest_vantage import transport, vcs
 from pytest_vantage.recorder import _WORKER_INTERRUPT_KEY, Recorder, WorkerInterruptRelay
 from vantage_test_server import (
@@ -864,16 +864,17 @@ def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_cont
     """The server's last-contact time advances during a long suite, end to
     end: `send_heartbeat` is left unpatched, so the plugin POSTs over real
     HTTP and the route calls `touch_last_contact` on `vantage_server`. Only
-    `_BEAT_INTERVAL_SECONDS` is driven down, so the test does not sleep
-    through 30 real seconds.
+    `_BEAT_INTERVAL_SECONDS` is driven down, and one test outlasts it, so the
+    test does not sleep through 30 real seconds.
 
     The store's `touch_last_contact` is wrapped, not replaced: the wrapper
     only records the value the start-write set, before the first heartbeat
     overwrites it, so the final assertion compares two real reads of the
     store. If the path, method or run id on the wire is wrong, the wrapper
-    is never called and `baseline_by_run` stays empty.
+    is never called and `baseline_by_run` stays empty. The session ran in
+    this process, and its heartbeat thread ended with it.
     """
-    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.02)
 
     baseline_by_run: dict[str, datetime] = {}
     real_touch_last_contact = vantage_server.store.touch_last_contact
@@ -886,13 +887,11 @@ def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_cont
         return real_touch_last_contact(execution_id, contacted_at)
 
     monkeypatch.setattr(vantage_server.store, "touch_last_contact", _spy_touch_last_contact)
-    pytester.makepyfile(
-        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
-    )
+    pytester.makepyfile(test_long="import time\n\ndef test_it():\n    time.sleep(0.3)\n")
 
     result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
-    result.assert_outcomes(passed=3)
+    result.assert_outcomes(passed=1)
     execution = wait_for_execution(vantage_server)
     run_id = execution.identity.value
     assert run_id in baseline_by_run, (
@@ -900,55 +899,59 @@ def test_a_suite_exceeding_one_heartbeat_interval_advances_the_servers_last_cont
         "the plugin -> HTTP -> route -> store chain never completed"
     )
     assert _last_contact_at(vantage_server, run_id) > baseline_by_run[run_id]
+    assert vantage_server.requests[-1] == ("POST", "/api/v1/runs")
+    assert not any(thread.name == "vantage-heartbeat" for thread in threading.enumerate())
 
 
-def test_a_fast_suite_emits_no_heartbeat(
-    monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+def _heartbeats(server: VantageTestServer) -> int:
+    return sum(1 for _method, path in server.requests if path.endswith("/heartbeat"))
+
+
+@pytest.mark.slow
+def test_a_test_quieter_than_the_grace_period_keeps_its_run_alive(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
 ) -> None:
-    """1,000 tests at ~10 ms each is a ~10-second suite, well inside one
-    30-second `_BEAT_INTERVAL_SECONDS`. Proven directly against
-    `Recorder._maybe_beat`'s timing guard, called 1,000 times right after
-    construction, rather than by running 1,000 real tests.
-
-    `_maybe_beat` is `@liveness_isolated`, which turns an exception into a
-    `VantageWarning`, so `beats == []` alone cannot tell "correctly
-    suppressed" from "the first attempt raised and latched". Asserting that
-    no warning was emitted closes that gap.
-    """
-    beats: list[str] = []
-    monkeypatch.setattr(
-        "pytest_vantage.recorder.send_heartbeat",
-        lambda *args, **kwargs: beats.append("beat"),
+    """One test, fixture or collection can run longer than the server's
+    grace period without reporting anything. Beats come from a timer, not
+    from test reports, so the session keeps saying it is alive all through
+    it and the run never reads as abandoned. Here the interval is 50 ms and
+    the one test sleeps a second: beats sent only as reports arrive could
+    number three at most, one per phase report."""
+    pytester.makeconftest(
+        "import pytest_vantage.recorder as recorder\nrecorder._BEAT_INTERVAL_SECONDS = 0.05\n"
     )
-    recorder, _sent = _offline_recorder(monkeypatch)
-    for _ in range(1000):
-        recorder._maybe_beat()
+    pytester.makepyfile(test_quiet="import time\n\ndef test_it():\n    time.sleep(1.0)\n")
 
-    assert beats == []
-    assert len(recwarn) == 0, [str(w.message) for w in recwarn.list]
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}"
+    )
+
+    result.assert_outcomes(passed=1)
+    assert _heartbeats(vantage_server) >= 6
+    assert vantage_server.requests[-1] == ("POST", "/api/v1/runs")
 
 
-def test_heartbeats_are_one_interval_apart(
-    monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+def test_a_suite_shorter_than_one_interval_sends_no_heartbeat(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
 ) -> None:
-    """A beat is due one `_BEAT_INTERVAL_SECONDS` after the start-write and
-    one after each beat, however many reports arrive in between: offered a
-    beat every second for 100 seconds of a fake clock, the recorder sends
-    one at 30, 60 and 90. A long suite never sends one per test report.
-    """
-    clock = [0.0]
-    monkeypatch.setattr(recorder_module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    beats: list[float] = []
-    monkeypatch.setattr(
-        "pytest_vantage.recorder.send_heartbeat", lambda *args, **kwargs: beats.append(clock[0])
+    """The first beat is due a full 30-second interval after the start
+    report, which already told the server the session is alive: a quick
+    suite sends none at all, and no warning."""
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(20))
     )
-    recorder, _sent = _offline_recorder(monkeypatch)
-    for second in range(1, 101):
-        clock[0] = float(second)
-        recorder._maybe_beat()
 
-    assert beats == [30.0, 60.0, 90.0]
-    assert len(recwarn) == 0, [str(w.message) for w in recwarn.list]
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+
+    result.assert_outcomes(passed=20)
+    assert vantage_server.requests == [
+        ("GET", "/api/v1/capabilities"),
+        ("POST", "/api/v1/runs"),
+        ("POST", "/api/v1/runs"),
+    ]
+    assert vantage_warnings(result) == []
 
 
 # --- End-to-end xdist ------------------------------------------------------

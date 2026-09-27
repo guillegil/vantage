@@ -326,8 +326,10 @@ heartbeats. The read API presents a run with no finishing report as
 `running`, and as `abandoned` once its last contact is older than the
 server's grace period (900 seconds by default). A run with a finish time is
 `finished`; one whose finishing report carried no finish time is
-`interrupted`. `pytest-vantage` beats at most every 30 seconds, and only while
-tests are reporting.
+`interrupted`. `pytest-vantage` beats every 30 seconds from a background
+thread, from the start report until the session finishes, whatever its tests
+are doing: a heartbeat says the process is alive, so a test that hangs keeps
+its run `running`.
 
 ## Status codes
 
