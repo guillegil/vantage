@@ -69,6 +69,7 @@ from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
     HistoryEntry,
     MetadataEntry,
+    MetadataFile,
     NamespaceFullError,
     Page,
     ResultListEntry,
@@ -311,6 +312,12 @@ _SELECT_RUN_METADATA = """
     SELECT key, name, value, status, source, source_file, declared
     FROM run_metadata WHERE run_id = ?
     ORDER BY key
+"""
+
+_SELECT_RUN_METADATA_FILES = """
+    SELECT source_file, content_type, status
+    FROM run_metadata_file WHERE run_id = ?
+    ORDER BY source_file
 """
 
 # `_decode_identity`'s five columns and the eleven outcome and timing
@@ -629,6 +636,16 @@ def _row_to_metadata_entry(row: tuple[object, ...]) -> MetadataEntry:
         source=cast(str, source),
         source_file=cast("str | None", source_file),
         declared=bool(declared),
+    )
+
+
+def _row_to_metadata_file(row: tuple[object, ...]) -> MetadataFile:
+    """A `_SELECT_RUN_METADATA_FILES` row."""
+    source_file, content_type, status = row
+    return MetadataFile(
+        source_file=cast(str, source_file),
+        content_type=cast(str, content_type),
+        status=cast(str, status),
     )
 
 
@@ -961,12 +978,16 @@ class SqliteExecutionStore:
             execution=_decode_execution(row[:12]), last_contact_at=_opt_datetime(row[12])
         )
 
-    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+    def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
         with self._read_snapshot() as conn:
             if conn.execute(_PROBE_RUN_EXISTS, (execution_id,)).fetchone() is None:
                 return None
-            rows = conn.execute(_SELECT_RUN_METADATA, (execution_id,)).fetchall()
-        return tuple(_row_to_metadata_entry(row) for row in rows)
+            file_rows = conn.execute(_SELECT_RUN_METADATA_FILES, (execution_id,)).fetchall()
+            entry_rows = conn.execute(_SELECT_RUN_METADATA, (execution_id,)).fetchall()
+        return RunMetadata(
+            files=tuple(_row_to_metadata_file(row) for row in file_rows),
+            entries=tuple(_row_to_metadata_entry(row) for row in entry_rows),
+        )
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)

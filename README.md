@@ -504,14 +504,20 @@ out, with one warning for each bound.
 ### Reading it back
 
 `GET /api/v1/runs/{run_id}/metadata` returns every key of one run, sorted by
-key, whether it was read from a file or reported by the session:
+key, whether it was read from a file or reported by the session, and every
+file the declaration named, sorted by path:
 
 ```json
 {"items": [
   {"key": "bench", "name": null, "value": "lab-3", "status": "captured",
    "source": "session", "source_file": null, "declared": false},
   {"key": "fmc.hardware", "name": "FMC hardware version", "value": "5.2.0",
-   "status": "captured", "source": "session", "source_file": null, "declared": true}
+   "status": "captured", "source": "session", "source_file": null, "declared": true},
+  {"key": "toolchain", "name": null, "value": null, "status": "source_unavailable",
+   "source": "file", "source_file": "build/manifest.json", "declared": true}
+],
+ "files": [
+  {"source_file": "build/manifest.json", "content_type": "json", "status": "not_found"}
 ]}
 ```
 
@@ -520,8 +526,12 @@ key, whether it was read from a file or reported by the session:
 - `value` is null unless `status` is `captured`. The other statuses are
   `absent`, `value_too_large`, and, for a file's key only, `not_scalar` and
   `source_unavailable`.
-- A run that recorded no metadata has no items; a run id never recorded
-  answers `404`. The list is not paged.
+- A file's `status` is `captured` when it was read. Otherwise it says why
+  its keys are `source_unavailable`: `not_found`, `path_rejected` (outside
+  the project), `too_large`, `not_text`, `unreadable`, `over_budget` or
+  `malformed`.
+- A run that recorded no metadata has no items and no files; a run id never
+  recorded answers `404`. The lists are not paged.
 
 The run list filters by up to 16 keys at once. Repeat `metadata_key` and
 `metadata_value` once per key; each value pairs with the key in the same
@@ -656,7 +666,7 @@ side:
 | --- | --- |
 | `GET /api/v1/runs` | Runs, newest first, each `running`, `finished`, `interrupted` or `abandoned` |
 | `GET /api/v1/runs/{run_id}` | One run |
-| `GET /api/v1/runs/{run_id}/metadata` | One run's metadata, from declared files and from the session |
+| `GET /api/v1/runs/{run_id}/metadata` | One run's metadata, from declared files and from the session, and each declared file's status |
 | `GET /api/v1/runs/{run_id}/results` | One run's results, with a short failure summary |
 | `GET /api/v1/runs/{run_id}/result?node_id=...` | One result in full, failure text included |
 | `GET /api/v1/tests/history?node_id=...` | One test across runs, newest first |

@@ -327,20 +327,15 @@ class InMemoryExecutionStore:
         )
 
     @_locked
-    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+    def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
         # `sorted()` compares code points, the order the SQLite adapter's
-        # `ORDER BY key` gets from comparing UTF-8 bytes.
+        # `ORDER BY` gets from comparing UTF-8 bytes.
         if execution_id not in self._executions:
             return None
-        return tuple(
-            sorted(
-                (
-                    entry
-                    for (run_id, _key), entry in self._metadata_entries.items()
-                    if run_id == execution_id
-                ),
-                key=lambda entry: entry.key,
-            )
+        stored = self._stored_metadata(execution_id)
+        return RunMetadata(
+            files=tuple(sorted(stored.files, key=lambda file: file.source_file)),
+            entries=tuple(sorted(stored.entries, key=lambda entry: entry.key)),
         )
 
     @_locked
@@ -438,8 +433,12 @@ class InMemoryExecutionStore:
 
     @_locked
     def metadata(self, run_id: str) -> RunMetadata:
-        """The metadata files and entries stored for `run_id`, for a test to
-        inspect: the port never returns the files."""
+        """The metadata files and entries stored for `run_id`, in the order
+        they were stored, for a test to inspect without `get_run_metadata`."""
+        return self._stored_metadata(run_id)
+
+    def _stored_metadata(self, run_id: str) -> RunMetadata:
+        """`metadata`, for a caller already holding the lock."""
         return RunMetadata(
             files=tuple(
                 metadata_file

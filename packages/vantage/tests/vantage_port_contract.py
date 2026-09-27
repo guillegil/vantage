@@ -192,8 +192,9 @@ def _captured(
 
 StoredMetadata = Callable[[str], RunMetadata]
 """Reads back the metadata files and entries an adapter stored for one run
-id. The port never returns the files, so each adapter's test module reads its
-own storage for both."""
+id, straight from that adapter's own storage rather than through
+`get_run_metadata`, so what a write stored is checked by a read that shares
+no code with the port's."""
 
 
 class ExecutionStoreContract:
@@ -1854,7 +1855,7 @@ class ExecutionStoreContract:
 
         stored = store.get_run_metadata(identity)
         assert stored is not None
-        assert [(entry.key, entry.value) for entry in stored] == [
+        assert [(entry.key, entry.value) for entry in stored.entries] == [
             *((key, "v") for key in first),
             ("b000", "later"),
         ]
@@ -2030,8 +2031,7 @@ class ExecutionStoreContract:
 
         stored = store.get_run_metadata(execution.identity.value)
 
-        assert stored is not None
-        assert list(stored) == []
+        assert stored == RunMetadata()
 
     def test_get_run_metadata_returns_the_runs_rows_whole_in_code_point_order(
         self, store: ExecutionStore
@@ -2100,5 +2100,55 @@ class ExecutionStoreContract:
         stored = store.get_run_metadata(execution.identity.value)
 
         assert stored is not None
-        assert [entry.key for entry in stored] == ["Zeta", "a.b", "fw", "zeta", "é", "\U0001f600"]
-        assert list(stored) == sorted(entries, key=lambda entry: entry.key)
+        assert [entry.key for entry in stored.entries] == [
+            "Zeta",
+            "a.b",
+            "fw",
+            "zeta",
+            "é",
+            "\U0001f600",
+        ]
+        assert list(stored.entries) == sorted(entries, key=lambda entry: entry.key)
+
+    def test_get_run_metadata_returns_the_runs_files_whole_in_code_point_order(
+        self, store: ExecutionStore
+    ) -> None:
+        """Every declared file of that run and no other, with the status that
+        says why its keys have no value, ordered by path the same way on
+        either adapter: by code point, as the keys are."""
+        execution = _execution("8" * 32)
+        other = _execution("9" * 32)
+        files = (
+            MetadataFile(
+                source_file="build/manifest.json", content_type="json", status="not_found"
+            ),
+            MetadataFile(source_file="é.yaml", content_type="yaml", status="malformed"),
+            MetadataFile(source_file="B.yaml", content_type="yaml", status="captured"),
+            MetadataFile(source_file="a.json", content_type="json", status="too_large"),
+        )
+        store.record_session(
+            execution,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(files=files),
+        )
+        store.record_session(
+            other,
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            metadata=RunMetadata(
+                files=(MetadataFile(source_file="c.yaml", content_type="yaml", status="captured"),),
+            ),
+        )
+
+        stored = store.get_run_metadata(execution.identity.value)
+
+        assert stored is not None
+        assert [file.source_file for file in stored.files] == [
+            "B.yaml",
+            "a.json",
+            "build/manifest.json",
+            "é.yaml",
+        ]
+        assert list(stored.files) == sorted(files, key=lambda file: file.source_file)
+        assert stored.entries == ()

@@ -1269,7 +1269,8 @@ def test_a_reported_session_value_reads_back_through_the_run_metadata_route(
                 "source_file": None,
                 "declared": False,
             }
-        ]
+        ],
+        "files": [],
     }
 
 

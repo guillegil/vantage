@@ -119,12 +119,25 @@ class MetadataItemResponse(BaseModel):
     declared: bool
 
 
+class MetadataFileResponse(BaseModel):
+    """One entry of `RunMetadataResponse.files`: one file the run's
+    declaration named. `status` is `captured` when it was read, and
+    otherwise says why its keys have no value. Built field by field in
+    `routes/read.py`."""
+
+    source_file: str
+    content_type: str
+    status: str
+
+
 class RunMetadataResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}/metadata`: every
-    key the run reported, ordered by key. Not paged -- a run holds at most
-    `MAX_METADATA_ENTRIES` keys."""
+    key the run reported, ordered by key, and every file it declared,
+    ordered by path. Not paged -- a run holds at most `MAX_METADATA_ENTRIES`
+    keys."""
 
     items: list[MetadataItemResponse]
+    files: list[MetadataFileResponse]
 
 
 class FailureProjectionResponse(BaseModel):

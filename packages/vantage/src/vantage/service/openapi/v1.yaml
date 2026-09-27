@@ -54,8 +54,8 @@ paths:
     get:
       operationId: get_run_metadata
       tags: [read]
-      summary: Every metadata key one run reported, ordered by key.
-      description: Keys read from declared files and keys the test session reported itself alike; source tells them apart. Not paged -- a run holds at most 200 keys. A run that reported no metadata has no items.
+      summary: Every metadata key one run reported, ordered by key, and every file it declared.
+      description: Keys read from declared files and keys the test session reported itself alike; source tells them apart. files lists each declared file, ordered by path, with the status that says whether it was read and, if not, why its keys have no value. Not paged -- a run holds at most 200 keys. A run that reported no metadata has no items and no files.
       parameters:
         - $ref: '#/components/parameters/run_id'
       responses:
@@ -316,10 +316,14 @@ components:
       type: object
       required: [key, name, value, status, source, source_file, declared]
       properties: {key: {type: string}, name: {type: [string, "null"]}, value: {type: [string, "null"]}, status: {type: string, enum: [captured, absent, not_scalar, value_too_large, source_unavailable]}, source: {type: string, enum: [file, session]}, source_file: {type: [string, "null"]}, declared: {type: boolean}}
+    MetadataFile:
+      type: object
+      required: [source_file, content_type, status]
+      properties: {source_file: {type: string}, content_type: {type: string, enum: [json, yaml]}, status: {type: string, enum: [captured, not_found, path_rejected, too_large, not_text, unreadable, over_budget, malformed]}}
     RunMetadataResponse:
       type: object
-      required: [items]
-      properties: {items: {type: array, items: {$ref: '#/components/schemas/MetadataItem'}}}
+      required: [items, files]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/MetadataItem'}}, files: {type: array, items: {$ref: '#/components/schemas/MetadataFile'}}}
     # No traceback, failure_repr or captured output at any depth -- a
     # results list never carries them; the single-result endpoint does.
     FailureProjection:

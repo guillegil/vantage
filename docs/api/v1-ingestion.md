@@ -241,8 +241,9 @@ released. A server that predates them rejects a report carrying either with
 empty: a session that declares no key and reports no value is accepted by
 such a server as before.
 
-What was stored reads back from `GET /api/v1/runs/{run_id}/metadata`, and
-filters the run list; see the OpenAPI document.
+What was stored reads back from `GET /api/v1/runs/{run_id}/metadata`, each
+declared file's status included, and filters the run list; see the OpenAPI
+document.
 
 ### The answer
 
