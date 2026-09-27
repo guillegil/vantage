@@ -163,6 +163,28 @@ class InvalidMetadataFilterError(InvalidParameterError):
         )
 
 
+class InvalidCursorError(InvalidParameterError):
+    """The `cursor` of `GET /api/v1/runs` or `GET /api/v1/tests/history` is
+    not one the server handed out as `next_cursor`, or comes with an offset.
+    A cursor already says where the page starts, so an offset past it would
+    be a second answer to the same question. `fields` names the parameters
+    at fault."""
+
+    @classmethod
+    def malformed(cls) -> InvalidCursorError:
+        return cls(
+            "cursor must be a next_cursor value a previous page returned.",
+            ["query.cursor"],
+        )
+
+    @classmethod
+    def with_offset(cls) -> InvalidCursorError:
+        return cls(
+            "cursor and a non-zero offset cannot be given together.",
+            ["query.cursor", "query.offset"],
+        )
+
+
 class UnknownRunError(RejectionError):
     """No run matches the `run_id` in a heartbeat or read path.
 

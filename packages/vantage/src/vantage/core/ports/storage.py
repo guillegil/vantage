@@ -54,6 +54,19 @@ class Page(Generic[T]):
 
 
 @dataclass(frozen=True, slots=True)
+class RunKey:
+    """Where a run stands in the newest-first order the run list and a
+    test's history share: `started_at`, then `run_id`, both descending, a
+    total order since `run_id` is unique. A page read `after` a key holds
+    only the runs past it, so a run recorded while a client pages through
+    never moves a run from one page onto the next, as it does under an
+    offset."""
+
+    started_at: datetime
+    run_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class RunListEntry:
     """One row of `list_runs`.
 
@@ -332,28 +345,38 @@ class ExecutionStore(Protocol):
         """Return the catalogue entry for `node_id`, or None if never observed."""
         ...
 
-    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+    def list_runs(
+        self, *, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[RunListEntry]:
         """Return a page of runs, newest first.
 
         Ordered `started_at DESC, id DESC` -- the `id` tiebreak makes the
         order total, so a page boundary is deterministic even when two runs
-        share a `started_at`. `limit` is clamped at `MAX_PAGE_ITEMS`, never
-        rejected; `has_more` is true when more rows exist beyond the
-        returned page. Each entry's VCS data is a lean `VcsProjection` --
-        the entry's own `execution.vcs` is always `None`."""
+        share a `started_at`. With `after`, only the runs past that key in
+        this order, then `offset` of them skipped. `limit` is clamped at
+        `MAX_PAGE_ITEMS`, never rejected; `has_more` is true when more rows
+        exist beyond the returned page. Each entry's VCS data is a lean
+        `VcsProjection` -- the entry's own `execution.vcs` is always
+        `None`."""
         ...
 
     def list_runs_with_metadata_horizon(
-        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+        self,
+        *,
+        filters: Sequence[tuple[str, str]],
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
         """`list_runs` narrowed to runs holding every `(key, value)` pair of
         `filters` -- a captured value exactly equal to it, from a file or
         the session alike -- together with, for each distinct key of
         `filters` in the order it first appears, how many runs were recorded
-        before that key first appeared. The page and the counts are read
-        from one snapshot of the store: separate reads can straddle a
-        session another process records, and then describe two different
-        sets of runs. This is the only filtered read of the run list.
+        before that key first appeared -- over every run, whatever `after`
+        says. The page and the counts are read from one snapshot of the
+        store: separate reads can straddle a session another process
+        records, and then describe two different sets of runs. This is the
+        only filtered read of the run list.
 
         A key without a captured value has no value, so it never matches,
         and two pairs giving one key different values match no run. An
@@ -397,10 +420,13 @@ class ExecutionStore(Protocol):
         populated in full, unbounded."""
         ...
 
-    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
-        """Return a page of one test's execution history, newest first. An
-        unknown `node_id` yields an empty page, never an error. Each entry's
-        VCS data is a lean `VcsProjection`, same as `list_runs`."""
+    def list_history(
+        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[HistoryEntry]:
+        """Return a page of one test's execution history, newest first, in
+        `list_runs`' order and taking `after` as it does. An unknown
+        `node_id` yields an empty page, never an error. Each entry's VCS
+        data is a lean `VcsProjection`, same as `list_runs`."""
         ...
 
     def list_settings(self, namespace: str) -> Sequence[UserSetting]:

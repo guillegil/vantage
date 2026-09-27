@@ -74,6 +74,7 @@ from vantage.core.ports.storage import (
     Page,
     ResultListEntry,
     RunDetail,
+    RunKey,
     RunListEntry,
     RunMetadata,
     UserSetting,
@@ -184,15 +185,28 @@ _LIST_RUNS = f"""
     LIMIT ? OFFSET ?
 """
 
+# The runs past a `RunKey` in the newest-first order, bound as its
+# `started_at`, then its id: a tie on `started_at` is settled by id, as the
+# order settles it, and `idx_run_started_at` starts the scan at the key.
+_AFTER_RUN_KEY = "(run.started_at, run.id) < (?, ?)"
+
+_LIST_RUNS_AFTER = f"""
+    {_SELECT_RUN_LIST}
+    WHERE {_AFTER_RUN_KEY}
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT ? OFFSET ?
+"""  # noqa: S608
+
 # The runs holding one `(key, value)` metadata pair. `value` is NULL for any
 # row without a captured value, and NULL never equals a bound string, so a
 # key whose value was dropped never matches.
 _RUNS_HOLDING_PAIR = "SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND rm.value = ?"
 
 
-def _list_runs_by_metadata(pair_count: int) -> str:
+def _list_runs_by_metadata(pair_count: int, *, after: bool = False) -> str:
     """`_LIST_RUNS` narrowed to the runs holding each of `pair_count`
-    `(key, value)` pairs, bound after the subject prefix width.
+    `(key, value)` pairs, bound after the subject prefix width, and with
+    `after` to the runs past a `RunKey` (`_AFTER_RUN_KEY`), bound next.
 
     `id IN (subquery)`, not a correlated `EXISTS`: with `EXISTS`, SQLite
     anchors on `rm.run_id = run.id` and probes the primary-key autoindex
@@ -202,9 +216,10 @@ def _list_runs_by_metadata(pair_count: int) -> str:
     by primary key. `test_list_runs_by_metadata_uses_the_key_value_index`
     pins the plan. Only the module's own constants are interpolated."""
     holding_every_pair = " INTERSECT ".join([_RUNS_HOLDING_PAIR] * pair_count)
+    past_key = f"AND {_AFTER_RUN_KEY}" if after else ""
     return f"""
         {_SELECT_RUN_LIST}
-        WHERE run.id IN ({holding_every_pair})
+        WHERE run.id IN ({holding_every_pair}) {past_key}
         ORDER BY run.started_at DESC, run.id DESC
         LIMIT ? OFFSET ?
     """  # noqa: S608
@@ -392,6 +407,16 @@ _LIST_HISTORY = f"""
     JOIN result r ON r.test_case_id = tc.id
     JOIN run ON run.id = r.run_id
     WHERE tc.node_id = ?
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT ? OFFSET ?
+"""  # noqa: S608
+
+_LIST_HISTORY_AFTER = f"""
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration
+    FROM test_case tc
+    JOIN result r ON r.test_case_id = tc.id
+    JOIN run ON run.id = r.run_id
+    WHERE tc.node_id = ? AND {_AFTER_RUN_KEY}
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT ? OFFSET ?
 """  # noqa: S608
@@ -637,6 +662,11 @@ def _row_to_metadata_entry(row: tuple[object, ...]) -> MetadataEntry:
         source_file=cast("str | None", source_file),
         declared=bool(declared),
     )
+
+
+def _run_key_params(after: RunKey | None) -> tuple[str, ...]:
+    """`_AFTER_RUN_KEY`'s two parameters, or none without a key."""
+    return () if after is None else (isoformat_utc(after.started_at), after.run_id)
 
 
 def _row_to_metadata_file(row: tuple[object, ...]) -> MetadataFile:
@@ -943,22 +973,35 @@ class SqliteExecutionStore:
         row = self._fetchone(_SELECT_TEST_CASE, (node_id,))
         return None if row is None else _row_to_catalogue_entry(row)
 
-    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+    def list_runs(
+        self, *, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[RunListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        rows = self._fetchall(_LIST_RUNS, (_LIST_SUBJECT_PREFIX_BYTES, page_limit + 1, offset))
+        sql = _LIST_RUNS if after is None else _LIST_RUNS_AFTER
+        params = [_LIST_SUBJECT_PREFIX_BYTES, *_run_key_params(after), page_limit + 1, offset]
+        rows = self._fetchall(sql, params)
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def list_runs_with_metadata_horizon(
-        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+        self,
+        *,
+        filters: Sequence[tuple[str, str]],
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         # A repeated pair narrows nothing further; dropping it keeps the query
         # one seek per distinct pair.
         pairs = list(dict.fromkeys(filters))
-        sql = _list_runs_by_metadata(len(pairs)) if pairs else _LIST_RUNS
+        if pairs:
+            sql = _list_runs_by_metadata(len(pairs), after=after is not None)
+        else:
+            sql = _LIST_RUNS if after is None else _LIST_RUNS_AFTER
         params = [
             _LIST_SUBJECT_PREFIX_BYTES,
             *(part for pair in pairs for part in pair),
+            *_run_key_params(after),
             page_limit + 1,
             offset,
         ]
@@ -1001,11 +1044,19 @@ class SqliteExecutionStore:
         row = self._fetchone(_SELECT_RESULT, (execution_id, node_id))
         return None if row is None else _row_to_result(row)
 
-    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+    def list_history(
+        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[HistoryEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         rows = self._fetchall(
-            _LIST_HISTORY,
-            (_LIST_SUBJECT_PREFIX_BYTES, node_id, page_limit + 1, offset),
+            _LIST_HISTORY if after is None else _LIST_HISTORY_AFTER,
+            (
+                _LIST_SUBJECT_PREFIX_BYTES,
+                node_id,
+                *_run_key_params(after),
+                page_limit + 1,
+                offset,
+            ),
         )
         return _page(rows, page_limit, _row_to_history_entry)
 

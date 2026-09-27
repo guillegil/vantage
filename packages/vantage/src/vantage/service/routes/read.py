@@ -42,6 +42,13 @@ of runs. `metadata_horizon` is `None` when no filter was given.
 A node id or metadata filter holding U+0000 matches nothing: nothing stored
 holds one (`ingestion/text.py`), and PostgreSQL cannot even be asked about
 one, so these routes answer it without passing it to the store.
+
+The run list and a test's history page by `offset` or by `cursor`. An offset
+counts runs from the newest, so a run recorded while a client pages through
+pushes a run it already listed onto the next page. A cursor names the last
+run a page listed (`service/cursor.py`), and the next page starts just past
+it in the same order, whatever was recorded since. Each page hands out the
+cursor for the next one as `next_cursor`.
 """
 
 from __future__ import annotations
@@ -64,11 +71,18 @@ from vantage.core.ports.storage import (
     Page,
     ResultListEntry,
     RunDetail,
+    RunKey,
     RunListEntry,
 )
 from vantage.ingestion.text import NUL, without_nul
+from vantage.service.cursor import MAX_CURSOR_CHARS, decode_cursor, encode_cursor
 from vantage.service.dependencies import get_grace_period, get_store
-from vantage.service.errors import InvalidMetadataFilterError, UnknownResultError, UnknownRunError
+from vantage.service.errors import (
+    InvalidCursorError,
+    InvalidMetadataFilterError,
+    UnknownResultError,
+    UnknownRunError,
+)
 from vantage.service.schemas import (
     FailureProjectionResponse,
     HistoryEntryResponse,
@@ -261,6 +275,19 @@ def _result_detail_response(result: Result) -> ResultDetailResponse:
     )
 
 
+def _run_key(cursor: str | None, offset: int) -> RunKey | None:
+    """The key a page starts after, from the `cursor` a previous page
+    handed out; `None` without one."""
+    if cursor is None:
+        return None
+    key = decode_cursor(cursor)
+    if key is None:
+        raise InvalidCursorError.malformed()
+    if offset:
+        raise InvalidCursorError.with_offset()
+    return key
+
+
 def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
     """Field by field -- `entry.vcs` is a lean `VcsProjection`, read
     through the same `_vcs_response` helper as the other routes."""
@@ -278,6 +305,7 @@ def _history_entry(entry: HistoryEntry) -> HistoryEntryResponse:
 def list_runs(
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
+    cursor: str | None = Query(default=None, max_length=MAX_CURSOR_CHARS),
     metadata_key: list[str] | None = Query(default=None),
     metadata_value: list[str] | None = Query(default=None),
     store: ExecutionStore = Depends(get_store),
@@ -297,6 +325,7 @@ def list_runs(
     key with U+0000 replaced by U+FFFD, the text a report carrying the key
     stores, so the store is still asked once, for one snapshot, and never
     with U+0000."""
+    after = _run_key(cursor, offset)
     keys = metadata_key or []
     values = metadata_value or []
     if len(keys) != len(values):
@@ -309,7 +338,10 @@ def list_runs(
     if keys:
         stored_keys = [without_nul(key) for key in keys]
         page, predating = store.list_runs_with_metadata_horizon(
-            filters=list(zip(stored_keys, map(without_nul, values))), limit=limit, offset=offset
+            filters=list(zip(stored_keys, map(without_nul, values))),
+            limit=limit,
+            offset=offset,
+            after=after,
         )
         # Two keys differing only in U+0000 and U+FFFD are one key to the store.
         counts = dict(zip(dict.fromkeys(stored_keys), predating, strict=True))
@@ -320,10 +352,16 @@ def list_runs(
         if any(NUL in text for text in (*keys, *values)):
             page = Page(items=(), has_more=False)
     else:
-        page = store.list_runs(limit=limit, offset=offset)
+        page = store.list_runs(limit=limit, offset=offset, after=after)
     now = datetime.now(timezone.utc)
     items = [_run_list_item(entry, now=now, grace=grace) for entry in page.items]
-    return RunListResponse(items=items, has_more=page.has_more, metadata_horizon=horizon)
+    next_cursor = None
+    if page.has_more:
+        last = page.items[-1].execution
+        next_cursor = encode_cursor(RunKey(started_at=last.started_at, run_id=last.identity.value))
+    return RunListResponse(
+        items=items, has_more=page.has_more, next_cursor=next_cursor, metadata_horizon=horizon
+    )
 
 
 @router.get("/runs/{run_id}")
@@ -402,16 +440,22 @@ def list_history(
     node_id: str = Query(...),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
+    cursor: str | None = Query(default=None, max_length=MAX_CURSOR_CHARS),
     store: ExecutionStore = Depends(get_store),
 ) -> HistoryResponse:
     """`GET /api/v1/tests/history?node_id=...` -- see the module docstring
     for why `node_id` is a query value, not a path segment. An unknown
     `node_id` yields an empty page, not an error."""
+    after = _run_key(cursor, offset)
     if NUL in node_id:
-        return HistoryResponse(items=[], has_more=False)
-    page = store.list_history(node_id=node_id, limit=limit, offset=offset)
+        return HistoryResponse(items=[], has_more=False, next_cursor=None)
+    page = store.list_history(node_id=node_id, limit=limit, offset=offset, after=after)
     items = [_history_entry(entry) for entry in page.items]
-    return HistoryResponse(items=items, has_more=page.has_more)
+    next_cursor = None
+    if page.has_more:
+        last = page.items[-1]
+        next_cursor = encode_cursor(RunKey(started_at=last.started_at, run_id=last.run_id))
+    return HistoryResponse(items=items, has_more=page.has_more, next_cursor=next_cursor)
 
 
 @router.get("/openapi.yaml")

@@ -34,11 +34,12 @@ paths:
       parameters:
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/cursor'
         - {name: metadata_key, in: query, required: false, schema: {type: array, items: {type: string}, maxItems: 16}}
         - {name: metadata_value, in: query, required: false, schema: {type: array, items: {type: string}, maxItems: 16}}
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
-        "422": {description: "limit below 1 or offset out of range -- not a page; or metadata_key and metadata_value repeated a different number of times, or more than 16 pairs (invalid_parameter).", content: *rejection}
+        "422": {description: "limit below 1 or offset out of range -- not a page; or a cursor no page handed out, or a cursor with a non-zero offset; or metadata_key and metadata_value repeated a different number of times, or more than 16 pairs (invalid_parameter).", content: *rejection}
   /runs/{run_id}:
     get:
       operationId: get_run_detail
@@ -109,9 +110,10 @@ paths:
         - {name: node_id, in: query, required: true, schema: {type: string}}
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
+        - $ref: '#/components/parameters/cursor'
       responses:
         "200": {description: "A page of history entries; empty, not an error, for an unknown node_id.", content: {application/json: {schema: {$ref: '#/components/schemas/HistoryResponse'}}}}
-        "422": {description: "node_id missing (invalid_identity); or limit below 1 or offset out of range (invalid_parameter).", content: *rejection}
+        "422": {description: "node_id missing (invalid_identity); or limit below 1 or offset out of range, or a cursor no page handed out, or a cursor with a non-zero offset (invalid_parameter).", content: *rejection}
   /capabilities:
     get:
       operationId: capabilities
@@ -184,6 +186,7 @@ components:
     # server answers happily. The cap is stated as behaviour instead.
     limit: {name: limit, in: query, required: false, description: "Page size. Values above 200 are clamped to 200; the response reports whether more items exist. A value below 1 is rejected with 422 -- it is not a page size.", schema: {type: integer, minimum: 1}}
     offset: {name: offset, in: query, required: false, schema: {type: integer, format: int64, minimum: 0, maximum: 9223372036854775807}}
+    cursor: {name: cursor, in: query, required: false, description: "The next_cursor a previous page of the same list returned. The page starts just past the last run that page listed, so runs recorded in between never repeat or shift a run onto it, as they do under an offset. Opaque: pass it back unchanged. Not combined with a non-zero offset.", schema: {type: string, maxLength: 128}}
   schemas:
     # Request and response bodies are both stated in full: this document is
     # the contract for what the server accepts and what it returns, and a
@@ -300,8 +303,8 @@ components:
       properties: {key: {type: string}, predating: {type: integer}}
     RunListResponse:
       type: object
-      required: [items, has_more, metadata_horizon]
-      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}, metadata_horizon: {type: [array, "null"], items: {$ref: '#/components/schemas/MetadataHorizon'}}}
+      required: [items, has_more, next_cursor, metadata_horizon]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/RunListItem'}}, has_more: {type: boolean}, next_cursor: {type: [string, "null"], description: "The cursor for the page after this one; null on the last page."}, metadata_horizon: {type: [array, "null"], items: {$ref: '#/components/schemas/MetadataHorizon'}}}
     # Carries `interrupt_reason` and an untruncated `commit_subject`, which
     # the lean list entry omits -- the detail path keeps the full record
     # reachable.
@@ -351,8 +354,8 @@ components:
       properties: {run_id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, outcome: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}, duration: {type: [number, "null"]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
     HistoryResponse:
       type: object
-      required: [items, has_more]
-      properties: {items: {type: array, items: {$ref: '#/components/schemas/HistoryEntry'}}, has_more: {type: boolean}}
+      required: [items, has_more, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/HistoryEntry'}}, has_more: {type: boolean}, next_cursor: {type: [string, "null"], description: "The cursor for the page after this one; null on the last page."}}
     SectionUpsertRequest:
       type: object
       required: [name, prefix]

@@ -648,8 +648,9 @@ and speaks UTF-8 on the wire whatever `PGCLIENTENCODING` says.
   parses no other style, and in a local zone either end of the years
   1-9999 falls outside what a `datetime` holds; every connection
   asks for doubles with all their digits (`extra_float_digits`), which a
-  database set to 0 would cut to 15; paging and `has_more` are computed
-  the same way.
+  database set to 0 would cut to 15; paging, `has_more` and where a page
+  after a cursor starts (a row comparison on `started_at` and `id`, which
+  both adapters' indexes serve) are computed the same way.
 - **U+0000 never reaches it** from the service (see *Request handling and
   concurrency*). The adapter still replaces it with U+FFFD in anything it
   writes, and treats a lookup value holding it as matching nothing, so a
