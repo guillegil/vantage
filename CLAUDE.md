@@ -150,6 +150,7 @@ builds.
 ## Conventions
 
 - Short descriptive branch names (`fix/xdist-dedup`, `feat/run-filter`).
-- Commits: imperative subject ≤ 72 characters, a body saying why, signed with
-  the 1Password SSH key.
+- Commits: imperative subject ≤ 72 characters, a body saying why. Commits
+  made on a workstation are signed with the 1Password SSH key; commits made
+  on agentbox are unsigned, since that key is never on the server.
 - All documentation in English.

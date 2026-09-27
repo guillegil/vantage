@@ -37,3 +37,6 @@ htmlcov/
 /claude-config.tar.gz
 /engram-raw.tar.gz
 /engram-backup-*.json
+
+# Maintainers' own notes, not part of the project
+/IDEAS.md
