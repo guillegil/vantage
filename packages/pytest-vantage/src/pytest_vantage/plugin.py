@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 
 import pytest
 
-from pytest_vantage.boundary import warn
+from pytest_vantage.boundary import WarningPhase, configuring, warn
 from pytest_vantage.config import (
     LOCAL_MODE,
     SERVER_MODE,
@@ -376,6 +376,11 @@ def pytest_configure(config: pytest.Config) -> None:
     A server that passes the preflight and later disappears or fails is
     handled by ``pytest_vantage.boundary``'s fault-isolation decorator on
     every ``Recorder`` hook, not by this function.
+
+    pytest records no warning raised here, so the controller branch runs
+    under ``configuring``, and ``warn`` puts its warnings in the warnings
+    summary; a registered `Recorder` brings a `WarningPhase` that does the
+    same for the rest of the session.
     """
     if hasattr(config, "workerinput"):
         if _activation_requested(config):
@@ -396,6 +401,12 @@ def pytest_configure(config: pytest.Config) -> None:
 
             config.pluginmanager.register(EvidenceCollector(config))
         return
+    with configuring():
+        _configure_controller(config)
+
+
+def _configure_controller(config: pytest.Config) -> None:
+    """`pytest_configure` on the controller, from step 3 on."""
     if _session_runs_no_tests(config):
         return
     _warn_about_untyped_flags(config)
@@ -493,5 +504,6 @@ def _register_recorder(
             config, f"vantage: could not start recording: {exc}, this session will not be recorded"
         )
         return
+    config.pluginmanager.register(WarningPhase())
     config.pluginmanager.register(recorder)
     config.stash[SESSION_METADATA] = recorder.session_metadata

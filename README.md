@@ -595,28 +595,27 @@ still run and the suite's exit status is never changed.
 - **The local database or the outbox cannot take the run:** one warning
   saying where the run is, if anywhere; the server's copy is unaffected.
 
-Warnings are `VantageWarning`, a `UserWarning` subclass. Where one appears
-depends on when it is raised:
+Warnings are `VantageWarning`, a `UserWarning` subclass. Whenever one is
+raised, it appears in pytest's warnings summary, counted with the others, and
+your warning filters apply to it as to any other: one that ignores
+`VantageWarning` hides it.
 
 - **At the start of the session** (server unreachable, switches ignored,
   recording could not start, session tracking unavailable, the start report
-  failed, git or the metadata declaration unreadable): printed to stderr as
-  a plain Python warning, above pytest's session header. pytest neither
-  lists nor counts it in its warnings summary, so in a long CI log the line
-  saying a session is not being recorded is at the top.
-- **At the end of the session** (the final report failed, where a run the
-  server could not take was kept, a queued run dropped, results left out,
-  metadata keys undeclared, left out or reported twice): in pytest's
-  warnings summary.
+  failed, git or the metadata declaration unreadable) and **at its end**
+  (the final report failed, where a run the server could not take was kept,
+  a queued run dropped, results left out, metadata keys undeclared, left out
+  or reported twice): listed on its own, under no test.
 - **While tests run** (a heartbeat failed, a test report of an unexpected
-  shape): in the warnings summary, listed under whichever test was running
-  at the time; under pytest-xdist, printed to stderr when it happens.
-- **When a metadata key or value is skipped:** in the warnings summary,
-  under the test whose fixture set it and pointing at the line that set it,
-  and under pytest-xdist once for each worker that set it.
+  shape): listed under whichever test was running at the time; under
+  pytest-xdist, whose controller runs no test itself, under no test.
+- **When a metadata key or value is skipped:** under the test whose fixture
+  set it and pointing at the line that set it, and under pytest-xdist once
+  for each worker that set it.
 
 If your warning filters turn warnings into errors, the message is written to
-the terminal instead.
+the terminal instead. With pytest's warnings plugin disabled
+(`-p no:warnings`) there is no summary, and it is printed to stderr.
 
 A run whose final report never arrives (the process was killed, the machine
 lost power) reads as `abandoned` once the server has heard nothing from it

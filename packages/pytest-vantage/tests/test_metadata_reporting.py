@@ -21,6 +21,7 @@ from pytest_vantage.metadata import SessionValue
 from pytest_vantage.recorder import _WORKER_METADATA_KEY, Recorder, WorkerMetadataRelay
 from pytest_vantage.session_metadata import relay, unrelay
 from vantage_test_server import VantageTestServer
+from warnings_summary import vantage_warnings
 
 _DECLARATION = "vantage-metadata.json"
 
@@ -199,17 +200,14 @@ def test_an_unrecorded_session_hands_out_a_mapping_that_sends_nothing(
     pytester: pytest.Pytester, sent: list[dict[str, object]]
 ) -> None:
     """Recording asked for, but nothing listens: the fixture still works,
-    and the only warning is the one saying the session is not recorded.
-    Raised from `pytest_configure`, it escapes an in-process run."""
+    and the only warning is the one saying the session is not recorded."""
     pytester.makepyfile(test_bench=_REPORTS_THE_BENCH)
 
-    with pytest.warns(VantageWarning) as warned:
-        result = pytester.runpytest("--vantage", "--vantage-server=http://127.0.0.1:1")
+    result = pytester.runpytest("--vantage", "--vantage-server=http://127.0.0.1:1")
 
-    result.assert_outcomes(passed=2)
-    assert "VantageWarning" not in result.stdout.str()
+    result.assert_outcomes(passed=2, warnings=1)
     assert sent == []
-    assert [str(w.message) for w in warned] == [
+    assert vantage_warnings(result) == [
         "vantage: cannot reach http://127.0.0.1:1, this session will not be recorded"
     ]
 
@@ -489,15 +487,13 @@ def test_two():
 """
     )
 
-    with pytest.warns(VantageWarning) as warned:
-        result = pytester.runpytest(
-            "--vantage", "--vantage-server=http://127.0.0.1:1", "-n", "2", "--dist", "each"
-        )
+    result = pytester.runpytest(
+        "--vantage", "--vantage-server=http://127.0.0.1:1", "-n", "2", "--dist", "each"
+    )
 
-    result.assert_outcomes(passed=4)
-    assert "VantageWarning" not in result.stdout.str()
+    result.assert_outcomes(passed=4, warnings=1)
     assert sent == []
-    assert [str(w.message) for w in warned] == [
+    assert vantage_warnings(result) == [
         "vantage: cannot reach http://127.0.0.1:1, this session will not be recorded"
     ]
 

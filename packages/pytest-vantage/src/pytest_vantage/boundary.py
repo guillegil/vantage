@@ -5,14 +5,24 @@ exactly as it would have otherwise. `warn` emits that warning;
 `fault_isolated`, `liveness_isolated` and `accumulation_isolated` wrap
 `Recorder` hooks, each on its own flag, so neither a failed start-write or
 heartbeat nor an unexpected test report disables the finish report.
+
+pytest records warnings, for its warnings summary, only inside its
+collection, test-protocol, session-finish and terminal-summary hooks. A
+warning raised anywhere else -- the plugin's `pytest_configure`,
+`pytest_sessionstart`, the xdist controller's loop -- would print to stderr
+and never reach the summary, so `warn` issues it there the way pytest issues
+its own configuration warnings. `configuring` and `WarningPhase` tell it
+when.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
 import sys
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Generator, Iterator
 from types import FrameType
 from typing import Any, TypeVar
 
@@ -32,6 +42,58 @@ class VantageWarning(UserWarning):
 
 
 _PACKAGE = __name__.partition(".")[0]
+
+# Whether pytest is recording no warning right now while its warnings
+# summary is still to come, for `warn`. A context variable, not the stash:
+# the plugin's own `pytest_configure` has no plugin registered to own state
+# (a session without `--vantage` must register none), and each value is set
+# only for the length of one `with`, so nothing outlives the hook that set
+# it -- a pytest session run inside another keeps its own.
+_UNRECORDED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vantage_unrecorded", default=False
+)
+
+
+@contextlib.contextmanager
+def _unrecorded_while(value: bool) -> Iterator[None]:
+    token = _UNRECORDED.set(value)
+    try:
+        yield
+    finally:
+        _UNRECORDED.reset(token)
+
+
+def configuring() -> contextlib.AbstractContextManager[None]:
+    """Marks the plugin's own `pytest_configure`, for `warn`: pytest records
+    no warning raised there."""
+    return _unrecorded_while(True)
+
+
+class WarningPhase:
+    """Tells `warn` where pytest records no warning for the rest of a
+    recorded session: registered with the `Recorder`, on the controller.
+
+    `pytest_sessionstart` and the test loop are unrecorded -- the loop is
+    where the xdist controller does all its work -- but each test inside it
+    is recorded, by pytest's own `pytest_runtest_protocol` wrapper, which
+    this one's `trylast` puts it inside. Collection, the session's finish and
+    its summary are recorded too, and nothing is marked there.
+    """
+
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
+    def pytest_sessionstart(self) -> Generator[None, object, object]:
+        with _unrecorded_while(True):
+            return (yield)
+
+    @pytest.hookimpl(wrapper=True, tryfirst=True)
+    def pytest_runtestloop(self) -> Generator[None, object, object]:
+        with _unrecorded_while(True):
+            return (yield)
+
+    @pytest.hookimpl(wrapper=True, trylast=True)
+    def pytest_runtest_protocol(self) -> Generator[None, object, object]:
+        with _unrecorded_while(False):
+            return (yield)
 
 
 def _in_this_package(frame: FrameType) -> bool:
@@ -58,6 +120,12 @@ def warn(config: pytest.Config, message: str, *, at_project_line: bool = False) 
     `at_project_line` at the project's own line that called into the
     plugin, for a warning about something that line did.
 
+    Where pytest records nothing (`_UNRECORDED`), it goes through
+    `config.issue_config_time_warning`, which applies the project's warning
+    filters and puts it in the warnings summary. Without pytest's warnings
+    plugin (`-p no:warnings`) there is no summary, and a plain warning
+    prints to stderr.
+
     `warnings.warn` raises the warning instance itself when the active
     filters turn it into an error (`filterwarnings = ["error"]`, `-W
     error`) -- a project that made that choice for its own warnings must not
@@ -68,7 +136,11 @@ def warn(config: pytest.Config, message: str, *, at_project_line: bool = False) 
     """
     stacklevel = _project_stacklevel() if at_project_line else 2
     try:
-        warnings.warn(VantageWarning(message), stacklevel=stacklevel)
+        if _UNRECORDED.get() and not config.pluginmanager.is_blocked("warnings"):
+            # One frame deeper: `issue_config_time_warning` calls `warnings.warn`.
+            config.issue_config_time_warning(VantageWarning(message), stacklevel=stacklevel + 1)
+        else:
+            warnings.warn(VantageWarning(message), stacklevel=stacklevel)
         return
     except VantageWarning:
         pass
@@ -156,7 +228,9 @@ it neither reads nor sets.
 
 __all__ = [
     "VantageWarning",
+    "WarningPhase",
     "accumulation_isolated",
+    "configuring",
     "fault_isolated",
     "liveness_isolated",
     "warn",

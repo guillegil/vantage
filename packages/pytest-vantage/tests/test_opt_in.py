@@ -40,6 +40,7 @@ from pytest_vantage.plugin import (
 )
 from pytest_vantage.recorder import Recorder
 from vantage_test_server import VantageTestServer
+from warnings_summary import vantage_warnings
 
 _SAMPLE_TEST = "def test_it():\n    assert True\n"
 _METADATA_DECLARATION_FILENAME = "vantage-metadata.json"
@@ -89,10 +90,6 @@ def _run_pytest(cwd: Path, *extra_args: str) -> subprocess.CompletedProcess[str]
 
 def _forbidden_create_connection(*args: object, **kwargs: object) -> tuple[object, ...]:
     raise AssertionError("socket.create_connection must not be called when --vantage is absent")
-
-
-def _vantage_warnings(recwarn: pytest.WarningsRecorder) -> list[str]:
-    return [str(w.message) for w in recwarn.list if issubclass(w.category, VantageWarning)]
 
 
 @pytest.mark.parametrize(
@@ -297,7 +294,6 @@ _UNTYPED_SOURCES = [
 def test_nothing_but_a_typed_vantage_records(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
-    recwarn: pytest.WarningsRecorder,
     vantage_server: VantageTestServer,
     source: str,
 ) -> None:
@@ -324,7 +320,7 @@ def test_nothing_but_a_typed_vantage_records(
     result.assert_outcomes(failed=1)
     assert attempts == []
     assert vantage_server.executions() == []
-    warned = _vantage_warnings(recwarn)
+    warned = vantage_warnings(result)
     if source in _ADDOPTS_SOURCES:
         assert warned == [
             "vantage: ignoring --vantage, --vantage-failure-text, --vantage-metadata: "
@@ -338,7 +334,6 @@ def test_nothing_but_a_typed_vantage_records(
 def test_flags_from_an_argument_file_enable_nothing_and_the_warning_does_not_blame_addopts(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
-    recwarn: pytest.WarningsRecorder,
     vantage_server: VantageTestServer,
 ) -> None:
     """An ``@file`` of arguments is not typing either, so its flags enable
@@ -357,7 +352,7 @@ def test_flags_from_an_argument_file_enable_nothing_and_the_warning_does_not_bla
     result.assert_outcomes(failed=1)
     assert attempts == []
     assert vantage_server.executions() == []
-    (warned,) = _vantage_warnings(recwarn)
+    (warned,) = vantage_warnings(result)
     assert warned.startswith("vantage: ignoring --vantage: not typed on the command line ")
     assert "@file" in warned
 
@@ -528,7 +523,6 @@ def _refuse_and_record_connections(monkeypatch: pytest.MonkeyPatch) -> list[obje
 def test_an_invocation_that_runs_no_tests_is_not_recorded(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
-    recwarn: pytest.WarningsRecorder,
     mode: str,
 ) -> None:
     """Collection, fixture setup alone and the listing modes run nothing,
@@ -542,13 +536,12 @@ def test_an_invocation_that_runs_no_tests_is_not_recorded(
 
     assert result.ret == pytest.ExitCode.OK
     assert attempts == []
-    assert _vantage_warnings(recwarn) == []
+    assert vantage_warnings(result) == []
 
 
 def test_an_invocation_that_runs_tests_does_reach_for_the_server(
     pytester: pytest.Pytester,
     monkeypatch: pytest.MonkeyPatch,
-    recwarn: pytest.WarningsRecorder,
 ) -> None:
     """The control for the test above: the same harness without a listing
     mode attempts the preflight and warns that nothing listens."""
@@ -559,7 +552,7 @@ def test_an_invocation_that_runs_tests_does_reach_for_the_server(
 
     result.assert_outcomes(passed=1)
     assert attempts == [("127.0.0.1", 1)]
-    (warned,) = _vantage_warnings(recwarn)
+    (warned,) = vantage_warnings(result)
     assert "cannot reach" in warned
 
 
@@ -581,11 +574,12 @@ def test_a_recorder_that_fails_to_start_leaves_the_suite_unrecorded_and_unharmed
     monkeypatch.setattr(Recorder, "__init__", _explode)
     pytester.makepyfile(test_sample=_SAMPLE_TEST)
 
-    with pytest.warns(VantageWarning, match="synthetic start-up failure"):
-        result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
     assert result.ret == pytest.ExitCode.OK
-    result.assert_outcomes(passed=1)
+    result.assert_outcomes(passed=1, warnings=1)
+    (warned,) = vantage_warnings(result)
+    assert "synthetic start-up failure" in warned
     assert vantage_server.executions() == []
 
 

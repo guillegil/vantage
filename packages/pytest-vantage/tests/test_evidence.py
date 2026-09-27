@@ -16,8 +16,8 @@ import socket
 from pathlib import Path
 
 import pytest
-from pytest_vantage.boundary import VantageWarning
 from vantage_test_server import VantageTestServer
+from warnings_summary import vantage_warnings
 
 
 def _closed_port_address() -> str:
@@ -234,9 +234,8 @@ def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[s
     An unreachable `--vantage-server` is given deliberately: `EvidenceCollector`
     registers and runs regardless of reachability (`plugin.py::pytest_configure`
     registers it BEFORE the preflight), so no live server is needed to
-    observe what it extracted. The preflight's warning is raised in the
-    outer process, before the inner session captures warnings, so it is
-    asserted here rather than left to leak into the calling test.
+    observe what it extracted. The preflight's warning goes to the inner
+    session's warnings summary, where it is asserted.
     `--vantage-failure-text` is given unconditionally -- rendering and field
     extraction only run with it.
     """
@@ -258,13 +257,14 @@ def _capture_evidence(pytester: pytest.Pytester, *args: str) -> dict[str, dict[s
                 json.dump(_captured, fh)
         """
     )
-    with pytest.warns(VantageWarning, match="cannot reach"):
-        pytester.runpytest_inprocess(
-            "--vantage",
-            f"--vantage-server={_closed_port_address()}",
-            "--vantage-failure-text",
-            *args,
-        )
+    result = pytester.runpytest_inprocess(
+        "--vantage",
+        f"--vantage-server={_closed_port_address()}",
+        "--vantage-failure-text",
+        *args,
+    )
+    (warned,) = vantage_warnings(result)
+    assert "cannot reach" in warned
     captured: dict[str, dict[str, object] | None] = json.loads(
         (pytester.path / "evidence_capture.json").read_text()
     )

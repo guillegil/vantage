@@ -45,21 +45,35 @@ from pytest_vantage.recorder import Recorder
 from pytest_vantage.transport import Capabilities, fetch_capabilities, send
 from vantage.service.errors import RejectionError
 from vantage_test_server import VantageTestServer, wait_for_file
+from warnings_summary import vantage_warnings, warnings_summary
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
 _A_SESSION_RUN_TO_ITS_END = SimpleNamespace(shouldfail=False, shouldstop=False)
 
 
 def _combined_output(result: pytest.RunResult) -> str:
-    """`VantageWarning`s raised from `pytest_configure` (the preflight) print
-    straight to the real `stderr` via Python's default `warnings.showwarning`
-    -- they fire before pytest's own warnings-summary capturing is active for
-    this pytest version, so they never reach the "warnings summary" section
-    in `stdout`. One fired from a later hook (`pytest_sessionfinish`) does
-    reach that section. Checking both streams together is robust to either
-    timing rather than depending on which hook happened to raise.
-    """
+    """Both streams: a `VantageWarning` is in the warnings summary, on
+    stdout, but one that fell back to the terminal or to stderr -- under an
+    error filter, or with pytest's warnings plugin blocked -- is not, and a
+    test about the message rather than its place reads both."""
     return result.stdout.str() + result.stderr.str()
+
+
+def _warnings_issued_to(config: pytest.Config) -> list[str]:
+    """The message of every warning issued to `config`'s warnings summary
+    so far: pytest replays a configuration-time warning to any plugin
+    registered after it was issued, as it does to its terminal reporter."""
+
+    class _Listener:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def pytest_warning_recorded(self, warning_message: warnings.WarningMessage) -> None:
+            self.messages.append(str(warning_message.message))
+
+    listener = _Listener()
+    config.pluginmanager.register(listener)
+    return listener.messages
 
 
 def _closed_port_address() -> str:
@@ -527,18 +541,112 @@ def test_unresolvable_host_warns_naming_the_address_and_runs_unrecorded(
     assert output.count("VantageWarning:") == 1
 
 
+def test_a_warning_from_the_start_of_the_session_is_in_the_warnings_summary(
+    pytester: pytest.Pytester,
+) -> None:
+    """pytest records no warning raised in `pytest_configure`, so one from
+    there -- here the server that cannot be reached -- would print to
+    stderr above the session header and be missing from the summary a
+    reader goes to. It is issued the way pytest issues its own
+    configuration warnings: listed and counted in the summary, and nowhere
+    else."""
+    address = _closed_port_address()
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess("--vantage", f"--vantage-server={address}")
+
+    result.assert_outcomes(passed=1, warnings=1)
+    summary = warnings_summary(result)
+    assert f"VantageWarning: vantage: cannot reach {address}" in summary
+    assert "VantageWarning" not in result.stderr.str()
+
+
+def test_a_flag_ignored_from_addopts_is_warned_about_in_the_warnings_summary(
+    pytester: pytest.Pytester,
+) -> None:
+    """The warning that an opt-in flag in `addopts` was ignored comes from
+    `pytest_configure` too, in a session nothing records."""
+    pytester.makeini("[pytest]\naddopts = --vantage-failure-text\n")
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess()
+
+    result.assert_outcomes(passed=1, warnings=1)
+    assert "VantageWarning: vantage: ignoring --vantage-failure-text" in warnings_summary(result)
+    assert "VantageWarning" not in result.stderr.str()
+
+
+def test_a_start_of_session_warning_follows_the_projects_warning_filters(
+    pytester: pytest.Pytester,
+) -> None:
+    """Issued as pytest issues its own, the warning is subject to the
+    filters the project gave pytest, from the command line or its
+    configuration, like any warning in the summary: one that ignores it
+    hides it."""
+    address = _closed_port_address()
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={address}",
+        "-W",
+        "ignore::pytest_vantage.boundary.VantageWarning",
+    )
+
+    result.assert_outcomes(passed=1)
+    assert "cannot reach" not in _combined_output(result)
+
+
+def test_a_start_of_session_warning_made_an_error_is_still_written_and_harms_nothing(
+    pytester: pytest.Pytester,
+) -> None:
+    """A project whose filters turn warnings into errors gets the message
+    written out instead, and a session that runs to its usual end: the
+    error the filter raises never escapes `pytest_configure`."""
+    address = _closed_port_address()
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={address}",
+        "-W",
+        "error::pytest_vantage.boundary.VantageWarning",
+    )
+
+    result.assert_outcomes(passed=1)
+    assert result.ret == pytest.ExitCode.OK
+    assert f"vantage: cannot reach {address}" in _combined_output(result)
+
+
+def test_without_pytests_warnings_plugin_a_warning_still_reaches_stderr(
+    pytester: pytest.Pytester,
+) -> None:
+    """`-p no:warnings` leaves pytest with no summary to put it in, and no
+    way to issue it there: the warning is printed to stderr instead, as a
+    plain Python warning."""
+    address = _closed_port_address()
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={address}", "-p", "no:warnings"
+    )
+
+    result.assert_outcomes(passed=1)
+    assert f"VantageWarning: vantage: cannot reach {address}" in result.stderr.str()
+
+
 def test_recorder_is_not_registered_when_the_preflight_fails(
     pytester: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("VANTAGE_SERVER", raising=False)
-    # `pytest.warns` rather than a bare call: the preflight failing here is
-    # the whole point of the test, so asserting the warning is part of
-    # the proof -- and it stops this in-process `parseconfigure` from
-    # leaking a `VantageWarning` into the summary of the suite running it.
-    with pytest.warns(VantageWarning, match="cannot reach"):
-        config = pytester.parseconfigure("--vantage", f"--vantage-server={_closed_port_address()}")
+
+    config = pytester.parseconfigure("--vantage", f"--vantage-server={_closed_port_address()}")
 
     assert not any(isinstance(plugin, Recorder) for plugin in config.pluginmanager.get_plugins())
+    # The preflight failing is the whole point, so its warning is part of
+    # the proof. It was issued to the warnings summary, which pytest replays
+    # to a plugin registered after the fact.
+    assert any("cannot reach" in message for message in _warnings_issued_to(config))
 
 
 def test_preflight_falls_back_to_the_scheme_default_port(
@@ -656,16 +764,14 @@ def test_reporting_error_preserves_passing_exit_status_and_warns_once(
 
     # Two independent failures: the patched `send` raises for the start-write
     # as well as the finish-write, and the two are isolated by different
-    # decorators, so each warns once. Only the finish-write's warning reaches
-    # `RunResult`; one raised as early as `pytest_sessionstart` escapes an
-    # in-process run's capture into THIS session (see `_combined_output`).
-    # `pytest.warns` asserts it rather than letting it leak into the summary.
-    with pytest.warns(VantageWarning, match="session liveness"):
-        result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+    # decorators, so each warns once, both in the run's warnings summary.
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
-    result.assert_outcomes(passed=1)
+    result.assert_outcomes(passed=1, warnings=2)
     assert result.ret == 0
-    assert _combined_output(result).count("VantageWarning:") == 1
+    start, finish = vantage_warnings(result)
+    assert "error while reporting session liveness: boom" in start
+    assert "error while reporting: boom" in finish
 
 
 def test_reporting_error_preserves_failing_exit_status_and_warns_once(
@@ -679,14 +785,11 @@ def test_reporting_error_preserves_failing_exit_status_and_warns_once(
     monkeypatch.setattr("pytest_vantage.recorder.send", _raise)
     pytester.makepyfile(test_sample="def test_it():\n    assert False\n")
 
-    # See the sibling above: the start-write's warning escapes an in-process
-    # run's capture, so it is asserted here rather than left to leak.
-    with pytest.warns(VantageWarning, match="session liveness"):
-        result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
-    result.assert_outcomes(failed=1)
+    result.assert_outcomes(failed=1, warnings=2)
     assert result.ret == 1
-    assert _combined_output(result).count("VantageWarning:") == 1
+    assert len(vantage_warnings(result)) == 2
 
 
 class _UnavailableError(RejectionError):
@@ -709,10 +812,10 @@ def test_a_failing_start_write_warns_once_silences_the_heartbeats_and_keeps_ever
     at all. The finish-write alone then records the whole run, every
     result included, and the exit status is untouched.
 
-    `runpytest_subprocess`, not in-process `runpytest`: a `VantageWarning`
-    raised as early as `pytest_sessionstart` escapes an in-process run's
-    capture (see `_combined_output`). The server runs in this process, so
-    its store can still be made to refuse the first write.
+    The warning is raised in `pytest_sessionstart`, where pytest records
+    none itself, and is in the warnings summary all the same. The session
+    runs in a subprocess; the server runs in this one, so its store can
+    still be made to refuse the first write.
     """
     real_record_session = vantage_server.store.record_session
     writes = itertools.count()
@@ -734,11 +837,11 @@ def test_a_failing_start_write_warns_once_silences_the_heartbeats_and_keeps_ever
         "--vantage", f"--vantage-server={vantage_server.address}"
     )
 
-    result.assert_outcomes(passed=5)
+    result.assert_outcomes(passed=5, warnings=1)
     assert result.ret == 0
     output = _combined_output(result)
     assert output.count("VantageWarning:") == 1
-    assert "error while reporting session liveness: HTTP Error 503" in output
+    assert "error while reporting session liveness: HTTP Error 503" in warnings_summary(result)
     assert vantage_server.requests == [
         ("GET", "/api/v1/capabilities"),
         ("POST", "/api/v1/runs"),
@@ -1065,6 +1168,15 @@ def test_a_server_that_trickles_its_answers_cannot_hold_the_session(
 # --- Activity-driven heartbeats --------------------------------------------
 
 
+_FAILING_HEARTBEAT = (
+    "import pytest_vantage.recorder as recorder\n"
+    "recorder._BEAT_INTERVAL_SECONDS = 0.0\n"
+    "def _fail_heartbeat(*args, **kwargs):\n"
+    "    raise RuntimeError('boom')\n"
+    "recorder.send_heartbeat = _fail_heartbeat\n"
+)
+
+
 def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still_recorded(
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,
@@ -1079,19 +1191,10 @@ def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still
     `test_run_report.py::test_heartbeats_are_one_interval_apart`.
 
     A `conftest.py` written into the pytester's own directory, not
-    `monkeypatch`: this test needs `runpytest_subprocess` (an in-process
-    `runpytest` would let a `pytest_sessionstart`-era warning escape into
-    THIS session's own capture, the same phenomenon
-    `_combined_output`'s docstring names), and `monkeypatch` cannot reach
-    into a genuinely separate process.
+    `monkeypatch`, which cannot reach into the separate process
+    `runpytest_subprocess` runs the session in.
     """
-    pytester.makeconftest(
-        "import pytest_vantage.recorder as recorder\n"
-        "recorder._BEAT_INTERVAL_SECONDS = 0.0\n"
-        "def _fail_heartbeat(*args, **kwargs):\n"
-        "    raise RuntimeError('boom')\n"
-        "recorder.send_heartbeat = _fail_heartbeat\n"
-    )
+    pytester.makeconftest(_FAILING_HEARTBEAT)
     pytester.makepyfile(
         test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
     )
@@ -1103,6 +1206,30 @@ def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still
     result.assert_outcomes(passed=5)
     assert result.ret == 0
     assert _combined_output(result).count("VantageWarning:") == 1
+    assert len(vantage_server.results()) == 5
+
+
+def test_a_heartbeat_failing_under_xdist_is_in_the_warnings_summary(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+) -> None:
+    """Under xdist the controller runs no test itself: its whole loop, where
+    it accumulates the workers' reports and beats, is outside every hook
+    pytest records warnings in. A heartbeat failing there is issued to the
+    warnings summary all the same, not printed to stderr mid-run."""
+    pytest.importorskip("xdist")
+    pytester.makeconftest(_FAILING_HEARTBEAT)
+    pytester.makepyfile(
+        test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(5))
+    )
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", f"--vantage-server={vantage_server.address}", "-n", "2"
+    )
+
+    result.assert_outcomes(passed=5, warnings=1)
+    assert "error while reporting session liveness: boom" in warnings_summary(result)
+    assert "VantageWarning" not in result.stderr.str()
     assert len(vantage_server.results()) == 5
 
 
@@ -1407,14 +1534,11 @@ def test_git_failure_disables_nothing_else(
         test_many="\n".join(f"def test_{i}():\n    assert True\n" for i in range(3))
     )
 
-    # The escaped exception is exactly what `_capture_vcs` warns about once
-    # -- an in-process run's own `pytest_configure`-era warning escapes THIS
-    # session's capture, the same phenomenon `_combined_output`'s docstring
-    # names above, so it is asserted here rather than left to leak.
-    with pytest.warns(VantageWarning, match="could not read the git repository"):
-        result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
+    result = pytester.runpytest("--vantage", f"--vantage-server={vantage_server.address}")
 
-    result.assert_outcomes(passed=3)
+    (warned,) = vantage_warnings(result)
+    assert "could not read the git repository" in warned
+    result.assert_outcomes(passed=3, warnings=1)
     assert result.ret == 0
     assert len(created) == 1
     recorder = created[0]

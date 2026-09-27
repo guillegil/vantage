@@ -14,13 +14,13 @@ import math
 import socket
 
 import pytest
-from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.config import (
     VantageConfigError,
     resolve_report_timeout,
     resolve_server_address,
     resolve_settings,
 )
+from warnings_summary import vantage_warnings
 
 _PASSING_TEST = "def test_it():\n    assert True\n"
 
@@ -282,8 +282,9 @@ def test_a_numeric_native_toml_timeout_lets_the_session_run(pytester: pytest.Pyt
     pytester.makepyfile(test_sample=_PASSING_TEST)
     address = _closed_port_address()
 
-    with pytest.warns(VantageWarning, match="cannot reach"):
-        result = pytester.runpytest("--vantage", f"--vantage-server={address}")
+    result = pytester.runpytest("--vantage", f"--vantage-server={address}")
 
     assert result.ret == pytest.ExitCode.OK
-    result.assert_outcomes(passed=1)
+    result.assert_outcomes(passed=1, warnings=1)
+    (warned,) = vantage_warnings(result)
+    assert "cannot reach" in warned

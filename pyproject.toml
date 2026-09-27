@@ -110,6 +110,7 @@ DEP001 = [
     "sqlite_rows",
     "vantage_port_contract",
     "vantage_test_server",
+    "warnings_summary",
 ]
 # `types-PyYAML` is a stub package mypy reads, never itself imported --
 # same category as the CLI-only tools below.
