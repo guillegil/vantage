@@ -56,6 +56,9 @@ class _RegisterCallDouble:
     def register(self, plugin: object) -> None:
         self.registered.append(plugin)
 
+    def is_blocked(self, name: str) -> bool:
+        return False
+
 
 class _WorkerConfigDouble:
     """A ``pytest.Config`` stand-in carrying xdist's ``workerinput`` marker.
@@ -175,10 +178,13 @@ def test_no_worker_input_still_runs_the_activation_check() -> None:
 class _ActivatedControllerDouble:
     """A controller whose typed arguments ask for recording and failure
     text, pointed at a port where nothing listens: `EvidenceCollector`
-    registers before the preflight, so its outcome does not matter here."""
+    registers before the preflight, so its outcome does not matter here.
+    A warning raised in `pytest_configure` is issued the way pytest issues
+    its own configuration warnings, and kept in `issued`."""
 
     def __init__(self, address: str) -> None:
         self.pluginmanager = _RegisterCallDouble()
+        self.issued: list[Warning] = []
         self.invocation_params = SimpleNamespace(args=("--vantage", "--vantage-failure-text"))
         self._options: dict[str, Any] = {
             "vantage": True,
@@ -194,6 +200,9 @@ class _ActivatedControllerDouble:
     def getini(self, name: str) -> object:
         return None
 
+    def issue_config_time_warning(self, warning: Warning, stacklevel: int) -> None:
+        self.issued.append(warning)
+
 
 def test_controller_registers_an_evidencecollector_when_activated() -> None:
     """A session with no xdist workers at all still needs failure evidence
@@ -205,7 +214,9 @@ def test_controller_registers_an_evidencecollector_when_activated() -> None:
     probe.close()
     config = _ActivatedControllerDouble(f"http://127.0.0.1:{closed_port}")
 
-    with pytest.warns(VantageWarning, match="cannot reach"):
-        pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
+    pytest_configure(config)  # type: ignore[arg-type]  # deliberately not a real Config
 
     assert [type(plugin) for plugin in config.pluginmanager.registered] == [EvidenceCollector]
+    (warned,) = config.issued
+    assert isinstance(warned, VantageWarning)
+    assert "cannot reach" in str(warned)

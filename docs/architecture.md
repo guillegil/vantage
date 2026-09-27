@@ -424,10 +424,18 @@ switch off another:
   turn them into errors. When the active filters raise it anyway, the message
   goes to the terminal reporter, or to stderr.
 - pytest records warnings only inside its collection, test-protocol,
-  session-finish and terminal-summary hooks. A warning from
-  `pytest_configure` or `pytest_sessionstart`, and one from the xdist
-  controller's `pytest_runtest_logreport`, is printed to stderr and never
-  reaches the warnings summary.
+  session-finish and terminal-summary hooks. Anywhere else -- the plugin's
+  `pytest_configure`, `pytest_sessionstart`, the xdist controller's loop --
+  `warn` issues the warning through `config.issue_config_time_warning`, as
+  pytest issues its own configuration warnings, so it reaches the summary
+  and the project's filters apply to it. `configuring` marks the plugin's
+  `pytest_configure`, which a session without `--vantage` runs too, so it
+  registers nothing; `WarningPhase`, registered with the `Recorder`, marks
+  `pytest_sessionstart` and the test loop, but not each test inside it. Both
+  set a context variable for the length of one hook, so nothing outlives it,
+  and a session pytest runs inside another keeps its own. With pytest's
+  warnings plugin blocked there is no summary, and the warning is printed
+  to stderr.
 
 The transport (`transport.py`) uses an `urllib` opener with only the HTTP and
 HTTPS handlers. It follows no redirect, because `urllib` would resend a

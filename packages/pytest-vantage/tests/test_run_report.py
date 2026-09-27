@@ -21,13 +21,13 @@ from types import SimpleNamespace
 import pytest
 import pytest_vantage.recorder as recorder_module
 from pytest_vantage import transport, vcs
-from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.recorder import _WORKER_INTERRUPT_KEY, Recorder, WorkerInterruptRelay
 from vantage_test_server import (
     VantageTestServer,
     wait_for_execution,
     wait_for_file,
 )
+from warnings_summary import vantage_warnings
 
 # Several tests build a broken repository in their project directory; git
 # must not find one above it instead.
@@ -321,15 +321,12 @@ def test_a_metadata_capture_that_raises_costs_the_run_only_its_metadata(
     monkeypatch.setattr("pytest_vantage.recorder.send", _record_then_send)
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
-    # Raised from `pytest_configure`, the warning escapes an in-process
-    # run's capture into this session, so it is asserted here.
-    with pytest.warns(VantageWarning, match="synthetic metadata failure") as warned:
-        result = pytester.runpytest(
-            "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-metadata"
-        )
+    result = pytester.runpytest(
+        "--vantage", f"--vantage-server={vantage_server.address}", "--vantage-metadata"
+    )
 
-    result.assert_outcomes(passed=1)
-    assert [str(w.message) for w in warned] == [
+    result.assert_outcomes(passed=1, warnings=1)
+    assert vantage_warnings(result) == [
         "vantage: error while reading vantage-metadata.json: synthetic metadata failure, "
         "the declaration is ignored"
     ]
