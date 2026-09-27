@@ -269,11 +269,16 @@ any of them.
   in-progress report never overwrites a finish, whatever order they arrive
   in, and `started_at` never changes after the first report. A VCS field that
   is null in the finishing report keeps its earlier value.
-- **Results accumulate.** Each report adds the results whose node ids the run
-  does not have yet. A result already stored is never replaced.
+- **Results accumulate** until the run is finished. Each report adds the
+  results whose node ids the run does not have yet. A result already stored
+  is never replaced.
 - **Metadata** is stored once per file path and per key: the first report
   to carry a key decides its value, and later copies are ignored. A run
   holds at most 200 keys over all its reports.
+- **A finished run is final.** A report arriving once the run has an exit
+  status stores nothing: no results, no metadata, no change to the run. A
+  client sends the finishing report last, so anything after it is a retry
+  or a replay. It still answers `200`.
 - **`200` does not mean nothing changed.** It means the run already existed.
   A finishing report after a start report answers `200` and stores the
   finish and its results.
@@ -295,7 +300,8 @@ Every report of a session carries the declaration's `keys` and `files`, so
 the files' keys are stored from the first report that arrives. Only the
 finishing report carries `values`; when the last results leave no room for
 them, those results go in one more in-progress report and the finishing
-report carries none. The server takes values from any report.
+report carries none. The server takes values from any report that reaches
+the run before it is finished.
 
 ## `POST /api/v1/runs/{run_id}/heartbeat`
 

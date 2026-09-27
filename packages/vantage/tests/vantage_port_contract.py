@@ -325,6 +325,72 @@ class ExecutionStoreContract:
         stored = store.get_execution(identity)
         assert stored == first_finish
 
+    def test_results_before_the_finish_accumulate_and_the_finish_adds_its_own(
+        self, store: ExecutionStore
+    ) -> None:
+        """A run not yet finished takes every report's new results: the
+        in-progress reports a split session sends first, then the finishing
+        report's own."""
+        identity = "1" + "4" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        start = _start_only_execution(identity, started=started)
+        store.record_session(start, results=(), received_at=started)
+        store.record_session(start, results=(_result("t.py::test_a"),), received_at=started)
+
+        store.record_session(
+            _execution(identity, started=started),
+            results=(_result("t.py::test_b"),),
+            received_at=started,
+        )
+
+        stored = {result.identity.node_id for result in store.get_results(identity)}
+        assert stored == {"t.py::test_a", "t.py::test_b"}
+
+    def test_a_report_after_the_finish_adds_no_results(self, store: ExecutionStore) -> None:
+        """A finished run is final. Whatever arrives for it later -- a finish
+        replayed with another result set, an in-progress report -- stores no
+        result and puts no node id in the catalogue."""
+        identity = "1" + "5" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        finish = _execution(identity, started=started)
+        store.record_session(finish, results=(_result("t.py::test_a"),), received_at=started)
+
+        store.record_session(finish, results=(_result("t.py::test_b"),), received_at=started)
+        store.record_session(
+            _start_only_execution(identity, started=started),
+            results=(_result("t.py::test_c"),),
+            received_at=started,
+        )
+
+        stored = [result.identity.node_id for result in store.get_results(identity)]
+        assert stored == ["t.py::test_a"]
+        assert store.get_catalogue_entry("t.py::test_b") is None
+        assert store.get_catalogue_entry("t.py::test_c") is None
+
+    def test_a_report_after_the_finish_adds_no_metadata(
+        self, store: ExecutionStore, stored_metadata: StoredMetadata
+    ) -> None:
+        """A report arriving after the finish stores none of its metadata
+        files or keys, not even ones the run does not hold yet."""
+        identity = "1" + "6" * 31
+        started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        first = RunMetadata(
+            files=(MetadataFile(source_file="a.yaml", content_type="yaml", status="captured"),),
+            entries=(MetadataEntry(key="k", value="v", source_file="a.yaml", status="captured"),),
+        )
+        later = RunMetadata(
+            files=(MetadataFile(source_file="b.yaml", content_type="yaml", status="captured"),),
+            entries=(MetadataEntry(key="k2", value="v2", source_file="b.yaml", status="captured"),),
+        )
+        finish = _execution(identity, started=started)
+        store.record_session(finish, results=(), received_at=started, metadata=first)
+
+        store.record_session(finish, results=(), received_at=started, metadata=later)
+
+        stored = stored_metadata(identity)
+        assert set(stored.files) == set(first.files)
+        assert set(stored.entries) == set(first.entries)
+
     def test_duplicate_start_after_start_is_a_no_op(self, store: ExecutionStore) -> None:
         """A second start-write for the same run id changes nothing --
         `excluded.exit_status IS NULL` never satisfies the conflict `WHERE`,

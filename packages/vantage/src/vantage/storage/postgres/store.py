@@ -118,8 +118,9 @@ _UPSERT_RUN = """
 """
 
 # The conflict path of `_UPSERT_RUN` already holds this lock; taking it
-# explicitly holds it on every path.
-_LOCK_RUN = "SELECT 1 FROM vantage.run WHERE id = %s FOR UPDATE"
+# explicitly holds it on every path, so the exit status it reads is still the
+# stored one.
+_LOCK_RUN = "SELECT exit_status FROM vantage.run WHERE id = %s FOR UPDATE"
 
 _PROBE_RUN = "SELECT 1 FROM vantage.run WHERE id = %s"
 
@@ -828,7 +829,13 @@ class PostgresExecutionStore:
 
         def write(conn: PgConnection) -> bool:
             upserted = conn.execute(_UPSERT_RUN, run_row).fetchone()
-            conn.execute(_LOCK_RUN, (run_id,))
+            locked = conn.execute(_LOCK_RUN, (run_id,)).fetchone()
+            if upserted is None and locked is not None and locked[0] is not None:
+                # The upsert changed nothing and the run has an exit status,
+                # so it was finished before this report. A finished run is
+                # final: a report reaching it later is a replay and adds
+                # nothing, whatever results it carries.
+                return False
             with conn.cursor() as cursor:
                 if catalogue_rows:
                     test_case_ids = _upsert_catalogue(conn, catalogue_rows)

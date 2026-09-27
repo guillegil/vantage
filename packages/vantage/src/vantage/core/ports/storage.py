@@ -298,7 +298,8 @@ class ExecutionStore(Protocol):
         whatever a later report says, and whichever source a later row of the
         same key comes from. A run holds at most `MAX_METADATA_ENTRIES` keys:
         once it does, every new key a report carries is dropped, in order,
-        however many reports the run is sent."""
+        however many reports the run is sent. A run with an exit status is
+        final: a report reaching it afterwards stores nothing at all."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:
