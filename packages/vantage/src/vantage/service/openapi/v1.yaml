@@ -21,7 +21,7 @@ paths:
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReport'}}}}
       responses:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
-        "200": {description: "The run already existed. This report's finish fields, results and metadata were applied where the run did not have them yet; nothing already stored was replaced.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
+        "200": {description: "The run already existed. This report's finish fields, results and metadata were applied where the run did not have them yet; nothing already stored was replaced. A run already finished takes nothing from a later report.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json) -- NaN and Infinity are not JSON -- or the client disconnected before sending all of it (incomplete_body).", content: &rejection {application/json: {schema: {$ref: '#/components/schemas/Rejection'}}}}
         "413": {description: "The body exceeds 1 MiB (payload_too_large).", content: *rejection}
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}

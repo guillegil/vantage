@@ -118,6 +118,8 @@ _UPSERT_RUN = """
 
 _PROBE_RUN_EXISTS = "SELECT 1 FROM run WHERE id = ?"
 
+_SELECT_EXIT_STATUS = "SELECT exit_status FROM run WHERE id = ?"
+
 # Monotonic: a `contacted_at` earlier than or equal to the stored one changes
 # zero rows.
 _TOUCH_LAST_CONTACT = """
@@ -866,7 +868,12 @@ class SqliteExecutionStore:
         # must exist first.
         run_id = execution.identity.value
         with self._write_transaction() as conn:
-            created = conn.execute(_PROBE_RUN_EXISTS, (run_id,)).fetchone() is None
+            stored = conn.execute(_SELECT_EXIT_STATUS, (run_id,)).fetchone()
+            if stored is not None and stored[0] is not None:
+                # A finished run is final: a report reaching it later is a
+                # replay and adds nothing, whatever results it carries.
+                return False
+            created = stored is None
 
             conn.execute(
                 _UPSERT_RUN,

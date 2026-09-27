@@ -131,6 +131,10 @@ class InMemoryExecutionStore:
         # `_last_contact` for a new run and is not part of `Execution`.
         identity = execution.identity.value
         stored = self._executions.get(identity)
+        if stored is not None and stored.exit_status is not None:
+            # A finished run is final: a report reaching it later is a replay
+            # and adds nothing, whatever results it carries.
+            return False
         created = stored is None
         if stored is None:
             self._executions[identity] = replace(execution, vcs=_normalized_vcs(execution.vcs))

@@ -257,7 +257,8 @@ a finish time.
 
 On the server, the first report of a run creates it (`201`) and every later
 one answers `200`. The finish is applied once, over a run not yet finished;
-results accumulate, first write wins; the last-contact time is set when the
+results accumulate until then, first write wins, and a report reaching a
+finished run stores nothing; the last-contact time is set when the
 run is created and advanced by heartbeats. A run's presentation is derived at
 read time, never stored: `finished` when it has a finish time, `interrupted`
 when a finish report arrived without one, `abandoned` when nothing was heard
@@ -588,6 +589,10 @@ its row: run, catalogue, results, metadata.
   value.
 - Whether the report created the run comes from an existence probe inside the
   transaction, since SQLite's row count cannot tell an insert from an update.
+  The probe reads the exit status too: a report reaching a finished run
+  returns there and stores nothing, since a client sends the finish last and
+  anything after it is a replay. PostgreSQL reads it under the run's row
+  lock, after an upsert that changed nothing.
 - Results insert with `ON CONFLICT DO NOTHING`, metadata rows likewise, so a
   replay changes nothing. A metadata key is inserted only while the run
   holds fewer than 200, counted in the same statement, so the bound holds
