@@ -60,6 +60,7 @@ from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
     HistoryEntry,
     MetadataEntry,
+    MetadataFile,
     NamespaceFullError,
     Page,
     ResultListEntry,
@@ -288,6 +289,14 @@ _SELECT_RUN_METADATA = """
     SELECT key, name, value, status, source, source_file, declared
     FROM vantage.run_metadata WHERE run_id = %s
     ORDER BY key
+"""
+
+# `source_file` keeps the database's collation, so the code point order the
+# other adapters give is asked for here.
+_SELECT_RUN_METADATA_FILES = """
+    SELECT source_file, content_type, status
+    FROM vantage.run_metadata_file WHERE run_id = %s
+    ORDER BY source_file COLLATE "C"
 """
 
 # `_decode_identity`'s five columns and the eleven outcome and timing
@@ -608,6 +617,16 @@ def _row_to_metadata_entry(row: Row) -> MetadataEntry:
     )
 
 
+def _row_to_metadata_file(row: Row) -> MetadataFile:
+    """A `_SELECT_RUN_METADATA_FILES` row."""
+    source_file, content_type, status = row
+    return MetadataFile(
+        source_file=cast(str, source_file),
+        content_type=cast(str, content_type),
+        status=cast(str, status),
+    )
+
+
 def _row_to_catalogue_entry(row: Row) -> CatalogueEntry:
     first_seen_at, last_seen_at, last_seen_run_id = row[5:]
     return CatalogueEntry(
@@ -918,17 +937,21 @@ class PostgresExecutionStore:
             return None
         return RunDetail(execution=_decode_execution(row[:12]), last_contact_at=_opt_utc(row[12]))
 
-    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
+    def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
         if _unmatchable(execution_id):
             return None
 
-        def read(conn: PgConnection) -> list[Row] | None:
+        def read(conn: PgConnection) -> RunMetadata | None:
             if conn.execute(_PROBE_RUN, (execution_id,)).fetchone() is None:
                 return None
-            return conn.execute(_SELECT_RUN_METADATA, (execution_id,)).fetchall()
+            file_rows = conn.execute(_SELECT_RUN_METADATA_FILES, (execution_id,)).fetchall()
+            entry_rows = conn.execute(_SELECT_RUN_METADATA, (execution_id,)).fetchall()
+            return RunMetadata(
+                files=tuple(_row_to_metadata_file(row) for row in file_rows),
+                entries=tuple(_row_to_metadata_entry(row) for row in entry_rows),
+            )
 
-        rows = self._transaction(read, snapshot=True)
-        return None if rows is None else tuple(_row_to_metadata_entry(row) for row in rows)
+        return self._transaction(read, snapshot=True)
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)

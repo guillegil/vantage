@@ -60,6 +60,7 @@ from vantage.core.ports.storage import (
     ExecutionStore,
     HistoryEntry,
     MetadataEntry,
+    MetadataFile,
     Page,
     ResultListEntry,
     RunDetail,
@@ -72,6 +73,7 @@ from vantage.service.schemas import (
     FailureProjectionResponse,
     HistoryEntryResponse,
     HistoryResponse,
+    MetadataFileResponse,
     MetadataHorizonResponse,
     MetadataItemResponse,
     ResultDetailResponse,
@@ -158,6 +160,14 @@ def _metadata_item(entry: MetadataEntry) -> MetadataItemResponse:
         source=entry.source,
         source_file=entry.source_file,
         declared=entry.declared,
+    )
+
+
+def _metadata_file(metadata_file: MetadataFile) -> MetadataFileResponse:
+    return MetadataFileResponse(
+        source_file=metadata_file.source_file,
+        content_type=metadata_file.content_type,
+        status=metadata_file.status,
     )
 
 
@@ -338,13 +348,18 @@ def get_run_metadata(
     store: ExecutionStore = Depends(get_store),
 ) -> RunMetadataResponse:
     """`GET /api/v1/runs/{run_id}/metadata` -- every key the run reported,
-    ordered by key, from whichever source. Not paged, since a run holds at
-    most `MAX_METADATA_ENTRIES` keys. An unknown run is `UnknownRunError`,
-    as on `get_run_detail`; one that reported no metadata has no items."""
-    entries = store.get_run_metadata(run_id)
-    if entries is None:
+    ordered by key, from whichever source, and every file it declared,
+    ordered by path, with the status saying why a file's keys have no
+    value. Not paged, since a run holds at most `MAX_METADATA_ENTRIES` keys.
+    An unknown run is `UnknownRunError`, as on `get_run_detail`; one that
+    reported no metadata has no items and no files."""
+    metadata = store.get_run_metadata(run_id)
+    if metadata is None:
         raise UnknownRunError()
-    return RunMetadataResponse(items=[_metadata_item(entry) for entry in entries])
+    return RunMetadataResponse(
+        items=[_metadata_item(entry) for entry in metadata.entries],
+        files=[_metadata_file(metadata_file) for metadata_file in metadata.files],
+    )
 
 
 @router.get("/runs/{run_id}/results")

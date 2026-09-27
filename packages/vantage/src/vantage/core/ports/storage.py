@@ -251,8 +251,9 @@ class MetadataEntry:
 
 @dataclass(frozen=True, slots=True)
 class RunMetadata:
-    """The frozen aggregate `record_session` accepts: files and entries as
-    one parameter rather than two, so a caller passes them together."""
+    """The frozen aggregate `record_session` accepts and `get_run_metadata`
+    returns: files and entries as one value rather than two, so they travel
+    together."""
 
     files: tuple[MetadataFile, ...] = ()
     entries: tuple[MetadataEntry, ...] = ()
@@ -372,12 +373,13 @@ class ExecutionStore(Protocol):
         complement of `list_runs`' bounded projection."""
         ...
 
-    def get_run_metadata(self, execution_id: str) -> Sequence[MetadataEntry] | None:
-        """Return every metadata row stored for one run, ordered by `key`
-        (code point order), or None if `execution_id` is unknown. A known
-        run with no metadata has an empty sequence. Not paginated:
-        `MAX_METADATA_ENTRIES` bounds a run's rows. The existence check and
-        the rows are read from one snapshot."""
+    def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
+        """Return every metadata file and key stored for one run, the files
+        ordered by `source_file` and the keys by `key` (both code point
+        order), or None if `execution_id` is unknown. A known run with no
+        metadata has neither. Not paginated: `MAX_METADATA_ENTRIES` bounds a
+        run's keys, and a report's file bound its files. The existence check
+        and both tables are read from one snapshot."""
         ...
 
     def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:

@@ -591,7 +591,7 @@ def test_run_detail_unknown_id_is_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_run_metadata_returns_every_key_ordered_by_key_with_every_field(
+def test_run_metadata_returns_every_key_and_file_in_order_with_every_field(
     client: TestClient, store: ExecutionStore
 ) -> None:
     """File and session keys alike, each field carried by value, and the
@@ -603,8 +603,19 @@ def test_run_metadata_returns_every_key_ordered_by_key_with_every_field(
         results=[],
         received_at=now - timedelta(hours=1),
         metadata=RunMetadata(
-            files=(MetadataFile(source_file="fw.yaml", content_type="yaml", status="captured"),),
+            files=(
+                MetadataFile(source_file="fw.yaml", content_type="yaml", status="captured"),
+                MetadataFile(
+                    source_file="build/manifest.json", content_type="json", status="not_found"
+                ),
+            ),
             entries=(
+                MetadataEntry(
+                    key="toolchain",
+                    value=None,
+                    source_file="build/manifest.json",
+                    status="source_unavailable",
+                ),
                 MetadataEntry(
                     key="fpga.firmware",
                     value="1.1.0",
@@ -671,11 +682,24 @@ def test_run_metadata_returns_every_key_ordered_by_key_with_every_field(
                 "source_file": None,
                 "declared": True,
             },
-        ]
+            {
+                "key": "toolchain",
+                "name": None,
+                "value": None,
+                "status": "source_unavailable",
+                "source": "file",
+                "source_file": "build/manifest.json",
+                "declared": True,
+            },
+        ],
+        "files": [
+            {"source_file": "build/manifest.json", "content_type": "json", "status": "not_found"},
+            {"source_file": "fw.yaml", "content_type": "yaml", "status": "captured"},
+        ],
     }
 
 
-def test_run_metadata_of_a_run_that_reported_none_has_no_items(
+def test_run_metadata_of_a_run_that_reported_none_has_no_items_and_no_files(
     client: TestClient, store: ExecutionStore
 ) -> None:
     now = datetime.now(timezone.utc)
@@ -689,7 +713,7 @@ def test_run_metadata_of_a_run_that_reported_none_has_no_items(
     response = client.get(f"/api/v1/runs/{run_id}/metadata")
 
     assert response.status_code == 200
-    assert response.json() == {"items": []}
+    assert response.json() == {"items": [], "files": []}
 
 
 def test_run_metadata_of_an_unknown_run_is_404_unknown_run(client: TestClient) -> None:

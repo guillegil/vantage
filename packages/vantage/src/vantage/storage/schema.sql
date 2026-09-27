@@ -20,10 +20,8 @@
 --
 -- A few values are recorded for whoever reads the database directly and
 -- are returned by no route: `meta.created_at`/`created_by`,
--- `run.received_at`, `test_case.first_seen_at`/`last_seen_run_id`, and the
--- format and status of each declared metadata file (`run_metadata_file`),
--- which say why its keys have no value. The tests read them to check what a
--- write stored.
+-- `run.received_at` and `test_case.first_seen_at`/`last_seen_run_id`. The
+-- tests read them to check what a write stored.
 
 -- ---------------------------------------------------------------------------
 -- meta -- `schema_version`, plus the best-effort `created_at`/`created_by`

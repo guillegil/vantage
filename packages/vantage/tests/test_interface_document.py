@@ -32,7 +32,12 @@ from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from pydantic import BaseModel
 from vantage.core.domain.liveness import PRESENTATIONS
-from vantage.core.domain.metadata import KEY_STATUSES, METADATA_SOURCES
+from vantage.core.domain.metadata import (
+    FILE_STATUSES,
+    KEY_STATUSES,
+    METADATA_CONTENT_TYPES,
+    METADATA_SOURCES,
+)
 from vantage.core.domain.result import OUTCOMES
 from vantage.ingestion.schemas import (
     MetadataFileReport,
@@ -53,6 +58,7 @@ from vantage.service.schemas import (
     HeartbeatAcknowledgement,
     HistoryEntryResponse,
     HistoryResponse,
+    MetadataFileResponse,
     MetadataHorizonResponse,
     MetadataItemResponse,
     RejectionResponse,
@@ -519,6 +525,7 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "MetadataHorizon": MetadataHorizonResponse,
     "RunDetailResponse": RunDetailResponse,
     "MetadataItem": MetadataItemResponse,
+    "MetadataFile": MetadataFileResponse,
     "RunMetadataResponse": RunMetadataResponse,
     "FailureProjection": FailureProjectionResponse,
     "ResultListItem": ResultListItemResponse,
@@ -553,6 +560,8 @@ _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
     ("HistoryEntry", "outcome"): OUTCOMES,
     ("MetadataItem", "status"): KEY_STATUSES,
     ("MetadataItem", "source"): METADATA_SOURCES,
+    ("MetadataFile", "content_type"): METADATA_CONTENT_TYPES,
+    ("MetadataFile", "status"): FILE_STATUSES,
 }
 
 # `extra=` on a model, to the `additionalProperties` its schema must declare.
