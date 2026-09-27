@@ -30,6 +30,7 @@ from vantage.core.ports.storage import (
     MetadataEntry,
     MetadataFile,
     NamespaceFullError,
+    RunKey,
     RunMetadata,
     UserSetting,
 )
@@ -878,6 +879,91 @@ class ExecutionStoreContract:
             "a" * 32,
         ]
 
+    def test_list_runs_after_a_key_starts_just_past_it(self, store: ExecutionStore) -> None:
+        """A page asked for `after` a run's key holds only the runs past it
+        in the newest-first order: a tie on `started_at` is broken by `id`,
+        as the order itself breaks it, and a microsecond apart is apart."""
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        tied = base + timedelta(microseconds=1)
+        for identity, started in (
+            ("a" * 32, base),
+            ("b" * 32, tied),
+            ("c" * 32, tied),
+            ("d" * 32, tied + timedelta(microseconds=1)),
+        ):
+            store.record_session(
+                _execution(identity, started=started), results=(), received_at=base
+            )
+
+        page = store.list_runs(limit=10, offset=0, after=RunKey(started_at=tied, run_id="c" * 32))
+
+        assert [entry.execution.identity.value for entry in page.items] == ["b" * 32, "a" * 32]
+        assert page.has_more is False
+
+    def test_list_runs_after_a_key_is_not_shifted_by_a_run_recorded_since(
+        self, store: ExecutionStore
+    ) -> None:
+        """The page after a key holds the same runs whatever was recorded
+        once the key was read. A newer run lands before the key, where an
+        offset would have pushed a run already listed onto the next page."""
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        for i in range(4):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(seconds=i)),
+                results=(),
+                received_at=base,
+            )
+        first = store.list_runs(limit=2, offset=0)
+        last = first.items[-1].execution
+        store.record_session(
+            _execution("f" * 32, started=base + timedelta(seconds=10)), results=(), received_at=base
+        )
+
+        after = RunKey(started_at=last.started_at, run_id=last.identity.value)
+        second = store.list_runs(limit=2, offset=0, after=after)
+
+        assert [entry.execution.identity.value for entry in second.items] == [
+            f"{1:032x}",
+            f"{0:032x}",
+        ]
+        assert second.has_more is False
+
+    def test_the_filtered_run_list_pages_after_a_key_too(self, store: ExecutionStore) -> None:
+        """The metadata-filtered run list takes the same key, over the runs
+        the filter keeps; the horizon still counts every run."""
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        for i in range(4):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(seconds=i)),
+                results=(),
+                received_at=base,
+                metadata=RunMetadata(
+                    entries=(
+                        MetadataEntry(
+                            key="bench",
+                            value="lab" if i != 2 else "other",
+                            source_file=None,
+                            status="captured",
+                            source="session",
+                            declared=False,
+                        ),
+                    )
+                ),
+            )
+
+        page, predating = store.list_runs_with_metadata_horizon(
+            filters=[("bench", "lab")],
+            limit=10,
+            offset=0,
+            after=RunKey(started_at=base + timedelta(seconds=3), run_id=f"{3:032x}"),
+        )
+
+        assert [entry.execution.identity.value for entry in page.items] == [
+            f"{1:032x}",
+            f"{0:032x}",
+        ]
+        assert predating == (0,)
+
     def test_list_runs_caps_at_200_items(self, store: ExecutionStore) -> None:
         """A list response never exceeds 200 items, even when the caller asks
         for more."""
@@ -1176,6 +1262,28 @@ class ExecutionStoreContract:
         assert oldest.vcs.branch == "feature"
         assert oldest.vcs.dirty is True
         assert oldest.duration == 0.5
+
+    def test_list_history_after_a_key_starts_just_past_it(self, store: ExecutionStore) -> None:
+        """A test's history pages after a run's key the way the run list
+        does, in the same newest-first order."""
+        node_id = "t.py::test_recurring"
+        base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+        for i in range(3):
+            store.record_session(
+                _execution(f"{i:032x}", started=base + timedelta(seconds=i)),
+                results=(_result(node_id),),
+                received_at=base,
+            )
+
+        page = store.list_history(
+            node_id=node_id,
+            limit=10,
+            offset=0,
+            after=RunKey(started_at=base + timedelta(seconds=2), run_id=f"{2:032x}"),
+        )
+
+        assert [entry.run_id for entry in page.items] == [f"{1:032x}", f"{0:032x}"]
+        assert page.has_more is False
 
     def test_list_history_unknown_node_id_is_empty_not_error(self, store: ExecutionStore) -> None:
         """An unknown test identity yields an empty history, not an error."""
