@@ -24,7 +24,7 @@ from pytest_vantage.capture import is_crash_report, is_subtest
 
 
 class EvidenceCollector:
-    """Two hooks, no I/O, no state beyond two session-constant values.
+    """Three hooks, no I/O, no state beyond two session-constant values.
 
     `_disabled` is this instance's OWN fault-isolation latch -- deliberately
     not `pytest_vantage.boundary.fault_isolated`, which wraps an ordinary
@@ -84,6 +84,25 @@ class EvidenceCollector:
             evidence = getattr(report, "vantage_evidence", None)
             if isinstance(evidence, dict):
                 evidence.update(_captured_fields(report, self._capture_disabled))
+        except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
+            self._disabled = True
+            warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_collectreport(self, report: pytest.CollectReport) -> None:
+        """A collector that failed: no test ran, so `pytest_runtest_makereport`
+        never saw it, and pytest's collection text -- the error it prints
+        for it -- is the only statement of what went wrong. Its `longrepr`
+        alone, as for a crash report. `tryfirst` so a worker attaches it
+        before xdist serialises the report for the controller, and the
+        controller keeps what a worker attached.
+        """
+        if self._disabled or not report.failed:
+            return
+        try:
+            if getattr(report, "vantage_evidence", None) is None:
+                text = "" if report.longrepr is None else str(report.longrepr)
+                report.vantage_evidence = {"failure_message": text or None}  # type: ignore[attr-defined]
         except Exception as exc:  # never BaseException: Ctrl-C must still stop the run
             self._disabled = True
             warn(self._config, f"vantage: error while capturing failure evidence: {exc}")
