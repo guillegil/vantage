@@ -667,3 +667,83 @@ def test_names_that_are_not_utf8_are_recorded_not_lost(
     assert stored.failure.failure_path == "caf\ufffd/test_non_utf8.py"
     (execution,) = vantage_server.executions()
     assert execution.finished_at is not None
+
+
+# --- collection errors --------------------------------------------------------
+
+_COLLECTS = """
+def test_ok():
+    assert True
+"""
+
+_FAILS_TO_COLLECT = """
+import a_module_that_does_not_exist
+
+
+def test_never_collected():
+    assert True
+"""
+
+
+@pytest.mark.parametrize("failure_text", [False, True], ids=["plain", "failure-text"])
+def test_a_module_that_fails_to_collect_is_recorded_as_an_error(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    failure_text: bool,
+) -> None:
+    """With `--continue-on-collection-errors` pytest runs every module it
+    could collect and counts each one it could not as an error. The run
+    records that module as an `error` result under its own node id, so it
+    never reads as all passing. No phase ran; pytest's collection text is
+    the failure message, and only when failure text was asked for.
+    """
+    pytester.makepyfile(test_ok=_COLLECTS, test_broken=_FAILS_TO_COLLECT)
+    options = ["--vantage-failure-text"] if failure_text else []
+
+    run = pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={vantage_server.address}",
+        "--continue-on-collection-errors",
+        *options,
+    )
+
+    assert run.ret == pytest.ExitCode.TESTS_FAILED
+    assert "VantageWarning" not in run.stdout.str() + run.stderr.str()
+    (execution,) = vantage_server.executions()
+    assert execution.exit_status == 1
+    results = {result.identity.node_id: result for result in vantage_server.results()}
+    assert set(results) == {"test_ok.py::test_ok", "test_broken.py"}
+    assert results["test_ok.py::test_ok"].outcome == "passed"
+    broken = results["test_broken.py"]
+    assert broken.outcome == "error"
+    assert broken.identity.file_path == "test_broken.py"
+    assert (broken.setup_outcome, broken.call_outcome, broken.teardown_outcome) == (
+        None,
+        None,
+        None,
+    )
+    assert broken.duration is None
+    if failure_text:
+        assert broken.failure is not None
+        assert "a_module_that_does_not_exist" in (broken.failure.failure_message or "")
+    else:
+        assert broken.failure is None
+
+
+def test_a_session_stopped_by_a_collection_error_records_which_module(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+) -> None:
+    """Without `--continue-on-collection-errors` pytest runs nothing once a
+    module fails to collect. The run still names the module that stopped it.
+    """
+    pytester.makepyfile(test_ok=_COLLECTS, test_broken=_FAILS_TO_COLLECT)
+
+    run = pytester.runpytest_subprocess("--vantage", f"--vantage-server={vantage_server.address}")
+
+    assert run.ret == pytest.ExitCode.INTERRUPTED
+    (execution,) = vantage_server.executions()
+    assert execution.exit_status == 2
+    (broken,) = vantage_server.results()
+    assert broken.identity.node_id == "test_broken.py"
+    assert broken.outcome == "error"

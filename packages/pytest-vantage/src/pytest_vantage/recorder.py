@@ -309,6 +309,7 @@ class Recorder:
         self._accumulation_warned = False
         self._summary: list[str] = []
         self._results: dict[str, PendingResult] = {}
+        self._collection_errors: dict[str, pytest.CollectReport] = {}
         self._stop: BaseException | None = None
         self._worker_interruption: str | None = None
         self._last_beat_at = time.monotonic()
@@ -411,6 +412,17 @@ class Recorder:
         """
         accumulate(self._results, report)
         self._maybe_beat()
+
+    @accumulation_isolated
+    def pytest_collectreport(self, report: pytest.CollectReport) -> None:
+        """Keeps each collector pytest could not collect, for the finish
+        report to record as an `error` result. Under xdist the controller
+        collects nothing itself: xdist calls this hook on it once for each
+        distinct failure the workers report. A node id seen already keeps
+        its first report.
+        """
+        if report.failed:
+            self._collection_errors.setdefault(report.nodeid, report)
 
     @liveness_isolated
     def _maybe_beat(self) -> None:
@@ -550,7 +562,7 @@ class Recorder:
         early_stop = session.shouldfail or session.shouldstop
         finished_at, interrupted, interrupt_reason = self._how_it_ended(exit_status, early_stop)
 
-        results = assemble_results(self._results)
+        results = assemble_results(self._results, collection_errors=self._collection_errors)
         if results.dropped:
             warn(self._config, f"vantage: {results.dropped} test result(s) could not be recorded")
         # The server rejects an oversized body whole, losing the entire

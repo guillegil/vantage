@@ -10,6 +10,7 @@ instead. Standard library and `pytest` only -- never `xdist`
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import NamedTuple
 
@@ -470,6 +471,44 @@ def _build_execution(node_id: str, execution: _Execution) -> dict[str, object] |
     return result
 
 
+def collection_error_result(report: pytest.CollectReport) -> dict[str, object]:
+    """One `results[]` entry for a collector pytest could not collect -- a
+    module that fails to import, a class whose collection raised. pytest
+    counts it as an error, so it is recorded as one, under the collector's
+    own node id, as pytest's JUnit XML records it: a run with a broken
+    module then never reads as all passing.
+
+    No phase of any test ran, so every phase, duration and timestamp is
+    null. `worker_id` is null too: under xdist every worker collects every
+    module, and the controller is handed the failure once, from whichever
+    worker reported it first. Its evidence is pytest's collection text,
+    attached by `EvidenceCollector` only when failure text was asked for.
+    """
+    identity = decompose(report.nodeid)
+    result: dict[str, object] = {
+        "node_id": identity.node_id,
+        "file_path": identity.file_path,
+        "class_name": identity.class_name,
+        "function_name": identity.function_name,
+        "param_id": identity.param_id,
+        "outcome": "error",
+        "duration": None,
+        "started_at": None,
+        "finished_at": None,
+        "setup_outcome": None,
+        "call_outcome": None,
+        "teardown_outcome": None,
+        "setup_duration": None,
+        "call_duration": None,
+        "teardown_duration": None,
+        "worker_id": None,
+    }
+    evidence = getattr(report, "vantage_evidence", None)
+    if isinstance(evidence, dict):
+        result.update(evidence)
+    return result
+
+
 class AssembledResults(list[dict[str, object]]):
     """The `results` array, plus `dropped`: how many tests had reports that
     could not be built into a result. Still a plain list to everything that
@@ -479,10 +518,17 @@ class AssembledResults(list[dict[str, object]]):
     dropped: int = 0
 
 
-def assemble_results(pending: dict[str, PendingResult]) -> AssembledResults:
-    """Build the `results` array in insertion (execution) order. Entries
-    that were never observed whole are left out (`build_result` returning
-    `None`).
+def assemble_results(
+    pending: dict[str, PendingResult],
+    *,
+    collection_errors: Mapping[str, pytest.CollectReport] | None = None,
+) -> AssembledResults:
+    """Build the `results` array in insertion (execution) order, then one
+    `error` result per collector that failed (`collection_error_result`).
+    Entries that were never observed whole are left out (`build_result`
+    returning `None`), and so is a collection error under a node id a test
+    result already has: the server rejects a report naming one node id
+    twice, with every result in it.
 
     Each entry is built on its own: a report shape this module does not
     expect costs that one test its result and is counted in `dropped`,
@@ -497,6 +543,14 @@ def assemble_results(pending: dict[str, PendingResult]) -> AssembledResults:
             continue
         if result is not None:
             results.append(result)
+    recorded = {result["node_id"] for result in results}
+    for node_id, report in (collection_errors or {}).items():
+        if node_id in recorded:
+            continue
+        try:
+            results.append(collection_error_result(report))
+        except Exception:  # deliberately broad, same reason
+            results.dropped += 1
     return results
 
 
@@ -507,6 +561,7 @@ __all__ = [
     "accumulate",
     "assemble_results",
     "build_result",
+    "collection_error_result",
     "decompose",
     "derive_outcome",
     "is_crash_report",

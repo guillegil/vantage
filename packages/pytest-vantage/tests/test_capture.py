@@ -554,6 +554,87 @@ def test_a_new_setup_report_after_a_crash_starts_a_fresh_attempt() -> None:
     assert result["teardown_outcome"] == "passed"
 
 
+def _collection_error(nodeid: str) -> pytest.CollectReport:
+    """The report pytest emits for a collector it could not collect -- a
+    module that fails to import, say: outcome failed, pytest's text as the
+    `longrepr`, nothing collected."""
+    return pytest.CollectReport(
+        nodeid, "failed", f"ImportError while importing test module {nodeid!r}", result=[]
+    )
+
+
+@pytest.mark.parametrize(
+    ("nodeid", "file_path", "function_name"),
+    [
+        pytest.param("tests/test_broken.py", "tests/test_broken.py", "test_broken.py", id="module"),
+        pytest.param("t.py::TestBroken", "t.py", "TestBroken", id="class"),
+        pytest.param("tests/pkg", "tests/pkg", "pkg", id="directory"),
+    ],
+)
+def test_a_collector_that_failed_is_recorded_as_an_error_no_phase_of_which_ran(
+    nodeid: str, file_path: str, function_name: str
+) -> None:
+    """pytest counts a collector it could not collect as an error, so it is
+    recorded as one, under the collector's own node id, next to the tests
+    that did run -- a run with a broken module never reads as all passing.
+    No test phase ran, so every phase field is null."""
+    pending: dict[str, PendingResult] = {}
+    for when, outcome in _ALL_PHASES_PASSING:
+        accumulate(pending, _report(when, outcome, nodeid="t.py::test_ok"))
+
+    results = assemble_results(pending, collection_errors={nodeid: _collection_error(nodeid)})
+
+    assert results.dropped == 0
+    ok, broken = results
+    assert ok["node_id"] == "t.py::test_ok"
+    assert broken == {
+        "node_id": nodeid,
+        "file_path": file_path,
+        "class_name": None,
+        "function_name": function_name,
+        "param_id": None,
+        "outcome": "error",
+        "duration": None,
+        "started_at": None,
+        "finished_at": None,
+        "setup_outcome": None,
+        "call_outcome": None,
+        "teardown_outcome": None,
+        "setup_duration": None,
+        "call_duration": None,
+        "teardown_duration": None,
+        "worker_id": None,
+    }
+
+
+def test_a_collection_error_carries_the_evidence_attached_to_it() -> None:
+    """The collect report's own evidence -- pytest's collection text,
+    attached when failure text was asked for -- is the result's."""
+    report = _collection_error("broken.py")
+    report.vantage_evidence = {"failure_message": str(report.longrepr)}  # type: ignore[attr-defined]
+
+    (result,) = assemble_results({}, collection_errors={"broken.py": report})
+
+    assert result["failure_message"] == "ImportError while importing test module 'broken.py'"
+
+
+def test_a_collection_error_under_a_node_id_a_test_already_has_is_left_out() -> None:
+    """A node that is both a file and a test can report both. The server
+    rejects a report naming one node id twice, losing every result in it,
+    so the test's own result is the one kept."""
+    pending: dict[str, PendingResult] = {}
+    for when, outcome in _ALL_PHASES_PASSING:
+        accumulate(pending, _report(when, outcome, nodeid="spec.yaml"))
+
+    results = assemble_results(
+        pending, collection_errors={"spec.yaml": _collection_error("spec.yaml")}
+    )
+
+    assert [(result["node_id"], result["outcome"]) for result in results] == [
+        ("spec.yaml", "passed")
+    ]
+
+
 def _rerun(when: _Phase, *, duration: float) -> pytest.TestReport:
     """A failed phase report a rerun plugin (pytest-rerunfailures) logs as
     an intermediate attempt: it rewrites the outcome to `"rerun"` before

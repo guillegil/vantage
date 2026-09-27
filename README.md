@@ -295,6 +295,12 @@ Sessions can keep storing into the file while it serves.
   parameter id), the overall outcome (`passed`, `failed`, `error`,
   `skipped`, `xfailed` or `xpassed`), the outcome and duration of setup, call
   and teardown, start and finish times, and the xdist worker id.
+- **Each module, class or directory pytest could not collect** (an import
+  error, a syntax error, a `conftest.py` that raises): one `error` result
+  under its node id, such as `tests/test_broken.py`, with no setup, call or
+  teardown. pytest counts it as an error, and so does the run, whether
+  `--continue-on-collection-errors` let the other tests run or pytest
+  stopped before running any.
 - **The repository:** the commit hash, branch, commit subject, whether
   tracked files have uncommitted changes, and the absolute path of the
   repository root. The server stores the root path but no API response
@@ -312,7 +318,9 @@ Adds, for each result: the exception type, message and `repr`, the full
 traceback, the failing file (relative to pytest's rootdir when inside it) and
 line, the skip reason and the xfail reason, **and the captured stdout and
 stderr of every result, passing ones included**, from setup, call and
-teardown. Under `-s` nothing is captured and the output fields are null.
+teardown. Under `-s` nothing is captured and the output fields are null. A
+module that could not be collected gets the text pytest prints for it as its
+message.
 
 **This text is stored unredacted.** Anything a test printed, logged to a
 captured stream, asserted or raised with, credentials and tokens included,

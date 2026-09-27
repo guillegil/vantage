@@ -235,6 +235,11 @@ patterns or lengths.
    the session started), the plugin sends
    `POST /api/v1/runs/{id}/heartbeat`. Beats are driven by test activity,
    not a timer thread, and measured on the monotonic clock.
+   `pytest_collectreport` keeps each collector that failed, by node id; it
+   becomes one `error` result with no phases in the finish write, since
+   pytest counts it as an error and a run must not read as all passing
+   without it. Under xdist the controller collects nothing, and xdist calls
+   this hook on it once per distinct failure the workers report.
 4. **`pytest_sessionfinish`: the finish write.** The results are assembled
    and the failure-text budget spent. If the results do not fit the server's
    1 MiB body cap in one report, they are split into slices that do: every
@@ -269,7 +274,8 @@ otherwise `running`.
 would record one session as several runs. The exception behind a failure
 exists only in the process that ran the test, so each worker registers an
 `EvidenceCollector` that attaches failure text to the report before xdist
-sends it to the controller. Reports are grouped per worker, so one result is
+sends it to the controller; it does the same for a collector that failed,
+with pytest's collection text. Reports are grouped per worker, so one result is
 never stitched together from two workers, and under `--dist each` the most
 severe execution of a node id is recorded.
 
@@ -391,7 +397,7 @@ switch off another:
 | --- | --- | --- |
 | `fault_isolated` | the report header and the finish write | every later wrapped hook is skipped |
 | `liveness_isolated` | the start report and heartbeats | heartbeats stop; the finish write is unaffected |
-| `accumulation_isolated` | accumulating reports, recording an interrupt | warns once, keeps accumulating |
+| `accumulation_isolated` | accumulating test and collection reports, recording an interrupt | warns once, keeps accumulating |
 
 - `EvidenceCollector` wraps `pytest_runtest_makereport` as a hookwrapper,
   which pluggy forbids from returning before its `yield`, so it has its own

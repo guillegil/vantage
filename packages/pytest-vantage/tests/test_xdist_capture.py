@@ -124,6 +124,45 @@ def test_a_test_whose_worker_crashed_is_recorded_as_failed(
         assert crashed.failure is None
 
 
+_FAILS_TO_COLLECT = """
+import a_module_that_does_not_exist
+
+
+def test_never_collected():
+    assert True
+"""
+
+
+def test_a_module_that_fails_to_collect_is_recorded_once_under_xdist(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+) -> None:
+    """Every worker collects every module, so each fails to collect the
+    broken one; xdist hands the controller that failure once, and the run
+    records it once, as an `error` result, beside the tests that ran."""
+    pytest.importorskip("xdist")
+    pytester.makepyfile(test_six=_SIX_TESTS, test_broken=_FAILS_TO_COLLECT)
+
+    run = pytester.runpytest_subprocess(
+        "--vantage",
+        f"--vantage-server={vantage_server.address}",
+        "--vantage-failure-text",
+        "--continue-on-collection-errors",
+        "-n",
+        "2",
+    )
+
+    assert run.ret == pytest.ExitCode.TESTS_FAILED
+    assert "VantageWarning" not in run.stdout.str() + run.stderr.str()
+    results = {result.identity.node_id: result for result in vantage_server.results()}
+    broken = results.pop("test_broken.py")
+    assert broken.outcome == "error"
+    assert broken.failure is not None
+    assert "a_module_that_does_not_exist" in (broken.failure.failure_message or "")
+    assert set(results) == {f"test_six.py::test_{n}" for n in range(1, 7)}
+    assert all(result.outcome == "passed" for result in results.values())
+
+
 # Fails on gw0 only. gw1 passes after a short sleep, so its passing call
 # report reaches the controller after gw0's failing one.
 _FAILS_ON_ONE_WORKER = """
