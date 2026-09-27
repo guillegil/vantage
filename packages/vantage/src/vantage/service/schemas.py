@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from vantage.core.domain.access import DEFAULT_SCOPES
 
 
 class RejectionResponse(BaseModel):
@@ -313,3 +315,88 @@ class RunSectionSummaryResponse(BaseModel):
 
     items: list[SectionSummaryResponse]
     unassigned: SectionSummaryResponse
+
+
+# --- Users and tokens -------------------------------------------------------
+#
+# The request models forbid unknown fields, so a misspelt `disable` is a 422
+# rather than a change half made, and are strict, so `"true"` or `1` is not
+# a boolean. Names, scopes and labels are plain strings here and checked by
+# the domain's own rules (`core/domain/access.py`), which the command line
+# applies too, so each failure keeps its own error code.
+
+
+class UserCreateRequest(BaseModel):
+    """The request body for `POST /api/v1/users`."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str
+    admin: bool = False
+
+
+class UserUpdateRequest(BaseModel):
+    """The request body for `PATCH /api/v1/users/{name}`: each field given
+    and not null is set, and at least one must be."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    admin: bool | None = None
+    disabled: bool | None = None
+
+
+class TokenCreateRequest(BaseModel):
+    """The request body for `POST /api/v1/tokens`."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    user: str
+    scopes: list[str] = Field(default_factory=lambda: sorted(DEFAULT_SCOPES))
+    label: str = ""
+
+
+class UserResponse(BaseModel):
+    """One user."""
+
+    name: str
+    admin: bool
+    disabled: bool
+    created_at: datetime
+
+
+class UserListResponse(BaseModel):
+    """The response body for `GET /api/v1/users`: every user, by name."""
+
+    items: list[UserResponse]
+
+
+class TokenResponse(BaseModel):
+    """One token, without the token itself, which is never stored.
+    `scopes` is sorted."""
+
+    id: int
+    user: str
+    label: str
+    scopes: list[str]
+    created_at: datetime
+    revoked_at: datetime | None
+
+
+class TokenListResponse(BaseModel):
+    """The response body for `GET /api/v1/tokens`: every token, or one
+    user's, revoked ones included, oldest first."""
+
+    items: list[TokenResponse]
+
+
+class CreatedTokenResponse(BaseModel):
+    """The response body for `POST /api/v1/tokens`: the token, shown this
+    once and kept out of the `repr`, and what `TokenResponse` says of it."""
+
+    token: str = Field(repr=False)
+    id: int
+    user: str
+    label: str
+    scopes: list[str]
+    created_at: datetime
+    revoked_at: datetime | None

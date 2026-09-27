@@ -18,6 +18,11 @@ through the store's own connection, with `count_executions()` and
 `test_a_writing_endpoint_tagged_read_fails_the_harness` proves
 `_run_read_only_proof` can report a mismatch, so the read-only check is not
 vacuously green.
+
+**On an open database and on a closed one.** Once a user exists every read
+authenticates first, so the closed run proves that authenticating writes
+nothing either, and it is the only way the users and tokens reads get past
+their refusal to an anonymous caller.
 """
 
 from __future__ import annotations
@@ -31,8 +36,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
+from vantage.core.domain.access import RECORD_SCOPE, SCOPES, new_token, token_digest
 from vantage.core.ports.storage import MetadataEntry, MetadataFile, RunMetadata
 from vantage.service.app import create_app
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -117,10 +124,26 @@ def _run_read_only_proof(
     return _ReadOnlyProof(before=before, after=_snapshot(conn, store))
 
 
-def _seed_database(db_path: Path) -> None:
+def _seed_database(db_path: Path, *, closed: bool = False) -> dict[str, str]:
     """One run, one result and its metadata, via `record_session`, from a
-    writer closed before the store under test opens."""
+    writer closed before the store under test opens. With `closed`, also an
+    admin `alice` with a token holding every scope, and a user `bob` with a
+    record-only one; the headers that send alice's token are returned, and
+    bob's are kept for `_read_bindings`."""
     writer = SqliteExecutionStore(db_path)
+    headers: dict[str, str] = {}
+    if closed:
+        for name, admin, scopes in (("alice", True, SCOPES), ("bob", False, {RECORD_SCOPE})):
+            writer.create_user(name, admin=admin, created_at=_SEEDED_AT)
+            token = new_token()
+            writer.create_token(
+                name,
+                digest=token_digest(token),
+                label="",
+                scopes=frozenset(scopes),
+                created_at=_SEEDED_AT,
+            )
+            headers[name] = f"Bearer {token}"
     writer.record_session(
         _execution(_RUN_ID, started=_SEEDED_AT, vcs=_vcs()),
         results=(_result(_NODE_ID),),
@@ -143,19 +166,25 @@ def _seed_database(db_path: Path) -> None:
         ),
     )
     writer.close()
+    return headers
 
 
 _UNKNOWN_RUN_ID = "0" * 32
 
 
-def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...]]:
+def _read_bindings(
+    client: TestClient, bob: str | None = None
+) -> dict[tuple[str, str], tuple[_Call, ...]]:
     """One or more callables per `read`-tagged path.
 
     Every route with an error branch gets one call per branch (happy path,
     plus its `404` and/or `422` variants), so a read path that wrote only on
     a miss -- an audit log on `404`, say -- is caught too. A route with no
-    such branch keeps its single happy-path call."""
+    such branch keeps its single happy-path call. With `bob`, the
+    authorization header of a user who is no admin, the users and tokens
+    reads are also asked with it, to be refused."""
     run = f"/api/v1/runs/{_RUN_ID}"
+    refused = {} if bob is None else {"Authorization": bob}
     unknown_run = f"/api/v1/runs/{_UNKNOWN_RUN_ID}"
     return {
         ("GET", "/runs"): (
@@ -201,6 +230,17 @@ def _read_bindings(client: TestClient) -> dict[tuple[str, str], tuple[_Call, ...
             lambda: client.get(f"{run}/sections"),
             lambda: client.get(f"{unknown_run}/sections"),  # 404 (UnknownRunError)
         ),
+        ("GET", "/users"): (
+            lambda: client.get("/api/v1/users"),
+            lambda: client.get("/api/v1/users", headers=refused),  # 403, or 409 when open
+        ),
+        ("GET", "/tokens"): (
+            lambda: client.get("/api/v1/tokens"),
+            lambda: client.get("/api/v1/tokens", params={"user": "alice"}),
+            lambda: client.get("/api/v1/tokens", params={"user": "ghost"}),
+            lambda: client.get("/api/v1/tokens", params={"user": "NOT-A-NAME"}),
+            lambda: client.get("/api/v1/tokens", headers=refused),  # 403, or 409 when open
+        ),
     }
 
 
@@ -243,20 +283,29 @@ def test_a_writing_endpoint_tagged_read_fails_the_harness(tmp_path: Path) -> Non
         store.close()
 
 
-def test_logical_content_digest_unchanged_after_every_read_path(tmp_path: Path) -> None:
-    """Calling every read path leaves the stored data unchanged."""
+@pytest.mark.parametrize("closed", [False, True], ids=["open", "closed"])
+def test_logical_content_digest_unchanged_after_every_read_path(
+    tmp_path: Path, closed: bool
+) -> None:
+    """Calling every read path leaves the stored data unchanged, on a
+    database with no user and on one whose reads each authenticate."""
     db_path = tmp_path / "store" / "vantage.db"
-    _seed_database(db_path)
+    tokens = _seed_database(db_path, closed=closed)
 
     store = SqliteExecutionStore(db_path)
     try:
-        client = TestClient(create_app(store))
+        headers = {"Authorization": tokens["alice"]} if closed else {}
+        client = TestClient(create_app(store), headers=headers)
         read_ops = _read_operations(_document())
-        bindings = _read_bindings(client)
+        bindings = _read_bindings(client, tokens.get("bob"))
         assert set(bindings) == read_ops, "binding table incomplete for this run"
 
         proof = _run_read_only_proof(store=store, ops=read_ops, bindings=bindings)
 
+        # The users and tokens reads got past their refusal to an anonymous
+        # caller, so their read of the store is proven too, not only that.
+        answered = [client.get(path).status_code for path in ("/api/v1/users", "/api/v1/tokens")]
+        assert answered == [200, 200] if closed else [409, 409]
         assert proof.before[_LOGICAL] == proof.after[_LOGICAL]
         assert proof.before[_EXECUTIONS] == proof.after[_EXECUTIONS] == 1
         assert proof.before[_RESULTS] == proof.after[_RESULTS] == 1

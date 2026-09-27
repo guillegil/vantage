@@ -463,8 +463,8 @@ answer is read to at most 64 KiB and must acknowledge this run's id with
 
 ## Users, tokens and who may do what
 
-A database with no user is open: every route answers anyone, as the server
-did before it had users, and `vantage` serving a local database on a test
+A database with no user is open: every route but the users and tokens ones
+answers anyone, as the server did before it had users, and `vantage` serving a local database on a test
 machine needs nothing more. The first user closes it. Users are disabled,
 never deleted, so "a user exists" is a latch: once true it stays true, and
 every `run.recorded_by` keeps naming an existing user.
@@ -481,9 +481,11 @@ every `run.recorded_by` keeps naming an existing user.
   token of a disabled user, authenticates nothing.
 - **`service/access.py`** is the dependency every route declares but
   `/capabilities` and `/openapi.yaml`, which a client asks before it can
-  know it needs a token: `requires_read` on everything `read`-tagged,
+  know it needs a token: `requires_read` on the `read`-tagged routes but
+  the users and tokens ones,
   `requires_record` on a report and a heartbeat, `requires_admin` on
-  changing sections. It is a plain `def`, since it reads the store, so on
+  changing sections, and `requires_admin_token` on the users and tokens
+  routes. It is a plain `def`, since it reads the store, so on
   `POST /runs` it runs in the threadpool before the body is read. While the
   server is open it asks the store whether a user exists on every request,
   because `vantage user add` may run against the database meanwhile; once
@@ -504,6 +506,25 @@ every `run.recorded_by` keeps naming an existing user.
   (`service/manage.py`) resolve and open the database as the server does,
   never import the web framework, and create a database only for `user
   add`. `token create` prints the token alone on stdout.
+- **Managing them over HTTP.** `service/routes/users.py` gives an admin
+  what the two commands give, with the same domain checks in the same
+  order. `requires_admin_token` is `requires_admin` that also refuses the
+  anonymous caller an open server lets through, with `409 open_server`: the
+  one thing it could do there is make the first user, and whoever asked
+  first would own the server. It is refused for who it is, never after
+  asking the store again, so a request racing the first `vantage user add`
+  cannot mint that user a token or list its name; reads are refused too.
+  The dependency runs before the path is validated and before the body is
+  read, so nobody else learns which names or ids exist. An admin cannot
+  demote or disable their own user here (`409 own_account`), decided by
+  who asks and so racing nothing; the command line, unguarded, is how to
+  recover when no admin is left. Revoking is idempotent: the conditional
+  `UPDATE` keeps the first revocation time, and `get_token` reads the row
+  back, which races nothing since tokens are never deleted and a revocation
+  is never undone. The one answer carrying a token, the `201` of `POST
+  /tokens`, is `Cache-Control: no-store`, and `CreatedTokenResponse` keeps
+  the token out of its `repr`. A value that cannot be a name matches no
+  user without asking the store, which keeps U+0000 from every adapter.
 - **The plugin** reads its token from `VANTAGE_TOKEN` alone, only once
   `--vantage` is typed; a committed ini file or a command line would show it
   to others. It goes in `Authorization` on every report and heartbeat, never
@@ -522,7 +543,7 @@ every `run.recorded_by` keeps naming an existing user.
 ## Request handling and concurrency
 
 `create_app(store, grace_period_seconds=900)` builds the app, mounts the
-`runs`, `read`, `capabilities` and `sections` routers under `/api/v1`, and
+`runs`, `read`, `capabilities`, `sections` and `users` routers under `/api/v1`, and
 registers the error handlers. The `vantage` command runs it under Uvicorn, in
 one process.
 
@@ -535,7 +556,9 @@ would stall every other request, heartbeats included.
   as soon as it passes 1 MiB, never trusting `Content-Length`. Decoding
   (`ingestion/decode.py`) and `vantage.ingestion.ingest` -- validation,
   conversion (YAML parsing of metadata included) and the store write -- then
-  run in the threadpool through `run_in_threadpool`.
+  run in the threadpool through `run_in_threadpool`. `POST /config/sections`,
+  `POST /users`, `PATCH /users/{name}` and `POST /tokens` read their bodies
+  the same way, under caps of their own.
 - **Every other route that reaches the store is a plain `def`**, which
   FastAPI runs on AnyIO's worker threads (40 by default).
 - **`GET /capabilities` and `GET /openapi.yaml` are `async`** and never block,
@@ -604,6 +627,10 @@ another process by construction, never by a check first:
   `create_token` one `INSERT ... SELECT` from its user, which inserts
   nothing when there is none: users are never deleted, so the user found
   stays.
+- `update_user` is one `UPDATE ... RETURNING` of non-key columns, so its
+  row lock never blocks the key-share locks ingestion's foreign keys take,
+  and `revoke_token` one conditional `UPDATE` that keeps the first
+  revocation. Two servers revoking one token both read back the same time.
 - A transaction that fails with a serialization failure or a deadlock is
   retried a bounded number of times; any other error propagates.
 
@@ -611,8 +638,8 @@ another process by construction, never by a check first:
 and no UTF-8 encoder takes a lone surrogate, so `decode_json`
 (`ingestion/decode.py`, with `ingestion/text.py`) replaces every U+0000 in a
 key or string value of a body with U+FFFD, and every lone surrogate too for
-`POST /runs` and the local store; `POST /config/sections` refuses a lone
-surrogate instead. `metadata_parse`
+`POST /runs` and the local store; `POST /config/sections` and the users
+and tokens bodies refuse a lone surrogate instead. `metadata_parse`
 replaces a U+0000 that a declared document spells as an escape the same
 way. Every adapter therefore stores the same text. A value that is only
 looked up with -- a node id, a metadata filter, a section name to delete --

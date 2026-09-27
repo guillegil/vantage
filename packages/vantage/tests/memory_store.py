@@ -548,6 +548,10 @@ class InMemoryExecutionStore:
         )
 
     @_locked
+    def get_token(self, token_id: int) -> Token | None:
+        return self._tokens.get(token_id)
+
+    @_locked
     def revoke_token(self, token_id: int, *, revoked_at: datetime, user: str | None = None) -> bool:
         token = self._tokens.get(token_id)
         if token is None or token.revoked_at is not None:

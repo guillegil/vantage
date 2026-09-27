@@ -5,7 +5,7 @@ openapi: 3.1.0
 info:
   title: Vantage API
   version: "1"
-  description: "read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data. Every rejection -- each 4xx and 5xx listed here, and the 404 or 405 for a path nothing serves or a method a path does not take -- has the Rejection body. A server whose database has no user serves every path without a token. Once a user exists, every path but /capabilities and /openapi.yaml needs Authorization: Bearer <token>, a token of an enabled user that has not been revoked and grants the path's scope: read for what read-tagged paths return, record for a report or a heartbeat, admin for changing sections -- the admin scope granting nothing once its user is no longer an admin. A 401 or 403 carries a WWW-Authenticate header naming the scope a request lacked."
+  description: "read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data. Every rejection -- each 4xx and 5xx listed here, and the 404 or 405 for a path nothing serves or a method a path does not take -- has the Rejection body. A server whose database has no user serves every path without a token but the users-tagged ones, which answer 409 open_server until the vantage command adds the first user. Once a user exists, every path but /capabilities and /openapi.yaml needs Authorization: Bearer <token>, a token of an enabled user that has not been revoked and grants the path's scope: read for what read-tagged paths return, record for a report or a heartbeat, admin for changing sections and for the users-tagged paths -- the admin scope granting nothing once its user is no longer an admin. A 401 or 403 carries a WWW-Authenticate header naming the scope a request lacked."
 servers:
   - url: /api/v1
 security:
@@ -14,6 +14,7 @@ security:
 tags:
   - {name: read, description: Leaves stored data unchanged.}
   - {name: write, description: Changes stored data.}
+  - {name: users, description: "Users and their tokens. Needs a token granting the admin scope on every server: one with no user answers 409 open_server."}
 paths:
   /runs:
     post:
@@ -207,6 +208,104 @@ paths:
         "404": {description: No run with that id has been recorded., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
         "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
+  /users:
+    get:
+      operationId: list_users
+      tags: [read, users]
+      security: [{bearer: []}]
+      summary: Every user, disabled ones included, by name.
+      description: Returned whole, not paged, as vantage user list prints them.
+      responses:
+        "200": {description: Every user., content: {application/json: {schema: {$ref: '#/components/schemas/UserListResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server).", content: *rejection}
+    post:
+      operationId: create_user
+      tags: [write, users]
+      security: [{bearer: []}]
+      summary: Add an enabled user, as vantage user add does.
+      description: The first user is never made here -- a server with no user answers 409 open_server -- but only by the vantage command. The name is never repeated in a rejection.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UserCreateRequest'}}}}
+      responses:
+        "201": {description: The user, enabled., content: {application/json: {schema: {$ref: '#/components/schemas/UserResponse'}}}}
+        "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server); or a user with that name exists already (user_exists).", content: *rejection}
+        "413": {description: "The body exceeds 16 KiB (payload_too_large).", content: *rejection}
+        "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
+        "422": {description: "The body does not match UserCreateRequest -- a field missing, of the wrong type or unknown (invalid_user_request); or the name is not one a user can have (invalid_user_name).", content: *rejection}
+  /users/{name}:
+    patch:
+      operationId: update_user
+      tags: [write, users]
+      security: [{bearer: []}]
+      summary: Make a user an admin or not, enabled or disabled, as vantage user update does.
+      description: "Each field given and not null is set; at least one must be. An admin cannot demote or disable their own user here: another admin can, or vantage user update on the database. A disabled user's tokens authenticate nothing until it is enabled again."
+      parameters:
+        - $ref: '#/components/parameters/user_name'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UserUpdateRequest'}}}}
+      responses:
+        "200": {description: The user as it now stands., content: {application/json: {schema: {$ref: '#/components/schemas/UserResponse'}}}}
+        "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "404": {description: "No user with that name exists, or none can (unknown_user).", content: *rejection}
+        "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server); or the change would demote or disable the caller's own user (own_account).", content: *rejection}
+        "413": {description: "The body exceeds 16 KiB (payload_too_large).", content: *rejection}
+        "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
+        "422": {description: "The body does not match UserUpdateRequest, or changes nothing (invalid_user_request).", content: *rejection}
+  /tokens:
+    get:
+      operationId: list_tokens
+      tags: [read, users]
+      security: [{bearer: []}]
+      summary: Every token, or one user's, revoked ones included, oldest first.
+      description: Returned whole, not paged, as vantage token list prints them. A token is never in it -- only its SHA-256 is stored.
+      parameters:
+        - $ref: '#/components/parameters/token_user'
+      responses:
+        "200": {description: The tokens., content: {application/json: {schema: {$ref: '#/components/schemas/TokenListResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server).", content: *rejection}
+    post:
+      operationId: create_token
+      tags: [write, users]
+      security: [{bearer: []}]
+      summary: Make a token for a user, as vantage token create does, and answer it this once.
+      description: "The token is in this answer only, which is not to be stored (Cache-Control: no-store). A token holds read and record unless scopes names others; the admin scope only for an admin user. A U+0000 in the label is stored as U+FFFD; a lone surrogate in it is rejected. A disabled user's token is made, and authenticates nothing until the user is enabled. Minting a token for another user lets its bearer record runs as that user."
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TokenCreateRequest'}}}}
+      responses:
+        "201":
+          description: The token, shown this once, and what the server keeps of it.
+          headers: {Cache-Control: {description: "no-store: the token is shown this once.", schema: {type: string}}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/CreatedTokenResponse'}}}
+        "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "404": {description: "No user with that name exists, or none can (unknown_user).", content: *rejection}
+        "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server); or the admin scope was asked for a user who is not an admin (not_an_admin).", content: *rejection}
+        "413": {description: "The body exceeds 16 KiB (payload_too_large).", content: *rejection}
+        "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
+        "422": {description: "The body does not match TokenCreateRequest (invalid_token_request); no scope, or one that is not a scope (invalid_scopes); or a label over 200 characters or holding a control character other than U+0000, or a lone surrogate (invalid_token_label).", content: *rejection}
+  /tokens/{token_id}/revoke:
+    post:
+      operationId: revoke_token
+      tags: [write, users]
+      security: [{bearer: []}]
+      summary: Revoke a token.
+      description: Idempotent. A token revoked already answers 200 with the time it was first revoked. The token authenticates nothing from the next request on, the caller's own included. The body is not read.
+      parameters:
+        - $ref: '#/components/parameters/token_id'
+      responses:
+        "200": {description: The token, revoked., content: {application/json: {schema: {$ref: '#/components/schemas/TokenResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "404": {description: "No token with that id exists (unknown_token).", content: *rejection}
+        "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server).", content: *rejection}
+        "422": {description: "token_id is not an integer from 1 to 9223372036854775807 (invalid_parameter).", content: *rejection}
 components:
   securitySchemes:
     bearer: {type: http, scheme: bearer, description: "A token `vantage token create` printed, or the admin API returned. Each holds one or more of the read, record and admin scopes."}
@@ -219,6 +318,9 @@ components:
     # server answers happily. The cap is stated as behaviour instead.
     limit: {name: limit, in: query, required: false, description: "Page size. Values above 200 are clamped to 200; the response reports whether more items exist. A value below 1 is rejected with 422 -- it is not a page size.", schema: {type: integer, minimum: 1}}
     offset: {name: offset, in: query, required: false, schema: {type: integer, format: int64, minimum: 0, maximum: 9223372036854775807}}
+    user_name: {name: name, in: path, required: true, description: "A user's name; one no user can have answers 404.", schema: {type: string}}
+    token_user: {name: user, in: query, required: false, description: "Only this user's tokens; a name nobody has lists none.", schema: {type: string}}
+    token_id: {name: token_id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1, maximum: 9223372036854775807}}
     cursor: {name: cursor, in: query, required: false, description: "The next_cursor a previous page of the same list returned. The page starts just past the last run that page listed, so runs recorded in between never repeat or shift a run onto it, as they do under an offset. Opaque: pass it back unchanged. Not combined with a non-zero offset.", schema: {type: string, maxLength: 128}}
   schemas:
     # Request and response bodies are both stated in full: this document is
@@ -409,3 +511,41 @@ components:
       type: object
       required: [items, unassigned]
       properties: {items: {type: array, items: {$ref: '#/components/schemas/SectionSummary'}}, unassigned: {$ref: '#/components/schemas/SectionSummary'}}
+    # Users and tokens. The request bodies refuse an unknown field, and take
+    # a boolean only as a JSON boolean. A token is in CreatedTokenResponse
+    # alone; no other body carries it, or its digest.
+    UserCreateRequest:
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties: {name: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,63}$'}, admin: {type: boolean, default: false}}
+    UserUpdateRequest:
+      type: object
+      description: At least one of admin and disabled must be given and not null.
+      additionalProperties: false
+      properties: {admin: {type: [boolean, "null"], default: null}, disabled: {type: [boolean, "null"], default: null}}
+    TokenCreateRequest:
+      type: object
+      required: [user]
+      additionalProperties: false
+      properties: {user: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, read, record]}, minItems: 1, default: [read, record]}, label: {type: string, maxLength: 200, default: ""}}
+    UserResponse:
+      type: object
+      required: [name, admin, disabled, created_at]
+      properties: {name: {type: string}, admin: {type: boolean}, disabled: {type: boolean}, created_at: {type: string, format: date-time}}
+    UserListResponse:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/UserResponse'}}}
+    TokenResponse:
+      type: object
+      required: [id, user, label, scopes, created_at, revoked_at]
+      properties: {id: {type: integer, format: int64}, user: {type: string}, label: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, read, record]}}, created_at: {type: string, format: date-time}, revoked_at: {type: [string, "null"], format: date-time}}
+    TokenListResponse:
+      type: object
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/TokenResponse'}}}
+    CreatedTokenResponse:
+      type: object
+      required: [token, id, user, label, scopes, created_at, revoked_at]
+      properties: {token: {type: string, description: "The token, shown this once."}, id: {type: integer, format: int64}, user: {type: string}, label: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, read, record]}}, created_at: {type: string, format: date-time}, revoked_at: {type: [string, "null"], format: date-time}}

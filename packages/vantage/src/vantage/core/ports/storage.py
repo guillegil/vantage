@@ -546,6 +546,12 @@ class ExecutionStore(Protocol):
         oldest first."""
         ...
 
+    def get_token(self, token_id: int) -> Token | None:
+        """Return the token `token_id`, revoked or not, or None if there is
+        none. An id no key can hold, outside 1 to 2**63 - 1, matches nothing
+        without asking the database."""
+        ...
+
     def revoke_token(self, token_id: int, *, revoked_at: datetime, user: str | None = None) -> bool:
         """Revoke the token `token_id` -- only if it is `user`'s, when a
         user is given. Returns False if there is no such token, it is not

@@ -2441,6 +2441,27 @@ class ExecutionStoreContract:
 
         assert (by_bob, by_nobody, by_alice) == (False, False, True)
 
+    def test_a_token_reads_back_by_its_id_revoked_or_not(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        live = _token(store, "alice", "live")
+        revoked = _token(store, "alice", "revoked")
+        revoked_at = _ACCESS_AT + timedelta(hours=1)
+        store.revoke_token(revoked.id, revoked_at=revoked_at)
+        store.revoke_token(revoked.id, revoked_at=revoked_at + timedelta(hours=1))
+
+        assert store.get_token(live.id) == live
+        assert store.get_token(revoked.id) == replace(revoked, revoked_at=revoked_at)
+        assert store.get_token(revoked.id + 1) is None
+
+    @pytest.mark.parametrize("token_id", [0, -1, 2**63, 2**64])
+    def test_an_id_no_token_can_have_reads_back_as_none(
+        self, store: ExecutionStore, token_id: int
+    ) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        _token(store, "alice", "secret")
+
+        assert store.get_token(token_id) is None
+
     @pytest.mark.parametrize("token_id", [0, -1, 2**63, 2**64])
     def test_revoking_an_id_no_token_can_have_is_false(
         self, store: ExecutionStore, token_id: int

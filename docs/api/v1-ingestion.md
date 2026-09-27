@@ -18,8 +18,9 @@ at `GET /api/v1/openapi.yaml` (source:
 
 ## Authentication
 
-A server whose database has no user takes every request without a token.
-Once a user exists (`vantage user add`), every route but
+A server whose database has no user takes every request here without a
+token; only the users and tokens routes, which manage who may do so, answer
+`409 open_server`. Once a user exists (`vantage user add`), every route but
 `GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml` needs one:
 
 ```
@@ -27,7 +28,8 @@ Authorization: Bearer vantage_...
 ```
 
 A token belongs to one user and holds one or more scopes: `read`, `record`
-and `admin`. The two ingestion routes need `record`, which is all a token
+and `admin`. It comes from `vantage token create`, or from an admin's
+`POST /api/v1/tokens`. The two ingestion routes need `record`, which is all a token
 for a test runner needs. The server answers:
 
 - No `Authorization` header, on a server with users: `401 unauthenticated`,

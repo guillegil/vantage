@@ -27,9 +27,9 @@ RECORD_SCOPE = "record"
 """Send session reports and heartbeats: what the plugin needs."""
 
 ADMIN_SCOPE = "admin"
-"""Change what everyone shares, such as the section definitions. Only a
-token of an admin user can hold it, and it grants nothing once its user
-stops being one."""
+"""Change what everyone shares and who may use the server: the section
+definitions, users and tokens. Only a token of an admin user can hold it,
+and it grants nothing once its user stops being one."""
 
 SCOPES = frozenset({READ_SCOPE, RECORD_SCOPE, ADMIN_SCOPE})
 

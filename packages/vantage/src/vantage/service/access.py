@@ -13,6 +13,13 @@ the server is open each request asks the store whether a user exists yet.
 Users are never deleted, so once one does, `app.state.access_required`
 remembers it and the store is not asked again.
 
+**Managing users and tokens needs a user, always** (`requires_admin_token`).
+On an open server the anonymous caller may do anything else, but not this:
+the one thing it could do here is make the first user, which only the
+`vantage` command does. It is refused for who it is, never for what the
+store says, so a request racing the first `vantage user add` cannot slip
+through between the two, reads included.
+
 **A token is checked wherever it is sent.** On an open server no token
 authenticates, since tokens belong to users; a request carrying one is
 refused rather than served as if it carried none, so a client that means
@@ -39,7 +46,11 @@ from vantage.core.domain.access import (
     well_formed_token,
 )
 from vantage.core.ports.storage import ExecutionStore
-from vantage.service.errors import InsufficientScopeError, UnauthenticatedError
+from vantage.service.errors import (
+    InsufficientScopeError,
+    OpenServerError,
+    UnauthenticatedError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,4 +110,21 @@ requires_admin = _requires(ADMIN_SCOPE)
 """Changing what every user shares: the section definitions."""
 
 
-__all__ = ["Caller", "authorize", "requires_admin", "requires_read", "requires_record"]
+def requires_admin_token(request: Request) -> Caller:
+    """Managing users and tokens: a live admin-scope token of an enabled
+    admin user, on every server. The anonymous caller an open server lets
+    through is refused with `OpenServerError`."""
+    caller = authorize(request, ADMIN_SCOPE)
+    if caller.user is None:
+        raise OpenServerError()
+    return caller
+
+
+__all__ = [
+    "Caller",
+    "authorize",
+    "requires_admin",
+    "requires_admin_token",
+    "requires_read",
+    "requires_record",
+]

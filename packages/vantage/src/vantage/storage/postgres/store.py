@@ -490,6 +490,8 @@ _INSERT_TOKEN = f"""
     RETURNING {_TOKEN_COLUMNS}
 """  # noqa: S608
 
+_SELECT_TOKEN = f"SELECT {_TOKEN_COLUMNS} FROM vantage.access_token WHERE id = %s"  # noqa: S608
+
 _LIST_TOKENS = f"SELECT {_TOKEN_COLUMNS} FROM vantage.access_token ORDER BY id"  # noqa: S608
 
 _LIST_USER_TOKENS = f"""
@@ -1249,6 +1251,12 @@ class PostgresExecutionStore:
         else:
             rows = self._fetchall(_LIST_USER_TOKENS, (user,))
         return tuple(_row_to_token(row) for row in rows)
+
+    def get_token(self, token_id: int) -> Token | None:
+        if not 0 < token_id <= _MAX_ID:
+            return None
+        row = self._fetchone(_SELECT_TOKEN, (token_id,))
+        return None if row is None else _row_to_token(row)
 
     def revoke_token(self, token_id: int, *, revoked_at: datetime, user: str | None = None) -> bool:
         if not 0 < token_id <= _MAX_ID or (user is not None and _unmatchable(user)):

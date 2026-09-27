@@ -260,6 +260,150 @@ class InsufficientScopeError(ChallengeError):
         )
 
 
+class OpenServerError(RejectionError):
+    """A users or tokens route asked without a token of a database with no
+    user. Nobody can act as an admin there, and the one thing an anonymous
+    caller could do -- make the first user -- only the `vantage` command
+    does. A 409 without a challenge, since no token would help."""
+
+    status_code = 409
+    error = "open_server"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This server has no user yet, so nobody can manage users over HTTP: add the first "
+            "admin with vantage user add NAME --admin on its database."
+        )
+
+
+class UserNameTakenError(RejectionError):
+    """`POST /users` for a name another user has. The name is not repeated."""
+
+    status_code = 409
+    error = "user_exists"
+
+    def __init__(self) -> None:
+        super().__init__("A user with that name exists already.", ["name"])
+
+
+class NoSuchUserError(RejectionError):
+    """No user has that name, or the name is one nobody can have."""
+
+    status_code = 404
+    error = "unknown_user"
+
+    def __init__(self, fields: list[str] | None = None) -> None:
+        super().__init__("No user with that name exists.", fields)
+
+
+class OwnAccountError(RejectionError):
+    """An admin demoting or disabling their own user over HTTP. Decided by
+    who asks alone, so it races nothing; the command line stays the way to
+    do it, and to recover when every admin is gone."""
+
+    status_code = 409
+    error = "own_account"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "An admin cannot demote or disable their own user here: another admin can, or "
+            "vantage user update on the server's database."
+        )
+
+
+class NotAnAdminError(RejectionError):
+    """The admin scope asked for a token of a user who is not an admin."""
+
+    status_code = 409
+    error = "not_an_admin"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The user is not an admin, so the admin scope would grant nothing.", ["scopes"]
+        )
+
+
+class UnknownTokenError(RejectionError):
+    """No token has that id."""
+
+    status_code = 404
+    error = "unknown_token"
+
+    def __init__(self) -> None:
+        super().__init__("No token with that id exists.")
+
+
+class InvalidUserRequestError(RejectionError):
+    """A `POST /users` or `PATCH /users/{name}` body of the wrong shape, or
+    a `PATCH` that changes nothing."""
+
+    status_code = 422
+    error = "invalid_user_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidUserRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
+
+    @classmethod
+    def nothing_to_change(cls) -> InvalidUserRequestError:
+        return cls("Say what to change: admin, disabled, or both.", ["admin", "disabled"])
+
+
+class UserNameRefusedError(RejectionError):
+    """A name `POST /users` cannot create. The name is not repeated."""
+
+    status_code = 422
+    error = "invalid_user_name"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A user name is 1 to 64 characters of a-z, 0-9, '.', '_' and '-', starting with a "
+            "letter or a digit.",
+            ["name"],
+        )
+
+
+class InvalidTokenRequestError(RejectionError):
+    """A `POST /tokens` body of the wrong shape. Not `invalid_token`, which
+    RFC 6750 gives a token that does not authenticate."""
+
+    status_code = 422
+    error = "invalid_token_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidTokenRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
+
+
+class ScopesRefusedError(RejectionError):
+    """No scope, or one that is not a scope."""
+
+    status_code = 422
+    error = "invalid_scopes"
+
+    def __init__(self) -> None:
+        super().__init__("A token holds one or more of admin, read and record.", ["scopes"])
+
+
+class TokenLabelRefusedError(RejectionError):
+    """A label too long, or holding a control character or a lone
+    surrogate. The label is not repeated."""
+
+    status_code = 422
+    error = "invalid_token_label"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A token label is at most 200 characters, with no control characters.", ["label"]
+        )
+
+
 class UnknownResultError(RejectionError):
     """A run is known, but no result matches the `node_id` used against the
     single-result endpoint.
@@ -383,7 +527,8 @@ def register_error_handlers(app: FastAPI) -> None:
     Three sources, one output. `RejectionError` is raised by the manual body
     handling in `service/body.py` (media type, size cap), by
     `vantage.ingestion` (JSON parse, report validation), by the section
-    upsert, which validates the body it reads, and by the other routes.
+    upsert and the users and tokens routes, which validate the bodies they
+    read, and by the other routes.
     `RequestValidationError` is FastAPI's own exception, raised for a path
     or query parameter that fails automatic binding -- no route binds its
     body that way. Neither handler ever forwards a pydantic error dict
@@ -442,17 +587,28 @@ __all__ = [
     "InvalidSectionError",
     "InvalidSectionNameError",
     "InvalidSectionPrefixError",
+    "InvalidTokenRequestError",
+    "InvalidUserRequestError",
+    "NoSuchUserError",
+    "NotAnAdminError",
+    "OpenServerError",
+    "OwnAccountError",
     "PayloadTooLargeError",
     "RejectionError",
     "ReservedSectionNameError",
     "RunOfAnotherUserError",
+    "ScopesRefusedError",
+    "TokenLabelRefusedError",
     "TooManySectionsError",
     "UnauthenticatedError",
     "UnknownResultError",
     "UnknownRunError",
     "UnknownSectionError",
+    "UnknownTokenError",
     "UnreadableSettingError",
     "UnsupportedMediaTypeError",
+    "UserNameRefusedError",
+    "UserNameTakenError",
     "register_error_handlers",
     "safe_segment",
 ]

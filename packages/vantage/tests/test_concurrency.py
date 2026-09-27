@@ -11,6 +11,7 @@ test has failed must not keep the interpreter from exiting afterwards.
 from __future__ import annotations
 
 import contextlib
+import importlib.resources
 import sqlite3
 import sys
 import threading
@@ -21,9 +22,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
-from vantage.core.domain.access import READ_SCOPE, new_token, token_digest
+from vantage.core.domain.access import READ_SCOPE, SCOPES, new_token, token_digest
 from vantage.core.domain.execution import Execution, Identity
 from vantage.core.domain.result import Result
 from vantage.core.domain.sections import MAX_SECTIONS
@@ -381,7 +383,11 @@ def test_a_slow_store_write_holds_up_no_other_request() -> None:
 _HELD_RUN = "c" * 32
 _HELD_NODE = "tests/test_held.py::test_x"
 
-# Each route that reaches the store, with the store method it calls first.
+# Each route that reaches the store, with the store method it calls after
+# authenticating, keyed by the operation id the document gives it (the
+# metadata filter is one more way to call `list_runs`). Every request is an
+# admin's, holding every scope, on a store with a user `bob` and a token of
+# his, id 2.
 _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "create_run": ("POST", "/api/v1/runs", {"json": _report("d" * 32)}, "record_session"),
     "heartbeat": ("POST", f"/api/v1/runs/{_HELD_RUN}/heartbeat", {}, "get_run_detail"),
@@ -421,7 +427,31 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
         "delete_setting",
     ),
     "get_run_sections": ("GET", f"/api/v1/runs/{_HELD_RUN}/sections", {}, "get_execution"),
+    "list_users": ("GET", "/api/v1/users", {}, "list_users"),
+    "create_user": ("POST", "/api/v1/users", {"json": {"name": "carol"}}, "create_user"),
+    "update_user": ("PATCH", "/api/v1/users/bob", {"json": {"admin": True}}, "update_user"),
+    "list_tokens": ("GET", "/api/v1/tokens", {}, "list_tokens"),
+    "create_token": ("POST", "/api/v1/tokens", {"json": {"user": "bob"}}, "get_user"),
+    "revoke_token": ("POST", "/api/v1/tokens/2/revoke", {}, "revoke_token"),
 }
+
+
+def test_every_operation_that_reads_the_store_is_held_below() -> None:
+    """The table is checked against the document, so a route added later
+    cannot be left out of the event-loop check: every documented operation
+    but the two that never touch the store."""
+    document = yaml.safe_load(
+        importlib.resources.files("vantage.service.openapi").joinpath("v1.yaml").read_bytes()
+    )
+    operations = {
+        operation["operationId"]
+        for methods in document["paths"].values()
+        for operation in methods.values()
+    }
+
+    assert operations - {"capabilities", "get_openapi_document"} == set(_STORE_ROUTES) - {
+        "list_runs_by_metadata"
+    }
 
 
 def _hold(store: InMemoryExecutionStore, method: str) -> tuple[threading.Event, threading.Event]:
@@ -453,8 +483,24 @@ def test_a_held_store_call_holds_up_no_other_request(
     store call held, the capability check must still answer."""
     store = InMemoryExecutionStore()
     now = datetime.now(timezone.utc)
+    admin = new_token()
+    store.create_user("alice", admin=True, created_at=now)
+    store.create_token(
+        "alice", digest=token_digest(admin), label="", scopes=frozenset(SCOPES), created_at=now
+    )
+    store.create_user("bob", admin=False, created_at=now)
+    store.create_token(
+        "bob",
+        digest=token_digest(new_token()),
+        label="",
+        scopes=frozenset({READ_SCOPE}),
+        created_at=now,
+    )
     store.record_session(
-        _start_only_execution(_HELD_RUN), results=[_result(_HELD_NODE)], received_at=now
+        _start_only_execution(_HELD_RUN),
+        results=[_result(_HELD_NODE)],
+        received_at=now,
+        recorded_by="alice",
     )
     store.upsert_setting(
         TEST_SECTIONS_NAMESPACE, "Seeded", value='{"prefix": "tests/seeded/"}', updated_at=now
@@ -462,7 +508,7 @@ def test_a_held_store_call_holds_up_no_other_request(
     entered, release = _hold(store, held)
     answered: dict[str, int] = {}
 
-    with TestClient(create_app(store)) as client:
+    with TestClient(create_app(store), headers={"Authorization": f"Bearer {admin}"}) as client:
 
         def _held_request() -> None:
             answered["held"] = client.request(method, path, **request_kwargs).status_code

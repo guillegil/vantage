@@ -11,9 +11,10 @@ redirect from one, so an unversioned path answers 404.
 disk, on the store's own lock, on another process's write -- and one made on
 the loop would stall every other request until it returned, heartbeats
 included. So every route that reaches the store is a plain `def`, which
-FastAPI runs in its threadpool. `POST /runs` and `POST /config/sections`
-are `async` only to stream their bodies under a size cap, and hand the rest
-to the threadpool themselves (`service/body.py`). The
+FastAPI runs in its threadpool. `POST /runs`, `POST /config/sections`,
+`POST /users`, `PATCH /users/{name}` and `POST /tokens` are `async` only to
+stream their bodies under a size cap, and hand the rest to the threadpool
+themselves (`service/body.py`). The
 capabilities and interface-document routes never block and stay `async`, so
 they answer even while every worker thread waits on the store.
 
@@ -21,7 +22,8 @@ they answer even while every worker thread waits on the store.
 (`service/access.py`): the capability advertisement and the interface
 document stay open, since a client asks them before it can know it needs
 one. `app.state.access_required` starts false and becomes true, for good,
-the first time a request finds a user.
+the first time a request finds a user. The users and tokens routes need an
+admin's token whether or not the database has a user.
 
 **Every rejection is shaped by `service/errors.py`**, registered here once,
 so no route can answer a rejection in a different shape -- nor can the
@@ -57,6 +59,7 @@ from vantage.service.routes.capabilities import router as capabilities_router
 from vantage.service.routes.read import router as read_router
 from vantage.service.routes.runs import router as runs_router
 from vantage.service.routes.sections import router as sections_router
+from vantage.service.routes.users import router as users_router
 
 
 def create_app(
@@ -96,5 +99,6 @@ def create_app(
     app.include_router(read_router, prefix="/api/v1")
     app.include_router(capabilities_router, prefix="/api/v1")
     app.include_router(sections_router, prefix="/api/v1")
+    app.include_router(users_router, prefix="/api/v1")
     register_error_handlers(app)
     return app
