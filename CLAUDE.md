@@ -106,10 +106,19 @@ its `postgres` extra.
   (`isoformat_utc`), so text order is time order, and as `timestamptz` in
   PostgreSQL, read back as UTC.
 - **Schema:** each adapter applies its whole schema at first use and stamps
-  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 6,
+  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 7,
   one version for both). Any other stamp is refused; there are no
   migrations. Changing either schema means bumping that literal. No table
   or column exists before code writes it.
+- **Access.** A database with no user is open; the first user closes it
+  for good, since users are disabled, never deleted. Every route but
+  `/capabilities` and `/openapi.yaml` declares its scope through
+  `service/access.py` (`read`, `record`, `admin`), and
+  `test_interface_document.py` checks each against the document. A token is
+  stored only as its SHA-256, printed once by whatever made it, read by the
+  plugin from `VANTAGE_TOKEN` alone, and never written to the outbox, a
+  message or a `repr`. A run takes reports and heartbeats only from the
+  user whose token created it (`ForeignRunError`, `409 foreign_run`).
 - **Passwords never printed.** A PostgreSQL URL is shown only through
   `redacted`, and a driver message only through `redact_message`
   (`core/config/database.py`); the driver's loggers are silenced while the
@@ -132,6 +141,8 @@ VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/postgres
 vantage --database ./vantage.db              # server on 127.0.0.1:8765
 vantage --database postgresql://user@host/db # the same, storing in PostgreSQL
 vantage push                                 # send the runs the plugin queued
+vantage user add alice --admin               # the first user closes the database
+vantage token create alice                   # prints a token once; VANTAGE_TOKEN for the plugin
 pytest --vantage --vantage-mode local        # record into the local database
 ```
 

@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
+from vantage.core.domain.access import READ_SCOPE, new_token, token_digest
 from vantage.core.domain.execution import Execution, Identity
 from vantage.core.domain.result import Result
 from vantage.core.domain.sections import MAX_SECTIONS
@@ -321,11 +322,16 @@ class _ParkedWriteStore(InMemoryExecutionStore):
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
+        recorded_by: str | None = None,
     ) -> bool:
         self.writing.set()
         self.release.wait(2 * _JOIN_TIMEOUT_SECONDS)
         return super().record_session(
-            execution, results=results, received_at=received_at, metadata=metadata
+            execution,
+            results=results,
+            received_at=received_at,
+            metadata=metadata,
+            recorded_by=recorded_by,
         )
 
 
@@ -378,7 +384,7 @@ _HELD_NODE = "tests/test_held.py::test_x"
 # Each route that reaches the store, with the store method it calls first.
 _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "create_run": ("POST", "/api/v1/runs", {"json": _report("d" * 32)}, "record_session"),
-    "heartbeat": ("POST", f"/api/v1/runs/{_HELD_RUN}/heartbeat", {}, "get_execution"),
+    "heartbeat": ("POST", f"/api/v1/runs/{_HELD_RUN}/heartbeat", {}, "get_run_detail"),
     "list_runs": ("GET", "/api/v1/runs", {}, "list_runs"),
     "list_runs_by_metadata": (
         "GET",
@@ -481,6 +487,53 @@ def test_a_held_store_call_holds_up_no_other_request(
     assert not holder.is_alive()
     assert answered["capabilities"] == 200
     assert 200 <= answered["held"] < 300
+
+
+@pytest.mark.parametrize("held", ["access_required", "authenticate"])
+def test_authenticating_holds_up_no_other_request(held: str) -> None:
+    """Authenticating reads the store, before any route does: asking
+    whether a user exists on a server that has none, or looking a token up
+    on one that has. Done on the event loop, it would stall every request
+    as a slow route would."""
+    store = InMemoryExecutionStore()
+    headers = {}
+    if held == "authenticate":
+        store.create_user("alice", admin=False, created_at=datetime.now(timezone.utc))
+        token = new_token()
+        store.create_token(
+            "alice",
+            digest=token_digest(token),
+            label="",
+            scopes=frozenset({READ_SCOPE}),
+            created_at=datetime.now(timezone.utc),
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+    entered, release = _hold(store, held)
+    answered: dict[str, int] = {}
+
+    with TestClient(create_app(store)) as client:
+
+        def _held_request() -> None:
+            answered["held"] = client.get("/api/v1/runs", headers=headers).status_code
+
+        def _capabilities() -> None:
+            answered["capabilities"] = client.get("/api/v1/capabilities").status_code
+
+        holder = threading.Thread(target=_held_request, daemon=True)
+        other = threading.Thread(target=_capabilities, daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(_JOIN_TIMEOUT_SECONDS), f"the run list never called {held}"
+            other.start()
+            other.join(timeout=_JOIN_TIMEOUT_SECONDS)
+            assert not other.is_alive(), f"a request waited for {held}"
+            assert "held" not in answered
+        finally:
+            release.set()
+            holder.join(timeout=_JOIN_TIMEOUT_SECONDS)
+            other.join(timeout=_JOIN_TIMEOUT_SECONDS)
+
+    assert answered == {"capabilities": 200, "held": 200}
 
 
 def test_section_posts_racing_for_the_last_slot_never_pass_the_bound(

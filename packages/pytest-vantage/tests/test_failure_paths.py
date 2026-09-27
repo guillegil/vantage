@@ -1582,7 +1582,7 @@ def test_hung_git_does_not_delay_session(
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
         "pytest_vantage.recorder.send",
-        lambda address, report, *, timeout: sent.append(report),
+        lambda address, report, *, timeout, token=None: sent.append(report),
     )
     pytester.makepyfile(test_sample=_PASSING_TEST)
 
@@ -1649,7 +1649,8 @@ def test_an_unrecordable_test_report_never_disables_the_finish_write(
     """
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
-        "pytest_vantage.recorder.send", lambda address, report, *, timeout: sent.append(report)
+        "pytest_vantage.recorder.send",
+        lambda address, report, *, timeout, token=None: sent.append(report),
     )
     monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
 
@@ -1693,7 +1694,8 @@ def test_a_result_that_cannot_be_built_warns_once_and_costs_only_itself(
     """
     sent: list[dict[str, object]] = []
     monkeypatch.setattr(
-        "pytest_vantage.recorder.send", lambda address, report, *, timeout: sent.append(report)
+        "pytest_vantage.recorder.send",
+        lambda address, report, *, timeout, token=None: sent.append(report),
     )
     monkeypatch.setattr("pytest_vantage.recorder.vcs.capture", lambda rootpath: vcs.VcsSnapshot())
 

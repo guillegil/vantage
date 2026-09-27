@@ -15,6 +15,12 @@ malformed ever reaches the socket layer.
 
 `resolve_mode` and `resolve_local_database` do the same for where a run is
 kept: on the server, in a local SQLite database, or both.
+
+`resolve_token` reads the token a server with users needs from the
+``VANTAGE_TOKEN`` environment variable, and from nowhere else: an ini value
+is committed for everyone who checks the project out to read, and a
+command-line flag is shown to every user of the machine. A token that could
+never authenticate is refused without being echoed.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ import os
 import re
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -49,10 +55,12 @@ class VantageConfigError(ValueError):
 
 @dataclass(frozen=True)
 class ReportSettings:
-    """A validated destination and time bound for this session's reports."""
+    """A validated destination, time bound and token for this session's
+    reports. The token is left out of the `repr`."""
 
     address: str
     timeout: float
+    token: str | None = field(default=None, repr=False)
 
 
 def resolve_and_validate_address(address: str, *, option: str = "vantage server address") -> str:
@@ -177,6 +185,24 @@ def resolve_report_timeout(*, cli_timeout: float | None, ini_timeout: object) ->
     return _DEFAULT_REPORT_TIMEOUT
 
 
+def resolve_token(env_token: str | None) -> str | None:
+    """The token from `VANTAGE_TOKEN`, `None` when it is unset or empty.
+
+    One the server could never accept -- anything but printable ASCII with
+    no space, at most 512 characters, which is also what fits a header --
+    is refused, naming the variable but never quoting the value."""
+    if not env_token:
+        return None
+    from pytest_vantage.transport import well_formed_token
+
+    if not well_formed_token(env_token):
+        raise VantageConfigError(
+            "VANTAGE_TOKEN is not a token: a token is at most 512 printable ASCII characters, "
+            "with no spaces"
+        )
+    return env_token
+
+
 def _read_ini(config: pytest.Config, name: str) -> Any:
     """pytest converts an ini value to its registered type while reading it
     and raises on a mismatch (``vantage_timeout = ten``, or a quoted number
@@ -202,6 +228,7 @@ def resolve_settings(config: pytest.Config) -> ReportSettings:
     return ReportSettings(
         address=resolve_server_address(cli_url=cli_url, env_url=env_url, ini_url=ini_url),
         timeout=resolve_report_timeout(cli_timeout=cli_timeout, ini_timeout=ini_timeout),
+        token=resolve_token(os.environ.get("VANTAGE_TOKEN")),
     )
 
 
@@ -317,4 +344,5 @@ __all__ = [
     "resolve_report_timeout",
     "resolve_server_address",
     "resolve_settings",
+    "resolve_token",
 ]

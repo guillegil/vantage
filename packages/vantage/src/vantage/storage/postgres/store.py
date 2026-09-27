@@ -8,11 +8,17 @@ serialised:
 - A report is one transaction. The run upsert's `ON CONFLICT (id) DO UPDATE
   ... WHERE run.exit_status IS NULL AND excluded.exit_status IS NOT NULL`
   applies a finish over a start, never the reverse, as the SQLite adapter
-  does. Whether it created the run is read from that statement itself --
-  `RETURNING xmax = 0` is true only for a row it inserted, and it returns
-  no row when the conflict's `WHERE` declined -- never from a probe another
-  process could overtake. The run row is then locked, so concurrent reports
-  of one run write their results and count their metadata one at a time.
+  does, and only over a run the same user recorded. Whether it created the
+  run is read from that statement itself -- `RETURNING xmax = 0` is true
+  only for a row it inserted, and it returns no row when the conflict's
+  `WHERE` declined -- never from a probe another process could overtake.
+  The run row is then locked, so concurrent reports of one run write their
+  results and count their metadata one at a time, and a report of another
+  user's run is refused there, rolling back a transaction that changed
+  nothing.
+- A user name is its key, so `create_user` is one insert that does nothing
+  on a taken name, and `create_token` one insert that selects its user:
+  users are never deleted, so the user it finds stays.
 - The catalogue is upserted in node-id order, so two reports sharing tests
   lock those rows in one order and never deadlock. `first_seen_at` takes
   the earlier time, `last_seen_at` the later, and the identity follows the
@@ -42,6 +48,14 @@ from typing import TypeVar, cast
 
 from psycopg import errors
 
+from vantage.core.domain.access import (
+    ADMIN_SCOPE,
+    READ_SCOPE,
+    RECORD_SCOPE,
+    Grant,
+    Token,
+    User,
+)
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
@@ -58,6 +72,7 @@ from vantage.core.domain.result import (
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
+    ForeignRunError,
     HistoryEntry,
     MetadataEntry,
     MetadataFile,
@@ -68,6 +83,8 @@ from vantage.core.ports.storage import (
     RunKey,
     RunListEntry,
     RunMetadata,
+    UnknownUserError,
+    UserExistsError,
     UserSetting,
 )
 from vantage.storage.postgres.connection import (
@@ -90,17 +107,19 @@ _SETTINGS_LOCK_CLASS = 0x76736574
 
 _SNAPSHOT = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
 
-# `last_contact_at` is set on the insert branch only. The `vcs_*` columns
-# update under the `exit_status` guard, each through `COALESCE`, so a report
-# without VCS data never nulls one an earlier report recorded, and the
-# truncation flag follows whichever subject is kept.
+# `last_contact_at` and `recorded_by` are set on the insert branch only.
+# The `vcs_*` columns update under the `exit_status` guard, each through
+# `COALESCE`, so a report without VCS data never nulls one an earlier report
+# recorded, and the truncation flag follows whichever subject is kept. The
+# guard names the recorder too, so another user's report never finishes a
+# run, even before `record_session` refuses it.
 _UPSERT_RUN = """
     INSERT INTO vantage.run AS run (
         id, received_at, last_contact_at, started_at, finished_at,
         exit_status, interrupted, interrupt_reason,
         vcs_commit, vcs_branch, vcs_commit_subject, vcs_commit_subject_truncated,
-        vcs_dirty, vcs_root
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        vcs_dirty, vcs_root, recorded_by
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (id) DO UPDATE SET
         finished_at      = excluded.finished_at,
         exit_status      = excluded.exit_status,
@@ -116,13 +135,14 @@ _UPSERT_RUN = """
                  THEN excluded.vcs_commit_subject_truncated
                  ELSE run.vcs_commit_subject_truncated END
      WHERE run.exit_status IS NULL AND excluded.exit_status IS NOT NULL
+       AND run.recorded_by IS NOT DISTINCT FROM excluded.recorded_by
     RETURNING xmax = 0
 """
 
 # The conflict path of `_UPSERT_RUN` already holds this lock; taking it
 # explicitly holds it on every path, so the exit status it reads is still the
 # stored one.
-_LOCK_RUN = "SELECT exit_status FROM vantage.run WHERE id = %s FOR UPDATE"
+_LOCK_RUN = "SELECT exit_status, recorded_by FROM vantage.run WHERE id = %s FOR UPDATE"
 
 _PROBE_RUN = "SELECT 1 FROM vantage.run WHERE id = %s"
 
@@ -157,14 +177,16 @@ _LIST_EXECUTION_COLUMNS = f"""
     run.vcs_commit_subject_truncated, run.vcs_dirty, run.vcs_root
 """
 
-# `last_contact_at` comes last, so the first twelve values decode as an
-# `Execution`.
+# `last_contact_at` and `recorded_by` come last, so the first twelve values
+# decode as an `Execution`.
 _SELECT_RUN = f"""
-    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at FROM vantage.run AS run WHERE run.id = %s
+    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by
+    FROM vantage.run AS run WHERE run.id = %s
 """  # noqa: S608
 
 _SELECT_RUN_LIST = f"""
-    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at FROM vantage.run AS run
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by
+    FROM vantage.run AS run
 """  # noqa: S608
 
 _LIST_RUNS = f"""
@@ -435,6 +457,90 @@ _SELECT_RUN_CASE_OUTCOMES = """
 """
 
 
+_PROBE_ANY_USER = "SELECT EXISTS (SELECT 1 FROM vantage.account)"
+
+_INSERT_USER = """
+    INSERT INTO vantage.account (name, admin, disabled, created_at)
+    VALUES (%s, %s, false, %s)
+    ON CONFLICT (name) DO NOTHING
+"""
+
+_USER_COLUMNS = "name, admin, disabled, created_at"
+
+_SELECT_USER = f"SELECT {_USER_COLUMNS} FROM vantage.account WHERE name = %s"  # noqa: S608
+
+_LIST_USERS = f"SELECT {_USER_COLUMNS} FROM vantage.account ORDER BY name"  # noqa: S608
+
+# A NULL parameter leaves its column as it is.
+_UPDATE_USER = f"""
+    UPDATE vantage.account
+       SET admin = COALESCE(%s, admin), disabled = COALESCE(%s, disabled)
+     WHERE name = %s
+    RETURNING {_USER_COLUMNS}
+"""  # noqa: S608
+
+_TOKEN_COLUMNS = "id, account, label, can_read, can_record, can_admin, created_at, revoked_at"  # noqa: S105
+
+# Inserts nothing, and returns no row, when there is no such user.
+_INSERT_TOKEN = f"""
+    INSERT INTO vantage.access_token (
+        account, digest, label, can_read, can_record, can_admin, created_at
+    )
+    SELECT name, %s, %s, %s, %s, %s, %s FROM vantage.account WHERE name = %s
+    RETURNING {_TOKEN_COLUMNS}
+"""  # noqa: S608
+
+_LIST_TOKENS = f"SELECT {_TOKEN_COLUMNS} FROM vantage.access_token ORDER BY id"  # noqa: S608
+
+_LIST_USER_TOKENS = f"""
+    SELECT {_TOKEN_COLUMNS} FROM vantage.access_token WHERE account = %s ORDER BY id
+"""  # noqa: S608
+
+# `account = COALESCE(%s, account)`: with no user given, any token.
+_REVOKE_TOKEN = """
+    UPDATE vantage.access_token SET revoked_at = %s
+    WHERE id = %s AND revoked_at IS NULL AND account = COALESCE(%s::text, account)
+"""  # noqa: S105
+
+_AUTHENTICATE = """
+    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_admin
+    FROM vantage.access_token t
+    JOIN vantage.account a ON a.name = t.account
+    WHERE t.digest = %s AND t.revoked_at IS NULL AND NOT a.disabled
+"""
+
+# The ids a `bigint` identity column can hold; a lookup by any other
+# matches nothing.
+_MAX_ID = 2**63 - 1
+
+
+def _decode_scopes(can_read: object, can_record: object, can_admin: object) -> frozenset[str]:
+    held = zip((READ_SCOPE, RECORD_SCOPE, ADMIN_SCOPE), (can_read, can_record, can_admin))
+    return frozenset(scope for scope, flag in held if flag)
+
+
+def _row_to_user(row: Row) -> User:
+    name, admin, disabled, created_at = row
+    return User(
+        name=cast(str, name),
+        admin=bool(admin),
+        disabled=bool(disabled),
+        created_at=_utc(created_at),
+    )
+
+
+def _row_to_token(row: Row) -> Token:
+    token_id, account, label, can_read, can_record, can_admin, created_at, revoked_at = row
+    return Token(
+        id=cast(int, token_id),
+        user=cast(str, account),
+        label=cast(str, label),
+        scopes=_decode_scopes(can_read, can_record, can_admin),
+        created_at=_utc(created_at),
+        revoked_at=_opt_utc(revoked_at),
+    )
+
+
 def _stored(value: T) -> T:
     """`value` as it is written: a string with U+0000, which PostgreSQL
     text cannot hold, replaced by U+FFFD; anything else unchanged."""
@@ -522,7 +628,9 @@ def _decode_execution(row: Sequence[object]) -> Execution:
 
 def _row_to_run_list_entry(row: Row) -> RunListEntry:
     return RunListEntry.from_execution(
-        _decode_execution(row[:12]), last_contact_at=_opt_utc(row[12])
+        _decode_execution(row[:12]),
+        last_contact_at=_opt_utc(row[12]),
+        recorded_by=cast("str | None", row[13]),
     )
 
 
@@ -855,6 +963,7 @@ class PostgresExecutionStore:
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
+        recorded_by: str | None = None,
     ) -> bool:
         # One transaction, in the order every foreign key needs: run,
         # catalogue, results, metadata.
@@ -869,6 +978,7 @@ class PostgresExecutionStore:
             execution.interrupted,
             execution.interrupt_reason,
             *_vcs_columns(execution.vcs),
+            recorded_by,
         )
         catalogue_rows = _catalogue_rows(execution, results)
         file_rows = [
@@ -880,6 +990,10 @@ class PostgresExecutionStore:
         def write(conn: PgConnection) -> bool:
             upserted = conn.execute(_UPSERT_RUN, run_row).fetchone()
             locked = conn.execute(_LOCK_RUN, (run_id,)).fetchone()
+            if locked is not None and locked[1] != recorded_by:
+                # The upsert declined to touch another user's run, and
+                # raising rolls back a transaction that changed nothing.
+                raise ForeignRunError(f"run {run_id} was recorded by another user")
             if upserted is None and locked is not None and locked[0] is not None:
                 # The upsert changed nothing and the run has an exit status,
                 # so it was finished before this report. A finished run is
@@ -978,7 +1092,11 @@ class PostgresExecutionStore:
         row = self._fetchone(_SELECT_RUN, (execution_id,))
         if row is None:
             return None
-        return RunDetail(execution=_decode_execution(row[:12]), last_contact_at=_opt_utc(row[12]))
+        return RunDetail(
+            execution=_decode_execution(row[:12]),
+            last_contact_at=_opt_utc(row[12]),
+            recorded_by=cast("str | None", row[13]),
+        )
 
     def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
         if _unmatchable(execution_id):
@@ -1067,6 +1185,90 @@ class PostgresExecutionStore:
             return ()
         rows = self._fetchall(_SELECT_RUN_CASE_OUTCOMES, (execution_id,))
         return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
+
+    def access_required(self) -> bool:
+        row = self._fetchone(_PROBE_ANY_USER)
+        return row is not None and bool(row[0])
+
+    def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
+        with live_connection(self._pool) as conn:
+            inserted = conn.execute(_INSERT_USER, _params(name, admin, created_at)).rowcount
+        if inserted != 1:
+            raise UserExistsError(f"there is already a user named {name!r}")
+        return User(name=name, admin=admin, disabled=False, created_at=created_at)
+
+    def get_user(self, name: str) -> User | None:
+        if _unmatchable(name):
+            return None
+        row = self._fetchone(_SELECT_USER, (name,))
+        return None if row is None else _row_to_user(row)
+
+    def list_users(self) -> Sequence[User]:
+        return tuple(_row_to_user(row) for row in self._fetchall(_LIST_USERS, ()))
+
+    def update_user(
+        self, name: str, *, admin: bool | None = None, disabled: bool | None = None
+    ) -> User | None:
+        if _unmatchable(name):
+            return None
+        row = self._fetchone(_UPDATE_USER, (admin, disabled, name))
+        return None if row is None else _row_to_user(row)
+
+    def create_token(
+        self,
+        user: str,
+        *,
+        digest: str,
+        label: str,
+        scopes: frozenset[str],
+        created_at: datetime,
+    ) -> Token:
+        row = None
+        if not _unmatchable(user):
+            row = self._fetchone(
+                _INSERT_TOKEN,
+                _params(
+                    digest,
+                    label,
+                    READ_SCOPE in scopes,
+                    RECORD_SCOPE in scopes,
+                    ADMIN_SCOPE in scopes,
+                    created_at,
+                    user,
+                ),
+            )
+        if row is None:
+            raise UnknownUserError(f"there is no user named {user!r}")
+        return _row_to_token(row)
+
+    def list_tokens(self, *, user: str | None = None) -> Sequence[Token]:
+        if user is None:
+            rows = self._fetchall(_LIST_TOKENS, ())
+        elif _unmatchable(user):
+            rows = []
+        else:
+            rows = self._fetchall(_LIST_USER_TOKENS, (user,))
+        return tuple(_row_to_token(row) for row in rows)
+
+    def revoke_token(self, token_id: int, *, revoked_at: datetime, user: str | None = None) -> bool:
+        if not 0 < token_id <= _MAX_ID or (user is not None and _unmatchable(user)):
+            return False
+        with live_connection(self._pool) as conn:
+            cursor = conn.execute(_REVOKE_TOKEN, (revoked_at, token_id, user))
+            return cursor.rowcount == 1
+
+    def authenticate(self, digest: str) -> Grant | None:
+        if _unmatchable(digest):
+            return None
+        row = self._fetchone(_AUTHENTICATE, (digest,))
+        if row is None:
+            return None
+        name, admin, can_read, can_record, can_admin = row
+        return Grant(
+            user=cast(str, name),
+            admin=bool(admin),
+            scopes=_decode_scopes(can_read, can_record, can_admin),
+        )
 
     def close(self) -> None:
         self._pool.close()

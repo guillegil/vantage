@@ -21,7 +21,9 @@ the other would make these checks unfailable for the same reason.
 from __future__ import annotations
 
 import importlib.resources
+import re
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, get_args
 
@@ -31,6 +33,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from pydantic import BaseModel
+from vantage.core.domain.access import RECORD_SCOPE, SCOPES, new_token, token_digest
 from vantage.core.domain.liveness import PRESENTATIONS
 from vantage.core.domain.metadata import (
     FILE_STATUSES,
@@ -405,6 +408,126 @@ def test_every_status_the_server_answers_is_documented() -> None:
     tainted = _parsed_document()
     del tainted["paths"]["/runs"]["post"]["responses"]["415"]
     assert _undocumented_statuses(tainted, observed) == {("POST", "/runs", 415)}
+
+
+_ACCESS_RUN = "5" * 32
+
+
+def _access_requests(client: TestClient, headers: dict[str, str]) -> dict[tuple[str, str], _Call]:
+    """One request per documented operation, sending `headers`, in an order
+    where each finds what it needs: the run reported first, the section
+    posted before it is deleted."""
+    run = f"/api/v1/runs/{_ACCESS_RUN}"
+    node = {"node_id": "tests/test_a.py::test_one"}
+    section = {"name": "AccessProbe", "prefix": "tests/access-probe"}
+    report = _report(_ACCESS_RUN)
+    report["results"] = [
+        {
+            "node_id": node["node_id"],
+            "file_path": "tests/test_a.py",
+            "class_name": None,
+            "function_name": "test_one",
+            "param_id": None,
+            "outcome": "passed",
+            "duration": None,
+            "started_at": None,
+            "finished_at": None,
+            "setup_outcome": None,
+            "call_outcome": None,
+            "teardown_outcome": None,
+            "setup_duration": None,
+            "call_duration": None,
+            "teardown_duration": None,
+            "worker_id": None,
+        }
+    ]
+    return {
+        ("POST", "/runs"): lambda: client.post("/api/v1/runs", json=report, headers=headers),
+        ("POST", "/runs/{run_id}/heartbeat"): lambda: client.post(
+            f"{run}/heartbeat", headers=headers
+        ),
+        ("GET", "/runs"): lambda: client.get("/api/v1/runs", headers=headers),
+        ("GET", "/runs/{run_id}"): lambda: client.get(run, headers=headers),
+        ("GET", "/runs/{run_id}/metadata"): lambda: client.get(f"{run}/metadata", headers=headers),
+        ("GET", "/runs/{run_id}/results"): lambda: client.get(f"{run}/results", headers=headers),
+        ("GET", "/runs/{run_id}/result"): lambda: client.get(
+            f"{run}/result", params=node, headers=headers
+        ),
+        ("GET", "/tests/history"): lambda: client.get(
+            "/api/v1/tests/history", params=node, headers=headers
+        ),
+        ("GET", "/runs/{run_id}/sections"): lambda: client.get(f"{run}/sections", headers=headers),
+        ("GET", "/capabilities"): lambda: client.get("/api/v1/capabilities", headers=headers),
+        ("GET", "/openapi.yaml"): lambda: client.get("/api/v1/openapi.yaml", headers=headers),
+        ("POST", "/config/sections"): lambda: client.post(
+            "/api/v1/config/sections", json=section, headers=headers
+        ),
+        ("GET", "/config/sections"): lambda: client.get("/api/v1/config/sections", headers=headers),
+        ("DELETE", "/config/sections"): lambda: client.delete(
+            "/api/v1/config/sections", params={"name": section["name"]}, headers=headers
+        ),
+    }
+
+
+def _documented_scope(operation: Mapping[str, Any]) -> str | None:
+    """The scope an operation's `403` says a token must grant, or `None`
+    for one whose `security` is empty: served without a token."""
+    if operation.get("security") == []:
+        return None
+    match = re.search(r"grant the (\w+) scope", operation["responses"]["403"]["description"])
+    assert match is not None, operation["operationId"]
+    return str(match.group(1))
+
+
+def test_every_operation_needs_the_scope_its_document_names() -> None:
+    """On a server with users, driven by the document: an operation whose
+    `security` is empty answers without a token; every other one refuses a
+    request without one (401) and one granting every scope but the one its
+    `403` names (403), and takes one granting that scope. A report or
+    heartbeat of another user's run is 409. Every status is documented, so
+    a route added without its scope, or a document that names the wrong
+    one, fails here."""
+    store = InMemoryExecutionStore()
+    now = datetime.now(timezone.utc)
+    store.create_user("alice", admin=True, created_at=now)
+    store.create_user("bob", admin=False, created_at=now)
+
+    def bearer(user: str, scopes: set[str]) -> dict[str, str]:
+        token = new_token()
+        store.create_token(
+            user, digest=token_digest(token), label="", scopes=frozenset(scopes), created_at=now
+        )
+        return {"Authorization": f"Bearer {token}"}
+
+    client = TestClient(create_app(store))
+    document = _parsed_document()
+    anonymous = _access_requests(client, {})
+    assert set(anonymous) == _declared_operations(document)
+    observed: set[tuple[str, str, int]] = set()
+
+    for key, call in anonymous.items():
+        method, path = key
+        scope = _documented_scope(document["paths"][path][method.lower()])
+        answered = {"none": call().status_code}
+        if scope is not None:
+            lacking = bearer("alice", set(SCOPES) - {scope})
+            holding = bearer("alice", {scope})
+            answered["lacking"] = _access_requests(client, lacking)[key]().status_code
+            answered["holding"] = _access_requests(client, holding)[key]().status_code
+            assert answered["none"] == 401, (key, answered)
+            assert answered["lacking"] == 403, (key, answered)
+            assert 200 <= answered["holding"] < 300, (key, answered)
+        else:
+            assert answered["none"] == 200, (key, answered)
+        observed |= {(method, path, status) for status in answered.values() if status >= 400}
+
+    bobs = bearer("bob", {RECORD_SCOPE})
+    for key in (("POST", "/runs"), ("POST", "/runs/{run_id}/heartbeat")):
+        status = _access_requests(client, bobs)[key]().status_code
+        assert status == 409, key
+        observed.add((*key, status))
+
+    assert _undocumented_statuses(document, observed) == set()
 
 
 def test_every_response_declares_its_body() -> None:

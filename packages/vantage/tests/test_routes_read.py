@@ -25,6 +25,7 @@ from typing import cast
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from vantage.core.domain.access import READ_SCOPE, new_token, token_digest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, LIST_FAILURE_MESSAGE_CHARS
 from vantage.core.domain.result import CaseIdentity, Result
@@ -145,13 +146,33 @@ def _client_with_grace(store: ExecutionStore, grace_period_seconds: float) -> Te
     return TestClient(create_app(store, grace_period_seconds=grace_period_seconds))
 
 
+def _reader(store: ExecutionStore, user: str) -> dict[str, str]:
+    """Make `user` and a read token of theirs, which closes the server, and
+    return the header that sends the token."""
+    now = datetime.now(timezone.utc)
+    store.create_user(user, admin=False, created_at=now)
+    token = new_token()
+    store.create_token(
+        user,
+        digest=token_digest(token),
+        label="",
+        scopes=frozenset({READ_SCOPE}),
+        created_at=now,
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
 class _SpyExecutionStore:
-    """A spy exposing only `list_history`, `cast` to `ExecutionStore` at its
-    one call site -- the history route calls no other method, and this test
-    asserts nothing about the rest of the port."""
+    """A spy exposing only `list_history`, and `access_required` for a store
+    without users, `cast` to `ExecutionStore` at its one call site -- the
+    history route calls no other method, and this test asserts nothing about
+    the rest of the port."""
 
     def __init__(self) -> None:
         self.list_history_calls: list[str] = []
+
+    def access_required(self) -> bool:
+        return False
 
     def list_history(
         self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
@@ -175,13 +196,15 @@ def test_run_list_returns_items_and_has_more_envelope(
 
     Every fixture value here is deliberately off the default: `started_at`
     and `finished_at` are distinct instants, and `exit_status` is `7` rather
-    than the `0` a swap would coincidentally match. `presentation` and
-    `interrupted` are asserted on varied fixtures by
+    than the `0` a swap would coincidentally match, and the run names the
+    user who recorded it. `presentation` and `interrupted` are asserted on
+    varied fixtures by
     `test_run_list_presentation_and_interruption_are_per_run`."""
     now = datetime.now(timezone.utc)
     run_id = _run_id(1)
     started_at = now - timedelta(hours=1)
     finished_at = now - timedelta(minutes=17)
+    authorization = _reader(store, "alice")
     store.record_session(
         _execution(
             run_id,
@@ -198,9 +221,10 @@ def test_run_list_returns_items_and_has_more_envelope(
         ),
         results=[],
         received_at=started_at,
+        recorded_by="alice",
     )
 
-    response = client.get("/api/v1/runs")
+    response = client.get("/api/v1/runs", headers=authorization)
 
     assert response.status_code == 200
     body = response.json()
@@ -217,8 +241,10 @@ def test_run_list_returns_items_and_has_more_envelope(
         "interrupted",
         "presentation",
         "vcs",
+        "recorded_by",
     }
     assert item["id"] == run_id
+    assert item["recorded_by"] == "alice"
     assert _instant(item["started_at"]) == started_at
     assert _instant(item["finished_at"]) == finished_at
     assert item["exit_status"] == 7
@@ -605,10 +631,11 @@ def test_run_detail_carries_every_stored_field_by_value(
     `finished_at`, and a builder that hardcoded either to `None` would still
     satisfy whichever run happens to be null there.
 
-    The two runs also disagree on `id`, `started_at` and `exit_status`, so
-    `id=<constant>` fails on whichever run it is not, and a `started_at`
-    shifted by a fixed offset fails on both."""
+    The two runs also disagree on `id`, `started_at`, `exit_status` and who
+    recorded them, so `id=<constant>` fails on whichever run it is not, and
+    a `started_at` shifted by a fixed offset fails on both."""
     now = datetime.now(timezone.utc)
+    authorization = _reader(store, "alice")
     orderly_run = _run_id(50)
     orderly_started_at = now - timedelta(hours=4)
     orderly_finished_at = now - timedelta(hours=3, minutes=11)
@@ -631,6 +658,7 @@ def test_run_detail_carries_every_stored_field_by_value(
         ),
         results=[],
         received_at=orderly_started_at,
+        recorded_by="alice",
     )
     store.record_session(
         _execution(
@@ -646,8 +674,8 @@ def test_run_detail_carries_every_stored_field_by_value(
         received_at=ctrl_c_started_at,
     )
 
-    orderly = client.get(f"/api/v1/runs/{orderly_run}").json()
-    ctrl_c = client.get(f"/api/v1/runs/{ctrl_c_run}").json()
+    orderly = client.get(f"/api/v1/runs/{orderly_run}", headers=authorization).json()
+    ctrl_c = client.get(f"/api/v1/runs/{ctrl_c_run}", headers=authorization).json()
 
     assert set(orderly.keys()) == {
         "id",
@@ -658,7 +686,10 @@ def test_run_detail_carries_every_stored_field_by_value(
         "interrupt_reason",
         "presentation",
         "vcs",
+        "recorded_by",
     }
+    assert orderly["recorded_by"] == "alice"
+    assert ctrl_c["recorded_by"] is None
     assert orderly["id"] == orderly_run
     assert _instant(orderly["started_at"]) == orderly_started_at
     assert _instant(orderly["finished_at"]) == orderly_finished_at

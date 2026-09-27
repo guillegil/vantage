@@ -51,6 +51,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypeVar, cast
 
+from vantage.core.domain.access import (
+    ADMIN_SCOPE,
+    READ_SCOPE,
+    RECORD_SCOPE,
+    Grant,
+    Token,
+    User,
+)
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
@@ -67,6 +75,7 @@ from vantage.core.domain.result import (
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
+    ForeignRunError,
     HistoryEntry,
     MetadataEntry,
     MetadataFile,
@@ -77,6 +86,8 @@ from vantage.core.ports.storage import (
     RunKey,
     RunListEntry,
     RunMetadata,
+    UnknownUserError,
+    UserExistsError,
     UserSetting,
 )
 from vantage.storage.connection import isoformat_utc, open_database
@@ -88,19 +99,22 @@ T = TypeVar("T")
 # limit.
 _MAX_PLACEHOLDERS = 500
 
-# `last_contact_at` is set on the insert branch only; the `DO UPDATE SET`
-# list never names it. The `vcs_*` columns update under the same
-# `exit_status` guard, each through `COALESCE(excluded, run)`, so a report
-# without VCS data never nulls a value an earlier report recorded.
-# `vcs_commit_subject_truncated` follows whichever subject is kept, so the
-# flag always describes the stored subject.
+# `last_contact_at` and `recorded_by` are set on the insert branch only;
+# the `DO UPDATE SET` list never names them. The `vcs_*` columns update
+# under the same `exit_status` guard, each through `COALESCE(excluded,
+# run)`, so a report without VCS data never nulls a value an earlier report
+# recorded. `vcs_commit_subject_truncated` follows whichever subject is
+# kept, so the flag always describes the stored subject. The guard also
+# names the recorder, though `record_session` refuses another user's
+# report before it gets here: a statement that could finish someone else's
+# run should not rely on its caller to stop it.
 _UPSERT_RUN = """
     INSERT INTO run (
         id, received_at, last_contact_at, started_at, finished_at,
         exit_status, interrupted, interrupt_reason,
         vcs_commit, vcs_branch, vcs_commit_subject, vcs_commit_subject_truncated,
-        vcs_dirty, vcs_root
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        vcs_dirty, vcs_root, recorded_by
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
         finished_at      = excluded.finished_at,
         exit_status      = excluded.exit_status,
@@ -116,11 +130,12 @@ _UPSERT_RUN = """
                  THEN excluded.vcs_commit_subject_truncated
                  ELSE run.vcs_commit_subject_truncated END
      WHERE run.exit_status IS NULL AND excluded.exit_status IS NOT NULL
+       AND run.recorded_by IS excluded.recorded_by
 """
 
 _PROBE_RUN_EXISTS = "SELECT 1 FROM run WHERE id = ?"
 
-_SELECT_EXIT_STATUS = "SELECT exit_status FROM run WHERE id = ?"
+_SELECT_RUN_STATE = "SELECT exit_status, recorded_by FROM run WHERE id = ?"
 
 # Monotonic: a `contacted_at` earlier than or equal to the stored one changes
 # zero rows.
@@ -169,14 +184,15 @@ _LIST_EXECUTION_COLUMNS = """
 _LIST_SUBJECT_PREFIX_BYTES = 4 * (LIST_COMMIT_SUBJECT_CHARS + 1)
 _LIST_MESSAGE_PREFIX_BYTES = 4 * (LIST_FAILURE_MESSAGE_CHARS + 1)
 
-# `get_execution` and `get_run_detail` share one statement; `last_contact_at`
-# comes last so the first twelve values decode as an `Execution`.
+# `get_execution` and `get_run_detail` share one statement;
+# `last_contact_at` and `recorded_by` come last so the first twelve values
+# decode as an `Execution`.
 _SELECT_RUN = f"""
-    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at FROM run WHERE run.id = ?
+    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by FROM run WHERE run.id = ?
 """  # noqa: S608
 
 _SELECT_RUN_LIST = f"""
-    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at FROM run
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by FROM run
 """  # noqa: S608
 
 _LIST_RUNS = f"""
@@ -458,6 +474,100 @@ _SELECT_RUN_CASE_OUTCOMES = """
 """
 
 
+# Users and tokens. A user name is its key, and a token is found by its
+# digest through the `UNIQUE` constraint's index. `ON CONFLICT DO NOTHING`
+# lets `create_user` tell a taken name from any other failure by the row
+# count alone.
+_PROBE_ANY_USER = "SELECT EXISTS (SELECT 1 FROM account)"
+
+_INSERT_USER = """
+    INSERT INTO account (name, admin, disabled, created_at) VALUES (?, ?, 0, ?)
+    ON CONFLICT (name) DO NOTHING
+"""
+
+_USER_COLUMNS = "name, admin, disabled, created_at"
+
+_SELECT_USER = f"SELECT {_USER_COLUMNS} FROM account WHERE name = ?"  # noqa: S608
+
+_LIST_USERS = f"SELECT {_USER_COLUMNS} FROM account ORDER BY name"  # noqa: S608
+
+# A NULL parameter leaves its column as it is.
+_UPDATE_USER = """
+    UPDATE account SET admin = COALESCE(?, admin), disabled = COALESCE(?, disabled)
+    WHERE name = ?
+"""
+
+_INSERT_TOKEN = """
+    INSERT INTO access_token (
+        account, digest, label, can_read, can_record, can_admin, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+"""  # noqa: S105
+
+_TOKEN_COLUMNS = "id, account, label, can_read, can_record, can_admin, created_at, revoked_at"  # noqa: S105
+
+_SELECT_TOKEN = f"SELECT {_TOKEN_COLUMNS} FROM access_token WHERE id = ?"  # noqa: S608
+
+_LIST_TOKENS = f"SELECT {_TOKEN_COLUMNS} FROM access_token ORDER BY id"  # noqa: S608
+
+_LIST_USER_TOKENS = f"""
+    SELECT {_TOKEN_COLUMNS} FROM access_token WHERE account = ? ORDER BY id
+"""  # noqa: S608
+
+# `account IS COALESCE(?, account)`: with no user given, any token.
+_REVOKE_TOKEN = """
+    UPDATE access_token SET revoked_at = ?
+    WHERE id = ? AND revoked_at IS NULL AND account IS COALESCE(?, account)
+"""  # noqa: S105
+
+_AUTHENTICATE = """
+    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_admin
+    FROM access_token t
+    JOIN account a ON a.name = t.account
+    WHERE t.digest = ? AND t.revoked_at IS NULL AND a.disabled = 0
+"""
+
+
+# The ids an `INTEGER PRIMARY KEY` can hold; a lookup by any other matches
+# nothing.
+_MAX_ID = 2**63 - 1
+
+
+def _scope_columns(scopes: frozenset[str]) -> tuple[int, int, int]:
+    """The `can_read`, `can_record` and `can_admin` values for `scopes`."""
+    return (
+        int(READ_SCOPE in scopes),
+        int(RECORD_SCOPE in scopes),
+        int(ADMIN_SCOPE in scopes),
+    )
+
+
+def _decode_scopes(can_read: object, can_record: object, can_admin: object) -> frozenset[str]:
+    held = zip((READ_SCOPE, RECORD_SCOPE, ADMIN_SCOPE), (can_read, can_record, can_admin))
+    return frozenset(scope for scope, flag in held if flag)
+
+
+def _row_to_user(row: tuple[object, ...]) -> User:
+    name, admin, disabled, created_at = row
+    return User(
+        name=cast(str, name),
+        admin=bool(admin),
+        disabled=bool(disabled),
+        created_at=_datetime(created_at),
+    )
+
+
+def _row_to_token(row: tuple[object, ...]) -> Token:
+    token_id, account, label, can_read, can_record, can_admin, created_at, revoked_at = row
+    return Token(
+        id=cast(int, token_id),
+        user=cast(str, account),
+        label=cast(str, label),
+        scopes=_decode_scopes(can_read, can_record, can_admin),
+        created_at=_datetime(created_at),
+        revoked_at=_opt_datetime(revoked_at),
+    )
+
+
 def _opt_isoformat_utc(moment: datetime | None) -> str | None:
     return None if moment is None else isoformat_utc(moment)
 
@@ -542,7 +652,9 @@ def _decode_execution(row: Sequence[object]) -> Execution:
 
 def _row_to_run_list_entry(row: tuple[object, ...]) -> RunListEntry:
     return RunListEntry.from_execution(
-        _decode_execution(row[:12]), last_contact_at=_opt_datetime(row[12])
+        _decode_execution(row[:12]),
+        last_contact_at=_opt_datetime(row[12]),
+        recorded_by=cast("str | None", row[13]),
     )
 
 
@@ -907,6 +1019,7 @@ class SqliteExecutionStore:
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
+        recorded_by: str | None = None,
     ) -> bool:
         # One transaction, fixed order: existence probe, run upsert,
         # catalogue upsert, surrogate-key resolve, result insert, metadata
@@ -915,7 +1028,11 @@ class SqliteExecutionStore:
         # must exist first.
         run_id = execution.identity.value
         with self._write_transaction() as conn:
-            stored = conn.execute(_SELECT_EXIT_STATUS, (run_id,)).fetchone()
+            stored = conn.execute(_SELECT_RUN_STATE, (run_id,)).fetchone()
+            if stored is not None and stored[1] != recorded_by:
+                # Raising rolls the transaction back, though nothing is
+                # written yet.
+                raise ForeignRunError(f"run {run_id} was recorded by another user")
             if stored is not None and stored[0] is not None:
                 # A finished run is final: a report reaching it later is a
                 # replay and adds nothing, whatever results it carries.
@@ -934,6 +1051,7 @@ class SqliteExecutionStore:
                     1 if execution.interrupted else 0,
                     execution.interrupt_reason,
                     *_vcs_columns(execution.vcs),
+                    recorded_by,
                 ),
             )
 
@@ -1018,7 +1136,9 @@ class SqliteExecutionStore:
         if row is None:
             return None
         return RunDetail(
-            execution=_decode_execution(row[:12]), last_contact_at=_opt_datetime(row[12])
+            execution=_decode_execution(row[:12]),
+            last_contact_at=_opt_datetime(row[12]),
+            recorded_by=cast("str | None", row[13]),
         )
 
     def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
@@ -1095,6 +1215,88 @@ class SqliteExecutionStore:
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
         rows = self._fetchall(_SELECT_RUN_CASE_OUTCOMES, (execution_id,))
         return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
+
+    def access_required(self) -> bool:
+        return bool(self._count(_PROBE_ANY_USER))
+
+    def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
+        with self._lock:
+            cursor = self._conn.execute(
+                _INSERT_USER, (name, 1 if admin else 0, isoformat_utc(created_at))
+            )
+            if cursor.rowcount != 1:
+                raise UserExistsError(f"there is already a user named {name!r}")
+        return User(name=name, admin=admin, disabled=False, created_at=created_at)
+
+    def get_user(self, name: str) -> User | None:
+        row = self._fetchone(_SELECT_USER, (name,))
+        return None if row is None else _row_to_user(row)
+
+    def list_users(self) -> Sequence[User]:
+        return tuple(_row_to_user(row) for row in self._fetchall(_LIST_USERS, ()))
+
+    def update_user(
+        self, name: str, *, admin: bool | None = None, disabled: bool | None = None
+    ) -> User | None:
+        with self._write_transaction() as conn:
+            conn.execute(
+                _UPDATE_USER,
+                (
+                    None if admin is None else int(admin),
+                    None if disabled is None else int(disabled),
+                    name,
+                ),
+            )
+            row = conn.execute(_SELECT_USER, (name,)).fetchone()
+        return None if row is None else _row_to_user(row)
+
+    def create_token(
+        self,
+        user: str,
+        *,
+        digest: str,
+        label: str,
+        scopes: frozenset[str],
+        created_at: datetime,
+    ) -> Token:
+        # The probe shares the write transaction, so the user it finds is
+        # there when the token is inserted: users are never deleted anyway.
+        with self._write_transaction() as conn:
+            if conn.execute(_SELECT_USER, (user,)).fetchone() is None:
+                raise UnknownUserError(f"there is no user named {user!r}")
+            cursor = conn.execute(
+                _INSERT_TOKEN,
+                (user, digest, label, *_scope_columns(scopes), isoformat_utc(created_at)),
+            )
+            row = conn.execute(_SELECT_TOKEN, (cursor.lastrowid,)).fetchone()
+        return _row_to_token(row)
+
+    def list_tokens(self, *, user: str | None = None) -> Sequence[Token]:
+        rows = (
+            self._fetchall(_LIST_TOKENS, ())
+            if user is None
+            else self._fetchall(_LIST_USER_TOKENS, (user,))
+        )
+        return tuple(_row_to_token(row) for row in rows)
+
+    def revoke_token(self, token_id: int, *, revoked_at: datetime, user: str | None = None) -> bool:
+        if not 0 < token_id <= _MAX_ID:
+            # `sqlite3` cannot bind a larger integer at all.
+            return False
+        with self._lock:
+            cursor = self._conn.execute(_REVOKE_TOKEN, (isoformat_utc(revoked_at), token_id, user))
+            return cursor.rowcount == 1
+
+    def authenticate(self, digest: str) -> Grant | None:
+        row = self._fetchone(_AUTHENTICATE, (digest,))
+        if row is None:
+            return None
+        name, admin, can_read, can_record, can_admin = row
+        return Grant(
+            user=cast(str, name),
+            admin=bool(admin),
+            scopes=_decode_scopes(can_read, can_record, can_admin),
+        )
 
     def close(self) -> None:
         # Under the lock, so a statement another thread has in flight

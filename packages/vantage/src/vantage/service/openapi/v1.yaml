@@ -5,9 +5,12 @@ openapi: 3.1.0
 info:
   title: Vantage API
   version: "1"
-  description: read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data. Every rejection -- each 4xx and 5xx listed here, and the 404 or 405 for a path nothing serves or a method a path does not take -- has the Rejection body.
+  description: "read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data. Every rejection -- each 4xx and 5xx listed here, and the 404 or 405 for a path nothing serves or a method a path does not take -- has the Rejection body. A server whose database has no user serves every path without a token. Once a user exists, every path but /capabilities and /openapi.yaml needs Authorization: Bearer <token>, a token of an enabled user that has not been revoked and grants the path's scope: read for what read-tagged paths return, record for a report or a heartbeat, admin for changing sections -- the admin scope granting nothing once its user is no longer an admin. A 401 or 403 carries a WWW-Authenticate header naming the scope a request lacked."
 servers:
   - url: /api/v1
+security:
+  - bearer: []
+  - {}
 tags:
   - {name: read, description: Leaves stored data unchanged.}
   - {name: write, description: Changes stored data.}
@@ -23,6 +26,9 @@ paths:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
         "200": {description: "The run already existed. This report's finish fields, results and metadata were applied where the run did not have them yet; nothing already stored was replaced. A run already finished takes nothing from a later report.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json) -- NaN and Infinity are not JSON -- or the client disconnected before sending all of it (incomplete_body).", content: &rejection {application/json: {schema: {$ref: '#/components/schemas/Rejection'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the record scope (insufficient_scope).", content: *rejection}
+        "409": {description: "The run was recorded by another user, or without a token when this report has one, or with one when it has none (foreign_run). Nothing of the report is stored.", content: *rejection}
         "413": {description: "The body exceeds 1 MiB (payload_too_large).", content: *rejection}
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
         "422": {description: "The body does not match SessionReport (invalid_report); fields names each failing field.", content: *rejection}
@@ -39,6 +45,8 @@ paths:
         - {name: metadata_value, in: query, required: false, schema: {type: array, items: {type: string}, maxItems: 16}}
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
         "422": {description: "limit below 1 or offset out of range -- not a page; or a cursor no page handed out, or a cursor with a non-zero offset; or metadata_key and metadata_value repeated a different number of times, or more than 16 pairs (invalid_parameter).", content: *rejection}
   /runs/{run_id}:
     get:
@@ -49,6 +57,8 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: The run., content: {application/json: {schema: {$ref: '#/components/schemas/RunDetailResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
         "404": {description: No run with that id has been recorded., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/metadata:
@@ -61,6 +71,8 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: The run's metadata., content: {application/json: {schema: {$ref: '#/components/schemas/RunMetadataResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
         "404": {description: No run with that id has been recorded., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/heartbeat:
@@ -72,7 +84,10 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: Acknowledged., content: {application/json: {schema: {$ref: '#/components/schemas/HeartbeatAcknowledgement'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the record scope (insufficient_scope).", content: *rejection}
         "404": {description: No run with that id has been recorded., content: *rejection}
+        "409": {description: "The run was recorded by another user, or without a token when this heartbeat has one, or with one when it has none (foreign_run).", content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/results:
     get:
@@ -85,6 +100,8 @@ paths:
         - $ref: '#/components/parameters/offset'
       responses:
         "200": {description: A page of results., content: {application/json: {schema: {$ref: '#/components/schemas/ResultsResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
         "404": {description: No run with that id has been recorded., content: *rejection}
         "422": {description: "limit below 1 or offset out of range -- not a page; or run_id is not 32 lowercase hex characters (invalid_parameter).", content: *rejection}
   /runs/{run_id}/result:
@@ -98,6 +115,8 @@ paths:
         - {name: node_id, in: query, required: true, schema: {type: string}}
       responses:
         "200": {description: The result., content: {application/json: {schema: {$ref: '#/components/schemas/ResultDetailResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
         "404": {description: "No run with that id has been recorded (unknown_run), or the run has no result with that node_id (unknown_result).", content: *rejection}
         "422": {description: "node_id missing (invalid_identity); or run_id is not 32 lowercase hex characters (invalid_parameter).", content: *rejection}
   /tests/history:
@@ -113,11 +132,14 @@ paths:
         - $ref: '#/components/parameters/cursor'
       responses:
         "200": {description: "A page of history entries; empty, not an error, for an unknown node_id.", content: {application/json: {schema: {$ref: '#/components/schemas/HistoryResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
         "422": {description: "node_id missing (invalid_identity); or limit below 1 or offset out of range, or a cursor no page handed out, or a cursor with a non-zero offset (invalid_parameter).", content: *rejection}
   /capabilities:
     get:
       operationId: capabilities
       tags: [read]
+      security: []
       summary: The compatibility advertisement.
       description: A server that predates this path answers 404, which a client reads as every capability absent.
       responses:
@@ -128,6 +150,7 @@ paths:
     get:
       operationId: get_openapi_document
       tags: [read]
+      security: []
       summary: This document, served as raw bytes.
       responses:
         "200": {description: The hand-written OpenAPI 3.1 YAML., content: {application/yaml: {schema: {type: string}}}}
@@ -138,6 +161,8 @@ paths:
       summary: List every defined test section.
       responses:
         "200": {description: Every stored section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionListResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
         "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
     post:
       operationId: upsert_section
@@ -149,6 +174,8 @@ paths:
         "201": {description: Stored, a new section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
         "200": {description: Updated; the name was already stored., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
         "413": {description: "The body exceeds 64 KiB (payload_too_large).", content: *rejection}
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
         "422": {description: "An invalid name (invalid_section_name) or a reserved one (reserved_section_name), an invalid prefix (invalid_section_prefix), the stored-section count bound (too_many_sections), or a body that does not match SectionUpsertRequest (invalid_section).", content: *rejection}
@@ -161,6 +188,8 @@ paths:
         - {name: name, in: query, required: true, schema: {type: string}}
       responses:
         "204": {description: Deleted.}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
         "404": {description: No section with that name has been stored., content: *rejection}
         "422": {description: name missing (invalid_parameter)., content: *rejection}
   /runs/{run_id}/sections:
@@ -173,10 +202,14 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: The run's section summary., content: {application/json: {schema: {$ref: '#/components/schemas/RunSectionSummaryResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
         "404": {description: No run with that id has been recorded., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
         "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
 components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer, description: "A token `vantage token create` printed, or the admin API returned. Each holds one or more of the read, record and admin scopes."}
   parameters:
     run_id: {name: run_id, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{32}$'}}
     # No `maximum`. A caller asking for more than 200 gets 200, not a
@@ -293,8 +326,8 @@ components:
       properties: {commit: {type: [string, "null"]}, branch: {type: [string, "null"]}, commit_subject: {type: [string, "null"]}, commit_subject_truncated: {type: boolean}, dirty: {type: [boolean, "null"]}}
     RunListItem:
       type: object
-      required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs]
-      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
+      required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs, recorded_by]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}}
     # One per distinct filtered key, in the order first given. `predating`
     # equals the total run count when no run ever carried `key`.
     MetadataHorizon:
@@ -310,8 +343,8 @@ components:
     # reachable.
     RunDetailResponse:
       type: object
-      required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs]
-      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}}
+      required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs, recorded_by]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}}
     # `source_file` names the declared file of a `file` key and is null for a
     # `session` one; `value` is null unless `status` is `captured`; `name`
     # is the display name the run's declaration gave the key.

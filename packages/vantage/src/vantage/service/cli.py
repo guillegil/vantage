@@ -1,11 +1,13 @@
-"""`vantage` -- resolve configuration, fail fast, then serve; and
-`vantage push` (`service/push.py`), which sends the runs the plugin queued.
+"""`vantage` -- resolve configuration, fail fast, then serve; `vantage push`
+(`service/push.py`), which sends the runs the plugin queued; and `vantage
+user` and `vantage token` (`service/manage.py`), which manage who may use
+the database.
 
 **Serving needs the `server` extra; nothing else does.** FastAPI and
 uvicorn are imported only once the arguments ask to serve, so `vantage
-push` and `--help` work in an install without them, and serving without
-them is one line naming the extra -- checked before anything is bound or
-created.
+push`, `vantage user`, `vantage token` and `--help` work in an install
+without them, and serving without them is one line naming the extra --
+checked before anything is bound or created.
 
 **Path check at startup.** A SQLite database directory that exists but
 cannot be written to fails here, before the server accepts a request -- not
@@ -36,10 +38,11 @@ first, and the driver's own logging is silenced while the store opens.
 raises the signal again with its default action, which ends the process
 inside `Server.run`, so a `finally` here never runs on that path.
 
-**Network exposure.** Binding wider than the loopback default warns that
-there is no authentication in front of this server. The default warns about
-nothing: a warning on every normal start trains people to ignore the one
-that matters.
+**Network exposure.** Binding wider than the loopback default, to a
+database with no user, warns that nothing authenticates the requests. The
+default warns about nothing, and neither does a database with users, whose
+server requires a token: a warning on every normal start trains people to
+ignore the one that matters.
 """
 
 from __future__ import annotations
@@ -115,12 +118,15 @@ def ensure_database_directory_writable(database_path: Path) -> None:
         )
 
 
-def warn_if_bound_wide(host: str) -> None:
-    """Warn, naming the missing authentication, for any bind address but the loopback default."""
-    if host != _LOOPBACK:
+def warn_if_bound_wide(host: str, *, access_required: bool) -> None:
+    """Warn, naming the missing authentication, for any bind address but
+    the loopback default, unless the database has a user and so the server
+    requires a token."""
+    if host != _LOOPBACK and not access_required:
         _LOGGER.warning(
-            "Binding to %s: there is no authentication in front of this server yet; "
-            "anyone who can route to this host can write to the database.",
+            "Binding to %s with no user in the database: nothing authenticates requests, so "
+            "anyone who can route to this host can read and write everything. Add one with "
+            "vantage user add NAME --admin, and the server requires a token.",
             host,
         )
 
@@ -131,7 +137,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         description="Run the vantage server.",
         epilog=(
             "vantage push sends the runs pytest-vantage queued for a server it could not "
-            "reach; vantage push --help says how."
+            "reach, vantage user manages the users of the database and vantage token their "
+            "tokens; each one's --help says how."
         ),
     )
     parser.add_argument(
@@ -156,7 +163,7 @@ def _refuse(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
-def _home_directory() -> Path | None:
+def home_directory() -> Path | None:
     """`None` when there is no home directory to find: `HOME` unset and a
     uid with no passwd entry, as in a container run as an unmapped uid.
     Only the default database path needs one, so resolution decides."""
@@ -187,7 +194,7 @@ def _listen(host: str, port: int) -> socket.socket:
     return sock
 
 
-def _open_store(database: DatabaseTarget) -> ExecutionStore:
+def open_store(database: DatabaseTarget) -> ExecutionStore:
     """The store, or a one-line refusal."""
     if isinstance(database, PostgresTarget):
         return _open_postgres(database.url)
@@ -311,10 +318,16 @@ def _serve(app: FastAPI, listener: socket.socket, config: ServerConfig) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """`vantage push ...` sends the queued runs. Anything else serves:
+    """`vantage user ...` and `vantage token ...` manage users and tokens,
+    and `vantage push ...` sends the queued runs. Anything else serves:
     resolve configuration, refuse anything unusable, warn on a wide bind,
     serve, then close."""
     arguments = sys.argv[1:] if argv is None else argv
+    if arguments[:1] in (["user"], ["token"]):
+        from vantage.service import manage
+
+        command = manage.user if arguments[0] == "user" else manage.token
+        raise SystemExit(command(arguments[1:]))
     if arguments[:1] == ["push"]:
         try:
             from vantage.service.push import push
@@ -337,7 +350,7 @@ def main(argv: list[str] | None = None) -> None:
             cli_host=args.host,
             cli_port=args.port,
             cli_grace_period=args.grace_period,
-            home=_home_directory(),
+            home=home_directory(),
             xdg_data_home=os.environ.get("XDG_DATA_HOME"),
         )
     except ServerConfigError as exc:
@@ -349,15 +362,15 @@ def main(argv: list[str] | None = None) -> None:
         _refuse(f"cannot listen on {config.host} port {config.port}: {exc}")
 
     try:
-        store = _open_store(config.database)
+        store = open_store(config.database)
     except BaseException:
         listener.close()
         raise
 
-    # Warn only once the port and the database are both held: a refused
-    # start makes no bind to warn about.
-    warn_if_bound_wide(config.host)
     try:
+        # Warn only once the port and the database are both held: a refused
+        # start makes no bind to warn about.
+        warn_if_bound_wide(config.host, access_required=store.access_required())
         app = create_app(
             store, grace_period_seconds=config.grace_period_seconds, close_store_on_shutdown=True
         )
@@ -372,6 +385,8 @@ def main(argv: list[str] | None = None) -> None:
 __all__ = [
     "DatabaseDirectoryNotWritableError",
     "ensure_database_directory_writable",
+    "home_directory",
     "main",
+    "open_store",
     "warn_if_bound_wide",
 ]

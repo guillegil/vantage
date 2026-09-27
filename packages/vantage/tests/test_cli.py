@@ -36,7 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Sequence
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -242,7 +242,7 @@ def test_main_listens_where_it_was_told_hands_uvicorn_that_socket_and_warns(
     warnings = [r.getMessage() for r in caplog.records if r.name == cli.__name__]
     assert len(warnings) == 1
     assert "0.0.0.0" in warnings[0]  # noqa: S104
-    assert "authentication" in warnings[0]
+    assert "authenticates" in warnings[0]
 
 
 def test_listen_binds_and_claims_the_address_it_is_given() -> None:
@@ -506,7 +506,7 @@ def test_default_host_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None
     """A warning on every normal start trains people to ignore the one that
     matters."""
     with caplog.at_level(logging.WARNING):
-        warn_if_bound_wide("127.0.0.1")
+        warn_if_bound_wide("127.0.0.1", access_required=False)
 
     assert caplog.records == []
 
@@ -514,14 +514,42 @@ def test_default_host_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None
 def test_non_loopback_host_warns_naming_missing_authentication(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Binding wider than loopback, with no authentication in front of the
-    server, warns and names what is missing."""
+    """Binding wider than loopback, with no user to require a token of,
+    warns and names what is missing and how to add it."""
     with caplog.at_level(logging.WARNING):
-        warn_if_bound_wide("0.0.0.0")  # noqa: S104
+        warn_if_bound_wide("0.0.0.0", access_required=False)  # noqa: S104
 
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("authentication" in message for message in messages)
+    assert any("authenticates" in message for message in messages)
+    assert any("vantage user add" in message for message in messages)
     assert any("0.0.0.0" in message for message in messages)  # noqa: S104
+
+
+def test_non_loopback_host_with_users_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """A database with a user makes the server require a token, so there is
+    nothing missing to warn about."""
+    with caplog.at_level(logging.WARNING):
+        warn_if_bound_wide("0.0.0.0", access_required=True)  # noqa: S104
+
+    assert caplog.records == []
+
+
+def test_a_wide_start_on_a_database_with_users_does_not_warn(
+    tmp_path: Path,
+    served: dict[str, Any],
+    listened: list[tuple[str, int, socket.socket]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    database = tmp_path / "v.db"
+    store = SqliteExecutionStore(database)
+    store.create_user("alice", admin=True, created_at=datetime.now(timezone.utc))
+    store.close()
+
+    with caplog.at_level(logging.WARNING, logger=cli.__name__):
+        cli.main(["--database", str(database), "--host", "0.0.0.0"])  # noqa: S104
+
+    assert served["sockets"]
+    assert [r.getMessage() for r in caplog.records if r.name == cli.__name__] == []
 
 
 def test_create_app_defaults_grace_period_to_900_seconds() -> None:

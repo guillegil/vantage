@@ -73,8 +73,9 @@ The checks catch different failures:
 
 Values both sides must agree on (the 1 MiB body cap, the 64 KiB text-field
 cap, the metadata bounds and statuses, the outcome vocabulary, the timestamp
-format, the heartbeat interval behind the default grace period) are kept as a
-copy on each side. `packages/pytest-vantage/tests/test_server_contract.py`
+format, the heartbeat interval behind the default grace period, the shape of
+a token and the statuses and error codes of the refusals of a token) are
+kept as a copy on each side. `packages/pytest-vantage/tests/test_server_contract.py`
 imports both and compares every copy.
 
 ## Clean architecture with Protocol ports
@@ -85,9 +86,11 @@ core on nothing but the standard library.
 
 - **`vantage.core`** holds the domain as frozen standard-library dataclasses
   (`Execution`, `Identity`, `VcsContext`, `Result`, `CaseIdentity`,
-  `FailureEvidence`, `CapturedOutput`, `CatalogueEntry`), the pure rules
-  (how a run is presented, list projections, section summaries, metadata
-  vocabularies), and the server's configuration resolution.
+  `FailureEvidence`, `CapturedOutput`, `CatalogueEntry`, and `User`,
+  `Token` and `Grant` in `domain/access.py`), the pure rules (how a run is
+  presented, list projections, section summaries, metadata vocabularies,
+  token scopes, user names, how a token is made and digested), and the
+  server's configuration resolution.
 - **The storage port** is `ExecutionStore` in `core/ports/storage.py`, a
   `typing.Protocol`. An adapter satisfies it by shape, without importing or
   subclassing the protocol itself. It does import the core's domain and
@@ -458,6 +461,64 @@ timed out may still be stored by the server; the plugin cannot know. The
 answer is read to at most 64 KiB and must acknowledge this run's id with
 `created` or `duplicate`, or the report counts as failed.
 
+## Users, tokens and who may do what
+
+A database with no user is open: every route answers anyone, as the server
+did before it had users, and `vantage` serving a local database on a test
+machine needs nothing more. The first user closes it. Users are disabled,
+never deleted, so "a user exists" is a latch: once true it stays true, and
+every `run.recorded_by` keeps naming an existing user.
+
+- **Tokens.** `new_token` is `vantage_` and 32 random bytes; the store keeps
+  its SHA-256 (`token_digest`) and finds it by that digest, through the
+  column's unique index. A token has nothing to guess, so a fast hash is
+  enough, and nobody can choose a digest's text, so the lookup needs no
+  constant-time comparison. A token is shown once, by whatever made it.
+- **Scopes.** A token holds one or more of `read`, `record` and `admin`
+  (the `can_*` columns). `Grant.allows` needs the admin scope and an admin
+  user: `authenticate` reads the user's standing each time, so demoting a
+  user takes their admin tokens' power at once. A revoked token, and any
+  token of a disabled user, authenticates nothing.
+- **`service/access.py`** is the dependency every route declares but
+  `/capabilities` and `/openapi.yaml`, which a client asks before it can
+  know it needs a token: `requires_read` on everything `read`-tagged,
+  `requires_record` on a report and a heartbeat, `requires_admin` on
+  changing sections. It is a plain `def`, since it reads the store, so on
+  `POST /runs` it runs in the threadpool before the body is read. While the
+  server is open it asks the store whether a user exists on every request,
+  because `vantage user add` may run against the database meanwhile; once
+  one does, `app.state.access_required` keeps the answer, and the store is
+  not asked again. A token sent to an open server is refused, not ignored.
+  A 401 or 403 carries RFC 6750's `WWW-Authenticate` challenge
+  (`ChallengeError`), naming the scope that was missing and never the
+  token.
+- **Who recorded a run.** `record_session` takes `recorded_by`, the
+  caller's user or `None`. The report that creates a run stores it, and
+  every later report must come from the same caller, or the store raises
+  `ForeignRunError` before looking at whether the run is finished, and
+  writes nothing; the route answers `409 foreign_run`. The run id is the
+  client's, so this is what keeps one user from finishing another's run.
+  The heartbeat route reads the run's `recorded_by` first, which never
+  changes once the run exists, so the check races nothing.
+- **Managing them.** `vantage user` and `vantage token`
+  (`service/manage.py`) resolve and open the database as the server does,
+  never import the web framework, and create a database only for `user
+  add`. `token create` prints the token alone on stdout.
+- **The plugin** reads its token from `VANTAGE_TOKEN` alone, only once
+  `--vantage` is typed; a committed ini file or a command line would show it
+  to others. It goes in `Authorization` on every report and heartbeat, never
+  on the capability probe, and the transport follows no redirect, so it only
+  ever reaches the configured address. A vantage server's 401, 403 or 409,
+  recognised by the error its body names, becomes an `AccessRefusedError`,
+  still an `HTTPError` with that status, whose message says what to fix.
+  `ReportSettings`' `repr` leaves the token out.
+- **The outbox never holds a token.** A 401 or 403 is worth retrying
+  (`outbox.worth_retrying`): the reports are queued, and a sender with
+  another token -- `vantage push` reads `VANTAGE_TOKEN` too -- can deliver
+  them. A sender refused that way stops, as for an unreachable server,
+  since every run would be refused alike; a 409 drops the run, since no
+  token but its recorder's will ever be taken for it.
+
 ## Request handling and concurrency
 
 `create_app(store, grace_period_seconds=900)` builds the app, mounts the
@@ -479,8 +540,9 @@ would stall every other request, heartbeats included.
   FastAPI runs on AnyIO's worker threads (40 by default).
 - **`GET /capabilities` and `GET /openapi.yaml` are `async`** and never block,
   so they answer even while every worker thread waits on the store. The
-  dependencies that read `app.state` are `async` for the same reason: an
-  attribute read is not worth a thread.
+  dependencies that only read `app.state` are `async` for the same reason:
+  an attribute read is not worth a thread. The one that authorizes a
+  request reads the store, and is a plain `def`.
 
 **The store's lock.** `SqliteExecutionStore` keeps one `sqlite3` connection,
 shared by every thread, and a `threading.Lock` held across every statement
@@ -524,11 +586,13 @@ under `REPEATABLE READ`. A write is safe against the same write from
 another process by construction, never by a check first:
 
 - `record_session` is one transaction. The run is inserted with
-  `ON CONFLICT (id) DO UPDATE ... WHERE` the stored run has no exit status
-  and the report has one, and whether it was created comes from that
-  statement's own result. The run row is then locked (`SELECT ... FOR
-  UPDATE`), so concurrent reports of one run take their turn at the
-  per-run metadata bound and the results. Catalogue rows are upserted in
+  `ON CONFLICT (id) DO UPDATE ... WHERE` the stored run has no exit status,
+  the report has one and both name the same recorder, and whether it was
+  created comes from that statement's own result. The run row is then
+  locked (`SELECT ... FOR UPDATE`), so concurrent reports of one run take
+  their turn at the per-run metadata bound and the results; a report of
+  another caller's run is refused there, rolling back a transaction that
+  changed nothing. Catalogue rows are upserted in
   sorted node id order, so two reports lock them in the same order and
   cannot deadlock; results and metadata insert with `ON CONFLICT DO
   NOTHING`.
@@ -536,6 +600,10 @@ another process by construction, never by a check first:
   lock keyed on the namespace, so the section bound holds across servers.
 - `touch_last_contact` is one conditional `UPDATE`, and never moves the
   contact backwards.
+- `create_user` is one insert that does nothing on a taken name, and
+  `create_token` one `INSERT ... SELECT` from its user, which inserts
+  nothing when there is none: users are never deleted, so the user found
+  stays.
 - A transaction that fails with a serialization failure or a deadlock is
   retried a bounded number of times; any other error propagates.
 
@@ -575,7 +643,7 @@ the repository root the plugin sends.
 
 **`schema.sql` is applied whole, once.** On first open, when the `meta` table
 does not exist, the whole file runs in one `BEGIN IMMEDIATE` transaction that
-also stamps `meta.schema_version` (currently 6). Reopening issues no DDL. A
+also stamps `meta.schema_version` (currently 7). Reopening issues no DDL. A
 database carrying any other stamp, older, newer, missing or not a number, is
 refused with `SchemaVersionError` before anything in it changes, and the
 `vantage` command turns that into a one-line refusal. There are no
@@ -587,11 +655,12 @@ logical schema, and change together.
 
 | Table | Holds |
 | --- | --- |
-| `run` | one row per session: times, exit status, interruption, VCS fields, last contact |
+| `run` | one row per session: times, exit status, interruption, VCS fields, last contact, the user who recorded it |
 | `test_case` | the catalogue: one row per node id ever seen, with first and last sighting |
 | `result` | one row per test per run, unique on `(run_id, node_id)` |
 | `run_metadata_file`, `run_metadata` | each declared file's status; each key's status and value, whether a file or the session gave it, its display name, and whether the declaration named it |
 | `user_setting` | namespaced JSON values; section definitions live here |
+| `account`, `access_token` | one row per user, never deleted; one per token ever made, by its digest, with its scopes and when it was revoked |
 | `meta` | the schema version, and when and by whom the database was created |
 
 **Timestamps are fixed-width UTC text**, `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`,
@@ -612,9 +681,10 @@ its row: run, catalogue, results, metadata.
   value.
 - Whether the report created the run comes from an existence probe inside the
   transaction, since SQLite's row count cannot tell an insert from an update.
-  The probe reads the exit status too: a report reaching a finished run
-  returns there and stores nothing, since a client sends the finish last and
-  anything after it is a replay. PostgreSQL reads it under the run's row
+  The probe reads who recorded the run first, and refuses another caller's
+  report before anything is written; then the exit status: a report reaching
+  a finished run returns there and stores nothing, since a client sends the
+  finish last and anything after it is a replay. PostgreSQL reads it under the run's row
   lock, after an upsert that changed nothing.
 - Results insert with `ON CONFLICT DO NOTHING`, metadata rows likewise, so a
   replay changes nothing. A metadata key is inserted only while the run
@@ -712,7 +782,8 @@ on over any `&` piece without an `=`. A `PostgresTarget`'s `repr` is
 redacted too.
 
 `service/cli.py` acts on the result, once it knows it is to serve: `vantage
-push` is handed off before argument parsing, and FastAPI, Uvicorn and the
+push`, `vantage user` and `vantage token` are handed off before argument
+parsing, and FastAPI, Uvicorn and the
 app are imported only after it, so an install without the `server` extra is
 refused in one line naming the extra, before anything is bound or created.
 Any other `ImportError` is a broken installation and raised as it is. For
@@ -723,7 +794,8 @@ its driver, and a driver that is not installed (psycopg or psycopg-pool
 absent, or psycopg without a libpq) is refused with one line naming the
 `postgres` extra. It then opens the store, refuses any failure with one
 `vantage: ...` line and exit status 1, warns about a bind other than
-`127.0.0.1` once the database is open, and closes the store on shutdown. A
+`127.0.0.1` once the database is open, unless the database has a user and
+so the server requires a token, and closes the store on shutdown. A
 PostgreSQL refusal names the redacted URL, and quotes the driver's message
 on one line with the URL's password taken out by `redact_message`, as
 written and percent-decoded: libpq quotes a percent-escape it cannot
@@ -750,7 +822,9 @@ fails if one appears. pytest honours `pytest_plugins` in the root
 `conftest.py` and in test modules, but fails collection over one in a
 package-level `conftest.py`, so the workspace has no package-level conftest.
 The root `conftest.py` registers `pytester` and `vantage_test_server` for
-every test; a test module that needs `store_fixtures` loads it with its own
+every test, and removes `VANTAGE_TOKEN` from each test's environment, which
+inner sessions and `vantage push` inherit: a token exported for a real
+server would be refused by every test server without users; a test module that needs `store_fixtures` loads it with its own
 `pytest_plugins = ["store_fixtures"]`.
 
 `pythonpath` puts both `tests/` directories on the import path, so the support
@@ -768,7 +842,7 @@ plugins, need none.
 | `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]`, `[sqlite]` and `[postgres]`, the last skipped without `VANTAGE_TEST_POSTGRES_URL`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
 | `packages/vantage/tests/sqlite_rows.py` | reads a run's metadata rows, whose file rows no port method returns, with plain SQL on a separate connection |
 | `packages/vantage/tests/loopback_server.py` | `LoopbackServer`: a real Uvicorn server on a thread, on a `127.0.0.1` port the OS assigns, with bounded start and stop |
-| `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a directory, recording each request's method and path, for the plugin's end-to-end tests, and able to serve a local database the plugin wrote; `ServerGate` and the `server_gate` fixture: one address that refuses connections, then forwards them to a server, then resets them after a given number, for a server that is down, back, or gone by a session's finish |
+| `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a directory, recording each request's method and path, for the plugin's end-to-end tests, and able to serve a local database the plugin wrote, and to make a user and a token of theirs, which closes it; `ServerGate` and the `server_gate` fixture: one address that refuses connections, then forwards them to a server, then resets them after a given number, for a server that is down, back, or gone by a session's finish |
 
 `slow` marks the tests that measure elapsed time; `-m 'not slow'` skips them
 locally, and CI always runs everything. The tests that need a PostgreSQL

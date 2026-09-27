@@ -41,15 +41,22 @@ class Ingested:
     ignored: tuple[str, ...]
 
 
-def ingest(report: object, store: ExecutionStore, *, received_at: datetime) -> Ingested:
+def ingest(
+    report: object,
+    store: ExecutionStore,
+    *,
+    received_at: datetime,
+    recorded_by: str | None = None,
+) -> Ingested:
     """Validate `report`, a decoded JSON payload, convert it and record it
-    in `store` as received at `received_at`.
+    in `store` as received at `received_at`, sent by the user `recorded_by`,
+    or by nobody in particular.
 
     Raises `InvalidReportError` for a payload that is not a session report,
     before the store is touched. Whatever the store raises passes through
-    unchanged. `created` is the store's own answer, decided inside its write
-    transaction: asking first whether the run exists would race another
-    report for the same run.
+    unchanged, `ForeignRunError` included. `created` is the store's own
+    answer, decided inside its write transaction: asking first whether the
+    run exists would race another report for the same run.
     """
     try:
         payload = SessionReport.model_validate(report)
@@ -62,7 +69,11 @@ def ingest(report: object, store: ExecutionStore, *, received_at: datetime) -> I
     metadata = to_run_metadata(payload.metadata)
 
     created = store.record_session(
-        execution, results=results, received_at=received_at, metadata=metadata
+        execution,
+        results=results,
+        received_at=received_at,
+        metadata=metadata,
+        recorded_by=recorded_by,
     )
     return Ingested(
         run_id=payload.run.id,

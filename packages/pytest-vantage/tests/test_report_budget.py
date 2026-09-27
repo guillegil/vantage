@@ -463,9 +463,11 @@ def wire_sizes(monkeypatch: pytest.MonkeyPatch) -> list[tuple[dict[str, object],
     on its way through the real `transport.send`."""
     sent: list[tuple[dict[str, object], int]] = []
 
-    def _measure_then_send(address: str, report: dict[str, object], *, timeout: float) -> None:
+    def _measure_then_send(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
         sent.append((report, len(json.dumps(report).encode("utf-8"))))
-        transport.send(address, report, timeout=timeout)
+        transport.send(address, report, timeout=timeout, token=token)
 
     # The module imported at collection, not a dotted path: `pytester`
     # restores `sys.modules` after each test, and the path would resolve to

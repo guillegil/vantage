@@ -21,12 +21,14 @@ import struct
 import threading
 import time
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from loopback_server import LoopbackServer
 from sqlite_rows import read_metadata
 from starlette.types import Receive, Scope, Send
+from vantage.core.domain.access import READ_SCOPE, RECORD_SCOPE, new_token, token_digest
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.result import CatalogueEntry, Result
 from vantage.core.ports.storage import MAX_PAGE_ITEMS, RunMetadata
@@ -99,6 +101,29 @@ class VantageTestServer(LoopbackServer):
         """The catalogue entry for one node id, or `None` if the server has
         never observed it."""
         return self.store.get_catalogue_entry(node_id)
+
+    def token(self, user: str, *scopes: str) -> str:
+        """A new token of `user` holding `scopes`, read and record when none
+        is named. The user is made first if nobody has that name, as an
+        admin, which closes the server: from then on it needs a token."""
+        now = datetime.now(timezone.utc)
+        if self.store.get_user(user) is None:
+            self.store.create_user(user, admin=True, created_at=now)
+        token = new_token()
+        self.store.create_token(
+            user,
+            digest=token_digest(token),
+            label="",
+            scopes=frozenset(scopes or (READ_SCOPE, RECORD_SCOPE)),
+            created_at=now,
+        )
+        return token
+
+    def recorded_by(self, run_id: str) -> str | None:
+        """Who the server says recorded `run_id`."""
+        detail = self.store.get_run_detail(run_id)
+        assert detail is not None, f"no run {run_id}"
+        return detail.recorded_by
 
 
 def wait_for_execution(server: VantageTestServer, *, timeout: float = 15.0) -> Execution:

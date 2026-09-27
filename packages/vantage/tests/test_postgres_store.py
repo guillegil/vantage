@@ -245,13 +245,14 @@ _CHECK_IN = re.compile(r"CHECK \((\w+) IN \(([^)]*)\)\)")
 
 def _vocabularies(package: str) -> list[tuple[str, tuple[str, ...]]]:
     """Every `CHECK (<column> IN (...))` in `package`'s `schema.sql`, but
-    the SQLite one on `declared`, a flag PostgreSQL stores as a boolean."""
+    the SQLite ones holding a flag to 0 or 1, which PostgreSQL stores as a
+    boolean."""
     schema = importlib.resources.files(package).joinpath("schema.sql").read_text("utf-8")
-    return sorted(
+    checks = (
         (column, tuple(sorted(value.strip().strip("'") for value in values.split(","))))
         for column, values in _CHECK_IN.findall(schema)
-        if column != "declared"
     )
+    return sorted(check for check in checks if check[1] != ("0", "1"))
 
 
 def test_the_check_constraints_accept_what_the_sqlite_schemas_accept() -> None:

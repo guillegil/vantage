@@ -20,6 +20,10 @@ long as a large body takes.
 U+FFFD (`ingestion/text.py`), so a delete naming U+0000 matches no section and
 is answered without asking the store.
 
+**Reading sections needs the read scope, changing them the admin scope**,
+once the server has a user (`service/access.py`): the definitions group
+every user's results, so they are changed by those who run the server.
+
 **Section definitions are read fresh on every request, never cached.** No
 `app.state` field remembers them between requests, so an edit takes effect
 on the very next read, with no restart and no invalidation logic.
@@ -53,6 +57,7 @@ from vantage.core.domain.sections import (
 from vantage.core.ports.storage import ExecutionStore, NamespaceFullError
 from vantage.ingestion.decode import decode_json
 from vantage.ingestion.text import NUL
+from vantage.service.access import requires_admin, requires_read
 from vantage.service.body import read_bounded_body, require_json_media_type
 from vantage.service.dependencies import get_store
 from vantage.service.errors import (
@@ -121,7 +126,7 @@ def _encodable(text: str) -> bool:
     return True
 
 
-@router.get("/config/sections")
+@router.get("/config/sections", dependencies=[Depends(requires_read)])
 def list_sections(store: ExecutionStore = Depends(get_store)) -> SectionListResponse:
     definitions = _load_definitions(store)
     items = [SectionResponse(name=d.name, prefix=d.prefix) for d in definitions]
@@ -166,7 +171,7 @@ def _upsert(store: ExecutionStore, body: bytes) -> tuple[bool, SectionResponse]:
     return created, SectionResponse(name=name, prefix=normalized_prefix)
 
 
-@router.post("/config/sections")
+@router.post("/config/sections", dependencies=[Depends(requires_admin)])
 async def upsert_section(request: Request, store: ExecutionStore = Depends(get_store)) -> Response:
     require_json_media_type(request)
     body = await read_bounded_body(request, MAX_SECTION_BODY_BYTES)
@@ -174,7 +179,7 @@ async def upsert_section(request: Request, store: ExecutionStore = Depends(get_s
     return JSONResponse(status_code=201 if created else 200, content=section.model_dump())
 
 
-@router.delete("/config/sections", status_code=204)
+@router.delete("/config/sections", status_code=204, dependencies=[Depends(requires_admin)])
 def delete_section(name: str = Query(...), store: ExecutionStore = Depends(get_store)) -> Response:
     stored_name = _stored_name(name)
     if NUL in stored_name or not store.delete_setting(TEST_SECTIONS_NAMESPACE, stored_name):
@@ -196,7 +201,7 @@ def _section_summary_response(summary: SectionSummary) -> SectionSummaryResponse
     )
 
 
-@router.get("/runs/{run_id}/sections")
+@router.get("/runs/{run_id}/sections", dependencies=[Depends(requires_read)])
 def get_run_sections(
     run_id: str = Path(pattern=IDENTITY_PATTERN), store: ExecutionStore = Depends(get_store)
 ) -> RunSectionSummaryResponse:

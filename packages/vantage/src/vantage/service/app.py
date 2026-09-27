@@ -17,6 +17,12 @@ to the threadpool themselves (`service/body.py`). The
 capabilities and interface-document routes never block and stay `async`, so
 they answer even while every worker thread waits on the store.
 
+**Every route but two needs a token once the database has a user**
+(`service/access.py`): the capability advertisement and the interface
+document stay open, since a client asks them before it can know it needs
+one. `app.state.access_required` starts false and becomes true, for good,
+the first time a request finds a user.
+
 **Every rejection is shaped by `service/errors.py`**, registered here once,
 so no route can answer a rejection in a different shape -- nor can the
 router, for a path nothing serves or a method a path does not take.
@@ -85,6 +91,7 @@ def create_app(
     app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan)
     app.state.store = store
     app.state.grace_period = grace_period
+    app.state.access_required = False
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(read_router, prefix="/api/v1")
     app.include_router(capabilities_router, prefix="/api/v1")

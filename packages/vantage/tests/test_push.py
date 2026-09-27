@@ -52,6 +52,7 @@ class _Queue:
     opened: list[Path] = field(default_factory=list)
     closed: int = 0
     sends: list[tuple[str, float, float]] = field(default_factory=list)
+    tokens: list[str | None] = field(default_factory=list)
 
     def module(self) -> types.ModuleType:
         queue = self
@@ -78,9 +79,15 @@ class _Queue:
             return database.with_name(database.name + "-outbox")
 
         def send_queued(
-            outbox: Outbox, server: str, *, timeout: float, budget: float
+            outbox: Outbox,
+            server: str,
+            *,
+            timeout: float,
+            budget: float,
+            token: str | None = None,
         ) -> _SendSummary:
             queue.sends.append((server, timeout, budget))
+            queue.tokens.append(token)
             if server in queue.failing:
                 raise queue.failing[server]
             runs = queue.entries.setdefault(server, [])
@@ -112,6 +119,7 @@ def queue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[_Queue]:
     monkeypatch.delattr(vantage.service, "push", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("VANTAGE_TOKEN", raising=False)
     yield queue
     sys.modules.pop(_PUSH_MODULE, None)
     if hasattr(vantage.service, "push"):
@@ -170,6 +178,59 @@ def test_each_run_gets_the_timeout_and_the_queue_no_budget_beyond_it(
         ("http://alpha:8765", 10.0, math.inf),
         ("http://alpha:8765", 2.5, math.inf),
     ]
+
+
+def test_every_queue_goes_with_the_token_in_vantage_token(
+    queue: _Queue,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server with users takes a run only with a token, and the queue
+    holds none: the one pushing it brings their own."""
+    _queued(queue, _default_database(tmp_path), alpha=["r1"], beta=["r2"])
+    monkeypatch.setenv("VANTAGE_TOKEN", "vantage_secret")
+
+    code, _lines, _err = _push(capsys)
+
+    assert code == 0
+    assert queue.tokens == ["vantage_secret", "vantage_secret"]
+
+
+def test_an_unset_or_empty_vantage_token_sends_none(
+    queue: _Queue,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _queued(queue, _default_database(tmp_path), alpha=["r1"])
+    _push(capsys)
+    monkeypatch.setenv("VANTAGE_TOKEN", "")
+    _queued(queue, _default_database(tmp_path), alpha=["r2"])
+    _push(capsys)
+
+    assert queue.tokens == [None, None]
+
+
+@pytest.mark.parametrize("token", ["two words", "caf\u00e9", "x" * 513])
+def test_a_vantage_token_that_is_no_token_is_refused_without_repeating_it(
+    queue: _Queue,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    token: str,
+) -> None:
+    _queued(queue, _default_database(tmp_path), alpha=["r1"])
+    monkeypatch.setenv("VANTAGE_TOKEN", token)
+
+    code, lines, err = _push(capsys)
+
+    assert (code, lines) == (1, [])
+    assert err == (
+        "vantage: VANTAGE_TOKEN is not a token: a token is at most 512 printable ASCII "
+        "characters, with no spaces\n"
+    )
+    assert queue.sends == []
 
 
 def test_to_sends_only_the_runs_queued_for_that_address(
@@ -473,7 +534,7 @@ _WITHOUT_THE_SERVER_EXTRA = textwrap.dedent(
     outbox.Outbox = Outbox
     outbox.SendSummary = Summary
     outbox.outbox_path = lambda database: database.with_name(database.name + "-outbox")
-    outbox.send_queued = lambda box, server, *, timeout, budget: Summary(server)
+    outbox.send_queued = lambda box, server, *, timeout, budget, token: Summary(server)
     sys.modules[outbox.__name__] = outbox
 
     from vantage.service.cli import main
