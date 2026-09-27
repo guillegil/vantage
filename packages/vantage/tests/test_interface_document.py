@@ -24,6 +24,7 @@ import importlib.resources
 import re
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any, get_args
 
@@ -33,7 +34,15 @@ from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from pydantic import BaseModel
-from vantage.core.domain.access import RECORD_SCOPE, SCOPES, new_token, token_digest
+from vantage.core.domain.access import (
+    ADMIN_SCOPE,
+    READ_SCOPE,
+    RECORD_SCOPE,
+    SCOPES,
+    USER_NAME_PATTERN,
+    new_token,
+    token_digest,
+)
 from vantage.core.domain.liveness import PRESENTATIONS
 from vantage.core.domain.metadata import (
     FILE_STATUSES,
@@ -42,6 +51,7 @@ from vantage.core.domain.metadata import (
     METADATA_SOURCES,
 )
 from vantage.core.domain.result import OUTCOMES
+from vantage.core.ports.storage import ExecutionStore
 from vantage.ingestion.schemas import (
     MetadataFileReport,
     MetadataKeyReport,
@@ -55,8 +65,10 @@ from vantage.ingestion.schemas import (
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
+from vantage.service.routes.users import MAX_USERS_BODY_BYTES
 from vantage.service.schemas import (
     Acknowledgement,
+    CreatedTokenResponse,
     FailureProjectionResponse,
     HeartbeatAcknowledgement,
     HistoryEntryResponse,
@@ -78,6 +90,13 @@ from vantage.service.schemas import (
     SectionResponse,
     SectionSummaryResponse,
     SectionUpsertRequest,
+    TokenCreateRequest,
+    TokenListResponse,
+    TokenResponse,
+    UserCreateRequest,
+    UserListResponse,
+    UserResponse,
+    UserUpdateRequest,
 )
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
@@ -222,16 +241,36 @@ def test_every_read_operation_is_get_and_every_write_operation_is_not() -> None:
     assert ("POST", "/runs/{run_id}/heartbeat") in write_ops
 
 
+def _admin(store: ExecutionStore, name: str = "alice") -> dict[str, str]:
+    """Make `name` an admin, with a token holding every scope, which closes
+    the server, and return the header that sends the token."""
+    now = datetime.now(timezone.utc)
+    store.create_user(name, admin=True, created_at=now)
+    token = new_token()
+    store.create_token(
+        name, digest=token_digest(token), label="", scopes=frozenset(SCOPES), created_at=now
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
     """A binding table maps every `(method, path)` the document declares to
     a callable producing valid parameters, driven against a dedicated
-    fixture database. Includes `GET /api/v1/capabilities` and
-    `GET /api/v1/openapi.yaml` themselves."""
+    fixture database with an admin's token holding every scope, since the
+    users and tokens paths answer nothing else. Includes
+    `GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml` themselves."""
     document = _parsed_document()
     declared = _declared_operations(document)
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    client = TestClient(create_app(store))
+    client = TestClient(create_app(store), headers=_admin(store))
     run = f"/api/v1/runs/{'6' * 32}"
+    minted: dict[str, Any] = {}
+
+    def mint() -> httpx.Response:
+        response = client.post("/api/v1/tokens", json={"user": "probe", "label": "probe"})
+        minted.update(response.json())
+        return response
+
     node_id = "tests/test_interface_document_probe.py::test_x"
     report = _report(run.rsplit("/", 1)[-1])
     # A single passing result, present so `GET /runs/{run_id}/result` has
@@ -291,6 +330,18 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
         (
             ("DELETE", "/config/sections"),
             lambda: client.delete("/api/v1/config/sections", params={"name": "InterfaceProbe"}),
+        ),
+        (("POST", "/users"), lambda: client.post("/api/v1/users", json={"name": "probe"})),
+        (
+            ("PATCH", "/users/{name}"),
+            lambda: client.patch("/api/v1/users/probe", json={"admin": True}),
+        ),
+        (("GET", "/users"), lambda: client.get("/api/v1/users")),
+        (("POST", "/tokens"), mint),
+        (("GET", "/tokens"), lambda: client.get("/api/v1/tokens")),
+        (
+            ("POST", "/tokens/{token_id}/revoke"),
+            lambda: client.post(f"/api/v1/tokens/{minted['id']}/revoke"),
         ),
     ]
     bound_keys = {key for key, _ in ordered_bindings}
@@ -382,6 +433,15 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
             lambda: client.delete("/api/v1/config/sections", params={"name": "never-stored"}),
         ),
         (("DELETE", "/config/sections"), lambda: client.delete("/api/v1/config/sections")),
+        (("GET", "/users"), lambda: client.get("/api/v1/users")),
+        (("POST", "/users"), lambda: client.post("/api/v1/users", json={"name": "a"})),
+        (
+            ("PATCH", "/users/{name}"),
+            lambda: client.patch("/api/v1/users/a", json={"admin": True}),
+        ),
+        (("GET", "/tokens"), lambda: client.get("/api/v1/tokens")),
+        (("POST", "/tokens"), lambda: client.post("/api/v1/tokens", json={"user": "a"})),
+        (("POST", "/tokens/{token_id}/revoke"), lambda: client.post("/api/v1/tokens/1/revoke")),
     ]
 
 
@@ -395,13 +455,75 @@ def _undocumented_statuses(
     }
 
 
+def _users_probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
+    """One request per rejection the users and tokens paths give an admin,
+    on a server whose admin is `alice` and has a user `bob`."""
+    json_header = {"content-type": "application/json"}
+    too_large = b" " * (MAX_USERS_BODY_BYTES + 1)
+    requests: list[tuple[tuple[str, str], _Call]] = []
+    for key, path, send in (
+        (("POST", "/users"), "/api/v1/users", client.post),
+        (("PATCH", "/users/{name}"), "/api/v1/users/bob", client.patch),
+        (("POST", "/tokens"), "/api/v1/tokens", client.post),
+    ):
+        requests += [
+            (key, partial(send, path, content=b"{}", headers={"content-type": "x/y"})),
+            (key, partial(send, path, content=b"{", headers=json_header)),
+            (key, partial(send, path, content=too_large, headers=json_header)),
+            (key, partial(send, path, content=b"[]", headers=json_header)),
+        ]
+    return [
+        *requests,
+        (("POST", "/users"), lambda: client.post("/api/v1/users", json={"name": "Bob"})),
+        (("POST", "/users"), lambda: client.post("/api/v1/users", json={"name": "bob"})),
+        (("PATCH", "/users/{name}"), lambda: client.patch("/api/v1/users/bob", json={})),
+        (
+            ("PATCH", "/users/{name}"),
+            lambda: client.patch("/api/v1/users/ghost", json={"admin": True}),
+        ),
+        (
+            ("PATCH", "/users/{name}"),
+            lambda: client.patch("/api/v1/users/alice", json={"admin": False}),
+        ),
+        (("POST", "/tokens"), lambda: client.post("/api/v1/tokens", json={"user": "ghost"})),
+        (
+            ("POST", "/tokens"),
+            lambda: client.post("/api/v1/tokens", json={"user": "bob", "scopes": []}),
+        ),
+        (
+            ("POST", "/tokens"),
+            lambda: client.post("/api/v1/tokens", json={"user": "bob", "label": "a\nb"}),
+        ),
+        (
+            ("POST", "/tokens"),
+            lambda: client.post("/api/v1/tokens", json={"user": "bob", "scopes": ["admin"]}),
+        ),
+        (("POST", "/tokens/{token_id}/revoke"), lambda: client.post("/api/v1/tokens/999/revoke")),
+        (("POST", "/tokens/{token_id}/revoke"), lambda: client.post("/api/v1/tokens/0/revoke")),
+    ]
+
+
 def test_every_status_the_server_answers_is_documented() -> None:
     """A generated client decides what to handle from the listed statuses,
-    so each rejection the server gives must be listed. Half 2 removes one
-    code from a copy of the document and proves the check reports it."""
+    so each rejection the server gives must be listed: on an open server,
+    and on one whose admin manages users. Half 2 removes one code from a
+    copy of the document and proves the check reports it."""
     client = TestClient(create_app(InMemoryExecutionStore()))
     observed = {(*key, call().status_code) for key, call in _probes(client)}
+    closed = InMemoryExecutionStore()
+    admin = _admin(closed)
+    closed.create_user("bob", admin=False, created_at=datetime.now(timezone.utc))
+    admin_client = TestClient(create_app(closed), headers=admin)
+    observed |= {(*key, call().status_code) for key, call in _users_probes(admin_client)}
     assert all(status >= 400 for _, _, status in observed)
+    assert {status for method, path, status in observed if path.startswith("/users")} == {
+        400,
+        404,
+        409,
+        413,
+        415,
+        422,
+    }
 
     assert _undocumented_statuses(_parsed_document(), observed) == set()
 
@@ -413,10 +535,13 @@ def test_every_status_the_server_answers_is_documented() -> None:
 _ACCESS_RUN = "5" * 32
 
 
-def _access_requests(client: TestClient, headers: dict[str, str]) -> dict[tuple[str, str], _Call]:
+def _access_requests(
+    client: TestClient, headers: dict[str, str], *, victim: int = 1
+) -> dict[tuple[str, str], _Call]:
     """One request per documented operation, sending `headers`, in an order
     where each finds what it needs: the run reported first, the section
-    posted before it is deleted."""
+    posted before it is deleted. The users bindings add `carol`, demote and
+    mint a token for `bob`, and revoke the token `victim`."""
     run = f"/api/v1/runs/{_ACCESS_RUN}"
     node = {"node_id": "tests/test_a.py::test_one"}
     section = {"name": "AccessProbe", "prefix": "tests/access-probe"}
@@ -466,7 +591,49 @@ def _access_requests(client: TestClient, headers: dict[str, str]) -> dict[tuple[
         ("DELETE", "/config/sections"): lambda: client.delete(
             "/api/v1/config/sections", params={"name": section["name"]}, headers=headers
         ),
+        ("POST", "/users"): lambda: client.post(
+            "/api/v1/users", json={"name": "carol"}, headers=headers
+        ),
+        ("PATCH", "/users/{name}"): lambda: client.patch(
+            "/api/v1/users/bob", json={"admin": False}, headers=headers
+        ),
+        ("GET", "/users"): lambda: client.get("/api/v1/users", headers=headers),
+        ("POST", "/tokens"): lambda: client.post(
+            "/api/v1/tokens", json={"user": "bob"}, headers=headers
+        ),
+        ("GET", "/tokens"): lambda: client.get("/api/v1/tokens", headers=headers),
+        ("POST", "/tokens/{token_id}/revoke"): lambda: client.post(
+            f"/api/v1/tokens/{victim}/revoke", headers=headers
+        ),
     }
+
+
+def _users_operation(operation: Mapping[str, Any]) -> bool:
+    return "users" in operation.get("tags", [])
+
+
+def test_an_open_server_serves_every_path_but_the_users_ones() -> None:
+    """Driven by the document, with no token and no user: every operation
+    tagged `users` answers `409 open_server`, and every other one serves
+    anyone, as before the server had users. Nothing asked makes a user."""
+    store = InMemoryExecutionStore()
+    client = TestClient(create_app(store))
+    document = _parsed_document()
+    requests = _access_requests(client, {})
+    assert set(requests) == _declared_operations(document)
+    observed: set[tuple[str, str, int]] = set()
+
+    for (method, path), call in requests.items():
+        response = call()
+        observed.add((method, path, response.status_code))
+        if _users_operation(document["paths"][path][method.lower()]):
+            assert response.status_code == 409, (method, path, response.text)
+            assert response.json()["error"] == "open_server"
+        else:
+            assert 200 <= response.status_code < 300, (method, path, response.text)
+
+    assert store.access_required() is False
+    assert _undocumented_statuses(document, {key for key in observed if key[2] >= 400}) == set()
 
 
 def _documented_scope(operation: Mapping[str, Any]) -> str | None:
@@ -501,7 +668,10 @@ def test_every_operation_needs_the_scope_its_document_names() -> None:
 
     client = TestClient(create_app(store))
     document = _parsed_document()
-    anonymous = _access_requests(client, {})
+    bobs = bearer("bob", {RECORD_SCOPE})
+    bearer("bob", {READ_SCOPE})
+    victim = store.list_tokens(user="bob")[-1].id
+    anonymous = _access_requests(client, {}, victim=victim)
     assert set(anonymous) == _declared_operations(document)
     observed: set[tuple[str, str, int]] = set()
 
@@ -512,8 +682,12 @@ def test_every_operation_needs_the_scope_its_document_names() -> None:
         if scope is not None:
             lacking = bearer("alice", set(SCOPES) - {scope})
             holding = bearer("alice", {scope})
-            answered["lacking"] = _access_requests(client, lacking)[key]().status_code
-            answered["holding"] = _access_requests(client, holding)[key]().status_code
+            answered["lacking"] = _access_requests(client, lacking, victim=victim)[
+                key
+            ]().status_code
+            answered["holding"] = _access_requests(client, holding, victim=victim)[
+                key
+            ]().status_code
             assert answered["none"] == 401, (key, answered)
             assert answered["lacking"] == 403, (key, answered)
             assert 200 <= answered["holding"] < 300, (key, answered)
@@ -521,13 +695,40 @@ def test_every_operation_needs_the_scope_its_document_names() -> None:
             assert answered["none"] == 200, (key, answered)
         observed |= {(method, path, status) for status in answered.values() if status >= 400}
 
-    bobs = bearer("bob", {RECORD_SCOPE})
     for key in (("POST", "/runs"), ("POST", "/runs/{run_id}/heartbeat")):
         status = _access_requests(client, bobs)[key]().status_code
         assert status == 409, key
         observed.add((*key, status))
 
     assert _undocumented_statuses(document, observed) == set()
+
+
+def test_every_admin_operation_refuses_a_non_admins_token_holding_every_scope() -> None:
+    """The admin scope is not enough: its user must be an admin now. A
+    token holding every scope, made for a user who is not one, as the store
+    allows and only `authenticate` catches, gets 403 on every operation
+    whose `403` names the admin scope."""
+    store = InMemoryExecutionStore()
+    now = datetime.now(timezone.utc)
+    store.create_user("bob", admin=False, created_at=now)
+    token = new_token()
+    store.create_token(
+        "bob", digest=token_digest(token), label="", scopes=frozenset(SCOPES), created_at=now
+    )
+    client = TestClient(create_app(store))
+    document = _parsed_document()
+    requests = _access_requests(client, {"Authorization": f"Bearer {token}"})
+    admin_operations = [
+        key
+        for key in requests
+        if _documented_scope(document["paths"][key[1]][key[0].lower()]) == ADMIN_SCOPE
+    ]
+
+    assert len(admin_operations) == 8
+    for key in admin_operations:
+        response = requests[key]()
+        assert response.status_code == 403, (key, response.text)
+    assert [user.name for user in store.list_users()] == ["bob"]
 
 
 def test_every_response_declares_its_body() -> None:
@@ -593,12 +794,17 @@ def test_every_documented_integer_bound_is_the_one_the_server_enforces(tmp_path:
     document = _parsed_document()
     schemas = document["components"]["schemas"]
     offset = document["components"]["parameters"]["offset"]["schema"]
+    token_id = document["components"]["parameters"]["token_id"]["schema"]
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
-    client = TestClient(create_app(store))
+    client = TestClient(create_app(store), headers=_admin(store))
     try:
         assert client.get("/api/v1/runs", params={"offset": offset["maximum"]}).status_code == 200
         past = client.get("/api/v1/runs", params={"offset": offset["maximum"] + 1})
         assert past.status_code == 422
+        revoke = "/api/v1/tokens/{}/revoke"
+        assert client.post(revoke.format(token_id["maximum"])).status_code == 404
+        assert client.post(revoke.format(token_id["maximum"] + 1)).status_code == 422
+        assert client.post(revoke.format(token_id["minimum"] - 1)).status_code == 422
 
         cases = [
             (field, value, expected)
@@ -615,6 +821,37 @@ def test_every_documented_integer_bound_is_the_one_the_server_enforces(tmp_path:
             assert response.status_code == expected, (field, value)
     finally:
         store.close()
+
+
+def test_the_created_token_is_declared_and_sent_as_not_to_be_stored() -> None:
+    """The one answer that carries a token says no cache may keep it, in
+    the document and on the wire, and it is the only one that does."""
+    document = _parsed_document()
+    created = document["paths"]["/tokens"]["post"]["responses"]["201"]
+    store = InMemoryExecutionStore()
+    client = TestClient(create_app(store), headers=_admin(store))
+
+    response = client.post("/api/v1/tokens", json={"user": "alice"})
+
+    assert set(created["headers"]) == {"Cache-Control"}
+    assert response.status_code == 201
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "Cache-Control" not in client.get("/api/v1/tokens").headers
+    headed = [
+        (method, path, status)
+        for path, operations in document["paths"].items()
+        for method, operation in operations.items()
+        for status, answer in operation["responses"].items()
+        if "headers" in answer
+    ]
+    assert headed == [("post", "/tokens", "201")]
+
+
+def test_the_documented_user_name_pattern_is_the_domains() -> None:
+    """The document spells the domain's anchors the way JSON Schema does."""
+    declared = _declared_schemas()["UserCreateRequest"]["properties"]["name"]["pattern"]
+
+    assert declared == USER_NAME_PATTERN.replace("\\A", "^").replace("\\Z", "$")
 
 
 # --- Schema checks ----------------------------------------------------------
@@ -637,6 +874,9 @@ _REQUEST_SCHEMAS: dict[str, type[BaseModel]] = {
     "MetadataFileReport": MetadataFileReport,
     "MetadataValueReport": MetadataValueReport,
     "SectionUpsertRequest": SectionUpsertRequest,
+    "UserCreateRequest": UserCreateRequest,
+    "UserUpdateRequest": UserUpdateRequest,
+    "TokenCreateRequest": TokenCreateRequest,
 }
 _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "Rejection": RejectionResponse,
@@ -660,6 +900,11 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "SectionListResponse": SectionListResponse,
     "SectionSummary": SectionSummaryResponse,
     "RunSectionSummaryResponse": RunSectionSummaryResponse,
+    "UserResponse": UserResponse,
+    "UserListResponse": UserListResponse,
+    "TokenResponse": TokenResponse,
+    "TokenListResponse": TokenListResponse,
+    "CreatedTokenResponse": CreatedTokenResponse,
 }
 _BOUND_MODELS: dict[str, type[BaseModel]] = {**_REQUEST_SCHEMAS, **_RESPONSE_SCHEMAS}
 
@@ -685,6 +930,9 @@ _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
     ("MetadataItem", "source"): METADATA_SOURCES,
     ("MetadataFile", "content_type"): METADATA_CONTENT_TYPES,
     ("MetadataFile", "status"): FILE_STATUSES,
+    ("TokenCreateRequest", "scopes"): SCOPES,
+    ("TokenResponse", "scopes"): SCOPES,
+    ("CreatedTokenResponse", "scopes"): SCOPES,
 }
 
 # `extra=` on a model, to the `additionalProperties` its schema must declare.
@@ -812,12 +1060,14 @@ def test_declared_enums_match_the_vocabulary_the_server_can_emit() -> None:
     `ResultListItem.outcome`'s enum with values the server never emits fails the
     second; adding an enum to a property nobody vetted fails the first,
     rather than passing unchecked because no expectation was written for
-    it."""
+    it. An array property's vocabulary is on its `items`, and is read from
+    there."""
     found: dict[tuple[str, str], Mapping[str, Any]] = {
-        (name, field): declaration
+        (name, field): declared
         for name, schema in _declared_schemas().items()
         for field, declaration in schema.get("properties", {}).items()
-        if "enum" in declaration
+        for declared in (declaration, declaration.get("items", {}))
+        if "enum" in declared
     }
 
     assert set(found) == set(_DECLARED_ENUMS), (

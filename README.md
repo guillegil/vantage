@@ -685,7 +685,9 @@ with exit status 1 and nothing created; `vantage push`, `vantage user`,
   or to others is used as it is, with a warning.
 - **Until the database has a user, there is no authentication.** Anyone
   who can reach the port can record runs, change the section definitions
-  and read everything recorded, failure text included. Any `--host` other
+  and read everything recorded, failure text included. Only the users and
+  tokens routes refuse, with `409 open_server`, so the first user is always
+  made with `vantage user add`. Any `--host` other
   than `127.0.0.1` logs a warning saying so at startup, as long as the
   database has no user. See [Users and tokens](#users-and-tokens).
 - The server refuses to start, with one `vantage: ...` line on stderr and
@@ -762,9 +764,10 @@ vantage user update bob --disable              # or --enable, --admin, --no-admi
   database that is not there yet.
 - A token holds one or more scopes. `read` reads runs, results, history and
   sections; `record` sends reports and heartbeats, all `pytest-vantage`
-  needs; `admin` changes the section definitions, and only an admin user's
-  token may hold it. It grants nothing once its user stops being one. A token
-  holds `read` and `record` unless `--scope` names others.
+  needs; `admin` changes the section definitions and manages users and
+  tokens, and only an admin user's token may hold it. It grants nothing once
+  its user stops being one. A token holds `read` and `record` unless
+  `--scope` names others.
 - `token create` prints the token alone on stdout, so
   `VANTAGE_TOKEN=$(vantage token create ci --scope record)` captures it and
   nothing else. It is shown once: the database keeps only its SHA-256.
@@ -777,6 +780,53 @@ vantage user update bob --disable              # or --enable, --admin, --no-admi
 - A token travels in the clear over plain `http`. Put the server behind
   HTTPS wherever the network between it and the test machines is not
   yours.
+
+#### Over HTTP
+
+Once the first admin exists, admins can manage users and tokens through the
+API as the commands do, from anywhere that reaches the server. Every route
+here needs an admin's token holding the `admin` scope, which the default
+token does not hold, so the first one is made on the command line:
+
+```bash
+vantage user add alice --admin
+vantage token create alice --scope admin --label admin-api
+```
+
+| Route | Does |
+| --- | --- |
+| `GET /api/v1/users` | Every user, disabled ones included, by name |
+| `POST /api/v1/users` | Adds an enabled user: `{"name": "bob", "admin": false}` |
+| `PATCH /api/v1/users/{name}` | Sets `admin`, `disabled` or both: `{"disabled": true}` |
+| `GET /api/v1/tokens[?user=NAME]` | Every token, or one user's, revoked ones included, oldest first |
+| `POST /api/v1/tokens` | Makes a token: `{"user": "ci", "scopes": ["record"], "label": "nightly"}` |
+| `POST /api/v1/tokens/{id}/revoke` | Revokes a token |
+
+```bash
+curl -s -X POST http://vantage.example:8765/api/v1/tokens \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"user": "ci", "scopes": ["record"], "label": "nightly"}'
+```
+
+- A server with no user answers a request to any of these without a token
+  `409 open_server`, even though it serves everything else to anyone: a
+  first user made over HTTP would belong to whoever asked first. A token
+  sent there is refused with `401`, as everywhere.
+- The new token is in the `201` answer alone, marked `Cache-Control:
+  no-store`, and never again: lists show its id, user, scopes, label and
+  times, never the token.
+- An admin cannot demote or disable their own user over HTTP
+  (`409 own_account`); another admin can, or `vantage user update` on the
+  database. If no admin is left, `vantage user update NAME --admin --enable`
+  and `vantage token create NAME --scope admin` bring one back.
+- Revoking is idempotent: a token revoked already answers `200` with the
+  time it was first revoked. (`vantage token revoke` says it was revoked
+  already.) An admin may revoke the token they are using; their next
+  request is refused.
+- An admin can make other admins, and tokens for any user. A token made for
+  another user records runs as that user.
+- The lists come whole, not paged. The commands' checks apply with the same
+  wording, and a rejection never repeats a name, a label or a token.
 
 ### Storing in PostgreSQL
 

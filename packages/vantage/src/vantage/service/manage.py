@@ -135,7 +135,9 @@ def _user_parser() -> argparse.ArgumentParser:
     add = commands.add_parser("add", help="Add an enabled user.")
     add.add_argument("name", help="1 to 64 characters of a-z, 0-9, '.', '_' and '-'.")
     add.add_argument(
-        "--admin", action="store_true", help="May hold the admin scope, to change sections."
+        "--admin",
+        action="store_true",
+        help="May hold the admin scope, to change sections and manage users and tokens.",
     )
     _add_database_option(add)
     listing = commands.add_parser("list", help="List every user.")
@@ -176,8 +178,9 @@ def _token_parser() -> argparse.ArgumentParser:
         choices=sorted(SCOPES),
         help=(
             "A scope the token holds; repeat for more. read: read runs; record: send "
-            "reports, what pytest-vantage needs; admin: change sections, for an admin "
-            f"user (default: {' and '.join(sorted(DEFAULT_SCOPES))})."
+            "reports, what pytest-vantage needs; admin: change sections and manage users "
+            "and tokens, for an admin user "
+            f"(default: {' and '.join(sorted(DEFAULT_SCOPES))})."
         ),
     )
     create.add_argument("--label", default="", help="What the token is for, to tell it apart.")

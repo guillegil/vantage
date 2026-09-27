@@ -118,7 +118,10 @@ its `postgres` extra.
   stored only as its SHA-256, printed once by whatever made it, read by the
   plugin from `VANTAGE_TOKEN` alone, and never written to the outbox, a
   message or a `repr`. A run takes reports and heartbeats only from the
-  user whose token created it (`ForeignRunError`, `409 foreign_run`).
+  user whose token created it (`ForeignRunError`, `409 foreign_run`). The
+  users and tokens routes (`routes/users.py`) need an admin's token on
+  every server and answer `409 open_server` while the database has no
+  user: the first user is the CLI's alone.
 - **Passwords never printed.** A PostgreSQL URL is shown only through
   `redacted`, and a driver message only through `redact_message`
   (`core/config/database.py`); the driver's loggers are silenced while the

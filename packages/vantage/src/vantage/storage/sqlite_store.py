@@ -1279,6 +1279,12 @@ class SqliteExecutionStore:
         )
         return tuple(_row_to_token(row) for row in rows)
 
+    def get_token(self, token_id: int) -> Token | None:
+        if not 0 < token_id <= _MAX_ID:
+            return None
+        row = self._fetchone(_SELECT_TOKEN, (token_id,))
+        return None if row is None else _row_to_token(row)
+
     def revoke_token(self, token_id: int, *, revoked_at: datetime, user: str | None = None) -> bool:
         if not 0 < token_id <= _MAX_ID:
             # `sqlite3` cannot bind a larger integer at all.
