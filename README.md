@@ -683,7 +683,19 @@ side:
 The run list, a run's results and a test's history are paged: they take
 `limit` (at most 200 per page) and `offset`, and say in `has_more` whether
 more items exist. The section lists and a run's metadata are returned
-whole. The run list also filters by metadata values; see
+whole.
+
+An offset counts from the newest run, so a run recorded while you page
+through the run list or a test's history pushes one you have already seen
+onto the next page. To walk either list without that, pass each page's
+`next_cursor` back as `cursor`: the next page starts just past the last run
+the previous one listed, whatever was recorded since. `next_cursor` is null
+on the last page, and a cursor is not combined with a non-zero `offset`.
+
+```
+GET /api/v1/runs?limit=50
+GET /api/v1/runs?limit=50&cursor=MjAyNi0wOS0yN1QwODowMDowMC4...
+``` The run list also filters by metadata values; see
 [Reading it back](#reading-it-back).
 
 ### Storing in PostgreSQL

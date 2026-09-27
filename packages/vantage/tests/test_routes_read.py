@@ -35,6 +35,7 @@ from vantage.core.ports.storage import (
     MetadataEntry,
     MetadataFile,
     Page,
+    RunKey,
     RunMetadata,
 )
 from vantage.service.app import create_app
@@ -152,7 +153,9 @@ class _SpyExecutionStore:
     def __init__(self) -> None:
         self.list_history_calls: list[str] = []
 
-    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+    def list_history(
+        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[HistoryEntry]:
         self.list_history_calls.append(node_id)
         return Page(items=(), has_more=False)
 
@@ -201,7 +204,7 @@ def test_run_list_returns_items_and_has_more_envelope(
 
     assert response.status_code == 200
     body = response.json()
-    assert set(body.keys()) == {"items", "has_more", "metadata_horizon"}
+    assert set(body.keys()) == {"items", "has_more", "next_cursor", "metadata_horizon"}
     assert isinstance(body["has_more"], bool)
     assert body["has_more"] is False
     assert body["metadata_horizon"] is None
@@ -433,6 +436,109 @@ def test_an_offset_beyond_int64_is_422_and_the_int64_maximum_is_an_empty_page(
     assert at_max.status_code == 200
     assert at_max.json()["items"] == []
     assert at_max.json()["has_more"] is False
+
+
+_CURSOR_PATHS = pytest.mark.parametrize(
+    ("path", "params", "id_field"),
+    [
+        ("/api/v1/runs", {}, "id"),
+        ("/api/v1/runs", {"metadata_key": "k", "metadata_value": "v"}, "id"),
+        ("/api/v1/tests/history", {"node_id": "t.py::test_x"}, "run_id"),
+    ],
+    ids=["runs", "runs-filtered", "history"],
+)
+
+
+def _record_listed_run(store: ExecutionStore, seed: int, started_at: datetime) -> None:
+    """A finished run every list in `_CURSOR_PATHS` shows: it holds the
+    filtered pair and a result for the history's node id."""
+    store.record_session(
+        _execution(_run_id(seed), started_at=started_at, finished_at=started_at),
+        results=[_result("t.py::test_x")],
+        received_at=started_at,
+        metadata=_captured_metadata("k", "v"),
+    )
+
+
+@_CURSOR_PATHS
+def test_following_next_cursor_lists_every_run_once_while_runs_keep_arriving(
+    client: TestClient, store: ExecutionStore, path: str, params: dict[str, str], id_field: str
+) -> None:
+    """Walking a list through `next_cursor` lists every run recorded before
+    the walk began exactly once, even when a run is recorded between two
+    pages -- where an offset lists a run twice. The last page's
+    `next_cursor` is null."""
+    base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+    for seed in range(5):
+        _record_listed_run(store, seed, base + timedelta(seconds=seed))
+
+    listed: list[str] = []
+    body = client.get(path, params={**params, "limit": 2}).json()
+    _record_listed_run(store, 9, base + timedelta(minutes=5))
+    while True:
+        listed += [item[id_field] for item in body["items"]]
+        if body["next_cursor"] is None:
+            break
+        assert body["has_more"] is True
+        body = client.get(path, params={**params, "limit": 2, "cursor": body["next_cursor"]}).json()
+
+    assert listed == [_run_id(seed) for seed in (4, 3, 2, 1, 0)]
+    assert body["has_more"] is False
+
+
+@_CURSOR_PATHS
+def test_a_page_with_nothing_after_it_has_no_next_cursor(
+    client: TestClient, store: ExecutionStore, path: str, params: dict[str, str], id_field: str
+) -> None:
+    now = datetime.now(timezone.utc)
+    _record_listed_run(store, 1, now)
+
+    body = client.get(path, params=params).json()
+
+    assert [item[id_field] for item in body["items"]] == [_run_id(1)]
+    assert body["has_more"] is False
+    assert body["next_cursor"] is None
+
+
+@_CURSOR_PATHS
+@pytest.mark.parametrize(
+    "cursor",
+    ["", "not a cursor", "bm90IGEgY3Vyc29y", "x" * 1000],
+    ids=["empty", "not-base64", "not-a-key", "oversized"],
+)
+def test_a_cursor_the_server_did_not_issue_is_422(
+    client: TestClient,
+    path: str,
+    params: dict[str, str],
+    id_field: str,
+    cursor: str,
+) -> None:
+    response = client.get(path, params={**params, "cursor": cursor})
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_parameter"
+    assert response.json()["fields"] == ["query.cursor"]
+
+
+@_CURSOR_PATHS
+def test_a_cursor_with_an_offset_is_422_but_with_offset_zero_is_a_page(
+    client: TestClient, store: ExecutionStore, path: str, params: dict[str, str], id_field: str
+) -> None:
+    """A cursor already says where the page starts, so an offset past it
+    would be a second answer to the same question."""
+    base = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
+    for seed in range(3):
+        _record_listed_run(store, seed, base + timedelta(seconds=seed))
+    cursor = client.get(path, params={**params, "limit": 1}).json()["next_cursor"]
+
+    both = client.get(path, params={**params, "cursor": cursor, "offset": 1})
+    zero = client.get(path, params={**params, "cursor": cursor, "offset": 0})
+
+    assert both.status_code == 422
+    assert both.json()["error"] == "invalid_parameter"
+    assert both.json()["fields"] == ["query.cursor", "query.offset"]
+    assert zero.status_code == 200
+    assert [item[id_field] for item in zero.json()["items"]] == [_run_id(1), _run_id(0)]
 
 
 def test_run_detail_returns_full_untruncated_subject(
@@ -1723,7 +1829,7 @@ def test_a_node_id_holding_nul_has_no_history(client: TestClient, store: Executi
     response = client.get("/api/v1/tests/history", params={"node_id": _NUL_NODE_ID})
 
     assert response.status_code == 200
-    assert response.json() == {"items": [], "has_more": False}
+    assert response.json() == {"items": [], "has_more": False, "next_cursor": None}
 
 
 def test_a_metadata_value_holding_nul_matches_no_run(

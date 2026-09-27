@@ -48,6 +48,7 @@ from vantage.core.ports.storage import (
     Page,
     ResultListEntry,
     RunDetail,
+    RunKey,
     RunListEntry,
     RunMetadata,
     UserSetting,
@@ -102,6 +103,13 @@ def _locked(
             return method(store, *args, **kwargs)
 
     return locked
+
+
+def _past(after: RunKey | None, started_at: datetime, run_id: str) -> bool:
+    """Whether a run comes after `after` in the newest-first order, as the
+    SQLite adapter's `_AFTER_RUN_KEY` decides it; every run does without a
+    key."""
+    return after is None or (started_at, run_id) < (after.started_at, after.run_id)
 
 
 class InMemoryExecutionStore:
@@ -246,7 +254,12 @@ class InMemoryExecutionStore:
         return self._catalogue.get(node_id)
 
     def _run_page(
-        self, candidates: Iterable[Execution], *, limit: int, offset: int
+        self,
+        candidates: Iterable[Execution],
+        *,
+        limit: int,
+        offset: int,
+        after: RunKey | None,
     ) -> Page[RunListEntry]:
         """One page of `candidates`, for a caller already holding the lock.
 
@@ -255,7 +268,11 @@ class InMemoryExecutionStore:
         sets `has_more` without a second query."""
         page_limit = min(limit, MAX_PAGE_ITEMS)
         ordered = sorted(
-            candidates,
+            (
+                execution
+                for execution in candidates
+                if _past(after, execution.started_at, execution.identity.value)
+            ),
             key=lambda execution: (execution.started_at, execution.identity.value),
             reverse=True,
         )
@@ -270,8 +287,10 @@ class InMemoryExecutionStore:
         return Page(items=items, has_more=has_more)
 
     @_locked
-    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
-        return self._run_page(self._executions.values(), limit=limit, offset=offset)
+    def list_runs(
+        self, *, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[RunListEntry]:
+        return self._run_page(self._executions.values(), limit=limit, offset=offset, after=after)
 
     def _holds(self, run_id: str, key: str, value: str) -> bool:
         """Mirrors `rm.key = ? AND rm.value = ?`: `entry.value` is `None`
@@ -300,7 +319,12 @@ class InMemoryExecutionStore:
 
     @_locked
     def list_runs_with_metadata_horizon(
-        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+        self,
+        *,
+        filters: Sequence[tuple[str, str]],
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
         # Every read happens under one hold of the lock, so the page and the
         # counts describe one state.
@@ -312,6 +336,7 @@ class InMemoryExecutionStore:
             ),
             limit=limit,
             offset=offset,
+            after=after,
         )
         keys = dict.fromkeys(key for key, _value in filters)
         return page, tuple(self._predating(key) for key in keys)
@@ -355,7 +380,9 @@ class InMemoryExecutionStore:
         return None if result is None else self._as_catalogued(result)
 
     @_locked
-    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+    def list_history(
+        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[HistoryEntry]:
         # Mirrors `list_runs`' total order -- `(started_at, run_id)`
         # descending -- over every execution that has a result for this
         # `node_id`. An unknown `node_id` yields an empty page, never an error.
@@ -364,6 +391,7 @@ class InMemoryExecutionStore:
             (run_id, result)
             for (run_id, result_node_id), result in self._results.items()
             if result_node_id == node_id
+            and _past(after, self._executions[run_id].started_at, run_id)
         ]
         ordered = sorted(
             matches,

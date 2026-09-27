@@ -21,6 +21,7 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.storage.sqlite_store import (
+    _LIST_RUNS_AFTER,
     _LIST_SUBJECT_PREFIX_BYTES,
     SqliteExecutionStore,
     _list_runs_by_metadata,
@@ -185,6 +186,25 @@ def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path, pair_cou
 
         assert plan_text.count("USING INDEX idx_run_metadata_key_value") == pair_count
         assert "sqlite_autoindex_run_metadata_1" not in plan_text
+    finally:
+        store.close()
+
+
+def test_the_run_list_after_a_key_starts_its_index_scan_at_the_key(tmp_path: Path) -> None:
+    """`_LIST_RUNS_AFTER` bounds `idx_run_started_at` at the key, so a late
+    page costs what the first one does. A predicate SQLite could not bound
+    the index with would return the same rows, reading every run older than
+    the key to find them -- silently, which is why this asserts the plan."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    started_at = "2026-08-15T09:00:00.000000+00:00"
+    try:
+        plan_rows = store._conn.execute(  # noqa: SLF001
+            f"EXPLAIN QUERY PLAN {_LIST_RUNS_AFTER}",
+            (_LIST_SUBJECT_PREFIX_BYTES, started_at, "a" * 32, 21, 0),
+        ).fetchall()
+        plan_text = "\n".join(str(row[-1]) for row in plan_rows)
+
+        assert "SEARCH run USING INDEX idx_run_started_at (started_at<?)" in plan_text
     finally:
         store.close()
 

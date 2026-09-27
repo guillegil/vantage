@@ -80,12 +80,14 @@ class MetadataHorizonResponse(BaseModel):
 
 class RunListResponse(BaseModel):
     """The response body for `GET /api/v1/runs`. No `total`, which would cost
-    a `COUNT(*)` on every page. `metadata_horizon` holds one entry per
-    distinct filtered key, in the order first given, and is `None` when no
-    metadata filter was given: there is no horizon to report."""
+    a `COUNT(*)` on every page. `next_cursor` is the `cursor` for the page
+    after this one, and `None` on the last page. `metadata_horizon` holds one
+    entry per distinct filtered key, in the order first given, and is `None`
+    when no metadata filter was given: there is no horizon to report."""
 
     items: list[RunListItemResponse]
     has_more: bool
+    next_cursor: str | None
     metadata_horizon: list[MetadataHorizonResponse] | None
 
 
@@ -244,10 +246,13 @@ class HistoryEntryResponse(BaseModel):
 
 
 class HistoryResponse(BaseModel):
-    """The response body for `GET /api/v1/tests/history`."""
+    """The response body for `GET /api/v1/tests/history`. `next_cursor`, as
+    on `RunListResponse`, is the `cursor` for the page after this one, and
+    `None` on the last page."""
 
     items: list[HistoryEntryResponse]
     has_more: bool
+    next_cursor: str | None
 
 
 class SectionValue(BaseModel):

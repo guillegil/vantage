@@ -65,6 +65,7 @@ from vantage.core.ports.storage import (
     Page,
     ResultListEntry,
     RunDetail,
+    RunKey,
     RunListEntry,
     RunMetadata,
     UserSetting,
@@ -172,6 +173,18 @@ _LIST_RUNS = f"""
     LIMIT %s OFFSET %s
 """
 
+# The runs past a `RunKey` in the newest-first order, bound as its
+# `started_at`, then its id: a row comparison, which `run_started_at`'s
+# `(started_at, id)` serves as one range.
+_AFTER_RUN_KEY = "(run.started_at, run.id) < (%s, %s)"
+
+_LIST_RUNS_AFTER = f"""
+    {_SELECT_RUN_LIST}
+    WHERE {_AFTER_RUN_KEY}
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT %s OFFSET %s
+"""  # noqa: S608
+
 # The runs holding one `(key, value)` pair, bound as key, key, value, value.
 # The digests find the rows through `run_metadata_key_value`; comparing the
 # text as well keeps the match exact. `value` is NULL for a row without a
@@ -183,14 +196,16 @@ _RUNS_HOLDING_PAIR = """
 """
 
 
-def _list_runs_by_metadata(pair_count: int) -> str:
+def _list_runs_by_metadata(pair_count: int, *, after: bool = False) -> str:
     """`_LIST_RUNS` narrowed to the runs holding each of `pair_count` pairs,
-    bound before the limit and offset. Only the module's own constants are
-    interpolated."""
+    and with `after` to the runs past a `RunKey` (`_AFTER_RUN_KEY`), bound
+    in that order before the limit and offset. Only the module's own
+    constants are interpolated."""
     holding_every_pair = " INTERSECT ".join([_RUNS_HOLDING_PAIR] * pair_count)
+    past_key = f"AND {_AFTER_RUN_KEY}" if after else ""
     return f"""
         {_SELECT_RUN_LIST}
-        WHERE run.id IN ({holding_every_pair})
+        WHERE run.id IN ({holding_every_pair}) {past_key}
         ORDER BY run.started_at DESC, run.id DESC
         LIMIT %s OFFSET %s
     """  # noqa: S608
@@ -367,6 +382,17 @@ _LIST_HISTORY = f"""
     JOIN vantage.result r ON r.test_case_id = tc.id
     JOIN vantage.run AS run ON run.id = r.run_id
     WHERE vantage.text_key(tc.node_id) = vantage.text_key(%s) AND tc.node_id = %s
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT %s OFFSET %s
+"""  # noqa: S608
+
+_LIST_HISTORY_AFTER = f"""
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration
+    FROM vantage.test_case tc
+    JOIN vantage.result r ON r.test_case_id = tc.id
+    JOIN vantage.run AS run ON run.id = r.run_id
+    WHERE vantage.text_key(tc.node_id) = vantage.text_key(%s) AND tc.node_id = %s
+      AND {_AFTER_RUN_KEY}
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT %s OFFSET %s
 """  # noqa: S608
@@ -615,6 +641,11 @@ def _row_to_metadata_entry(row: Row) -> MetadataEntry:
         source_file=cast("str | None", source_file),
         declared=bool(declared),
     )
+
+
+def _run_key_params(after: RunKey | None) -> tuple[object, ...]:
+    """`_AFTER_RUN_KEY`'s two parameters, or none without a key."""
+    return () if after is None else (after.started_at, after.run_id)
 
 
 def _row_to_metadata_file(row: Row) -> MetadataFile:
@@ -900,13 +931,21 @@ class PostgresExecutionStore:
         row = self._fetchone(_SELECT_TEST_CASE, (node_id, node_id))
         return None if row is None else _row_to_catalogue_entry(row)
 
-    def list_runs(self, *, limit: int, offset: int) -> Page[RunListEntry]:
+    def list_runs(
+        self, *, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[RunListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        rows = self._fetchall(_LIST_RUNS, (page_limit + 1, offset))
+        sql = _LIST_RUNS if after is None else _LIST_RUNS_AFTER
+        rows = self._fetchall(sql, (*_run_key_params(after), page_limit + 1, offset))
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def list_runs_with_metadata_horizon(
-        self, *, filters: Sequence[tuple[str, str]], limit: int, offset: int
+        self,
+        *,
+        filters: Sequence[tuple[str, str]],
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> tuple[Page[RunListEntry], tuple[int, ...]]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         # A repeated pair narrows nothing further.
@@ -917,9 +956,13 @@ class PostgresExecutionStore:
             if any(_unmatchable(key, value) for key, value in pairs):
                 rows: list[Row] = []
             else:
-                sql = _list_runs_by_metadata(len(pairs)) if pairs else _LIST_RUNS
+                if pairs:
+                    sql = _list_runs_by_metadata(len(pairs), after=after is not None)
+                else:
+                    sql = _LIST_RUNS if after is None else _LIST_RUNS_AFTER
                 params = [
                     *(part for key, value in pairs for part in (key, key, value, value)),
+                    *_run_key_params(after),
                     page_limit + 1,
                     offset,
                 ]
@@ -966,11 +1009,16 @@ class PostgresExecutionStore:
         row = self._fetchone(_SELECT_RESULT, (execution_id, node_id, node_id))
         return None if row is None else _row_to_result(row)
 
-    def list_history(self, *, node_id: str, limit: int, offset: int) -> Page[HistoryEntry]:
+    def list_history(
+        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[HistoryEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         if _unmatchable(node_id):
             return Page(items=(), has_more=False)
-        rows = self._fetchall(_LIST_HISTORY, (node_id, node_id, page_limit + 1, offset))
+        rows = self._fetchall(
+            _LIST_HISTORY if after is None else _LIST_HISTORY_AFTER,
+            (node_id, node_id, *_run_key_params(after), page_limit + 1, offset),
+        )
         return _page(rows, page_limit, _row_to_history_entry)
 
     def list_settings(self, namespace: str) -> Sequence[UserSetting]:
