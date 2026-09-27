@@ -807,10 +807,10 @@ def test_a_failing_start_write_warns_once_silences_the_heartbeats_and_keeps_ever
     """A server that advertises the lifecycle but refuses the start-write
     -- and so knows no run any heartbeat could name -- costs one warning.
     The start-write is `@liveness_isolated`, not `@fault_isolated`: its
-    failure latches `_liveness_disabled`, which the beats share, so five
-    beat opportunities (a zero `_BEAT_INTERVAL_SECONDS`) send no heartbeat
-    at all. The finish-write alone then records the whole run, every
-    result included, and the exit status is untouched.
+    failure latches `_liveness_disabled` and no heartbeat thread starts, so
+    even a zero `_BEAT_INTERVAL_SECONDS`, which would beat at once, sends no
+    heartbeat at all. The finish-write alone then records the whole run,
+    every result included, and the exit status is untouched.
 
     The warning is raised in `pytest_sessionstart`, where pytest records
     none itself, and is in the warnings summary all the same. The session
@@ -1181,14 +1181,14 @@ def test_heartbeat_failing_on_every_attempt_warns_once_and_every_result_is_still
     pytester: pytest.Pytester,
     vantage_server: VantageTestServer,
 ) -> None:
-    """`_maybe_beat` is `@liveness_isolated`, which latches after its first
-    failure, so a failing heartbeat is never attempted again. Across five
-    tests (a beat due on every report, forced by a zero
-    `_BEAT_INTERVAL_SECONDS`), that is exactly one warning, never one per
-    beat -- and `accumulate` running first means every test's result
-    still reaches the finish-write, whose own `send` is unpatched, so the
-    real `vantage_server` ends up with all five. Beat spacing is
-    `test_run_report.py::test_heartbeats_are_one_interval_apart`.
+    """The heartbeat thread stops at its first failure, so a failing
+    heartbeat is never attempted again, and `_report_heartbeat_failure` is
+    `@liveness_isolated`, which warns once and latches. A zero
+    `_BEAT_INTERVAL_SECONDS` beats at once, and the beat fails: across five
+    tests that is exactly one warning -- and `accumulate` running first
+    means every test's result still reaches the finish-write, whose own
+    `send` is unpatched, so the real `vantage_server` ends up with all five.
+    Beat spacing is `test_heartbeat.py`'s.
 
     A `conftest.py` written into the pytester's own directory, not
     `monkeypatch`, which cannot reach into the separate process
@@ -1466,9 +1466,9 @@ def test_capability_probe_is_bounded_by_the_liveness_timeout_not_the_report_time
 def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`pytest_sessionstart` and `_maybe_beat` both return immediately when
-    `lifecycle_available=False`, without ever calling `send` or
-    `send_heartbeat`.
+    """`pytest_sessionstart` returns immediately when
+    `lifecycle_available=False`, without calling `send`, and starts no
+    heartbeat, so `send_heartbeat` is never called either.
     """
     calls: list[str] = []
     monkeypatch.setattr("pytest_vantage.recorder.send", lambda *a, **k: calls.append("send"))
@@ -1476,7 +1476,7 @@ def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
         "pytest_vantage.recorder.send_heartbeat",
         lambda *a, **k: calls.append("send_heartbeat"),
     )
-    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr("pytest_vantage.recorder._BEAT_INTERVAL_SECONDS", 0.01)
     # This test is about the lifecycle-degraded gate, not vcs capture --
     # neutralise it rather than spawning a real `git` subprocess for
     # something this test does not exercise.
@@ -1497,8 +1497,9 @@ def test_recorder_skips_start_write_and_heartbeat_when_lifecycle_unavailable(
 
     with pytest.warns(VantageWarning, match="does not advertise the session lifecycle"):
         recorder.pytest_sessionstart()
-    recorder._maybe_beat()
+    time.sleep(0.1)
 
+    assert recorder._heartbeat is None
     assert calls == []
 
 
@@ -1634,7 +1635,9 @@ def test_every_recorder_hook_is_under_the_isolation_meant_for_it() -> None:
         "pytest_testnodedown": "_accumulation_warned",
         "pytest_unconfigure": "_disabled",
     }
-    assert getattr(Recorder._maybe_beat, "isolation_flag", None) == "_liveness_disabled"
+    assert getattr(Recorder._report_heartbeat_failure, "isolation_flag", None) == (
+        "_liveness_disabled"
+    )
 
 
 def test_an_unrecordable_test_report_never_disables_the_finish_write(

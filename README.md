@@ -617,6 +617,13 @@ If your warning filters turn warnings into errors, the message is written to
 the terminal instead. With pytest's warnings plugin disabled
 (`-p no:warnings`) there is no summary, and it is printed to stderr.
 
+While a session runs, the plugin sends the server a heartbeat every 30
+seconds from a background thread, whatever the tests are doing, so a test,
+fixture or collection that takes longer than the grace period keeps its run
+`running`. So does a test that hangs: a heartbeat says the process is alive,
+not that its tests are moving, and ending a hung test is a job for a
+timeout.
+
 A run whose final report never arrives (the process was killed, the machine
 lost power) reads as `abandoned` once the server has heard nothing from it
 for the grace period, provided the server received its start report. One
