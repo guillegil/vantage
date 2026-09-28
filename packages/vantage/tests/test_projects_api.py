@@ -1,9 +1,11 @@
 """Listing and making projects over HTTP (`service/routes/projects.py`):
-anyone who may read lists them; only who may change what a server shares
-makes one -- an admin's token once the database has a user, anyone while it
-has none; a name is checked by the rule the command line applies, and a
-rejection never repeats it. A project made here takes the reports that
-name it, as one made with `vantage project add` does.
+anyone who may read lists them -- the ones they have a role in, with that
+role, which `test_membership_access.py` covers; only an admin's token makes
+one once the database has a user, anyone while it has none; a name is
+checked by the rule the command line applies, and a rejection never
+repeats it. A project made here takes the reports that name it, as one
+made with `vantage project add` does, and has no member, its maker
+included.
 
 Run against every adapter (`any_store`): the routes are the service's, but
 every answer rests on what the store says of projects.
@@ -26,7 +28,7 @@ from vantage.core.domain.access import (
     new_token,
     token_digest,
 )
-from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.core.domain.projects import DEFAULT_PROJECT, OWNER_ROLE
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.routes.projects import MAX_PROJECTS_BODY_BYTES
@@ -88,6 +90,7 @@ def test_a_new_database_lists_default_alone(any_store: ExecutionStore) -> None:
     (item,) = response.json()["items"]
     assert item["name"] == DEFAULT_PROJECT
     assert _instant(item["created_at"]).tzinfo is not None
+    assert item["role"] is None
 
 
 def test_listing_needs_the_read_scope_once_the_database_has_a_user(
@@ -146,10 +149,12 @@ def test_only_an_admin_token_of_an_admin_makes_a_project(any_store: ExecutionSto
 def test_an_open_server_lets_anyone_make_a_project(any_store: ExecutionStore) -> None:
     """A server with no user already lets anyone record runs and change the
     sections; making a project is no more than that, and unlike making a
-    user it opens nothing."""
+    user it opens nothing. A server with no user checks no role, so the
+    answer names none."""
     response = TestClient(create_app(any_store)).post(_PROJECTS, json={"name": "firmware"})
 
     assert response.status_code == 201, response.text
+    assert response.json()["role"] is None
     assert _names(any_store) == [DEFAULT_PROJECT, "firmware"]
     assert any_store.access_required() is False
 
@@ -157,18 +162,41 @@ def test_an_open_server_lets_anyone_make_a_project(any_store: ExecutionStore) ->
 def test_a_made_project_is_answered_and_stored(
     admin: TestClient, any_store: ExecutionStore
 ) -> None:
+    """The answer names the role its maker acts with there: `owner`, as an
+    admin."""
     before = datetime.now(timezone.utc)
 
     response = admin.post(_PROJECTS, json={"name": "fw-2.x_nightly"})
 
     assert response.status_code == 201, response.text
     body = response.json()
-    assert set(body) == {"name", "created_at"}
+    assert set(body) == {"name", "created_at", "role"}
     assert body["name"] == "fw-2.x_nightly"
     assert before <= _instant(body["created_at"]) <= datetime.now(timezone.utc)
+    assert body["role"] == OWNER_ROLE
     stored = any_store.get_project("fw-2.x_nightly")
     assert stored is not None and stored.created_at == _instant(body["created_at"])
     assert _names(any_store) == [DEFAULT_PROJECT, "fw-2.x_nightly"]
+
+
+def test_a_made_project_has_no_member_its_maker_included(
+    admin: TestClient, any_store: ExecutionStore
+) -> None:
+    """Its maker gets no row: an admin acts as an owner of every project
+    without one, so once they stop being an admin they are no member of
+    the project they made."""
+    reader = _bearer(_token(any_store, "alice", READ_SCOPE))
+    made = admin.post(_PROJECTS, json={"name": "firmware"})
+
+    as_admin = admin.get("/api/v1/projects/firmware/runs", headers=reader)
+    any_store.update_user("alice", admin=False)
+    demoted = admin.get("/api/v1/projects/firmware/runs", headers=reader)
+
+    assert made.status_code == 201, made.text
+    assert any_store.list_members(project="firmware") == ()
+    assert any_store.list_memberships("alice") == ()
+    assert as_admin.status_code == 200, as_admin.text
+    _assert_rejected(demoted, 403, "not_a_member", [])
 
 
 @pytest.mark.parametrize("name", [DEFAULT_PROJECT, "firmware"])

@@ -11,6 +11,8 @@ Under `DO UPDATE`, `cursor.rowcount` cannot tell an insert from an applied
 update, so `created` comes from a `SELECT 1 FROM run WHERE id = ?` probe run
 right after `BEGIN IMMEDIATE`. The transaction already holds the `RESERVED`
 lock and `self._lock`, so no other write can land between probe and upsert.
+`upsert_setting` and `set_member` tell an added row from a changed one the
+same way.
 
 Concurrency needs two layers. `self._lock` is held across every statement
 and transaction, reads included, and across `close`: every thread shares one
@@ -54,6 +56,7 @@ from typing import TypeVar, cast
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
     LOGIN_TOKEN_LABEL,
+    MANAGE_SCOPE,
     READ_SCOPE,
     RECORD_SCOPE,
     Grant,
@@ -66,7 +69,7 @@ from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
 )
-from vantage.core.domain.projects import Project
+from vantage.core.domain.projects import DEFAULT_PROJECT, Membership, Project, check_role
 from vantage.core.domain.result import (
     CapturedOutput,
     CaseIdentity,
@@ -501,6 +504,27 @@ _SELECT_PROJECT = "SELECT name, created_at FROM project WHERE name = ?"
 
 _LIST_PROJECTS = "SELECT name, created_at FROM project ORDER BY name"
 
+# Members, keyed by project and user. A project's members and one member's
+# role are read along the primary key, a user's memberships along
+# `idx_project_member_account`; `BINARY` order is code point order.
+_SELECT_MEMBER_ROLE = "SELECT role FROM project_member WHERE project = ? AND account = ?"
+
+_LIST_MEMBERS = """
+    SELECT project, account, role FROM project_member WHERE project = ? ORDER BY account
+"""
+
+_LIST_MEMBERSHIPS = """
+    SELECT project, account, role FROM project_member WHERE account = ? ORDER BY project
+"""
+
+_UPSERT_MEMBER = """
+    INSERT INTO project_member (project, account, role) VALUES (?, ?, ?)
+    ON CONFLICT (project, account) DO UPDATE SET role = excluded.role
+"""
+
+# `rowcount == 1` is the "it was a member" answer.
+_DELETE_MEMBER = "DELETE FROM project_member WHERE project = ? AND account = ?"
+
 # The per-run aggregate read. It filters on `result.run_id` and joins
 # `test_case` by primary key; `file_path` is only read, so it needs no index.
 _SELECT_RUN_CASE_OUTCOMES = """
@@ -554,9 +578,10 @@ _REVOKE_LOGIN_TOKENS = """
 # password was checked against.
 _INSERT_LOGIN_TOKEN = """
     INSERT INTO access_token (
-        account, digest, label, can_read, can_record, can_admin, created_at, expires_at
+        account, digest, label, can_read, can_record, can_manage, can_admin,
+        created_at, expires_at
     )
-    SELECT name, ?, ?, 1, 0, admin, ?, ? FROM account
+    SELECT name, ?, ?, 1, 0, 1, admin, ?, ? FROM account
     WHERE name = ? AND password_hash = ? AND disabled = 0
 """  # noqa: S105
 
@@ -578,12 +603,13 @@ _UPDATE_USER = """
 
 _INSERT_TOKEN = """
     INSERT INTO access_token (
-        account, digest, label, can_read, can_record, can_admin, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        account, digest, label, can_read, can_record, can_manage, can_admin, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """  # noqa: S105
 
 _TOKEN_COLUMNS = (
-    "id, account, label, can_read, can_record, can_admin, created_at, revoked_at, expires_at"  # noqa: S105
+    "id, account, label, can_read, can_record, can_manage, can_admin,"  # noqa: S105
+    " created_at, revoked_at, expires_at"
 )
 
 _SELECT_TOKEN = f"SELECT {_TOKEN_COLUMNS} FROM access_token WHERE id = ?"  # noqa: S608
@@ -601,7 +627,7 @@ _REVOKE_TOKEN = """
 """  # noqa: S105
 
 _AUTHENTICATE = """
-    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_admin
+    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_manage, t.can_admin
     FROM access_token t
     JOIN account a ON a.name = t.account
     WHERE t.digest = ? AND t.revoked_at IS NULL AND a.disabled = 0
@@ -614,18 +640,38 @@ _AUTHENTICATE = """
 _MAX_ID = 2**63 - 1
 
 
-def _scope_columns(scopes: frozenset[str]) -> tuple[int, int, int]:
-    """The `can_read`, `can_record` and `can_admin` values for `scopes`."""
+def _scope_columns(scopes: frozenset[str]) -> tuple[int, int, int, int]:
+    """The `can_read`, `can_record`, `can_manage` and `can_admin` values for
+    `scopes`."""
     return (
         int(READ_SCOPE in scopes),
         int(RECORD_SCOPE in scopes),
+        int(MANAGE_SCOPE in scopes),
         int(ADMIN_SCOPE in scopes),
     )
 
 
-def _decode_scopes(can_read: object, can_record: object, can_admin: object) -> frozenset[str]:
-    held = zip((READ_SCOPE, RECORD_SCOPE, ADMIN_SCOPE), (can_read, can_record, can_admin))
+def _decode_scopes(
+    can_read: object, can_record: object, can_manage: object, can_admin: object
+) -> frozenset[str]:
+    held = zip(
+        (READ_SCOPE, RECORD_SCOPE, MANAGE_SCOPE, ADMIN_SCOPE),
+        (can_read, can_record, can_manage, can_admin),
+    )
     return frozenset(scope for scope, flag in held if flag)
+
+
+def _check_member_row(project: str, role: str) -> None:
+    """Refuse what no member row may hold: `default`, whose every user is an
+    editor without one, or a role outside `ROLES`."""
+    if project == DEFAULT_PROJECT:
+        raise ValueError("default takes no members: every user is an editor of it")
+    check_role(role)
+
+
+def _row_to_membership(row: tuple[object, ...]) -> Membership:
+    project, account, role = row
+    return Membership(project=cast(str, project), user=cast(str, account), role=cast(str, role))
 
 
 def _row_to_user(row: tuple[object, ...]) -> User:
@@ -646,6 +692,7 @@ def _row_to_token(row: tuple[object, ...]) -> Token:
         label,
         can_read,
         can_record,
+        can_manage,
         can_admin,
         created_at,
         revoked_at,
@@ -655,7 +702,7 @@ def _row_to_token(row: tuple[object, ...]) -> Token:
         id=cast(int, token_id),
         user=cast(str, account),
         label=cast(str, label),
-        scopes=_decode_scopes(can_read, can_record, can_admin),
+        scopes=_decode_scopes(can_read, can_record, can_manage, can_admin),
         created_at=_datetime(created_at),
         revoked_at=_opt_datetime(revoked_at),
         expires_at=_opt_datetime(expires_at),
@@ -1370,6 +1417,36 @@ class SqliteExecutionStore:
     def list_projects(self) -> Sequence[Project]:
         return tuple(_row_to_project(row) for row in self._fetchall(_LIST_PROJECTS, ()))
 
+    def get_member_role(self, user: str, *, project: str) -> str | None:
+        row = self._fetchone(_SELECT_MEMBER_ROLE, (project, user))
+        return None if row is None else cast(str, row[0])
+
+    def list_members(self, *, project: str) -> Sequence[Membership]:
+        return tuple(_row_to_membership(row) for row in self._fetchall(_LIST_MEMBERS, (project,)))
+
+    def list_memberships(self, user: str) -> Sequence[Membership]:
+        rows = self._fetchall(_LIST_MEMBERSHIPS, (user,))
+        return tuple(_row_to_membership(row) for row in rows)
+
+    def set_member(self, user: str, *, project: str, role: str) -> bool:
+        _check_member_row(project, role)
+        # The probes share the write transaction, so the project and the user
+        # they find are there at the upsert, and no other writer can add or
+        # remove the row between the member probe and the upsert. The project
+        # is probed first, so naming neither is answered with the project.
+        with self._write_transaction() as conn:
+            if conn.execute(_PROBE_PROJECT, (project,)).fetchone() is None:
+                raise UnknownProjectError(f"there is no project named {project!r}")
+            if conn.execute(_SELECT_USER, (user,)).fetchone() is None:
+                raise UnknownUserError(f"there is no user named {user!r}")
+            created = conn.execute(_SELECT_MEMBER_ROLE, (project, user)).fetchone() is None
+            conn.execute(_UPSERT_MEMBER, (project, user, role))
+        return created
+
+    def remove_member(self, user: str, *, project: str) -> bool:
+        with self._lock:
+            return self._conn.execute(_DELETE_MEMBER, (project, user)).rowcount == 1
+
     def access_required(self) -> bool:
         return bool(self._count(_PROBE_ANY_USER))
 
@@ -1513,11 +1590,11 @@ class SqliteExecutionStore:
         row = self._fetchone(_AUTHENTICATE, (digest, isoformat_utc(now)))
         if row is None:
             return None
-        name, admin, can_read, can_record, can_admin = row
+        name, admin, can_read, can_record, can_manage, can_admin = row
         return Grant(
             user=cast(str, name),
             admin=bool(admin),
-            scopes=_decode_scopes(can_read, can_record, can_admin),
+            scopes=_decode_scopes(can_read, can_record, can_manage, can_admin),
         )
 
     def close(self) -> None:

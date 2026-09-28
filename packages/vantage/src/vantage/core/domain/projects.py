@@ -9,6 +9,14 @@ Nothing renames or deletes a project, so "project X exists" only ever turns
 from false to true: a check that one exists stays true, and every row that
 names a project keeps naming one. `default` exists in every database from
 the moment it is created, for the runs that name no project.
+
+Once a database has users, a user acts in a project with a role: a
+`viewer` reads it, an `editor` also records runs and edits its section
+definitions, an `owner` also manages its members. A member's role is a
+stored row, with two rules no row holds (`effective_role`): every user is
+an editor of `default`, which takes no rows, and an admin acts as an owner
+of every project. A token's scopes still apply on top: scopes and roles
+only narrow each other.
 """
 
 from __future__ import annotations
@@ -57,11 +65,77 @@ class Project:
     created_at: datetime
 
 
+VIEWER_ROLE = "viewer"
+"""Reads the project: its runs, history, section definitions and members."""
+
+EDITOR_ROLE = "editor"
+"""Also records runs into the project and edits its section definitions."""
+
+OWNER_ROLE = "owner"
+"""Also manages the project's members."""
+
+ROLES = frozenset({VIEWER_ROLE, EDITOR_ROLE, OWNER_ROLE})
+
+_RANK = {VIEWER_ROLE: 0, EDITOR_ROLE: 1, OWNER_ROLE: 2}
+
+DEFAULT_PROJECT_ROLE = EDITOR_ROLE
+"""Every user's role in `default`, which takes no member rows: a server with
+one team needs no membership set up at all."""
+
+
+class InvalidRoleError(ValueError):
+    """A role that `ROLES` does not hold."""
+
+
+def check_role(role: str) -> str:
+    """`role`, if it is one."""
+    if role not in ROLES:
+        raise InvalidRoleError("a role is viewer, editor or owner")
+    return role
+
+
+def role_covers(held: str, needed: str) -> bool:
+    """Whether a member with the role `held` may do what needs `needed`."""
+    return _RANK[held] >= _RANK[needed]
+
+
+def effective_role(project: str, *, admin: bool, stored: str | None) -> str | None:
+    """The role a user acts with in `project`, given whether they are an
+    admin now and the role their member row holds, if any: `OWNER_ROLE` for
+    an admin, `DEFAULT_PROJECT_ROLE` in `default`, otherwise the row's; None
+    for a user with no role there. The only statement of the two rules no
+    row holds."""
+    if admin:
+        return OWNER_ROLE
+    if project == DEFAULT_PROJECT:
+        return DEFAULT_PROJECT_ROLE
+    return stored
+
+
+@dataclass(frozen=True, slots=True)
+class Membership:
+    """One user's role in one project, as a member row stores it."""
+
+    project: str
+    user: str
+    role: str
+
+
 __all__ = [
     "DEFAULT_PROJECT",
+    "DEFAULT_PROJECT_ROLE",
+    "EDITOR_ROLE",
+    "OWNER_ROLE",
     "PROJECT_NAME_PATTERN",
+    "ROLES",
+    "VIEWER_ROLE",
     "InvalidProjectNameError",
+    "InvalidRoleError",
+    "Membership",
     "Project",
     "can_name_a_project",
     "check_project_name",
+    "check_role",
+    "effective_role",
+    "role_covers",
 ]

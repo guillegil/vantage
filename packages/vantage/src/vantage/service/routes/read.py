@@ -6,7 +6,9 @@ history routes.
 caller is authorized (`requires_read_project`), and one no project has is
 `404 unknown_project`. Everything addressed by a run id stays where it was:
 a run id names one run across projects, and its detail says which project
-it belongs to, whose history a client then asks for.
+it belongs to, whose history a client then asks for. Either way the
+caller needs the viewer role in the project, checked for a run id once the
+run is found (`requires_read_run`), before the query is validated.
 
 **Every response model is built field by field**, never with
 `model_validate(..., from_attributes=True)` or any other whole-object
@@ -21,8 +23,9 @@ period; nothing here reimplements its precedence.
 
 Every route here but the interface document reads the store, so each is a
 plain `def` that FastAPI runs in its threadpool (see `app.py`), and needs
-the read scope once the server has a user (`service/access.py`). The
-interface document needs nothing: a client reads it to learn how to ask.
+the read scope and the viewer role once the server has a user
+(`service/access.py`). The interface document needs nothing: a client
+reads it to learn how to ask.
 
 A test's identity travels as a named query parameter (`?node_id=`), never a
 path segment: a node id contains `/`, an encoded slash in a path is decoded
@@ -65,9 +68,9 @@ from __future__ import annotations
 import importlib.resources
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Path, Query, Response
+from fastapi import APIRouter, Depends, Query, Response
 
-from vantage.core.domain.execution import IDENTITY_PATTERN, VcsContext
+from vantage.core.domain.execution import VcsContext
 from vantage.core.domain.liveness import derive_presentation
 from vantage.core.domain.projection import FailureProjection, VcsProjection
 from vantage.core.domain.projects import Project
@@ -85,7 +88,7 @@ from vantage.core.ports.storage import (
     RunListEntry,
 )
 from vantage.ingestion.text import NUL, without_nul
-from vantage.service.access import requires_read, requires_read_project
+from vantage.service.access import requires_read_project, requires_read_run
 from vantage.service.cursor import MAX_CURSOR_CHARS, decode_cursor, encode_cursor
 from vantage.service.dependencies import get_grace_period, get_store
 from vantage.service.errors import (
@@ -382,25 +385,20 @@ def list_runs(
     )
 
 
-@router.get("/runs/{run_id}", dependencies=[Depends(requires_read)])
+@router.get("/runs/{run_id}")
 def get_run_detail(
-    run_id: str = Path(pattern=IDENTITY_PATTERN),
-    store: ExecutionStore = Depends(get_store),
+    detail: RunDetail = Depends(requires_read_run),
     grace: timedelta = Depends(get_grace_period),
 ) -> RunDetailResponse:
     """`GET /api/v1/runs/{run_id}`. An unknown run is the same
     `UnknownRunError` the heartbeat route raises: one rejection shape per
     kind, not one per route."""
-    detail = store.get_run_detail(run_id)
-    if detail is None:
-        raise UnknownRunError()
-
     return _run_detail_response(detail, now=datetime.now(timezone.utc), grace=grace)
 
 
-@router.get("/runs/{run_id}/metadata", dependencies=[Depends(requires_read)])
+@router.get("/runs/{run_id}/metadata")
 def get_run_metadata(
-    run_id: str = Path(pattern=IDENTITY_PATTERN),
+    detail: RunDetail = Depends(requires_read_run),
     store: ExecutionStore = Depends(get_store),
 ) -> RunMetadataResponse:
     """`GET /api/v1/runs/{run_id}/metadata` -- every key the run reported,
@@ -409,7 +407,7 @@ def get_run_metadata(
     value. Not paged, since a run holds at most `MAX_METADATA_ENTRIES` keys.
     An unknown run is `UnknownRunError`, as on `get_run_detail`; one that
     reported no metadata has no items and no files."""
-    metadata = store.get_run_metadata(run_id)
+    metadata = store.get_run_metadata(detail.execution.identity.value)
     if metadata is None:
         raise UnknownRunError()
     return RunMetadataResponse(
@@ -418,26 +416,24 @@ def get_run_metadata(
     )
 
 
-@router.get("/runs/{run_id}/results", dependencies=[Depends(requires_read)])
+@router.get("/runs/{run_id}/results")
 def list_results(
-    run_id: str = Path(pattern=IDENTITY_PATTERN),
+    detail: RunDetail = Depends(requires_read_run),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
     store: ExecutionStore = Depends(get_store),
 ) -> ResultsResponse:
-    """`GET /api/v1/runs/{run_id}/results`. An unknown
-    `run_id` is `404`, consistent with `get_run_detail` -- checked via the
-    cheaper `store.get_execution` rather than building a full detail."""
-    if store.get_execution(run_id) is None:
-        raise UnknownRunError()
-    page = store.list_results(run_id, limit=limit, offset=offset)
+    """`GET /api/v1/runs/{run_id}/results`. An unknown `run_id` is `404`,
+    consistent with `get_run_detail`, decided by `requires_read_run`
+    before the page is asked for."""
+    page = store.list_results(detail.execution.identity.value, limit=limit, offset=offset)
     items = [_result_item(entry) for entry in page.items]
     return ResultsResponse(items=items, has_more=page.has_more)
 
 
-@router.get("/runs/{run_id}/result", dependencies=[Depends(requires_read)])
+@router.get("/runs/{run_id}/result")
 def get_result(
-    run_id: str = Path(pattern=IDENTITY_PATTERN),
+    detail: RunDetail = Depends(requires_read_run),
     node_id: str = Query(...),
     store: ExecutionStore = Depends(get_store),
 ) -> ResultDetailResponse:
@@ -445,8 +441,7 @@ def get_result(
     value for the same reason as on `/projects/{project}/tests/history`. An unknown `run_id` is
     `UnknownRunError`; a known run with no result at that identity is a
     distinct `404`, `UnknownResultError`."""
-    if store.get_execution(run_id) is None:
-        raise UnknownRunError()
+    run_id = detail.execution.identity.value
     result = None if NUL in node_id else store.get_result(run_id, node_id=node_id)
     if result is None:
         raise UnknownResultError()

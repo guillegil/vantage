@@ -38,7 +38,13 @@ status. The token never appears in it.
 A report names its project, and a server without it answers
 `404 unknown_project`: `send` turns that into a `ProjectRefusedError`,
 still an `HTTPError` 404, naming the project and how an admin adds it. Any
-other 404 -- a wrong base path's `not_found` -- stays a plain one.
+other 404 -- a wrong base path's `not_found` -- stays a plain one. A server
+that has the project but does not let the token's user record there answers
+`403 not_a_member` or `403 insufficient_role`: `send` turns that into a
+`ProjectRefusedError` too, still a 403, naming the project and how its user
+is made an editor of it, and `send_heartbeat`, when it carried a token, into an
+`AccessRefusedError`.
+Any other 403 -- a proxy's page -- stays a plain one.
 """
 
 from __future__ import annotations
@@ -80,6 +86,19 @@ _ACCESS_REFUSALS = {401: _UNAUTHENTICATED, 403: _INSUFFICIENT_SCOPE, 409: _FOREI
 # `test_server_contract.py` pins it to the server's `NoSuchProjectError`.
 _UNKNOWN_PROJECT = (404, "unknown_project")
 
+# What a vantage server's 403 names when it has the project but the token's
+# user may not record there: no role in it, or one below editor.
+# `test_server_contract.py` pins them to the server's rejections.
+_MEMBERSHIP_REFUSAL_STATUS = 403
+_NOT_A_MEMBER = "not_a_member"
+_INSUFFICIENT_ROLE = "insufficient_role"
+_MEMBERSHIP_REFUSALS = frozenset({_NOT_A_MEMBER, _INSUFFICIENT_ROLE})
+
+# The statuses whose rejection body the plugin reads, for the error it names.
+_EXPLAINED_STATUSES = frozenset(
+    {*_ACCESS_REFUSALS, _UNKNOWN_PROJECT[0], _MEMBERSHIP_REFUSAL_STATUS}
+)
+
 # The shape of a token the server could accept: printable ASCII with no
 # space, at most 512 characters. `test_server_contract.py` checks it agrees
 # with the server's `well_formed_token`.
@@ -93,14 +112,19 @@ def well_formed_token(text: str) -> bool:
 
 
 class ProjectRefusedError(urllib_error.HTTPError):
-    """A vantage server has no project of the name a report gave: a run an
-    admin can let in by adding the project, so it is worth keeping. Its
-    status and headers are the refusal's."""
+    """A vantage server refused a report for its project: it does not have
+    it (`unknown_project`), or the token's user may not record there
+    (`not_a_member`, `insufficient_role`), as `error` says. Either is a run
+    an admin, or an owner of the project, can let in, so it is worth
+    keeping. Its status and headers are the refusal's."""
 
-    def __init__(self, refused: urllib_error.HTTPError, project: str, reason: str) -> None:
+    def __init__(
+        self, refused: urllib_error.HTTPError, project: str, reason: str, *, error: str
+    ) -> None:
         super().__init__(refused.url, refused.code, refused.msg, refused.headers, None)
         self.project = project
         self.reason_text = reason
+        self.error = error
 
     def __str__(self) -> str:
         return f"HTTP {self.code}: {self.reason_text}"
@@ -122,7 +146,7 @@ class AccessRefusedError(urllib_error.HTTPError):
 def _refusal_reason(code: int, error: object, *, token: str | None) -> str | None:
     """What a refusal of who sent a request means, or `None` when `error`
     is not the one a vantage server gives with `code`."""
-    if _ACCESS_REFUSALS.get(code) != error:
+    if code not in _ACCESS_REFUSALS or _ACCESS_REFUSALS[code] != error:
         return None
     if error == _UNAUTHENTICATED:
         if token is None:
@@ -134,6 +158,38 @@ def _refusal_reason(code: int, error: object, *, token: str | None) -> str | Non
     if error == _INSUFFICIENT_SCOPE:
         return "the token in VANTAGE_TOKEN does not grant the record scope"
     return "the run was recorded by another user"
+
+
+def _project_refusal_reason(error: str, project: str, address: str | None) -> str:
+    """What a refusal of a report for its project means, and who fixes it
+    how. Never the server's own message, which the plugin does not trust."""
+    if error == _NOT_A_MEMBER:
+        return (
+            f"{address} does not let the user of the token in VANTAGE_TOKEN record in project "
+            f"{project}, which they are not a member of; an owner of it or an admin adds them "
+            f"with: vantage project member set {project} USER editor"
+        )
+    if error == _INSUFFICIENT_ROLE:
+        return (
+            f"{address} lets the user of the token in VANTAGE_TOKEN only read project "
+            f"{project}; recording needs the editor role, which an owner of it or an admin "
+            f"gives with: vantage project member set {project} USER editor"
+        )
+    return (
+        f"{address} has no project {project}; an admin adds it with: vantage project add {project}"
+    )
+
+
+def _project_refusal(code: int, error: object) -> str | None:
+    """The error a vantage server's refusal of a report for its project
+    names, or `None` when `code` and `error` are not one."""
+    if not isinstance(error, str):
+        return None
+    if code == _MEMBERSHIP_REFUSAL_STATUS and error in _MEMBERSHIP_REFUSALS:
+        return error
+    if (code, error) == _UNKNOWN_PROJECT:
+        return error
+    return None
 
 
 def _build_opener() -> urllib_request.OpenerDirector:
@@ -196,34 +252,40 @@ def _exchange(
     raises `urllib.error.HTTPError`, as an `AccessRefusedError` when a
     vantage server refused who sent it; ``token`` is what was sent, if
     anything, which the reason depends on. With ``project``, the report's,
-    a server's `404 unknown_project` raises `ProjectRefusedError` naming it
-    and ``address``.
+    a server's `404 unknown_project`, `403 not_a_member` or
+    `403 insufficient_role` raises `ProjectRefusedError` naming it and
+    ``address``; without one, as for a heartbeat, either 403 raises
+    `AccessRefusedError`.
     """
 
     def attempt() -> bytes:
         try:
             response = _OPENER.open(http_request, timeout=timeout)
         except urllib_error.HTTPError as exc:
-            # The error carries the still-open response. Only a refusal of
-            # who sent the request needs its body, for the error it names;
-            # the connection is released before the error is handed on.
+            # The error carries the still-open response. Only a refusal a
+            # vantage server explains needs its body, for the error it
+            # names; the connection is released before the error is handed on.
             try:
-                reason = None
-                missing_project = False
-                if exc.code in _ACCESS_REFUSALS:
-                    reason = _refusal_reason(exc.code, _rejection_error(exc), token=token)
-                elif exc.code == _UNKNOWN_PROJECT[0] and project is not None:
-                    missing_project = _rejection_error(exc) == _UNKNOWN_PROJECT[1]
+                error = _rejection_error(exc) if exc.code in _EXPLAINED_STATUSES else None
             finally:
                 exc.close()
+            reason = _refusal_reason(exc.code, error, token=token)
             if reason is not None:
                 raise AccessRefusedError(exc, reason) from None
-            if missing_project and project is not None:
+            refused = _project_refusal(exc.code, error)
+            if refused is not None and project is not None:
                 raise ProjectRefusedError(
+                    exc, project, _project_refusal_reason(refused, project, address), error=refused
+                ) from None
+            # Without a project the request is a heartbeat, for a run the
+            # server already files in one. Only a caller with a token is
+            # refused for its role, so the capability probe, which carries
+            # none, never reads as one.
+            if refused in _MEMBERSHIP_REFUSALS and token is not None:
+                raise AccessRefusedError(
                     exc,
-                    project,
-                    f"{address} has no project {project}; an admin adds it with: "
-                    f"vantage project add {project}",
+                    "the user of the token in VANTAGE_TOKEN may no longer record in this "
+                    "run's project",
                 ) from None
             raise
         with response:

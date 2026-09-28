@@ -20,8 +20,10 @@ from vantage.core.domain.access import (
     ADMIN_SCOPE,
     LOGIN_TOKEN_LABEL,
     LOGIN_TOKEN_LIFETIME,
+    MANAGE_SCOPE,
     READ_SCOPE,
     RECORD_SCOPE,
+    SCOPES,
     Grant,
     Token,
     User,
@@ -35,7 +37,14 @@ from vantage.core.domain.projection import (
     project_failure,
     project_vcs,
 )
-from vantage.core.domain.projects import DEFAULT_PROJECT, Project
+from vantage.core.domain.projects import (
+    DEFAULT_PROJECT,
+    EDITOR_ROLE,
+    OWNER_ROLE,
+    VIEWER_ROLE,
+    Membership,
+    Project,
+)
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
@@ -2682,6 +2691,33 @@ class ExecutionStoreContract:
         )
         assert store.authenticate(token_digest("other"), now=_ACCESS_AT) is None
 
+    @pytest.mark.parametrize(
+        "scopes",
+        [
+            {MANAGE_SCOPE},
+            {READ_SCOPE, MANAGE_SCOPE},
+            {RECORD_SCOPE, MANAGE_SCOPE, ADMIN_SCOPE},
+            set(SCOPES),
+        ],
+        ids=["manage", "read-manage", "all-but-read", "every-scope"],
+    )
+    def test_the_manage_scope_is_held_and_granted_beside_any_other(
+        self, store: ExecutionStore, scopes: set[str]
+    ) -> None:
+        """Each scope is stored on its own, so manage reads back, lists and
+        is granted with whatever else the token holds -- or alone, which is
+        still a scope held."""
+        store.create_user("alice", admin=True, created_at=_ACCESS_AT)
+
+        made = _token(store, "alice", "secret", scopes=scopes)
+
+        assert made.scopes == frozenset(scopes)
+        assert store.get_token(made.id) == made
+        assert store.list_tokens(user="alice") == (made,)
+        assert store.authenticate(token_digest("secret"), now=_ACCESS_AT) == Grant(
+            user="alice", admin=True, scopes=frozenset(scopes)
+        )
+
     def test_a_grant_carries_its_users_standing_now(self, store: ExecutionStore) -> None:
         """An admin token of a user who is no longer an admin still
         authenticates, but its grant says the user is not one, so the admin
@@ -3471,12 +3507,13 @@ class ExecutionStoreContract:
         assert store.get_password_hash("alice") == _HASH
 
     @pytest.mark.parametrize("admin", [False, True], ids=["user", "admin"])
-    def test_a_login_token_reads_and_administers_as_its_user_may_but_never_records(
+    def test_a_login_token_reads_manages_and_administers_as_its_user_may_but_never_records(
         self, store: ExecutionStore, admin: bool
     ) -> None:
         """Recording takes a made token, so a leaked login cannot inject
-        runs. The expiry reads back to the microsecond, which is what
-        `authenticate` compares."""
+        runs. Every login may manage, as far as the user's role in a project
+        lets it, and only an admin's may administer. The expiry reads back
+        to the microsecond, which is what `authenticate` compares."""
         _user(store, "alice", admin=admin)
         expires_at = _ACCESS_AT + LOGIN_TOKEN_LIFETIME + timedelta(microseconds=1)
 
@@ -3488,7 +3525,9 @@ class ExecutionStoreContract:
             expires_at=expires_at,
         )
 
-        scopes = frozenset({READ_SCOPE, ADMIN_SCOPE} if admin else {READ_SCOPE})
+        scopes = frozenset(
+            {READ_SCOPE, MANAGE_SCOPE, ADMIN_SCOPE} if admin else {READ_SCOPE, MANAGE_SCOPE}
+        )
         assert login is not None
         assert login == Token(
             id=login.id,
@@ -3609,7 +3648,7 @@ class ExecutionStoreContract:
             return store.authenticate(token_digest("login"), now=now.astimezone(zone))
 
         assert _grant(expires_at - timedelta(microseconds=1)) == Grant(
-            user="alice", admin=False, scopes=frozenset({READ_SCOPE})
+            user="alice", admin=False, scopes=frozenset({READ_SCOPE, MANAGE_SCOPE})
         )
         assert _grant(expires_at) is None
         assert _grant(expires_at + timedelta(days=365)) is None
@@ -3624,6 +3663,239 @@ class ExecutionStoreContract:
         assert made.expires_at is None
         assert store.get_token(made.id) == made
         assert store.authenticate(token_digest("made"), now=far_future) is not None
+
+    # --- Project members -------------------------------------------------------
+
+    def test_a_new_store_holds_no_member_rows(self, store: ExecutionStore) -> None:
+        """Not in `default` either, whose every user is an editor without a
+        row, nor for an admin, who acts as an owner everywhere: a store
+        holds rows alone, and those two rules are `effective_role`'s."""
+        store.create_user("alice", admin=True, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+
+        for project in (DEFAULT_PROJECT, "a"):
+            assert tuple(store.list_members(project=project)) == ()
+            assert store.get_member_role("alice", project=project) is None
+        assert tuple(store.list_memberships("alice")) == ()
+
+    def test_set_member_adds_a_member_once_and_then_sets_their_role(
+        self, store: ExecutionStore
+    ) -> None:
+        """Only the call that added the row says so, which is what tells
+        adding a member from setting a member's role -- also when a later
+        call sets the role the member already holds."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+
+        added = store.set_member("alice", project="a", role=VIEWER_ROLE)
+        as_added = store.get_member_role("alice", project="a")
+        to_editor = store.set_member("alice", project="a", role=EDITOR_ROLE)
+        as_editor = store.get_member_role("alice", project="a")
+        to_owner = store.set_member("alice", project="a", role=OWNER_ROLE)
+        as_owner = store.get_member_role("alice", project="a")
+        again = store.set_member("alice", project="a", role=OWNER_ROLE)
+
+        member = Membership(project="a", user="alice", role=OWNER_ROLE)
+        assert (added, to_editor, to_owner, again) == (True, False, False, False)
+        assert (as_added, as_editor, as_owner) == (VIEWER_ROLE, EDITOR_ROLE, OWNER_ROLE)
+        assert tuple(store.list_members(project="a")) == (member,)
+        assert tuple(store.list_memberships("alice")) == (member,)
+
+    def test_an_unknown_project_is_refused_before_an_unknown_user_and_nothing_stored(
+        self, store: ExecutionStore
+    ) -> None:
+        """Naming neither is answered with the project, and the store never
+        makes the project or the user itself."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+
+        with pytest.raises(UnknownProjectError):
+            store.set_member("nobody", project="nope", role=EDITOR_ROLE)
+        with pytest.raises(UnknownProjectError):
+            store.set_member("alice", project="nope", role=EDITOR_ROLE)
+        with pytest.raises(UnknownUserError):
+            store.set_member("nobody", project="a", role=EDITOR_ROLE)
+
+        assert tuple(store.list_members(project="a")) == ()
+        assert tuple(store.list_members(project="nope")) == ()
+        assert tuple(store.list_memberships("alice")) == ()
+        assert tuple(store.list_memberships("nobody")) == ()
+        assert [project.name for project in store.list_projects()] == ["a", DEFAULT_PROJECT]
+        assert [user.name for user in store.list_users()] == ["alice"]
+
+    @pytest.mark.parametrize(
+        ("project", "role", "refusal"),
+        [
+            (DEFAULT_PROJECT, EDITOR_ROLE, "default"),
+            ("a", "admin", "role"),
+            ("a", "Owner", "role"),
+            ("nope", "admin", "role"),
+        ],
+        ids=["default", "not-a-role", "capitalised", "unknown-project"],
+    )
+    def test_default_and_a_role_no_row_may_hold_are_refused_before_anything_is_looked_up(
+        self, store: ExecutionStore, project: str, role: str, refusal: str
+    ) -> None:
+        """So an unknown user or project gets the same refusal, and nothing
+        is stored."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+
+        for user in ("alice", "nobody"):
+            with pytest.raises(ValueError, match=refusal):
+                store.set_member(user, project=project, role=role)
+
+        assert store.get_member_role("alice", project=project) is None
+        assert tuple(store.list_members(project=project)) == ()
+        assert tuple(store.list_memberships("alice")) == ()
+
+    def test_removing_a_member_removes_that_row_alone(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_user("bob", admin=False, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.create_project("b", created_at=_ACCESS_AT)
+        store.set_member("alice", project="a", role=OWNER_ROLE)
+        store.set_member("bob", project="a", role=VIEWER_ROLE)
+        store.set_member("alice", project="b", role=EDITOR_ROLE)
+
+        removed = store.remove_member("alice", project="a")
+        again = store.remove_member("alice", project="a")
+
+        assert (removed, again) == (True, False)
+        assert store.get_member_role("alice", project="a") is None
+        assert tuple(store.list_members(project="a")) == (
+            Membership(project="a", user="bob", role=VIEWER_ROLE),
+        )
+        assert tuple(store.list_memberships("alice")) == (
+            Membership(project="b", user="alice", role=EDITOR_ROLE),
+        )
+
+    @pytest.mark.parametrize(
+        ("user", "project"),
+        [("bob", "a"), ("nobody", "a"), ("alice", "nope"), ("alice", DEFAULT_PROJECT)],
+        ids=["not-a-member", "unknown-user", "unknown-project", "default"],
+    )
+    def test_removing_someone_who_is_no_member_is_false_and_changes_nothing(
+        self, store: ExecutionStore, user: str, project: str
+    ) -> None:
+        """`default` included: it has no rows to remove, so there is nothing
+        to refuse."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_user("bob", admin=False, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.set_member("alice", project="a", role=EDITOR_ROLE)
+
+        assert store.remove_member(user, project=project) is False
+        assert tuple(store.list_members(project="a")) == (
+            Membership(project="a", user="alice", role=EDITOR_ROLE),
+        )
+
+    def test_members_and_memberships_list_in_code_point_order(self, store: ExecutionStore) -> None:
+        """A project's rows by user and a user's by project, each holding
+        its own rows alone. Code point order, not a locale's: `-`, `.` and
+        `_` sort by their code points, whatever the database collates by."""
+        role_of = {
+            "b": VIEWER_ROLE,
+            "a_3": EDITOR_ROLE,
+            "a.2": OWNER_ROLE,
+            "a-1": VIEWER_ROLE,
+            "0": EDITOR_ROLE,
+        }
+        for name in role_of:
+            store.create_user(name, admin=False, created_at=_ACCESS_AT)
+            store.create_project(name, created_at=_ACCESS_AT)
+        for name, role in role_of.items():
+            store.set_member(name, project="b", role=role)
+            store.set_member("b", project=name, role=role)
+
+        in_order = ["0", "a-1", "a.2", "a_3", "b"]
+        assert tuple(store.list_members(project="b")) == tuple(
+            Membership(project="b", user=name, role=role_of[name]) for name in in_order
+        )
+        assert tuple(store.list_memberships("b")) == tuple(
+            Membership(project=name, user="b", role=role_of[name]) for name in in_order
+        )
+        assert tuple(store.list_members(project="a-1")) == (
+            Membership(project="a-1", user="b", role=VIEWER_ROLE),
+        )
+        assert tuple(store.list_memberships("a-1")) == (
+            Membership(project="b", user="a-1", role=VIEWER_ROLE),
+        )
+
+    def test_a_value_holding_nul_names_no_member_on_any_call(self, store: ExecutionStore) -> None:
+        """No stored name or role holds U+0000, so a lookup by one matches
+        nothing, a removal removes nothing and an addition names no project,
+        no user or no role -- without the call failing, as binding the value
+        would -- and the one row stored is left as it was."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.set_member("alice", project="a", role=EDITOR_ROLE)
+        nul = "\x00"
+
+        assert store.get_member_role("alice" + nul, project="a") is None
+        assert store.get_member_role("alice", project="a" + nul) is None
+        assert tuple(store.list_members(project="a" + nul)) == ()
+        assert tuple(store.list_memberships("alice" + nul)) == ()
+        assert store.remove_member("alice" + nul, project="a") is False
+        assert store.remove_member("alice", project="a" + nul) is False
+        for project in ("a" + nul, DEFAULT_PROJECT + nul):
+            with pytest.raises(UnknownProjectError):
+                store.set_member("alice", project=project, role=EDITOR_ROLE)
+            with pytest.raises(UnknownProjectError):
+                store.set_member("alice" + nul, project=project, role=EDITOR_ROLE)
+        with pytest.raises(UnknownUserError):
+            store.set_member("alice" + nul, project="a", role=EDITOR_ROLE)
+        with pytest.raises(ValueError, match="role"):
+            store.set_member("alice", project="a", role=EDITOR_ROLE + nul)
+
+        assert tuple(store.list_members(project="a")) == (
+            Membership(project="a", user="alice", role=EDITOR_ROLE),
+        )
+        assert tuple(store.list_memberships("alice")) == (
+            Membership(project="a", user="alice", role=EDITOR_ROLE),
+        )
+
+    def test_a_disabled_users_and_a_demoted_admins_rows_stay(self, store: ExecutionStore) -> None:
+        """Users are disabled, never deleted, and neither that nor a change
+        of standing touches a member row: a disabled user's rows count again
+        once they are enabled, and a former admin's are what they act with."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_user("root", admin=True, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.set_member("alice", project="a", role=EDITOR_ROLE)
+        store.set_member("root", project="a", role=VIEWER_ROLE)
+
+        store.update_user("alice", disabled=True)
+        store.update_user("root", admin=False)
+        while_disabled = store.get_member_role("alice", project="a")
+        store.update_user("alice", disabled=False)
+
+        assert while_disabled == EDITOR_ROLE
+        assert tuple(store.list_members(project="a")) == (
+            Membership(project="a", user="alice", role=EDITOR_ROLE),
+            Membership(project="a", user="root", role=VIEWER_ROLE),
+        )
+        assert store.get_member_role("root", project="a") == VIEWER_ROLE
+
+    def test_a_disabled_user_or_an_admin_is_made_a_member_like_anyone(
+        self, store: ExecutionStore
+    ) -> None:
+        """A disabled user's row grants nothing while their tokens
+        authenticate nothing, and applies once they are enabled; an admin's
+        is what they act with if they stop being one."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.create_user("root", admin=True, created_at=_ACCESS_AT)
+        store.create_project("a", created_at=_ACCESS_AT)
+        store.update_user("alice", disabled=True)
+
+        disabled_added = store.set_member("alice", project="a", role=OWNER_ROLE)
+        admin_added = store.set_member("root", project="a", role=EDITOR_ROLE)
+
+        assert (disabled_added, admin_added) == (True, True)
+        assert tuple(store.list_members(project="a")) == (
+            Membership(project="a", user="alice", role=OWNER_ROLE),
+            Membership(project="a", user="root", role=EDITOR_ROLE),
+        )
 
 
 class LocalDatabaseContract:

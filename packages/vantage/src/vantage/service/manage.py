@@ -1,12 +1,17 @@
 """`vantage user`, `vantage token` and `vantage project` -- manage the users
-of a database, their tokens and its projects, where the database is,
-without a server.
+of a database, their tokens, its projects and their members, where the
+database is, without a server.
 
 **The database is found as the server finds it**: `--database`, then
 `VANTAGE_DATABASE`, then the default path, SQLite or PostgreSQL alike, and
 it is opened the way `vantage` opens it, so every refusal is the same one
 line. A server may be serving it meanwhile: the first user added closes that
 server at its next request (`service/access.py`).
+
+**Whoever can open the database acts with full authority.** No token or
+role is asked for here: any user may be made an admin, and any project
+given an owner, which is how a server whose admins are all gone, or a
+project with no owner left, is recovered.
 
 **Only `user add` and `project add` create a database.** Setting up a
 server's users and projects comes before serving it, so adding one to a
@@ -56,10 +61,17 @@ from vantage.core.domain.access import (
     token_digest,
 )
 from vantage.core.domain.passwords import InvalidPasswordError, check_password, hash_password
-from vantage.core.domain.projects import InvalidProjectNameError, check_project_name
+from vantage.core.domain.projects import (
+    DEFAULT_PROJECT,
+    DEFAULT_PROJECT_ROLE,
+    ROLES,
+    InvalidProjectNameError,
+    check_project_name,
+)
 from vantage.core.ports.storage import (
     ExecutionStore,
     ProjectExistsError,
+    UnknownProjectError,
     UnknownUserError,
     UserExistsError,
 )
@@ -161,7 +173,10 @@ def _user_parser() -> argparse.ArgumentParser:
     add.add_argument(
         "--admin",
         action="store_true",
-        help="May hold the admin scope, to change sections and manage users and tokens.",
+        help=(
+            "May hold the admin scope, to manage users, tokens and projects, and may do "
+            "everything in every project."
+        ),
     )
     _add_database_option(add)
     listing = commands.add_parser("list", help="List every user.")
@@ -219,9 +234,9 @@ def _token_parser() -> argparse.ArgumentParser:
         choices=sorted(SCOPES),
         help=(
             "A scope the token holds; repeat for more. read: read runs; record: send "
-            "reports, what pytest-vantage needs; admin: change sections and manage users "
-            "and tokens, for an admin user "
-            f"(default: {' and '.join(sorted(DEFAULT_SCOPES))})."
+            "reports, what pytest-vantage needs; manage: edit a project's sections as its "
+            "editor and its members as its owner; admin: manage users, tokens and projects, "
+            f"for an admin user (default: {' and '.join(sorted(DEFAULT_SCOPES))})."
         ),
     )
     create.add_argument("--label", default="", help="What the token is for, to tell it apart.")
@@ -239,8 +254,11 @@ def _project_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vantage project",
         description=(
-            "Manage the projects of a vantage database. Every run belongs to one; a run that "
-            "names none belongs to default, which every database has."
+            "Manage the projects of a vantage database and their members. Every run belongs "
+            "to one; a run that names none belongs to default, which every database has. "
+            "Once the database has a user, each user acts in a project with a role, as a "
+            "viewer, editor or owner of it, except that every user is an editor of default "
+            "and an admin may do everything in every project."
         ),
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
@@ -249,13 +267,39 @@ def _project_parser() -> argparse.ArgumentParser:
     _add_database_option(add)
     listing = commands.add_parser("list", help="List every project.")
     _add_database_option(listing)
+    member = commands.add_parser("member", help="Manage who is a member of a project.")
+    members = member.add_subparsers(dest="member_command", required=True, metavar="COMMAND")
+    setting = members.add_parser(
+        "set", help="Make a user a member of a project with a role, or change their role."
+    )
+    setting.add_argument("project")
+    setting.add_argument("user")
+    setting.add_argument(
+        "role",
+        choices=sorted(ROLES),
+        help=(
+            "viewer: read the project; editor: also record runs and edit its sections; "
+            "owner: also manage its members."
+        ),
+    )
+    _add_database_option(setting)
+    roster = members.add_parser("list", help="List a project's members and their roles.")
+    roster.add_argument("project")
+    _add_database_option(roster)
+    remove = members.add_parser("remove", help="Remove a user from a project's members.")
+    remove.add_argument("project")
+    remove.add_argument("user")
+    _add_database_option(remove)
     return parser
 
 
 def project(argv: Sequence[str]) -> int:
     """`vantage project ...`: 0 when done, 1 with one line on stderr when
-    it could not be. Nothing about a project changes once it is made."""
+    it could not be. Nothing about a project changes once it is made but
+    its members."""
     args = _project_parser().parse_args(list(argv))
+    if args.command == "member":
+        return _member(args)
     if args.command == "add":
         # Before the database is opened: a refused name creates nothing.
         try:
@@ -277,6 +321,79 @@ def project(argv: Sequence[str]) -> int:
         with contextlib.suppress(Exception):
             store.close()
     return 0
+
+
+def _member(args: argparse.Namespace) -> int:
+    """`vantage project member ...`: 0 when done, 1 with one line on stderr
+    when it could not be."""
+    changes = args.member_command != "list"
+    # Before the database is opened: a refusal creates nothing, and needs
+    # no database to be told.
+    try:
+        check_project_name(args.project)
+        if changes:
+            check_user_name(args.user)
+    except (InvalidProjectNameError, InvalidUserNameError) as exc:
+        _refuse(str(exc))
+    if changes and args.project == DEFAULT_PROJECT:
+        _refuse(
+            f"every user is an {DEFAULT_PROJECT_ROLE} of {DEFAULT_PROJECT}, "
+            "which has no members to set or remove"
+        )
+    store = _open(args.database)
+    try:
+        if args.member_command == "set":
+            _set_member(store, args.project, args.user, role=args.role)
+        elif args.member_command == "remove":
+            _remove_member(store, args.project, args.user)
+        else:
+            _list_members(store, args.project)
+    finally:
+        with contextlib.suppress(Exception):
+            store.close()
+    return 0
+
+
+def _set_member(store: ExecutionStore, project: str, name: str, *, role: str) -> None:
+    try:
+        added = store.set_member(name, project=project, role=role)
+    except UnknownProjectError:
+        _refuse(f"there is no project named {project}")
+    except UnknownUserError:
+        _refuse(f"there is no user named {name}")
+    _say(f"added {name} to {project} as {role}" if added else f"{name} is now {role} in {project}")
+    found = store.get_user(name)
+    if found is not None and found.disabled:
+        _say(
+            f"{name} is disabled, so this grants nothing until they are enabled: "
+            f"vantage user update {name} --enable"
+        )
+    if found is not None and found.admin:
+        _say(
+            f"{name} is an admin, who may do everything in every project whatever their role in it"
+        )
+
+
+def _remove_member(store: ExecutionStore, project: str, name: str) -> None:
+    if store.remove_member(name, project=project):
+        _say(f"removed {name} from {project}")
+        return
+    # Asked only once the removal found nothing: no project is ever
+    # deleted, so one missing now was missing then.
+    if store.get_project(project) is None:
+        _refuse(f"there is no project named {project}")
+    _refuse(f"{name} is not a member of {project}")
+
+
+def _list_members(store: ExecutionStore, project: str) -> None:
+    if store.get_project(project) is None:
+        _refuse(f"there is no project named {project}")
+    if project == DEFAULT_PROJECT:
+        _say(f"every user is an {DEFAULT_PROJECT_ROLE} of {DEFAULT_PROJECT}, which has no members")
+        return
+    rows = [[found.user, found.role] for found in store.list_members(project=project)]
+    if rows:
+        print(_table(["USER", "ROLE"], rows))
 
 
 def user(argv: Sequence[str]) -> int:

@@ -22,7 +22,8 @@ vacuously green.
 **Two projects, each with a run, a result and a section.** The per-project
 reads are asked of both, and of a project that does not exist and one no
 project can be named, so a lookup that made the project it missed, or read
-across projects and wrote as it went, is caught.
+across projects and wrote as it went, is caught. On the closed database the
+other project also has a member, so reading its members reads a row.
 
 **On an open database and on a closed one.** Once a user exists every read
 authenticates first, so the closed run proves that authenticating writes
@@ -46,7 +47,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 from vantage.core.domain.access import RECORD_SCOPE, SCOPES, new_token, token_digest
-from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.core.domain.projects import DEFAULT_PROJECT, EDITOR_ROLE
 from vantage.core.ports.storage import MetadataEntry, MetadataFile, RunMetadata
 from vantage.service.app import create_app
 from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
@@ -139,9 +140,9 @@ def _seed_database(db_path: Path, *, closed: bool = False) -> dict[str, str]:
     """Two projects, `default` and `_OTHER_PROJECT`, each with one run, one
     result, the run's metadata and one section, from a writer closed before
     the store under test opens. With `closed`, also an admin `alice` with a
-    token holding every scope, and a user `bob` with a record-only one; the
-    headers that send alice's token are returned, and bob's are kept for
-    `_read_bindings`."""
+    token holding every scope, and a user `bob`, an editor of
+    `_OTHER_PROJECT`, with a record-only one; the headers that send alice's
+    token are returned, and bob's are kept for `_read_bindings`."""
     writer = SqliteExecutionStore(db_path)
     headers: dict[str, str] = {}
     if closed:
@@ -157,6 +158,8 @@ def _seed_database(db_path: Path, *, closed: bool = False) -> dict[str, str]:
             )
             headers[name] = f"Bearer {token}"
     writer.create_project(_OTHER_PROJECT, created_at=_SEEDED_AT)
+    if closed:
+        writer.set_member("bob", project=_OTHER_PROJECT, role=EDITOR_ROLE)
     for run_id, project in ((_RUN_ID, DEFAULT_PROJECT), (_OTHER_RUN_ID, _OTHER_PROJECT)):
         writer.record_session(
             _execution(run_id, started=_SEEDED_AT, vcs=_vcs()),
@@ -210,8 +213,8 @@ def _read_bindings(
     such branch keeps its single happy-path call. A per-project read is
     asked of both seeded projects, and answers `404` for the missing ones.
     With `bob`, the
-    authorization header of a user who is no admin, the users and tokens
-    reads are also asked with it, to be refused."""
+    authorization header of a user who is no admin, the users, tokens and
+    members reads are also asked with it, to be refused."""
     run = f"/api/v1/runs/{_RUN_ID}"
     refused = {} if bob is None else {"Authorization": bob}
     unknown_run = f"/api/v1/runs/{_UNKNOWN_RUN_ID}"
@@ -274,6 +277,13 @@ def _read_bindings(
             lambda: client.get(f"{run}/sections"),
             lambda: client.get(f"{unknown_run}/sections"),  # 404 (UnknownRunError)
             lambda: client.get(f"{other_run}/sections"),  # the other project's sections
+        ),
+        ("GET", "/projects/{project}/members"): (
+            *(partial(client.get, f"{project}/members") for project in projects),
+            # 404 (NoSuchProjectError), or 409 when open
+            *(partial(client.get, f"{project}/members") for project in missing),
+            # 403, or 409 when open
+            partial(client.get, f"{projects[1]}/members", headers=refused),
         ),
         ("GET", "/users"): (
             lambda: client.get("/api/v1/users"),
@@ -347,10 +357,18 @@ def test_logical_content_digest_unchanged_after_every_read_path(
 
         proof = _run_read_only_proof(store=store, ops=read_ops, bindings=bindings)
 
-        # The users and tokens reads got past their refusal to an anonymous
-        # caller, so their read of the store is proven too, not only that.
-        answered = [client.get(path).status_code for path in ("/api/v1/users", "/api/v1/tokens")]
-        assert answered == [200, 200] if closed else [409, 409]
+        # The users, tokens and members reads got past their refusal to an
+        # anonymous caller, so their read of the store is proven too, not
+        # only that.
+        answered = [
+            client.get(path).status_code
+            for path in (
+                "/api/v1/users",
+                "/api/v1/tokens",
+                f"/api/v1/projects/{_OTHER_PROJECT}/members",
+            )
+        ]
+        assert answered == ([200, 200, 200] if closed else [409, 409, 409])
         # Both projects' rows are in the digest, and nothing asked made one.
         tables = set(_table_names(store._conn))  # noqa: SLF001
         assert {"project", "project_setting"} <= tables

@@ -460,3 +460,19 @@ def test_the_unknown_project_refusal_the_plugin_keeps_is_the_one_the_server_give
     refusal = (errors.NoSuchProjectError.status_code, errors.NoSuchProjectError.error)
 
     assert transport._UNKNOWN_PROJECT == refusal
+
+
+def test_the_membership_refusals_the_plugin_keeps_are_the_ones_the_server_gives() -> None:
+    """A run refused because the token's user may not record in its project
+    is kept, and sending moves on to other projects' runs; any other 403
+    refuses the token itself and stops it. Reading the wrong pairs would
+    stop at a run an owner of the project could let in, or pass over a
+    project for a refusal no grant there would lift."""
+    refusals = {
+        (errors.NotAMemberError.status_code, errors.NotAMemberError.error),
+        (errors.InsufficientRoleError.status_code, errors.InsufficientRoleError.error),
+    }
+
+    assert {
+        (transport._MEMBERSHIP_REFUSAL_STATUS, error) for error in transport._MEMBERSHIP_REFUSALS
+    } == refusals

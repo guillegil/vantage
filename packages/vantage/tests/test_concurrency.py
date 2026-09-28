@@ -25,10 +25,17 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
-from vantage.core.domain.access import READ_SCOPE, SCOPES, new_token, token_digest
+from vantage.core.domain.access import (
+    MANAGE_SCOPE,
+    READ_SCOPE,
+    RECORD_SCOPE,
+    SCOPES,
+    new_token,
+    token_digest,
+)
 from vantage.core.domain.execution import Execution, Identity
 from vantage.core.domain.passwords import hash_password
-from vantage.core.domain.projects import DEFAULT_PROJECT, Project
+from vantage.core.domain.projects import DEFAULT_PROJECT, OWNER_ROLE, Project
 from vantage.core.domain.result import Result
 from vantage.core.domain.sections import MAX_SECTIONS
 from vantage.core.ports.storage import (
@@ -545,13 +552,17 @@ def test_a_slow_store_write_holds_up_no_other_request() -> None:
 
 _HELD_RUN = "c" * 32
 _HELD_NODE = "tests/test_held.py::test_x"
+_HELD_PROJECT = "firmware"
+# A run of `bob`'s in `_HELD_PROJECT`.
+_HELD_MEMBER_RUN = "e" * 32
 
 # Each route that reaches the store, with the store method it calls after
 # authenticating, keyed by the operation id the document gives it (the
 # metadata filter is one more way to call `list_runs`). Every request is an
-# admin's, holding every scope, on a store with a user `bob` and a token of
-# his, id 2.
+# admin's, holding every scope, on a store with a user `bob`, an owner of
+# `_HELD_PROJECT`, and a token of his, id 2.
 _BOB_PASSWORD = "bob's password, long enough"  # noqa: S105
+_BOB_TOKEN = new_token()
 
 _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "create_run": ("POST", "/api/v1/runs", {"json": _report("d" * 32)}, "record_session"),
@@ -567,12 +578,12 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     ),
     "get_run_detail": ("GET", f"/api/v1/runs/{_HELD_RUN}", {}, "get_run_detail"),
     "get_run_metadata": ("GET", f"/api/v1/runs/{_HELD_RUN}/metadata", {}, "get_run_metadata"),
-    "list_results": ("GET", f"/api/v1/runs/{_HELD_RUN}/results", {}, "get_execution"),
+    "list_results": ("GET", f"/api/v1/runs/{_HELD_RUN}/results", {}, "get_run_detail"),
     "get_result": (
         "GET",
         f"/api/v1/runs/{_HELD_RUN}/result",
         {"params": {"node_id": _HELD_NODE}},
-        "get_execution",
+        "get_run_detail",
     ),
     "list_history": (
         "GET",
@@ -594,6 +605,19 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
         "delete_setting",
     ),
     "get_run_sections": ("GET", f"/api/v1/runs/{_HELD_RUN}/sections", {}, "get_run_detail"),
+    "list_members": ("GET", f"/api/v1/projects/{_HELD_PROJECT}/members", {}, "list_members"),
+    "set_member": (
+        "PUT",
+        f"/api/v1/projects/{_HELD_PROJECT}/members/bob",
+        {"json": {"role": "editor"}},
+        "set_member",
+    ),
+    "remove_member": (
+        "DELETE",
+        f"/api/v1/projects/{_HELD_PROJECT}/members/bob",
+        {},
+        "remove_member",
+    ),
     "list_users": ("GET", "/api/v1/users", {}, "list_users"),
     "create_user": ("POST", "/api/v1/users", {"json": {"name": "carol"}}, "create_user"),
     "update_user": ("PATCH", "/api/v1/users/bob", {"json": {"admin": True}}, "update_user"),
@@ -632,7 +656,33 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
 _PROJECT_LOOKUPS: dict[str, tuple[str, str, dict[str, Any], str]] = {
     f"{operation}-project": (method, path, request_kwargs, "get_project")
     for operation, (method, path, request_kwargs, _held) in _STORE_ROUTES.items()
-    if path.startswith("/api/v1/projects/default/")
+    if path.startswith("/api/v1/projects/")
+}
+
+# A member's role is read from the store as well, once the project or the
+# run is found, or, for a report, once it is read and valid; an admin's is
+# not, so these are `bob`'s requests, one per way a route comes to it.
+_BOBS = {"headers": {"Authorization": f"Bearer {_BOB_TOKEN}"}}
+_ROLE_LOOKUPS: dict[str, tuple[str, str, dict[str, Any], str]] = {
+    "list_runs-role": ("GET", f"/api/v1/projects/{_HELD_PROJECT}/runs", _BOBS, "get_member_role"),
+    "get_run_detail-role": (
+        "GET",
+        f"/api/v1/runs/{_HELD_MEMBER_RUN}",
+        _BOBS,
+        "get_member_role",
+    ),
+    "heartbeat-role": (
+        "POST",
+        f"/api/v1/runs/{_HELD_MEMBER_RUN}/heartbeat",
+        _BOBS,
+        "get_member_role",
+    ),
+    "create_run-role": (
+        "POST",
+        "/api/v1/runs",
+        {"json": {**_report("f" * 32), "project": _HELD_PROJECT}, **_BOBS},
+        "get_member_role",
+    ),
 }
 
 
@@ -673,8 +723,8 @@ def _hold(store: InMemoryExecutionStore, method: str) -> tuple[threading.Event, 
 
 @pytest.mark.parametrize(
     ("method", "path", "request_kwargs", "held"),
-    [*_STORE_ROUTES.values(), *_PROJECT_LOOKUPS.values()],
-    ids=[*_STORE_ROUTES, *_PROJECT_LOOKUPS],
+    [*_STORE_ROUTES.values(), *_PROJECT_LOOKUPS.values(), *_ROLE_LOOKUPS.values()],
+    ids=[*_STORE_ROUTES, *_PROJECT_LOOKUPS, *_ROLE_LOOKUPS],
 )
 def test_a_held_store_call_holds_up_no_other_request(
     method: str, path: str, request_kwargs: dict[str, Any], held: str, cheap_passwords: None
@@ -693,18 +743,27 @@ def test_a_held_store_call_holds_up_no_other_request(
     store.create_user("bob", admin=False, created_at=now)
     store.create_token(
         "bob",
-        digest=token_digest(new_token()),
+        digest=token_digest(_BOB_TOKEN),
         label="",
-        scopes=frozenset({READ_SCOPE}),
+        scopes=frozenset({READ_SCOPE, RECORD_SCOPE, MANAGE_SCOPE}),
         created_at=now,
     )
     store.set_password("bob", password_hash=hash_password(_BOB_PASSWORD), changed_at=now)
+    store.create_project(_HELD_PROJECT, created_at=now)
+    store.set_member("bob", project=_HELD_PROJECT, role=OWNER_ROLE)
     store.record_session(
         _start_only_execution(_HELD_RUN),
         results=[_result(_HELD_NODE)],
         received_at=now,
         recorded_by="alice",
         project=DEFAULT_PROJECT,
+    )
+    store.record_session(
+        _start_only_execution(_HELD_MEMBER_RUN),
+        results=[],
+        received_at=now,
+        recorded_by="bob",
+        project=_HELD_PROJECT,
     )
     store.upsert_setting(
         TEST_SECTIONS_NAMESPACE,

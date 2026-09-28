@@ -26,13 +26,20 @@ from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 import pytest
+from vantage.core.domain.access import (
+    LOGIN_TOKEN_LABEL,
+    LOGIN_TOKEN_LIFETIME,
+    MANAGE_SCOPE,
+    token_digest,
+)
 from vantage.core.domain.metadata import MAX_METADATA_KEY_CHARS
-from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.core.domain.projects import DEFAULT_PROJECT, EDITOR_ROLE, VIEWER_ROLE, Membership
 from vantage.core.ports.storage import (
     ExecutionStore,
     MetadataEntry,
     MetadataFile,
     RunMetadata,
+    UnknownProjectError,
 )
 from vantage.storage.connection import open_database
 from vantage.storage.postgres import PostgresExecutionStore, PostgresOpenError
@@ -41,6 +48,7 @@ from vantage.storage.postgres import store as postgres_store_module
 from vantage.storage.postgres.connection import PgConnection, scrubbed
 from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 from vantage_port_contract import (
+    _HASH,
     ExecutionStoreContract,
     StoredMetadata,
     _execution,
@@ -97,16 +105,16 @@ def test_a_fresh_database_gets_the_vantage_schema_stamped_with_the_current_versi
     assert datetime.fromisoformat(str(stamped["created_at"])).tzinfo is not None
 
 
-def test_a_new_database_is_stamped_9_and_holds_the_default_project_alone(
+def test_a_new_database_is_stamped_10_and_holds_the_default_project_alone(
     postgres_url: str,
 ) -> None:
-    """Version 9 is the schema with passwords, login tokens and the origin.
+    """Version 10 is the schema with project members and the manage scope.
     A report naming no project is recorded in `default`, so a new database
     has that project before anything is written to it -- and no other."""
     PostgresExecutionStore(postgres_url).close()
 
     assert _query(postgres_url, "SELECT value FROM vantage.meta WHERE key = 'schema_version'") == [
-        ("9",)
+        ("10",)
     ]
     assert _query(postgres_url, "SELECT name FROM vantage.project") == [(DEFAULT_PROJECT,)]
 
@@ -277,7 +285,8 @@ def test_a_version_7_schema_is_refused_and_left_as_it_was(postgres_url: str) -> 
     with pytest.raises(SchemaVersionError) as refused:
         PostgresExecutionStore(postgres_url)
 
-    assert "schema_version is 7, but this build requires schema_version 9;" in str(refused.value)
+    expected = f"schema_version is 7, but this build requires schema_version {_SCHEMA_VERSION};"
+    assert expected in str(refused.value)
     assert _vantage_objects(postgres_url) == before
     assert _query(postgres_url, "SELECT to_regclass('vantage.project')") == [(None,)]
     assert _query(postgres_url, "SELECT id FROM vantage.run") == [(_RUN,)]
@@ -303,7 +312,8 @@ def test_a_version_8_schema_is_refused_and_left_as_it_was(postgres_url: str) -> 
     with pytest.raises(SchemaVersionError) as refused:
         PostgresExecutionStore(postgres_url)
 
-    assert "schema_version is 8, but this build requires schema_version 9;" in str(refused.value)
+    expected = f"schema_version is 8, but this build requires schema_version {_SCHEMA_VERSION};"
+    assert expected in str(refused.value)
     assert _vantage_objects(postgres_url) == before
     assert _query(
         postgres_url,
@@ -312,6 +322,54 @@ def test_a_version_8_schema_is_refused_and_left_as_it_was(postgres_url: str) -> 
     ) == [("name",), ("admin",), ("disabled",), ("created_at",)]
     assert _query(postgres_url, "SELECT name FROM vantage.account") == [("alice",)]
     assert _query(postgres_url, "SELECT key, value FROM vantage.meta") == [("schema_version", "8")]
+
+
+def test_a_version_9_schema_is_refused_and_left_as_it_was(postgres_url: str) -> None:
+    """A schema from the build before project members has tokens without
+    the manage flag and no member table. Given the table empty, each of its
+    projects but `default` would shut out every user but an admin, even one
+    who recorded there. It is refused, not given the column or the table:
+    that would be a migration, and there are none."""
+    _query(postgres_url, "CREATE SCHEMA vantage")
+    _query(postgres_url, "CREATE TABLE vantage.meta (key text PRIMARY KEY, value text NOT NULL)")
+    _query(postgres_url, "INSERT INTO vantage.meta VALUES ('schema_version', '9')")
+    _query(
+        postgres_url,
+        "CREATE TABLE vantage.access_token (id bigint PRIMARY KEY, account text NOT NULL,"
+        " digest text NOT NULL UNIQUE, label text NOT NULL, can_read boolean NOT NULL,"
+        " can_record boolean NOT NULL, can_admin boolean NOT NULL)",
+    )
+    _query(
+        postgres_url,
+        "INSERT INTO vantage.access_token VALUES (1, 'alice', 'digest', '', true, true, false)",
+    )
+    before = _vantage_objects(postgres_url)
+
+    with pytest.raises(SchemaVersionError) as refused:
+        PostgresExecutionStore(postgres_url)
+
+    expected = f"schema_version is 9, but this build requires schema_version {_SCHEMA_VERSION};"
+    assert expected in str(refused.value)
+    assert _vantage_objects(postgres_url) == before
+    assert _query(postgres_url, "SELECT to_regclass('vantage.project_member')") == [(None,)]
+    assert _query(
+        postgres_url,
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = 'vantage' AND table_name = 'access_token'"
+        " ORDER BY ordinal_position",
+    ) == [
+        ("id",),
+        ("account",),
+        ("digest",),
+        ("label",),
+        ("can_read",),
+        ("can_record",),
+        ("can_admin",),
+    ]
+    assert _query(
+        postgres_url, "SELECT id, can_read, can_record, can_admin FROM vantage.access_token"
+    ) == [(1, True, True, False)]
+    assert _query(postgres_url, "SELECT key, value FROM vantage.meta") == [("schema_version", "9")]
 
 
 def _sqlite_columns(path: Path) -> dict[str, list[tuple[str, bool]]]:
@@ -359,24 +417,47 @@ def test_the_tables_and_columns_are_those_of_the_sqlite_schema(
 
 _CHECK_IN = re.compile(r"CHECK \((\w+) IN \(([^)]*)\)\)")
 
+# A row must set one of several flags: PostgreSQL ORs its booleans, SQLite
+# sums its 0-or-1 integers.
+_ANY_FLAG = {
+    "vantage.storage.postgres": (re.compile(r"CHECK \((\w+(?: OR \w+)+)\)"), " OR "),
+    "vantage.storage": (re.compile(r"CHECK \((\w+(?: \+ \w+)+) > 0\)"), " + "),
+}
+
+
+def _schema(package: str) -> str:
+    return importlib.resources.files(package).joinpath("schema.sql").read_text("utf-8")
+
 
 def _vocabularies(package: str) -> list[tuple[str, tuple[str, ...]]]:
     """Every `CHECK (<column> IN (...))` in `package`'s `schema.sql`, but
     the SQLite ones holding a flag to 0 or 1, which PostgreSQL stores as a
     boolean."""
-    schema = importlib.resources.files(package).joinpath("schema.sql").read_text("utf-8")
     checks = (
         (column, tuple(sorted(value.strip().strip("'") for value in values.split(","))))
-        for column, values in _CHECK_IN.findall(schema)
+        for column, values in _CHECK_IN.findall(_schema(package))
     )
     return sorted(check for check in checks if check[1] != ("0", "1"))
+
+
+def _any_flag_checks(package: str) -> list[tuple[str, ...]]:
+    """The flags each CHECK in `package`'s `schema.sql` that holds a row to
+    setting at least one of them names."""
+    pattern, separator = _ANY_FLAG[package]
+    return sorted(
+        tuple(sorted(flags.split(separator))) for flags in pattern.findall(_schema(package))
+    )
 
 
 def test_the_check_constraints_accept_what_the_sqlite_schemas_accept() -> None:
     postgres = _vocabularies("vantage.storage.postgres")
 
-    assert len(postgres) == 5
+    assert len(postgres) == 6
     assert postgres == _vocabularies("vantage.storage")
+    assert _any_flag_checks("vantage.storage.postgres") == [
+        ("can_admin", "can_manage", "can_read", "can_record")
+    ]
+    assert _any_flag_checks("vantage.storage.postgres") == _any_flag_checks("vantage.storage")
 
 
 def test_a_database_not_encoded_in_utf8_is_refused(
@@ -592,6 +673,117 @@ def test_a_call_waiting_since_before_the_server_came_back_is_served_once_it_is(
             assert waiting.result() == 0
     finally:
         store.close()
+
+
+# -- member rows and scope flags --
+
+_INSERT_MEMBER = "INSERT INTO vantage.project_member (project, account, role) VALUES (%s, %s, %s)"
+
+
+def _insert_member(url: str, project: str, account: str, role: str) -> None:
+    """A member row written past the store, as by hand."""
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(_INSERT_MEMBER, (project, account, role))
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["admin", "Owner", "owner ", ""],
+    ids=["not-a-role", "capitalised", "trailing-space", "empty"],
+)
+def test_the_schema_refuses_a_member_row_holding_a_role_outside_the_roles(
+    postgres_store: PostgresExecutionStore, postgres_url: str, role: str
+) -> None:
+    """The store refuses such a role before writing; the CHECK keeps one
+    written any other way out too, so every row read back holds a role
+    `effective_role` knows."""
+    now = datetime.now(timezone.utc)
+    postgres_store.create_user("alice", admin=False, created_at=now)
+    postgres_store.create_project("firmware", created_at=now)
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        _insert_member(postgres_url, "firmware", "alice", role)
+    _insert_member(postgres_url, "firmware", "alice", VIEWER_ROLE)
+
+    assert postgres_store.list_members(project="firmware") == (
+        Membership(project="firmware", user="alice", role=VIEWER_ROLE),
+    )
+
+
+@pytest.mark.parametrize(
+    ("project", "account"), [("nope", "alice"), ("firmware", "nobody")], ids=["project", "user"]
+)
+def test_the_schema_refuses_a_member_row_naming_a_missing_project_or_user(
+    postgres_store: PostgresExecutionStore, postgres_url: str, project: str, account: str
+) -> None:
+    """Projects and users are never deleted, so a row naming one keeps
+    naming one; the foreign keys keep a row written past the store's probes
+    from naming nothing in the first place."""
+    now = datetime.now(timezone.utc)
+    postgres_store.create_user("alice", admin=False, created_at=now)
+    postgres_store.create_project("firmware", created_at=now)
+
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        _insert_member(postgres_url, project, account, VIEWER_ROLE)
+
+    assert _query(postgres_url, "SELECT count(*) FROM vantage.project_member") == [(0,)]
+
+
+def test_a_member_row_no_store_may_write_is_refused_without_a_connection(
+    postgres_store: PostgresExecutionStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`default`, a role outside the roles and a project name holding
+    U+0000 are refused before a connection is taken from the pool, so a
+    refusal never waits for one."""
+
+    def _no_connection(pool: object) -> None:
+        raise AssertionError("set_member asked the database")
+
+    monkeypatch.setattr(postgres_store_module, "live_connection", _no_connection)
+
+    for project, role in ((DEFAULT_PROJECT, EDITOR_ROLE), ("nope", "admin")):
+        with pytest.raises(ValueError):
+            postgres_store.set_member("nobody", project=project, role=role)
+    with pytest.raises(UnknownProjectError):
+        postgres_store.set_member("nobody", project="nope\x00", role=EDITOR_ROLE)
+
+
+def test_each_scope_is_stored_in_a_flag_column_of_its_own(
+    postgres_store: PostgresExecutionStore, postgres_url: str
+) -> None:
+    """`manage` has a column of its own, set for a made token holding it
+    and for every login token, whose `can_record` never is. Read straight
+    off the rows, since decoding the columns the way they were encoded
+    would hide a flag stored in another scope's column."""
+    now = datetime.now(timezone.utc)
+    postgres_store.create_first_admin("admin", password_hash=_HASH, created_at=now)
+    postgres_store.create_user("alice", admin=False, created_at=now)
+    postgres_store.set_password("alice", password_hash=_HASH, changed_at=now)
+    postgres_store.create_token(
+        "alice",
+        digest=token_digest("made"),
+        label="made",
+        scopes=frozenset({MANAGE_SCOPE}),
+        created_at=now,
+    )
+    for user in ("alice", "admin"):
+        postgres_store.create_login_token(
+            user,
+            password_hash=_HASH,
+            digest=token_digest(f"login-{user}"),
+            created_at=now,
+            expires_at=now + LOGIN_TOKEN_LIFETIME,
+        )
+
+    assert _query(
+        postgres_url,
+        "SELECT account, label, can_read, can_record, can_manage, can_admin"
+        " FROM vantage.access_token ORDER BY id",
+    ) == [
+        ("alice", "made", False, False, True, False),
+        ("alice", LOGIN_TOKEN_LABEL, True, False, True, False),
+        ("admin", LOGIN_TOKEN_LABEL, True, False, True, True),
+    ]
 
 
 # -- transactions the server aborts --

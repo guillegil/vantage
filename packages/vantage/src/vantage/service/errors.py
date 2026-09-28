@@ -323,12 +323,13 @@ class InsufficientScopeError(ChallengeError):
 
 
 class OpenServerError(RejectionError):
-    """A users, tokens, login or password route asked of a database with no
-    user, which only a database pytest-vantage's local store made can be
-    while served. Nobody can log in or act as an admin there, and the one
-    thing an anonymous caller could do -- make the first user -- only the
-    `vantage` command does. A 409 without a challenge, since no token would
-    help."""
+    """A users, tokens, login, password or members route asked of a
+    database with no user, which only a database pytest-vantage's local
+    store made can be while served. Nobody can log in or act as an admin
+    there, a project has no member to list or change until users exist, and
+    the one thing an anonymous caller could do -- make the first user --
+    only the `vantage` command does. A 409 without a challenge, since no
+    token would help."""
 
     status_code = 409
     error = "open_server"
@@ -337,8 +338,32 @@ class OpenServerError(RejectionError):
         super().__init__(
             "This server's database was made by pytest-vantage's local store and has no user, "
             "so it serves every request without a token and nobody logs in or manages users "
-            "here: add the first admin with vantage user add NAME --admin on its database."
+            "or members here: add the first admin with vantage user add NAME --admin on its "
+            "database."
         )
+
+
+class NotAMemberError(RejectionError):
+    """An authenticated caller with no role in the project a path, a run or
+    a report names. A 403 without a challenge, since no other token of the
+    same user would help; the body names neither the project nor a member."""
+
+    status_code = 403
+    error = "not_a_member"
+
+    def __init__(self) -> None:
+        super().__init__("You are not a member of this project.")
+
+
+class InsufficientRoleError(RejectionError):
+    """A member whose role in the project is below the one the request
+    needs. Like `NotAMemberError`, a 403 without a challenge."""
+
+    status_code = 403
+    error = "insufficient_role"
+
+    def __init__(self, role: str) -> None:
+        super().__init__(f"This needs the {role} role in this project, and yours is below it.")
 
 
 class PasswordChecksBusyError(RejectionError):
@@ -463,6 +488,56 @@ class NotAnAdminError(RejectionError):
         )
 
 
+class DefaultProjectMembersError(RejectionError):
+    """A member set or removed in `default`, which takes none: every user
+    is an editor of it without a row."""
+
+    status_code = 409
+    error = "default_project"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Every user is an editor of default, which has no members to set or remove."
+        )
+
+
+class NoSuchMemberError(RejectionError):
+    """`DELETE /projects/{project}/members/{user}` for a user who is not a
+    member of the project -- whether or not the user exists -- or a name
+    nobody can have."""
+
+    status_code = 404
+    error = "unknown_member"
+
+    def __init__(self) -> None:
+        super().__init__("That user is not a member of this project.")
+
+
+class RoleRefusedError(RejectionError):
+    """A role that is not one (`check_role`). The value is not repeated."""
+
+    status_code = 422
+    error = "invalid_role"
+
+    def __init__(self) -> None:
+        super().__init__("A role is viewer, editor or owner.", ["role"])
+
+
+class InvalidMemberRequestError(RejectionError):
+    """A `PUT /projects/{project}/members/{user}` body of the wrong shape.
+    The fields are named, their values never repeated."""
+
+    status_code = 422
+    error = "invalid_member_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidMemberRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
+
+
 class UnknownTokenError(RejectionError):
     """No token has that id."""
 
@@ -528,7 +603,7 @@ class ScopesRefusedError(RejectionError):
     error = "invalid_scopes"
 
     def __init__(self) -> None:
-        super().__init__("A token holds one or more of admin, read and record.", ["scopes"])
+        super().__init__("A token holds one or more of admin, manage, read and record.", ["scopes"])
 
 
 class TokenLabelRefusedError(RejectionError):
@@ -718,12 +793,15 @@ def register_error_handlers(app: FastAPI) -> None:
 __all__ = [
     "MAX_REPORT_BYTES",
     "ChallengeError",
+    "DefaultProjectMembersError",
     "IncompleteBodyError",
+    "InsufficientRoleError",
     "InsufficientScopeError",
     "InvalidCredentialsError",
     "InvalidIdentityError",
     "InvalidJsonError",
     "InvalidLoginRequestError",
+    "InvalidMemberRequestError",
     "InvalidMetadataFilterError",
     "InvalidParameterError",
     "InvalidPasswordRequestError",
@@ -734,8 +812,10 @@ __all__ = [
     "InvalidSectionPrefixError",
     "InvalidTokenRequestError",
     "InvalidUserRequestError",
+    "NoSuchMemberError",
     "NoSuchProjectError",
     "NoSuchUserError",
+    "NotAMemberError",
     "NotAnAdminError",
     "OpenServerError",
     "OwnAccountError",
@@ -746,6 +826,7 @@ __all__ = [
     "ProjectNameTakenError",
     "RejectionError",
     "ReservedSectionNameError",
+    "RoleRefusedError",
     "RunOfAnotherProjectError",
     "RunOfAnotherUserError",
     "ScopesRefusedError",

@@ -10,7 +10,10 @@ can fail, not only that it currently passes.
 `GET /api/v1/openapi.yaml` is itself declared `read` in the document, so it
 is exercised by `test_every_documented_path_answers_2xx` like every other
 read path. The rejections are exercised the same way: every status a probe
-gets back must be one its operation lists.
+gets back must be one its operation lists. So is who may ask: each
+operation's `403` names the scope a token must grant and, within a project,
+the role its user needs, and requests are sent that hold each and that fall
+short of it.
 
 The schema tests at the end of this module check `components.schemas`: they
 read the declared schemas out of the parsed document and the field set out
@@ -51,7 +54,14 @@ from vantage.core.domain.metadata import (
     METADATA_SOURCES,
 )
 from vantage.core.domain.passwords import PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS, hash_password
-from vantage.core.domain.projects import DEFAULT_PROJECT, PROJECT_NAME_PATTERN
+from vantage.core.domain.projects import (
+    DEFAULT_PROJECT,
+    EDITOR_ROLE,
+    OWNER_ROLE,
+    PROJECT_NAME_PATTERN,
+    ROLES,
+    VIEWER_ROLE,
+)
 from vantage.core.domain.result import OUTCOMES
 from vantage.core.ports.storage import ExecutionStore
 from vantage.ingestion.schemas import (
@@ -66,6 +76,7 @@ from vantage.ingestion.schemas import (
 )
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
+from vantage.service.routes.members import MAX_MEMBERS_BODY_BYTES
 from vantage.service.routes.projects import MAX_PROJECTS_BODY_BYTES
 from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
 from vantage.service.routes.users import MAX_USERS_BODY_BYTES
@@ -77,6 +88,9 @@ from vantage.service.schemas import (
     HistoryEntryResponse,
     HistoryResponse,
     LoginRequest,
+    MemberListResponse,
+    MemberResponse,
+    MemberSetRequest,
     MetadataFileResponse,
     MetadataHorizonResponse,
     MetadataItemResponse,
@@ -255,16 +269,25 @@ def test_every_read_operation_is_get_and_every_write_operation_is_not() -> None:
     assert ("POST", "/runs/{run_id}/heartbeat") in write_ops
 
 
+def _bearer(store: ExecutionStore, user: str, scopes: set[str]) -> dict[str, str]:
+    """Make the existing `user` a token holding exactly `scopes`, and return
+    the header that sends it."""
+    token = new_token()
+    store.create_token(
+        user,
+        digest=token_digest(token),
+        label="",
+        scopes=frozenset(scopes),
+        created_at=datetime.now(timezone.utc),
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _admin(store: ExecutionStore, name: str = "alice") -> dict[str, str]:
     """Make `name` an admin, with a token holding every scope, which closes
     the server, and return the header that sends the token."""
-    now = datetime.now(timezone.utc)
-    store.create_user(name, admin=True, created_at=now)
-    token = new_token()
-    store.create_token(
-        name, digest=token_digest(token), label="", scopes=frozenset(SCOPES), created_at=now
-    )
-    return {"Authorization": f"Bearer {token}"}
+    store.create_user(name, admin=True, created_at=datetime.now(timezone.utc))
+    return _bearer(store, name, set(SCOPES))
 
 
 def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None) -> None:
@@ -316,8 +339,9 @@ def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None
 
     # Ordered so the fixture data a later binding needs already exists --
     # the project must be made before a run is reported in it, the run
-    # reported before it can be read back or heartbeat'd, and a user given
-    # a password before logging in.
+    # reported before it can be read back or heartbeat'd, a user made
+    # before being made a member of the project and removed from it, and
+    # given a password before logging in.
     ordered_bindings: list[tuple[tuple[str, str], _Call]] = [
         (
             ("POST", "/projects"),
@@ -360,6 +384,15 @@ def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None
             lambda: client.delete(f"{project}/config/sections", params={"name": "InterfaceProbe"}),
         ),
         (("POST", "/users"), lambda: client.post("/api/v1/users", json={"name": "probe"})),
+        (
+            ("PUT", "/projects/{project}/members/{user}"),
+            lambda: client.put(f"{project}/members/probe", json={"role": VIEWER_ROLE}),
+        ),
+        (("GET", "/projects/{project}/members"), lambda: client.get(f"{project}/members")),
+        (
+            ("DELETE", "/projects/{project}/members/{user}"),
+            lambda: client.delete(f"{project}/members/probe"),
+        ),
         (
             ("PATCH", "/users/{name}"),
             lambda: client.patch("/api/v1/users/probe", json={"admin": True}),
@@ -559,6 +592,15 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
             lambda: client.delete(sections, params={"name": "never-stored"}),
         ),
         (("DELETE", "/projects/{project}/config/sections"), lambda: client.delete(sections)),
+        (("GET", "/projects/{project}/members"), lambda: client.get(f"{default}/members")),
+        (
+            ("PUT", "/projects/{project}/members/{user}"),
+            lambda: client.put(f"{default}/members/a", json={"role": VIEWER_ROLE}),
+        ),
+        (
+            ("DELETE", "/projects/{project}/members/{user}"),
+            lambda: client.delete(f"{default}/members/a"),
+        ),
         (("GET", "/users"), lambda: client.get("/api/v1/users")),
         (("POST", "/users"), lambda: client.post("/api/v1/users", json={"name": "a"})),
         (
@@ -593,6 +635,20 @@ def _undocumented_statuses(
         (method, path, status)
         for method, path, status in observed
         if str(status) not in document["paths"][path][method.lower()]["responses"]
+    }
+
+
+def _unnamed_errors(
+    document: Mapping[str, Any], answered: set[tuple[str, str, int, str]]
+) -> set[tuple[str, str, int, str]]:
+    """The answers whose error code the description of their status does
+    not name, in the parentheses the document names every code in. Each
+    status must be documented already."""
+    return {
+        (method, path, status, error)
+        for method, path, status, error in answered
+        if f"({error})"
+        not in document["paths"][path][method.lower()]["responses"][str(status)]["description"]
     }
 
 
@@ -679,22 +735,84 @@ def _users_probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
     ]
 
 
+_MEMBERS_PROJECT = "members-probe"
+
+
+def _members_probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
+    """One request per rejection the members paths give an admin, on the
+    server `_users_probes` asks, which also has the project
+    `_MEMBERS_PROJECT`, of which `bob` is not a member."""
+    json_header = {"content-type": "application/json"}
+    listing = ("GET", "/projects/{project}/members")
+    setting = ("PUT", "/projects/{project}/members/{user}")
+    removing = ("DELETE", "/projects/{project}/members/{user}")
+    viewer = {"role": VIEWER_ROLE}
+    default = f"/api/v1/projects/{DEFAULT_PROJECT}"
+    members = f"/api/v1/projects/{_MEMBERS_PROJECT}/members"
+    bob = f"{members}/bob"
+    requests: list[tuple[tuple[str, str], _Call]] = []
+    # A name no project has, and one no project can have: both are 404.
+    for path in ("/api/v1/projects/ghost", "/api/v1/projects/NOT-A-NAME"):
+        requests += [
+            (listing, partial(client.get, f"{path}/members")),
+            (setting, partial(client.put, f"{path}/members/bob", json=viewer)),
+            (removing, partial(client.delete, f"{path}/members/bob")),
+        ]
+    # A user nobody has, and a name nobody can have, set and removed.
+    for user in ("ghost", "NOT-A-NAME"):
+        requests += [
+            (setting, partial(client.put, f"{members}/{user}", json=viewer)),
+            (removing, partial(client.delete, f"{members}/{user}")),
+        ]
+    return [
+        *requests,
+        (setting, partial(client.put, f"{default}/members/bob", json=viewer)),
+        (removing, partial(client.delete, f"{default}/members/bob")),
+        (setting, partial(client.put, bob, content=b"{}", headers={"content-type": "x/y"})),
+        (setting, partial(client.put, bob, content=b"{", headers=json_header)),
+        (
+            setting,
+            partial(
+                client.put, bob, content=b" " * (MAX_MEMBERS_BODY_BYTES + 1), headers=json_header
+            ),
+        ),
+        (setting, partial(client.put, bob, content=b"[]", headers=json_header)),
+        (setting, partial(client.put, bob, json={"role": 1})),
+        (setting, partial(client.put, bob, json={"role": "admin"})),
+        (removing, partial(client.delete, bob)),
+    ]
+
+
 def test_every_status_the_server_answers_is_documented(cheap_passwords: None) -> None:
     """A generated client decides what to handle from the listed statuses,
-    so each rejection the server gives must be listed: on an open server,
-    and on one whose admin manages users. Half 2 removes one code from a
-    copy of the document and proves the check reports it."""
+    so each rejection the server gives must be listed, and its error named
+    where its status is: on an open server, and on one whose admin manages
+    users and members. Half 2 removes one status, and one error's name,
+    from a copy of the document and proves each check reports it."""
     client = TestClient(create_app(InMemoryExecutionStore()))
     answers = [(key, call()) for key, call in _probes(client)]
     closed = InMemoryExecutionStore()
     admin = _admin(closed)
     closed.create_user("bob", admin=False, created_at=datetime.now(timezone.utc))
+    closed.create_project(_MEMBERS_PROJECT, created_at=datetime.now(timezone.utc))
     admin_client = TestClient(create_app(closed), headers=admin)
     answers += [(key, call()) for key, call in _users_probes(admin_client)]
+    answers += [(key, call()) for key, call in _members_probes(admin_client)]
     observed = {(*key, response.status_code) for key, response in answers}
     errors = {(*key, response.json()["error"]) for key, response in answers}
+    answered = {(*key, response.status_code, response.json()["error"]) for key, response in answers}
     assert all(status >= 400 for _, _, status in observed)
     assert {status for method, path, status in observed if path.startswith("/users")} == {
+        400,
+        404,
+        409,
+        413,
+        415,
+        422,
+    }
+    # And every rejection the members paths can give but a refusal of who
+    # asks, which the scope and role tests below earn.
+    assert {status for _, path, status in observed if "/members" in path} == {
         400,
         404,
         409,
@@ -737,15 +855,31 @@ def test_every_status_the_server_answers_is_documented(cheap_passwords: None) ->
         ("PUT", "/users/{name}/password", "unknown_user"),
         ("PUT", "/users/{name}/password", "invalid_password_request"),
         ("PUT", "/users/{name}/password", "invalid_password"),
+        ("GET", "/projects/{project}/members", "open_server"),
+        ("PUT", "/projects/{project}/members/{user}", "open_server"),
+        ("PUT", "/projects/{project}/members/{user}", "default_project"),
+        ("PUT", "/projects/{project}/members/{user}", "unknown_user"),
+        ("PUT", "/projects/{project}/members/{user}", "invalid_member_request"),
+        ("PUT", "/projects/{project}/members/{user}", "invalid_role"),
+        ("DELETE", "/projects/{project}/members/{user}", "open_server"),
+        ("DELETE", "/projects/{project}/members/{user}", "default_project"),
+        ("DELETE", "/projects/{project}/members/{user}", "unknown_member"),
     } <= errors
     nested = {key for key in _declared_operations(_parsed_document()) if "{project}" in key[1]}
     assert {(*key, "unknown_project") for key in nested} <= errors
 
     assert _undocumented_statuses(_parsed_document(), observed) == set()
+    assert _unnamed_errors(_parsed_document(), answered) == set()
 
     tainted = _parsed_document()
     del tainted["paths"]["/runs"]["post"]["responses"]["415"]
     assert _undocumented_statuses(tainted, observed) == {("POST", "/runs", 415)}
+    tainted = _parsed_document()
+    conflict = tainted["paths"]["/projects/{project}/members/{user}"]["delete"]["responses"]["409"]
+    conflict["description"] = conflict["description"].replace("(default_project)", "")
+    assert _unnamed_errors(tainted, answered) == {
+        ("DELETE", "/projects/{project}/members/{user}", 409, "default_project")
+    }
 
 
 _ACCESS_RUN = "5" * 32
@@ -757,7 +891,8 @@ def _access_requests(
 ) -> dict[tuple[str, str], _Call]:
     """One request per documented operation, sending `headers`, in an order
     where each finds what it needs: the project made first, the run
-    reported in it next, the section posted before it is deleted. The users
+    reported in it next, the section posted before it is deleted, `bob`
+    made a viewer of the project before he is removed from it. The users
     bindings add `carol`, demote and mint a token for `bob`, and revoke the
     token `victim`; the password bindings set `bob`'s password to
     `_PASSWORD`, log him in with it and change it to itself."""
@@ -817,6 +952,15 @@ def _access_requests(
         ("DELETE", "/projects/{project}/config/sections"): lambda: client.delete(
             f"{project}/config/sections", params={"name": section["name"]}, headers=headers
         ),
+        ("PUT", "/projects/{project}/members/{user}"): lambda: client.put(
+            f"{project}/members/bob", json={"role": VIEWER_ROLE}, headers=headers
+        ),
+        ("GET", "/projects/{project}/members"): lambda: client.get(
+            f"{project}/members", headers=headers
+        ),
+        ("DELETE", "/projects/{project}/members/{user}"): lambda: client.delete(
+            f"{project}/members/bob", headers=headers
+        ),
         ("POST", "/users"): lambda: client.post(
             "/api/v1/users", json={"name": "carol"}, headers=headers
         ),
@@ -845,16 +989,17 @@ def _access_requests(
     }
 
 
-def _users_operation(operation: Mapping[str, Any]) -> bool:
-    return "users" in operation.get("tags", [])
+def _needs_a_user(operation: Mapping[str, Any]) -> bool:
+    """Whether an operation is one a server with no user refuses."""
+    return not {"users", "members"}.isdisjoint(operation.get("tags", []))
 
 
-def test_an_open_server_serves_every_path_but_the_users_ones() -> None:
+def test_an_open_server_serves_every_path_but_the_users_and_members_ones() -> None:
     """Driven by the document, with no token and no user: every operation
-    tagged `users` answers `409 open_server`, logging in and changing a
-    password among them, and every other one serves anyone, as before the
-    server had users -- making a project included, as changing sections
-    is. Nothing asked makes a user."""
+    tagged `users` or `members` answers `409 open_server`, logging in and
+    changing a password among them, and every other one serves anyone, as
+    before the server had users -- making a project included, as changing
+    sections is, with no role asked. Nothing asked makes a user."""
     store = InMemoryExecutionStore()
     client = TestClient(create_app(store))
     document = _parsed_document()
@@ -865,7 +1010,7 @@ def test_an_open_server_serves_every_path_but_the_users_ones() -> None:
     for (method, path), call in requests.items():
         response = call()
         observed.add((method, path, response.status_code))
-        if _users_operation(document["paths"][path][method.lower()]):
+        if _needs_a_user(document["paths"][path][method.lower()]):
             assert response.status_code == 409, (method, path, response.text)
             assert response.json()["error"] == "open_server"
         else:
@@ -890,27 +1035,21 @@ def test_every_operation_needs_the_scope_its_document_names(cheap_passwords: Non
     """On a server with users, driven by the document: an operation whose
     `security` is empty answers without a token, and whatever token is
     sent; every other one refuses a request without one (401) and one
-    granting every scope but the one its `403` names (403), and takes one
-    granting that scope. A report or heartbeat of another user's run is
-    409. Every status is documented, so a route added without its scope, or
-    a document that names the wrong one, fails here."""
+    granting every scope but the one its `403` names (403), and takes an
+    admin's granting that scope, since an admin acts as an owner of every
+    project. A report or heartbeat of another user's run is 409, even from
+    an editor of its project. Every status is documented, so a route added
+    without its scope, or a document that names the wrong one, fails
+    here."""
     store = InMemoryExecutionStore()
     now = datetime.now(timezone.utc)
     store.create_user("alice", admin=True, created_at=now)
     store.create_user("bob", admin=False, created_at=now)
     store.set_password("bob", password_hash=hash_password(_PASSWORD), changed_at=now)
-
-    def bearer(user: str, scopes: set[str]) -> dict[str, str]:
-        token = new_token()
-        store.create_token(
-            user, digest=token_digest(token), label="", scopes=frozenset(scopes), created_at=now
-        )
-        return {"Authorization": f"Bearer {token}"}
-
     client = TestClient(create_app(store))
     document = _parsed_document()
-    bobs = bearer("bob", {RECORD_SCOPE})
-    bearer("bob", {READ_SCOPE})
+    bobs = _bearer(store, "bob", {RECORD_SCOPE})
+    _bearer(store, "bob", {READ_SCOPE})
     victim = store.list_tokens(user="bob")[-1].id
     anonymous = _access_requests(client, {}, victim=victim)
     assert set(anonymous) == _declared_operations(document)
@@ -921,8 +1060,8 @@ def test_every_operation_needs_the_scope_its_document_names(cheap_passwords: Non
         scope = _documented_scope(document["paths"][path][method.lower()])
         answered = {"none": call().status_code}
         if scope is not None:
-            lacking = bearer("alice", set(SCOPES) - {scope})
-            holding = bearer("alice", {scope})
+            lacking = _bearer(store, "alice", set(SCOPES) - {scope})
+            holding = _bearer(store, "alice", {scope})
             answered["lacking"] = _access_requests(client, lacking, victim=victim)[
                 key
             ]().status_code
@@ -939,6 +1078,8 @@ def test_every_operation_needs_the_scope_its_document_names(cheap_passwords: Non
             assert 200 <= answered["forged"] < 300, (key, answered)
         observed |= {(method, path, status) for status in answered.values() if status >= 400}
 
+    # An editor of the project, so it is the run's recorder that refuses him.
+    store.set_member("bob", project=_ACCESS_PROJECT, role=EDITOR_ROLE)
     for key in (("POST", "/runs"), ("POST", "/runs/{run_id}/heartbeat")):
         status = _access_requests(client, bobs)[key]().status_code
         assert status == 409, key
@@ -968,13 +1109,80 @@ def test_every_admin_operation_refuses_a_non_admins_token_holding_every_scope() 
         if _documented_scope(document["paths"][key[1]][key[0].lower()]) == ADMIN_SCOPE
     ]
 
-    assert len(admin_operations) == 10
+    assert len(admin_operations) == 8
     assert ("POST", "/projects") in admin_operations
     for key in admin_operations:
         response = requests[key]()
         assert response.status_code == 403, (key, response.text)
     assert [user.name for user in store.list_users()] == ["bob"]
     assert [project.name for project in store.list_projects()] == [DEFAULT_PROJECT]
+
+
+# The roles from least to most: each may do what the ones before it may.
+_RANKED_ROLES = (VIEWER_ROLE, EDITOR_ROLE, OWNER_ROLE)
+
+
+def _documented_role(operation: Mapping[str, Any]) -> str | None:
+    """The role within a project an operation's `403` says its user needs:
+    the one `insufficient_role` names, or the viewer role where only
+    `not_a_member` can refuse them; `None` for an operation no role
+    bounds."""
+    description = operation["responses"].get("403", {}).get("description", "")
+    match = re.search(r"below (\w+) \(insufficient_role\)", description)
+    if match is not None:
+        return str(match.group(1))
+    return VIEWER_ROLE if "(not_a_member)" in description else None
+
+
+def test_every_operation_in_a_project_needs_the_role_its_document_names() -> None:
+    """On a server with users, driven by the document: every operation
+    under a project or a run id, and a report, names the role its user
+    needs in the project, and a user who is not an admin, with a token
+    granting exactly the scope it names, is refused `not_a_member` with no
+    role there, `insufficient_role` with the one just below it, and served
+    with it -- recording the run the later ones ask about, and keeping it
+    alive, as its own. Neither refusal carries a challenge, since no other
+    token of the user's would help. A route that checks the wrong role, or
+    a document that names the wrong one, fails here."""
+    store = InMemoryExecutionStore()
+    now = datetime.now(timezone.utc)
+    store.create_user("bob", admin=False, created_at=now)
+    store.create_project(_ACCESS_PROJECT, created_at=now)
+    client = TestClient(create_app(store))
+    document = _parsed_document()
+    roles = {
+        key: role
+        for key in _access_requests(client, {})
+        for role in [_documented_role(document["paths"][key[1]][key[0].lower()])]
+        if role is not None
+    }
+    assert set(roles) == {
+        (method, path)
+        for method, path in _declared_operations(document)
+        if "{project}" in path or "{run_id}" in path
+    } | {("POST", "/runs")}
+    assert set(roles.values()) == ROLES
+
+    def answer(key: tuple[str, str], role: str | None) -> httpx.Response:
+        """`key`'s request from `bob`, holding `role` in the project and a
+        token granting exactly the scope `key`'s `403` names."""
+        store.remove_member("bob", project=_ACCESS_PROJECT)
+        if role is not None:
+            store.set_member("bob", project=_ACCESS_PROJECT, role=role)
+        scope = _documented_scope(document["paths"][key[1]][key[0].lower()])
+        assert scope is not None, key
+        return _access_requests(client, _bearer(store, "bob", {scope}))[key]()
+
+    for key, role in roles.items():
+        rank = _RANKED_ROLES.index(role)
+        refused = {"not_a_member": answer(key, None)}
+        if rank > 0:
+            refused["insufficient_role"] = answer(key, _RANKED_ROLES[rank - 1])
+        for error, response in refused.items():
+            assert (response.status_code, response.json()["error"]) == (403, error), (key, role)
+            assert "WWW-Authenticate" not in response.headers, key
+        served = answer(key, role)
+        assert 200 <= served.status_code < 300, (key, role, served.text)
 
 
 def test_every_response_declares_its_body() -> None:
@@ -1172,6 +1380,7 @@ _REQUEST_SCHEMAS: dict[str, type[BaseModel]] = {
     "PasswordChangeRequest": PasswordChangeRequest,
     "PasswordSetRequest": PasswordSetRequest,
     "ProjectCreateRequest": ProjectCreateRequest,
+    "MemberSetRequest": MemberSetRequest,
 }
 _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "Rejection": RejectionResponse,
@@ -1202,6 +1411,8 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "CreatedTokenResponse": CreatedTokenResponse,
     "ProjectResponse": ProjectResponse,
     "ProjectListResponse": ProjectListResponse,
+    "MemberResponse": MemberResponse,
+    "MemberListResponse": MemberListResponse,
 }
 _BOUND_MODELS: dict[str, type[BaseModel]] = {**_REQUEST_SCHEMAS, **_RESPONSE_SCHEMAS}
 
@@ -1230,6 +1441,10 @@ _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
     ("TokenCreateRequest", "scopes"): SCOPES,
     ("TokenResponse", "scopes"): SCOPES,
     ("CreatedTokenResponse", "scopes"): SCOPES,
+    ("ProjectResponse", "role"): ROLES,
+    ("MemberSetRequest", "role"): ROLES,
+    ("MemberResponse", "role"): ROLES,
+    ("MemberListResponse", "everyone"): ROLES,
 }
 
 # `extra=` on a model, to the `additionalProperties` its schema must declare.
@@ -1349,8 +1564,9 @@ def test_declared_nullability_matches_its_model_field() -> None:
 
 def test_declared_enums_match_the_vocabulary_the_server_can_emit() -> None:
     """Checked against `vantage.core.domain.result.OUTCOMES`,
-    `vantage.core.domain.liveness.PRESENTATIONS` and the metadata
-    vocabularies in `vantage.core.domain.metadata`.
+    `vantage.core.domain.liveness.PRESENTATIONS`, the metadata
+    vocabularies in `vantage.core.domain.metadata`, the token scopes and
+    the project roles.
 
     Both directions again, at two levels: which properties declare a closed
     vocabulary at all, and what that vocabulary contains. Replacing

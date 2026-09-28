@@ -13,10 +13,12 @@ manage users learns nothing of which names or ids exist.
 
 **The command line's checks, in its order**, through the same domain rules
 (`core/domain/access.py`): a scope list, then a label, then the user, then
-whether the admin scope is one its user may hold. A value that cannot be a
-name is a user nobody has -- `404`, or an empty list -- and is never handed
-to the store, which keeps U+0000 from every adapter; only `POST /users`,
-which makes a name, calls it invalid.
+whether the admin scope is one its user may hold. Any user's token may
+hold the others, manage included, which the user's role in each project
+bounds (`service/access.py`). A value that cannot be a name is a user
+nobody has -- `404`, or an empty list -- and is never handed to the store,
+which keeps U+0000 from every adapter; only `POST /users`, which makes a
+name, calls it invalid.
 
 **Two differences from the command line, both deliberate.** An admin cannot
 demote or disable their own user here (`409 own_account`), which is decided

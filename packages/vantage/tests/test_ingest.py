@@ -257,6 +257,111 @@ def test_create_missing_project_tolerates_another_writer_making_it_first() -> No
     assert [p.name for p in store.list_projects()] == ["alpha", DEFAULT_PROJECT]
 
 
+# --- Admitting a report ---------------------------------------------------------------
+
+
+class _RefusedError(Exception):
+    """What a caller's `admit` raises for a report it will not have stored."""
+
+
+@pytest.mark.parametrize(
+    ("sections", "project"),
+    [({}, DEFAULT_PROJECT), ({"project": None}, DEFAULT_PROJECT), ({"project": "alpha"}, "alpha")],
+    ids=["absent", "null", "named"],
+)
+def test_admit_is_given_the_reports_project_before_anything_is_stored(
+    sections: dict[str, Any], project: str
+) -> None:
+    """Once the report is valid and converted -- a report naming no project
+    names `default` -- and before anything is made or recorded, the project
+    it missed included."""
+    store = InMemoryExecutionStore()
+    seen: list[tuple[str, int, bool]] = []
+
+    def admit(name: str) -> None:
+        seen.append((name, store.count_executions(), store.get_project(name) is None))
+
+    ingest(
+        _report(**sections),
+        store,
+        received_at=_RECEIVED_AT,
+        create_missing_project=True,
+        admit=admit,
+    )
+
+    assert seen == [(project, 0, project != DEFAULT_PROJECT)]
+    assert _project_of(store) == project
+
+
+def test_what_admit_raises_passes_through_and_nothing_is_stored() -> None:
+    store = InMemoryExecutionStore()
+
+    def admit(name: str) -> None:
+        raise _RefusedError(name)
+
+    with pytest.raises(_RefusedError, match="alpha"):
+        ingest(
+            _report(project="alpha", results=[_result("tests/test_a.py::test_x")]),
+            store,
+            received_at=_RECEIVED_AT,
+            create_missing_project=True,
+            admit=admit,
+        )
+
+    assert store.count_executions() == 0
+    assert store.count_results() == 0
+    assert store.get_project("alpha") is None
+
+
+def test_admit_refuses_a_report_before_the_store_can() -> None:
+    """A report of another sender's run, filed in another project, is one
+    the store refuses for either reason; `admit` is asked first, so a
+    sender it refuses never learns which, and the run is left as it was."""
+    store = InMemoryExecutionStore()
+    for project in ("alpha", "beta"):
+        store.create_project(project, created_at=_RECEIVED_AT)
+    ingest(_report(project="beta"), store, received_at=_RECEIVED_AT, recorded_by="alice")
+    before = store.get_run_detail("a" * 32)
+
+    def admit(name: str) -> None:
+        raise _RefusedError(name)
+
+    with pytest.raises(_RefusedError, match="alpha"):
+        ingest(
+            _report(project="alpha", results=[_result("tests/test_a.py::test_x")]),
+            store,
+            received_at=_RECEIVED_AT,
+            recorded_by="bob",
+            admit=admit,
+        )
+
+    assert store.get_run_detail("a" * 32) == before
+    assert store.count_results() == 0
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        {"run": {"id": "a" * 32}},
+        _report(project="Bad"),
+        _report(results=[_result("tests/test_a.py::test_x", outcome="unheard-of")]),
+        [1, 2],
+    ],
+    ids=["incomplete-run", "impossible-project", "bad-result", "not-an-object"],
+)
+def test_a_report_that_is_not_valid_never_reaches_admit(report: object) -> None:
+    """A caller's check of who may record where is never asked about a
+    report the server would refuse anyway."""
+    store = InMemoryExecutionStore()
+    asked: list[str] = []
+
+    with pytest.raises(InvalidReportError):
+        ingest(report, store, received_at=_RECEIVED_AT, admit=asked.append)
+
+    assert asked == []
+    assert store.count_executions() == 0
+
+
 def test_decode_json_refuses_what_is_not_strict_json_as_a_plain_exception() -> None:
     for body in (b"{", b'{"a": NaN}', '"\ud800"'.encode("utf-8", "surrogatepass")):
         with pytest.raises(InvalidJsonError) as refused:

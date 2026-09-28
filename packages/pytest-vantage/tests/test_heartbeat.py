@@ -1,6 +1,8 @@
 """`Heartbeat`: the liveness beat's timer thread, on its own -- when it
-beats, when it stops, and what it keeps of a failure. The session-level
-behaviour, against a real server, is in `test_run_report.py`.
+beats, when it stops, and what it keeps of a failure -- and, against a real
+server, what a session says of a beat refused once its user may no longer
+record in its run's project. The rest of the session-level behaviour is in
+`test_run_report.py`.
 """
 
 from __future__ import annotations
@@ -8,9 +10,13 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from typing import Any
 
 import pytest
 from pytest_vantage.heartbeat import Heartbeat
+from vantage.core.domain.projects import EDITOR_ROLE
+from vantage_test_server import VantageTestServer
+from warnings_summary import vantage_warnings
 
 # Long enough for any beat these tests wait for to happen many times over.
 _PATIENCE_SECONDS = 5.0
@@ -160,3 +166,47 @@ def test_the_session_finishing_stops_it(hook: str) -> None:
 
 def test_the_finish_hook_runs_ahead_of_the_recorders() -> None:
     assert getattr(Heartbeat.pytest_sessionfinish, "pytest_impl", {}).get("tryfirst") is True
+
+
+def test_a_beat_refused_for_the_users_role_warns_once_with_the_reason(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The session's user is removed from its project as soon as its start
+    is recorded, so the first beat after is refused for their role, and the
+    thread stops there. The session says why once, as a liveness warning
+    that names no token; its finish is refused too, with a warning of its
+    own, and its verdict is untouched."""
+    vantage_server.add_project("firmware")
+    token = vantage_server.token("bob", admin=False)
+    vantage_server.set_member("bob", "firmware", EDITOR_ROLE)
+    real_record_session = vantage_server.store.record_session
+
+    def _remove_when_started(*args: Any, **kwargs: Any) -> bool:
+        recorded = real_record_session(*args, **kwargs)
+        vantage_server.remove_member("bob", "firmware")
+        return recorded
+
+    monkeypatch.setattr(vantage_server.store, "record_session", _remove_when_started)
+    monkeypatch.setenv("VANTAGE_TOKEN", token)
+    pytester.makeconftest(
+        "import pytest_vantage.recorder as recorder\nrecorder._BEAT_INTERVAL_SECONDS = 0.05\n"
+    )
+    pytester.makepyfile(test_quiet="import time\n\ndef test_it():\n    time.sleep(0.5)\n")
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", "--vantage-project=firmware", f"--vantage-server={vantage_server.address}"
+    )
+
+    assert result.ret == 0
+    liveness, finish = vantage_warnings(result)
+    assert liveness == (
+        "vantage: error while reporting session liveness: HTTP 403: the user of the token in "
+        "VANTAGE_TOKEN may no longer record in this run's project"
+    )
+    assert finish.startswith("vantage: error while reporting: HTTP 403: ")
+    assert "vantage project member set firmware USER editor" in finish
+    assert token not in result.stdout.str() + result.stderr.str()
+    heartbeats = [path for _method, path in vantage_server.requests if path.endswith("/heartbeat")]
+    assert len(heartbeats) == 1
+    (execution,) = vantage_server.executions()
+    assert execution.finished_at is None

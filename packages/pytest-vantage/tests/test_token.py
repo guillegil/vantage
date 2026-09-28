@@ -1,7 +1,8 @@
 """Recording to a server that has users: the token comes from
 `VANTAGE_TOKEN` alone, goes with every report and heartbeat, never shows in
-what the plugin prints, and a server's refusal of it reads as what to fix --
-a login token's too, which never records and expires.
+what the plugin prints, and a server's refusal of it, or of its user in the
+report's project, reads as what to fix -- a login token's too, which never
+records and expires.
 
 End to end against a real server (`vantage_server`) whose store holds a
 user, plus the transport against a server that answers only refusals, and
@@ -20,7 +21,13 @@ import pytest
 from loopback_server import LoopbackServer
 from pytest_vantage.config import ReportSettings, VantageConfigError, resolve_token
 from pytest_vantage.outbox import Outbox, outbox_path, send_queued, worth_retrying
-from pytest_vantage.transport import AccessRefusedError, send, send_heartbeat
+from pytest_vantage.transport import (
+    AccessRefusedError,
+    ProjectRefusedError,
+    fetch_capabilities,
+    send,
+    send_heartbeat,
+)
 from starlette.types import Receive, Scope, Send
 from vantage.core.domain.access import (
     LOGIN_TOKEN_LIFETIME,
@@ -39,7 +46,8 @@ _PASSING_TEST = "def test_passes():\n    pass\n"
 _RUN = "b" * 32
 
 
-def _report(run_id: str = _RUN) -> dict[str, object]:
+def _report(run_id: str = _RUN, *, project: str | None = None) -> dict[str, object]:
+    named = {} if project is None else {"project": project}
     return {
         "run": {
             "id": run_id,
@@ -48,7 +56,8 @@ def _report(run_id: str = _RUN) -> dict[str, object]:
             "exit_status": 0,
             "interrupted": False,
             "interrupt_reason": None,
-        }
+        },
+        **named,
     }
 
 
@@ -334,6 +343,8 @@ def test_a_vantage_servers_refusal_of_the_sender_says_what_to_fix(
         (403, _refusal("not_vantage")),
         (409, b""),
         (401, _refusal("insufficient_scope")),
+        (404, _refusal("not_a_member")),
+        (409, _refusal("insufficient_role")),
     ],
 )
 def test_a_refusal_no_vantage_server_gave_stays_a_plain_http_error(
@@ -350,6 +361,77 @@ def test_a_refusal_no_vantage_server_gave_stays_a_plain_http_error(
 
     assert type(refused.value).__name__ == "HTTPError"
     assert getattr(refused.value, "code", None) == status
+
+
+_NOT_A_MEMBER = (
+    "{address} does not let the user of the token in VANTAGE_TOKEN record in project firmware, "
+    "which they are not a member of; an owner of it or an admin adds them with: "
+    "vantage project member set firmware USER editor"
+)
+
+_ONLY_A_VIEWER = (
+    "{address} lets the user of the token in VANTAGE_TOKEN only read project firmware; "
+    "recording needs the editor role, which an owner of it or an admin gives with: "
+    "vantage project member set firmware USER editor"
+)
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [("not_a_member", _NOT_A_MEMBER), ("insufficient_role", _ONLY_A_VIEWER)],
+    ids=["not-a-member", "a-viewer"],
+)
+def test_a_vantage_servers_refusal_of_the_senders_role_names_the_project_and_the_fix(
+    error: str, reason: str
+) -> None:
+    """The token is accepted, but its user may not record in the report's
+    project: a refusal of the project, kept like one of a project the
+    server lacks, saying who lets the user in and how. A heartbeat names no
+    project, only a run the server already files in one, so its refusal is
+    of the sender."""
+    server = _Refusing(403, _refusal(error))
+    server.start()
+    try:
+        with pytest.raises(ProjectRefusedError) as refused:
+            send(server.address, _report(project="firmware"), timeout=5.0, token="vantage_s3cret")
+        with pytest.raises(AccessRefusedError) as beat_refused:
+            send_heartbeat(server.address, _RUN, timeout=5.0, token="vantage_s3cret")
+    finally:
+        server.stop()
+
+    assert (refused.value.code, refused.value.project, refused.value.error) == (
+        403,
+        "firmware",
+        error,
+    )
+    assert str(refused.value) == f"HTTP 403: {reason.format(address=server.address)}"
+    assert worth_retrying(refused.value) is True
+    assert beat_refused.value.code == 403
+    assert str(beat_refused.value) == (
+        "HTTP 403: the user of the token in VANTAGE_TOKEN may no longer record in this run's "
+        "project"
+    )
+    assert "s3cret" not in str(refused.value) + str(beat_refused.value)
+
+
+def test_a_role_refusal_of_a_request_that_carried_no_token_stays_a_plain_http_error() -> None:
+    """Only a sender with a token has a user to be refused a role: the
+    capability probe never carries one, and neither does a heartbeat to a
+    server without users, so neither reads a token into such a 403."""
+    server = _Refusing(403, _refusal("not_a_member"))
+    server.start()
+    try:
+        with pytest.raises(Exception) as refused:
+            send_heartbeat(server.address, _RUN, timeout=5.0)
+        probed = fetch_capabilities(server.address, timeout=5.0)
+    finally:
+        server.stop()
+
+    assert type(refused.value).__name__ == "HTTPError"
+    assert getattr(refused.value, "code", None) == 403
+    assert probed.problem is not None
+    assert "HTTP Error 403" in probed.problem
+    assert "VANTAGE_TOKEN" not in probed.problem
 
 
 def test_a_token_is_never_sent_to_the_capability_probe(

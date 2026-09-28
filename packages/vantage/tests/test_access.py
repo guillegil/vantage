@@ -2,7 +2,8 @@
 one needs a token granting each route's scope, a run takes reports and
 heartbeats from the user who created it alone, and logging in or changing
 a password needs no token but a server that has a user
-(`service/access.py`).
+(`service/access.py`). What a role in a project adds on top of the scope
+is `test_membership_access.py`'s.
 
 Most tests run against every adapter (`any_store`): the rules are the
 service's, but the answers they rest on -- whether a user exists, what a
@@ -20,8 +21,10 @@ from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
+    MANAGE_SCOPE,
     READ_SCOPE,
     RECORD_SCOPE,
+    SCOPES,
     new_token,
     token_digest,
 )
@@ -255,15 +258,16 @@ def test_a_revoked_token_and_a_disabled_users_token_are_refused_alike(
             "POST",
             "/api/v1/projects/default/config/sections",
             {"json": {"name": "Api", "prefix": "tests/api"}},
-            ADMIN_SCOPE,
+            MANAGE_SCOPE,
         ),
         (
             "DELETE",
             "/api/v1/projects/default/config/sections",
             {"params": {"name": "Api"}},
-            ADMIN_SCOPE,
+            MANAGE_SCOPE,
         ),
         ("GET", "/api/v1/projects/default/tests/history", {"params": {"node_id": "n"}}, READ_SCOPE),
+        ("GET", "/api/v1/projects/default/members", {}, READ_SCOPE),
         ("GET", "/api/v1/projects", {}, READ_SCOPE),
         ("POST", "/api/v1/projects", {"json": {"name": "web"}}, ADMIN_SCOPE),
     ],
@@ -278,7 +282,7 @@ def test_a_token_without_the_routes_scope_is_forbidden(
     """Every scope but the route's, held by an admin, is not enough; the
     route's own is."""
     _user(any_store, "alice", admin=True)
-    others = sorted({READ_SCOPE, RECORD_SCOPE, ADMIN_SCOPE} - {scope})
+    others = sorted(SCOPES - {scope})
     lacking = _bearer(any_store, "alice", *others)
     holding = _bearer(any_store, "alice", scope)
     client = TestClient(create_app(any_store))
@@ -307,6 +311,38 @@ def test_a_token_without_the_routes_scope_is_forbidden(
     assert allowed.status_code < 300, allowed.text
 
 
+@pytest.mark.parametrize(
+    ("method", "suffix", "scope"),
+    [
+        ("GET", "", READ_SCOPE),
+        ("GET", "/metadata", READ_SCOPE),
+        ("GET", "/results", READ_SCOPE),
+        ("GET", "/result", READ_SCOPE),
+        ("GET", "/sections", READ_SCOPE),
+        ("POST", "/heartbeat", RECORD_SCOPE),
+    ],
+    ids=["detail", "metadata", "results", "result", "sections", "heartbeat"],
+)
+def test_a_malformed_run_id_is_refused_for_who_asks_before_its_shape(
+    any_store: ExecutionStore, method: str, suffix: str, scope: str
+) -> None:
+    """A caller refused for who they are is never told what is wrong with
+    the id they sent: `401` without a token, `403 insufficient_scope`
+    without the route's scope, and only then `422`."""
+    _user(any_store, "alice", admin=True)
+    lacking = _bearer(any_store, "alice", *sorted(SCOPES - {scope}))
+    holding = _bearer(any_store, "alice", scope)
+    client = TestClient(create_app(any_store))
+    path = f"/api/v1/runs/NOT-A-RUN-ID{suffix}"
+
+    _assert_unauthenticated(client.request(method, path), invalid=False)
+    forbidden = client.request(method, path, headers=lacking)
+    shaped = client.request(method, path, headers=holding)
+
+    assert (forbidden.status_code, forbidden.json()["error"]) == (403, "insufficient_scope")
+    assert shaped.status_code == 422, shaped.text
+
+
 def test_the_admin_scope_needs_an_admin_user_now(any_store: ExecutionStore) -> None:
     """A token's admin scope grants nothing to a user who is not an admin,
     whether they never were one or stopped being one after it was made."""
@@ -315,20 +351,39 @@ def test_the_admin_scope_needs_an_admin_user_now(any_store: ExecutionStore) -> N
     alices = _bearer(any_store, "alice", ADMIN_SCOPE)
     bobs = _bearer(any_store, "bob", ADMIN_SCOPE)
     client = TestClient(create_app(any_store))
-    section = {"name": "Api", "prefix": "tests/api"}
 
-    by_admin = client.post("/api/v1/projects/default/config/sections", json=section, headers=alices)
-    by_non_admin = client.post(
-        "/api/v1/projects/default/config/sections", json=section, headers=bobs
-    )
+    by_admin = client.post("/api/v1/projects", json={"name": "firmware"}, headers=alices)
+    by_non_admin = client.post("/api/v1/projects", json={"name": "boards"}, headers=bobs)
     any_store.update_user("alice", admin=False)
-    by_former_admin = client.post(
-        "/api/v1/projects/default/config/sections", json=section, headers=alices
-    )
+    by_former_admin = client.post("/api/v1/projects", json={"name": "boards"}, headers=alices)
 
     assert by_admin.status_code == 201
     assert by_non_admin.status_code == 403
     assert by_former_admin.status_code == 403
+    assert [project.name for project in any_store.list_projects()] == [
+        DEFAULT_PROJECT,
+        "firmware",
+    ]
+
+
+def test_an_admin_acts_in_a_project_without_a_row_only_while_an_admin(
+    any_store: ExecutionStore,
+) -> None:
+    """Whether the caller is an admin is read with their token on every
+    request, so an admin reads a project nobody made them a member of, and
+    stops the moment they stop being one."""
+    _user(any_store, "alice", admin=True)
+    any_store.create_project("firmware", created_at=_NOW)
+    headers = _bearer(any_store, "alice", READ_SCOPE)
+    client = TestClient(create_app(any_store))
+
+    as_admin = client.get("/api/v1/projects/firmware/runs", headers=headers)
+    any_store.update_user("alice", admin=False)
+    demoted = client.get("/api/v1/projects/firmware/runs", headers=headers)
+
+    assert as_admin.status_code == 200, as_admin.text
+    assert demoted.status_code == 403
+    assert demoted.json()["error"] == "not_a_member"
 
 
 def test_a_report_records_the_user_whose_token_sent_it(any_store: ExecutionStore) -> None:

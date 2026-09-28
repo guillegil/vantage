@@ -25,7 +25,9 @@ from pytest_vantage import outbox as outbox_module
 from pytest_vantage import transport
 from pytest_vantage.outbox import Outbox, OutboxError, outbox_path, send_queued, worth_retrying
 from pytest_vantage.transport import ProjectRefusedError
+from vantage.core.domain.access import READ_SCOPE
 from vantage.core.domain.execution import Execution
+from vantage.core.domain.projects import EDITOR_ROLE, VIEWER_ROLE
 from vantage.service.errors import RejectionError
 from vantage_test_server import VantageTestServer
 
@@ -387,7 +389,7 @@ def test_a_run_answered_with_a_5xx_stays_queued_and_the_rest_are_sent(
     assert _column(box.path, "claimed_until") == [None]
 
 
-# --- A project the server does not have ------------------------------------------
+# --- A project the server refuses ------------------------------------------------
 
 
 def _http_error(status: int) -> urllib.error.HTTPError:
@@ -398,7 +400,9 @@ def test_a_run_refused_for_its_project_is_worth_keeping_and_no_other_404_is() ->
     """An admin can add the project, and the same reports are then taken;
     a 404 for anything else, such as a wrong base path, would be the same
     next time."""
-    refused = ProjectRefusedError(_http_error(404), "missing", "no project missing")
+    refused = ProjectRefusedError(
+        _http_error(404), "missing", "no project missing", error="unknown_project"
+    )
 
     assert worth_retrying(refused) is True
     assert outbox_module._rejected(refused) is False
@@ -439,6 +443,7 @@ def test_runs_of_a_project_the_server_lacks_stay_queued_and_cost_one_request(
 
     assert (summary.sent, summary.dropped, summary.waiting, summary.stopped) == (2, (), 3, None)
     assert summary.missing_projects == ("missing-a", "missing-b")
+    assert summary.forbidden_projects == ()
     assert set(_stored(vantage_server)) == {_run_id(no_project), _run_id(named_default)}
     assert _run_id(second_a) not in asked
     assert asked.count(_run_id(first_a)) == 1
@@ -508,6 +513,104 @@ def test_a_run_the_server_holds_in_another_project_is_dropped(
     assert (summary.sent, summary.dropped, summary.waiting) == (0, (run_id,), 0)
     assert summary.missing_projects == ()
     assert vantage_server.project_of(run_id) == "default"
+
+
+def test_runs_of_a_project_the_tokens_user_may_not_record_in_stay_queued_and_the_rest_go(
+    box: Outbox, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server takes the token, but its user is no member of one project
+    and only a viewer of another. The first run of each is refused and
+    kept, with its attempt counted and the reason, and the same project's
+    later runs are passed over unasked, as a missing project's are; the
+    token still records elsewhere, so sending goes on. Once an owner or an
+    admin makes the user an editor of both, the next send delivers every
+    run into its own project, as that user."""
+    token = vantage_server.token("bob", admin=False)
+    vantage_server.add_project("firmware")
+    vantage_server.add_project("boards")
+    vantage_server.set_member("bob", "boards", VIEWER_ROLE)
+    first_firmware = _run_reports(project="firmware")
+    no_project = _run_reports()
+    second_firmware = _run_reports(project="firmware")
+    only_boards = _run_reports(project="boards")
+    runs = [first_firmware, no_project, second_firmware, only_boards]
+    for reports in runs:
+        box.enqueue(vantage_server.address, _run_id(reports), reports)
+    asked: list[str] = []
+    real_send = transport.send
+
+    def _send(
+        address: str, report: dict[str, object], *, timeout: float, token: str | None = None
+    ) -> None:
+        run = report["run"]
+        assert isinstance(run, dict)
+        asked.append(run["id"])
+        real_send(address, report, timeout=timeout, token=token)
+
+    monkeypatch.setattr(outbox_module, "send", _send)
+
+    summary = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0, token=token)
+
+    assert (summary.sent, summary.dropped, summary.waiting, summary.stopped) == (1, (), 3, None)
+    assert summary.forbidden_projects == ("firmware", "boards")
+    assert summary.missing_projects == ()
+    assert set(_stored(vantage_server)) == {_run_id(no_project)}
+    assert _run_id(second_firmware) not in asked
+    assert asked.count(_run_id(first_firmware)) == 1
+    assert asked.count(_run_id(only_boards)) == 1
+    assert _column(box.path, "run_id") == [
+        _run_id(first_firmware),
+        _run_id(second_firmware),
+        _run_id(only_boards),
+    ]
+    assert _column(box.path, "attempts") == [1, 0, 1]
+    assert _column(box.path, "claimed_until") == [None, None, None]
+    firmware_error, second_error, boards_error = _column(box.path, "last_error")
+    assert "record in project firmware, which they are not a member of" in firmware_error
+    assert "vantage project member set firmware USER editor" in firmware_error
+    assert second_error is None
+    assert "only read project boards" in boards_error
+    assert "vantage project member set boards USER editor" in boards_error
+    assert token not in firmware_error + boards_error
+
+    vantage_server.set_member("bob", "firmware", EDITOR_ROLE)
+    vantage_server.set_member("bob", "boards", EDITOR_ROLE)
+    retried = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0, token=token)
+
+    assert (retried.sent, retried.waiting, retried.forbidden_projects) == (3, 0, ())
+    assert {
+        run_id: (vantage_server.project_of(run_id), vantage_server.recorded_by(run_id))
+        for run_id in _stored(vantage_server)
+    } == {
+        _run_id(first_firmware): ("firmware", "bob"),
+        _run_id(no_project): ("default", "bob"),
+        _run_id(second_firmware): ("firmware", "bob"),
+        _run_id(only_boards): ("boards", "bob"),
+    }
+
+
+def test_a_token_refused_its_scope_still_stops_sending_and_keeps_every_run(
+    box: Outbox, vantage_server: VantageTestServer
+) -> None:
+    """Unlike a refusal of its user's role in one project, a 403 refusing
+    the token itself would refuse every run the same, whatever its project:
+    sending stops at the first, and the next is not tried."""
+    token = vantage_server.token("bob", READ_SCOPE, admin=False)
+    vantage_server.add_project("firmware")
+    runs = [_run_reports(project="firmware"), _run_reports()]
+    for reports in runs:
+        box.enqueue(vantage_server.address, _run_id(reports), reports)
+
+    summary = send_queued(box, vantage_server.address, timeout=5.0, budget=30.0, token=token)
+
+    assert (summary.sent, summary.dropped, summary.waiting) == (0, (), 2)
+    assert (summary.forbidden_projects, summary.missing_projects) == ((), ())
+    assert summary.stopped is not None
+    assert "HTTP 403: the token in VANTAGE_TOKEN does not grant the record scope" in (
+        summary.stopped
+    )
+    assert _column(box.path, "attempts") == [1, 0]
+    assert vantage_server.executions() == []
 
 
 class _RetryLaterError(RejectionError):

@@ -1,7 +1,8 @@
 """Strict JSON decoding of a complete body, with its text made storable.
 
 Used for every body the server takes -- a session report, a section
-upsert, and the users and tokens routes' bodies -- once `service/body.py`
+upsert, and the bodies of the users, tokens, password, project and members
+routes -- once `service/body.py`
 has read it under its size cap, and for
 every report the local store takes, encoded the way the plugin sends one.
 It blocks for as long as the body is large, so the server calls it in the

@@ -27,6 +27,16 @@ serialised:
   newest run, as in the SQLite adapter.
 - `upsert_setting` counts a namespace's keys and writes under an advisory
   lock on the namespace, held to the end of its transaction.
+- `set_member` probes the project, then the user, then upserts the member
+  row, in one transaction. Projects and users are never deleted, so what
+  the probes find stays, and the foreign keys back them; whether it added
+  the row is read from the upsert's `RETURNING xmax = 0`, so of two calls
+  adding one member exactly one says it did. The write locks the one
+  member row, and an insert's foreign keys take `FOR KEY SHARE` on the
+  project and user rows, which conflicts with nothing else the store takes
+  on them.
+  `remove_member` is one `DELETE`; a set and a remove racing on one row end
+  as whichever commits last.
 - `touch_last_contact` is one conditional `UPDATE`, which never moves the
   contact backwards.
 - A transaction ended by a serialization failure or a deadlock is run again,
@@ -53,6 +63,7 @@ from psycopg import errors
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
     LOGIN_TOKEN_LABEL,
+    MANAGE_SCOPE,
     READ_SCOPE,
     RECORD_SCOPE,
     Grant,
@@ -65,7 +76,7 @@ from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
 )
-from vantage.core.domain.projects import Project
+from vantage.core.domain.projects import DEFAULT_PROJECT, Membership, Project, check_role
 from vantage.core.domain.result import (
     CapturedOutput,
     CaseIdentity,
@@ -485,6 +496,33 @@ _SELECT_PROJECT = "SELECT name, created_at FROM vantage.project WHERE name = %s"
 
 _LIST_PROJECTS = "SELECT name, created_at FROM vantage.project ORDER BY name"
 
+# Members, keyed by project and user, both `COLLATE "C"`: code point order,
+# as the other adapters sort.
+_SELECT_MEMBER_ROLE = """
+    SELECT role FROM vantage.project_member WHERE project = %s AND account = %s
+"""
+
+_LIST_MEMBERS = """
+    SELECT project, account, role FROM vantage.project_member
+    WHERE project = %s ORDER BY account
+"""
+
+_LIST_MEMBERSHIPS = """
+    SELECT project, account, role FROM vantage.project_member
+    WHERE account = %s ORDER BY project
+"""
+
+_PROBE_USER = "SELECT 1 FROM vantage.account WHERE name = %s"
+
+# `RETURNING xmax = 0` is true only for a row this statement inserted.
+_UPSERT_MEMBER = """
+    INSERT INTO vantage.project_member (project, account, role) VALUES (%s, %s, %s)
+    ON CONFLICT (project, account) DO UPDATE SET role = excluded.role
+    RETURNING xmax = 0
+"""
+
+_DELETE_MEMBER = "DELETE FROM vantage.project_member WHERE project = %s AND account = %s"
+
 _SELECT_RUN_CASE_OUTCOMES = """
     SELECT tc.file_path, r.outcome
     FROM vantage.result r
@@ -548,15 +586,16 @@ _UPDATE_USER = f"""
 """  # noqa: S608
 
 _TOKEN_COLUMNS = (
-    "id, account, label, can_read, can_record, can_admin, created_at, revoked_at, expires_at"  # noqa: S105
+    "id, account, label, can_read, can_record, can_manage, can_admin,"  # noqa: S105
+    " created_at, revoked_at, expires_at"
 )
 
 # Inserts nothing, and returns no row, when there is no such user.
 _INSERT_TOKEN = f"""
     INSERT INTO vantage.access_token (
-        account, digest, label, can_read, can_record, can_admin, created_at
+        account, digest, label, can_read, can_record, can_manage, can_admin, created_at
     )
-    SELECT name, %s, %s, %s, %s, %s, %s FROM vantage.account WHERE name = %s
+    SELECT name, %s, %s, %s, %s, %s, %s, %s FROM vantage.account WHERE name = %s
     RETURNING {_TOKEN_COLUMNS}
 """  # noqa: S608
 
@@ -568,9 +607,10 @@ _INSERT_TOKEN = f"""
 # read would have gone on with the old hash.
 _INSERT_LOGIN_TOKEN = f"""
     INSERT INTO vantage.access_token (
-        account, digest, label, can_read, can_record, can_admin, created_at, expires_at
+        account, digest, label, can_read, can_record, can_manage, can_admin,
+        created_at, expires_at
     )
-    SELECT a.name, %s, %s, true, false, a.admin, %s, %s
+    SELECT a.name, %s, %s, true, false, true, a.admin, %s, %s
       FROM vantage.account a
      WHERE a.name = %s AND a.password_hash = %s AND NOT a.disabled
        FOR SHARE OF a
@@ -597,7 +637,7 @@ _REVOKE_TOKEN = """
 """  # noqa: S105
 
 _AUTHENTICATE = """
-    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_admin
+    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_manage, t.can_admin
     FROM vantage.access_token t
     JOIN vantage.account a ON a.name = t.account
     WHERE t.digest = %s AND t.revoked_at IS NULL AND NOT a.disabled
@@ -609,9 +649,27 @@ _AUTHENTICATE = """
 _MAX_ID = 2**63 - 1
 
 
-def _decode_scopes(can_read: object, can_record: object, can_admin: object) -> frozenset[str]:
-    held = zip((READ_SCOPE, RECORD_SCOPE, ADMIN_SCOPE), (can_read, can_record, can_admin))
+def _decode_scopes(
+    can_read: object, can_record: object, can_manage: object, can_admin: object
+) -> frozenset[str]:
+    held = zip(
+        (READ_SCOPE, RECORD_SCOPE, MANAGE_SCOPE, ADMIN_SCOPE),
+        (can_read, can_record, can_manage, can_admin),
+    )
     return frozenset(scope for scope, flag in held if flag)
+
+
+def _check_member_row(project: str, role: str) -> None:
+    """Refuse what no member row may hold: `default`, whose every user is an
+    editor without one, or a role outside `ROLES`."""
+    if project == DEFAULT_PROJECT:
+        raise ValueError("default takes no members: every user is an editor of it")
+    check_role(role)
+
+
+def _row_to_membership(row: Row) -> Membership:
+    project, account, role = row
+    return Membership(project=cast(str, project), user=cast(str, account), role=cast(str, role))
 
 
 def _row_to_user(row: Row) -> User:
@@ -632,6 +690,7 @@ def _row_to_token(row: Row) -> Token:
         label,
         can_read,
         can_record,
+        can_manage,
         can_admin,
         created_at,
         revoked_at,
@@ -641,7 +700,7 @@ def _row_to_token(row: Row) -> Token:
         id=cast(int, token_id),
         user=cast(str, account),
         label=cast(str, label),
-        scopes=_decode_scopes(can_read, can_record, can_admin),
+        scopes=_decode_scopes(can_read, can_record, can_manage, can_admin),
         created_at=_utc(created_at),
         revoked_at=_opt_utc(revoked_at),
         expires_at=_opt_utc(expires_at),
@@ -1353,6 +1412,49 @@ class PostgresExecutionStore:
     def list_projects(self) -> Sequence[Project]:
         return tuple(_row_to_project(row) for row in self._fetchall(_LIST_PROJECTS, ()))
 
+    def get_member_role(self, user: str, *, project: str) -> str | None:
+        if _unmatchable(user, project):
+            return None
+        row = self._fetchone(_SELECT_MEMBER_ROLE, (project, user))
+        return None if row is None else cast(str, row[0])
+
+    def list_members(self, *, project: str) -> Sequence[Membership]:
+        if _unmatchable(project):
+            return ()
+        return tuple(_row_to_membership(row) for row in self._fetchall(_LIST_MEMBERS, (project,)))
+
+    def list_memberships(self, user: str) -> Sequence[Membership]:
+        if _unmatchable(user):
+            return ()
+        rows = self._fetchall(_LIST_MEMBERSHIPS, (user,))
+        return tuple(_row_to_membership(row) for row in rows)
+
+    def set_member(self, user: str, *, project: str, role: str) -> bool:
+        _check_member_row(project, role)
+        if _unmatchable(project):
+            raise UnknownProjectError("there is no such project")
+
+        def write(conn: PgConnection) -> bool:
+            # The project is probed first, so naming neither is answered with
+            # the project; a user name holding U+0000 is then refused without
+            # being sent.
+            if conn.execute(_PROBE_PROJECT, (project,)).fetchone() is None:
+                raise UnknownProjectError(f"there is no project named {project!r}")
+            if _unmatchable(user):
+                raise UnknownUserError("there is no such user")
+            if conn.execute(_PROBE_USER, (user,)).fetchone() is None:
+                raise UnknownUserError(f"there is no user named {user!r}")
+            upserted = conn.execute(_UPSERT_MEMBER, (project, user, role)).fetchone()
+            return upserted is not None and bool(upserted[0])
+
+        return self._transaction(write)
+
+    def remove_member(self, user: str, *, project: str) -> bool:
+        if _unmatchable(user, project):
+            return False
+        with live_connection(self._pool) as conn:
+            return conn.execute(_DELETE_MEMBER, (project, user)).rowcount == 1
+
     def access_required(self) -> bool:
         row = self._fetchone(_PROBE_ANY_USER)
         return row is not None and bool(row[0])
@@ -1467,6 +1569,7 @@ class PostgresExecutionStore:
                     label,
                     READ_SCOPE in scopes,
                     RECORD_SCOPE in scopes,
+                    MANAGE_SCOPE in scopes,
                     ADMIN_SCOPE in scopes,
                     created_at,
                     user,
@@ -1504,11 +1607,11 @@ class PostgresExecutionStore:
         row = self._fetchone(_AUTHENTICATE, (digest, now))
         if row is None:
             return None
-        name, admin, can_read, can_record, can_admin = row
+        name, admin, can_read, can_record, can_manage, can_admin = row
         return Grant(
             user=cast(str, name),
             admin=bool(admin),
-            scopes=_decode_scopes(can_read, can_record, can_admin),
+            scopes=_decode_scopes(can_read, can_record, can_manage, can_admin),
         )
 
     def close(self) -> None:

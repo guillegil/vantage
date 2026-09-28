@@ -24,8 +24,9 @@ gives a database with no user the admin `admin`, unless pytest-vantage's
 local store made it. So a fresh server needs a token from its first report
 on. Only a database the local store made is served without one, and only
 until it has a user (`vantage user add`): such a server takes every
-request here without a token, and only the routes that manage who may do
-so (users, tokens, login and password) answer `409 open_server`.
+request here without a token, checks no role, and only the routes that
+manage who may do so (users, tokens, members, login and password) answer
+`409 open_server`.
 
 Every other server needs a token on every route but
 `GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml`, and
@@ -36,12 +37,22 @@ password instead:
 Authorization: Bearer vantage_...
 ```
 
-A token belongs to one user and holds one or more scopes: `read`, `record`
-and `admin`. It comes from `vantage token create`, or from an admin's
-`POST /api/v1/tokens`, and never expires. The two ingestion routes need
-`record`, which is all a token for a test runner needs, and which a login
-token (`POST /api/v1/login`, for people reading, expiring after 12 hours)
-never holds. The server answers:
+A token belongs to one user and holds one or more scopes: `read`,
+`record`, `manage` and `admin`. It comes from `vantage token create`, or
+from an admin's `POST /api/v1/tokens`, and never expires. The two
+ingestion routes need `record`, which is all a token for a test runner
+needs, and which a login token (`POST /api/v1/login`, for people reading,
+expiring after 12 hours) never holds.
+
+Recording also needs a role in the project: its user must be an editor of
+the project a report names, or, for a heartbeat, of the project the run
+was filed in. Every user is an editor of `default`, and an admin acts as
+an owner, above an editor, of every project; in any other project an
+owner of it or an admin makes a user an editor
+(`vantage project member set PROJECT USER editor`, or
+`PUT /api/v1/projects/{project}/members/{user}`).
+
+The server answers:
 
 - No `Authorization` header, on a server with users: `401 unauthenticated`,
   with `WWW-Authenticate: Bearer realm="vantage"`.
@@ -52,6 +63,10 @@ never holds. The server answers:
   ignored.
 - A token that does not grant the route's scope: `403 insufficient_scope`,
   the challenge naming it, as in `scope="record"`.
+- A token whose user has no role in the project: `403 not_a_member`; one
+  whose user is only a viewer of it: `403 insufficient_role`. Neither
+  carries a challenge, since no other token of the same user would help,
+  and neither body names the project.
 
 Neither the body nor the challenge ever holds the token sent. The report
 that creates a run records who sent it: the token's user, or nobody on a
@@ -59,7 +74,9 @@ server without users. The read API shows it as `recorded_by`. Every later
 report and heartbeat of the run must come from the same user, or with no
 token if the first came with none: anything else is `409 foreign_run`, and
 nothing of it is stored. The client chooses the run id, so this is what
-keeps one user's session from finishing, or keeping alive, another's.
+keeps one user's session from finishing, or keeping alive, another's. A
+user who may not record in the project is refused with a `403` before
+that, so a `409` never tells them of a run there.
 
 `pytest-vantage` reads its token from the `VANTAGE_TOKEN` environment
 variable alone, never from a configuration file or a flag. It sends it with
@@ -103,6 +120,15 @@ the original U+0000 finds nothing.
 Nothing is stored unless the whole report is accepted, and an accepted report
 is stored in one transaction.
 
+A report is refused at the first check it fails, in this order: `401` and
+`403 insufficient_scope` (see [Authentication](#authentication)), before
+any of the body is read; then `415`, `413` (or `400 incomplete_body`),
+`400 invalid_json` and `422 invalid_report` from the table above; then
+`404 unknown_project` and `403 not_a_member` or `insufficient_role` for
+its [`project`](#project); and last the run's own `409 foreign_run`, then
+`409 project_mismatch` (see
+[Several reports for one run](#several-reports-for-one-run)).
+
 ### The body
 
 ```
@@ -140,7 +166,10 @@ The project the run belongs to: a string of 1 to 64 characters of `a-z`,
 project, since it never makes one from a report: one it does not have is
 `404 unknown_project` with `fields: ["project"]`, and nothing is stored.
 Projects are added by an admin (`vantage project add`, or
-`POST /api/v1/projects`).
+`POST /api/v1/projects`). The token's user must then be an editor of it
+(see [Authentication](#authentication)): a user with no role there is
+`403 not_a_member`, a viewer `403 insufficient_role`, and nothing is
+stored either.
 
 It is a top-level key rather than a field of `run`, which refuses unknown
 fields: a server that predates projects ignores it, so no server refuses a
@@ -368,11 +397,13 @@ is: a start report (in progress, no results), heartbeats, any in-progress
 reports with results, and the finishing report. Without the
 `session_lifecycle` capability it sends only the last two. In its backup
 modes, a report that got no answer, a `5xx`, a `408`, a `429`, a `401`
-or `403` refusing its token, or a `404 unknown_project`, is sent again
-later, unchanged, with the reports after it: by a later session or by `vantage push`, from another
-process, possibly days later, and with that sender's token. A session that
-could not reach the server at its start sends no start report at all, and
-its reports arrive only that way.
+or `403` refusing its token, a `404 unknown_project`, or a
+`403 not_a_member` or `insufficient_role` refusing its user the project,
+is sent again later, unchanged, with the reports after it: by a later
+session or by `vantage push`, from another process, possibly days later,
+and with that sender's token. A session that could not reach the server at
+its start sends no start report at all, and its reports arrive only that
+way.
 
 Every report of a session carries the declaration's `keys` and `files`, so
 the files' keys are stored from the first report that arrives. Only the
@@ -395,10 +426,18 @@ ignored; `pytest-vantage` sends `{}` as `application/json`.
   A heartbeat for a finished run is harmless.
 - A run the server has never seen answers `404 unknown_run`. A heartbeat never
   creates a run: send a report first.
+- A run in a project the token's user is not an editor of answers
+  `403 not_a_member` or `403 insufficient_role`, as a report would (see
+  [Authentication](#authentication)): a user removed from the project, or
+  made a viewer of it, while the session runs.
 - A run another user recorded answers `409 foreign_run`, and its last
   contact does not move.
 - A `run_id` that is not 32 lowercase hex characters answers
   `422 invalid_parameter` with `fields: ["path.run_id"]`.
+
+A heartbeat is refused at the first check it fails, in this order: `401`,
+`403 insufficient_scope`, `422 invalid_parameter`, `404 unknown_run`,
+`403 not_a_member` or `insufficient_role`, `409 foreign_run`.
 
 The last-contact time is set when a run is created and advanced only by
 heartbeats. The read API presents a run with no finishing report as
@@ -420,6 +459,8 @@ its run `running`.
 | `400` | `incomplete_body` | The client disconnected before sending the whole body. It never sees this answer. |
 | `401` | `unauthenticated` | No token on a server that has users, or a token that is not valid (unknown, revoked, expired, or of a disabled user) on any server. |
 | `403` | `insufficient_scope` | The token does not grant the `record` scope. |
+| `403` | `not_a_member` | The token's user has no role in the report's project, or in the heartbeat's run's. |
+| `403` | `insufficient_role` | The token's user is only a viewer of that project; recording needs the editor role. |
 | `404` | `unknown_run` | A heartbeat for a run never recorded. |
 | `404` | `unknown_project` | A report naming a project the server does not have. |
 | `404` | `not_found` | No route matches the path, unversioned paths included. |

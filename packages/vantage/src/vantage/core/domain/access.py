@@ -13,7 +13,8 @@ A database the server made has a user from its first start: `vantage`
 gives it the admin `admin` before serving it.
 
 A user who has a password (`core/domain/passwords.py`) can trade it for a
-login token, which expires after `LOGIN_TOKEN_LIFETIME` and is revoked
+login token -- holding read and manage, and admin for an admin, never
+record -- which expires after `LOGIN_TOKEN_LIFETIME` and is revoked
 whenever that user's password is set. Every other token is made by an
 admin or on the command line, never expires, and survives password
 changes.
@@ -29,17 +30,23 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 READ_SCOPE = "read"
-"""Read runs, results, history and the section definitions."""
+"""Read runs, results, history, section definitions and members, in the
+projects the user may read."""
 
 RECORD_SCOPE = "record"
 """Send session reports and heartbeats: what the plugin needs."""
 
-ADMIN_SCOPE = "admin"
-"""Change what everyone shares and who may use the server: the section
-definitions, users and tokens. Only a token of an admin user can hold it,
-and it grants nothing once its user stops being one."""
+MANAGE_SCOPE = "manage"
+"""Change what one project shares: its section definitions, for an editor
+of it, and its members, for an owner. Any user's token may hold it; the
+user's role in the project bounds it."""
 
-SCOPES = frozenset({READ_SCOPE, RECORD_SCOPE, ADMIN_SCOPE})
+ADMIN_SCOPE = "admin"
+"""Manage who may use the server: users, tokens and projects. Only a token
+of an admin user can hold it, and it grants nothing once its user stops
+being one."""
+
+SCOPES = frozenset({READ_SCOPE, RECORD_SCOPE, MANAGE_SCOPE, ADMIN_SCOPE})
 
 DEFAULT_SCOPES = frozenset({READ_SCOPE, RECORD_SCOPE})
 """What a token holds when its maker names no scope: everything but
@@ -135,8 +142,9 @@ def token_digest(token: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class User:
-    """One user of the server. `admin` users may hold the admin scope;
-    a `disabled` one's tokens authenticate nothing. `has_password` says
+    """One user of the server. `admin` users may hold the admin scope and
+    act as an owner of every project; a `disabled` one's tokens
+    authenticate nothing. `has_password` says
     whether the user can log in; the password's hash never leaves the
     store but through `get_password_hash`."""
 

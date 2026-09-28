@@ -20,9 +20,11 @@ server address they were meant for.
   text; queueing past either drops the oldest entries (`Outbox.evicted`).
 - **No token.** An entry holds the reports, never the token they were sent
   with: whoever sends the queue sends it with their own.
-- **A project the server lacks keeps its runs.** A server that answers
-  `404 unknown_project` takes them once an admin adds the project, so the
-  entry stays, and a sender moves on to runs of other projects.
+- **A project the server refuses keeps its runs.** A server that answers
+  `404 unknown_project` takes them once an admin adds the project, and one
+  that answers `403 not_a_member` or `insufficient_role` once an owner of
+  the project or an admin makes the token's user an editor of it. Either
+  way the entry stays, and a sender moves on to runs of other projects.
 """
 
 from __future__ import annotations
@@ -66,10 +68,15 @@ _RETRY_LATER = frozenset({408, 429})
 # Unauthorized and Forbidden: a server with users refusing the token sent,
 # or the lack of one. The same sender would be refused every run the same
 # way, so it stops rather than drop them; sent with another token, as
-# `vantage push` sends with its own, they can be taken.
+# `vantage push` sends with its own, they can be taken. A 403 refusing the
+# token's user a project is a `ProjectRefusedError`, which stops nothing.
 _RETRY_WITH_ANOTHER_TOKEN = frozenset({401, 403})
 
 _KEPT_FOR_LATER = _RETRY_LATER | _RETRY_WITH_ANOTHER_TOKEN
+
+# The error of a `ProjectRefusedError` for a project the server does not
+# have; any other is one the token's user may not record in.
+_UNKNOWN_PROJECT = "unknown_project"
 
 _SCHEMA = (
     """
@@ -114,10 +121,11 @@ def unreachable(exc: BaseException) -> bool:
 def worth_retrying(exc: BaseException) -> bool:
     """Whether sending the same report later could succeed: the server was
     unreachable, answered 5xx, asked for the request again later, refused
-    the token, which a sender with another one can fix, or has no project
-    of the report's name yet, which an admin can fix. Any other 4xx, a
-    redirect or an answer that does not acknowledge the run would be the
-    same the next time."""
+    the token, which a sender with another one can fix, or refused the
+    report's project, which an admin or an owner of it can fix: it has no
+    project of that name yet, or does not let the token's user record
+    there. Any other 4xx, a redirect or an answer that does not acknowledge
+    the run would be the same the next time."""
     if isinstance(exc, ProjectRefusedError):
         return True
     if isinstance(exc, urllib_error.HTTPError):
@@ -165,6 +173,11 @@ class SendSummary:
     missing_projects: tuple[str, ...] = ()
     """The projects the server said it does not have, in the order first
     refused. Their entries stay queued, for once an admin adds them."""
+    forbidden_projects: tuple[str, ...] = ()
+    """Projects whose runs the token's user may not record (403
+    `not_a_member` or `insufficient_role`), in the order first refused.
+    Their entries stay queued, for once an owner or an admin makes the user
+    an editor."""
 
 
 @dataclass(frozen=True)
@@ -391,11 +404,14 @@ def send_queued(
     run id in `dropped`; so is one whose reports no longer read back from
     the file, in `unreadable`. A 5xx leaves the run queued and goes on to
     the next, since it may be that run's own problem; so does a project
-    the server does not have, named in `missing_projects`, and every later
-    run of that project is passed over without asking again. Anything else
-    leaves the run queued and stops: an unreachable server, a 408 or 429
-    asking for it again later, a 401 or 403 refusing the token, or an
-    answer that is not a vantage server's.
+    the server refuses, and every later run of that project is passed over
+    without asking again: one it does not have, named in
+    `missing_projects`, or one the token's user may not record in, named
+    in `forbidden_projects`, since the same token may still record
+    elsewhere. Anything else leaves the run queued and stops: an
+    unreachable server, a 408 or 429 asking for it again later, a 401 or
+    another 403 refusing the token, or an answer that is not a vantage
+    server's.
     """
     deadline = time.monotonic() + budget
     ran_out = f"the {budget:g}s allowed for sending ran out"
@@ -403,6 +419,7 @@ def send_queued(
     dropped: list[str] = []
     unreadable: list[str] = []
     missing_projects: list[str] = []
+    forbidden_projects: list[str] = []
     stopped: str | None = None
     after = 0
     while stopped is None:
@@ -416,7 +433,8 @@ def send_queued(
             outbox._delete(claimed.id)
             unreadable.append(claimed.run_id)
             continue
-        if _project_of(claimed.reports) in missing_projects:
+        project = _project_of(claimed.reports)
+        if project in missing_projects or project in forbidden_projects:
             # Refused already in this call: asking again would only upload
             # the run to hear the same answer.
             outbox._release(claimed.id, None)
@@ -443,7 +461,8 @@ def send_queued(
                 continue
             outbox._release(claimed.id, str(exc) or type(exc).__name__)
             if isinstance(exc, ProjectRefusedError):
-                missing_projects.append(exc.project)
+                refused = missing_projects if exc.error == _UNKNOWN_PROJECT else forbidden_projects
+                refused.append(exc.project)
                 continue
             if not _server_error(exc):
                 stopped = (
@@ -468,6 +487,7 @@ def send_queued(
         stopped,
         tuple(unreadable),
         tuple(missing_projects),
+        tuple(forbidden_projects),
     )
 
 

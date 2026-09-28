@@ -29,7 +29,10 @@ _PUSH_MODULE = "vantage.service.push"
 
 
 @dataclass(frozen=True)
-class _SendSummary:
+class _OlderSendSummary:
+    """A `SendSummary` of a pytest-vantage older than this vantage, which
+    has no `forbidden_projects`."""
+
     server: str
     sent: int
     dropped: tuple[str, ...]
@@ -37,6 +40,11 @@ class _SendSummary:
     stopped: str | None
     unreadable: tuple[str, ...] = ()
     missing_projects: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _SendSummary(_OlderSendSummary):
+    forbidden_projects: tuple[str, ...] = ()
 
 
 @dataclass
@@ -51,6 +59,10 @@ class _Queue:
     """The project each run names, where it is not `default`."""
     missing: set[str] = field(default_factory=set)
     """The projects every server says it does not have."""
+    forbidden: set[str] = field(default_factory=set)
+    """The projects every server says the token's user may not record in."""
+    older: bool = False
+    """Whether the summaries are those of an older pytest-vantage."""
     failing: dict[str, BaseException] = field(default_factory=dict)
     fails_to_open: Exception | None = None
     databases: list[Path] = field(default_factory=list)
@@ -90,7 +102,7 @@ class _Queue:
             timeout: float,
             budget: float,
             token: str | None = None,
-        ) -> _SendSummary:
+        ) -> _OlderSendSummary:
             queue.sends.append((server, timeout, budget))
             queue.tokens.append(token)
             if server in queue.failing:
@@ -98,14 +110,26 @@ class _Queue:
             runs = queue.entries.setdefault(server, [])
             if server in queue.unreachable:
                 return _SendSummary(server, 0, (), len(runs), f"{server} is unreachable")
-            kept = [run for run in runs if queue.projects.get(run, "default") in queue.missing]
-            missing = tuple(dict.fromkeys(queue.projects.get(run, "default") for run in kept))
+            projects = [queue.projects.get(run, "default") for run in runs]
+            kept = [
+                run
+                for run, project in zip(runs, projects, strict=True)
+                if project in queue.missing | queue.forbidden
+            ]
+            missing = tuple(dict.fromkeys(p for p in projects if p in queue.missing))
+            forbidden = tuple(dict.fromkeys(p for p in projects if p in queue.forbidden))
             done = [run for run in runs if run not in kept]
             sent = [run for run in done if run not in queue.refused | queue.damaged]
             dropped = tuple(run for run in done if run in queue.refused)
             unreadable = tuple(run for run in done if run in queue.damaged)
             runs[:] = kept
-            return _SendSummary(server, len(sent), dropped, len(kept), None, unreadable, missing)
+            if queue.older:
+                return _OlderSendSummary(
+                    server, len(sent), dropped, len(kept), None, unreadable, missing
+                )
+            return _SendSummary(
+                server, len(sent), dropped, len(kept), None, unreadable, missing, forbidden
+            )
 
         module = types.ModuleType(_OUTBOX_MODULE)
         module.Outbox = Outbox  # type: ignore[attr-defined]
@@ -331,6 +355,47 @@ def test_runs_of_projects_the_server_lacks_are_named_by_project_and_left_waiting
         "kept runs of projects it does not have (firmware, boards) (3 waiting)"
     ]
     assert queue.entries["http://alpha:8765"] == ["r1", "r3", "r4"]
+
+
+def test_runs_of_projects_the_tokens_user_may_not_record_in_are_named_and_left_waiting(
+    queue: _Queue, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Such a run is delivered once an owner of its project, or an admin,
+    makes the token's user an editor there, so the line names those
+    projects, after any the server lacks, and the queue is not done."""
+    _queued(queue, _default_database(tmp_path), alpha=["r1", "r2", "r3", "r4", "r5"])
+    queue.projects.update({"r1": "firmware", "r2": "e2e", "r3": "boards", "r5": "firmware"})
+    queue.forbidden.update({"firmware", "boards"})
+    queue.missing.add("e2e")
+
+    code, lines, _err = _push(capsys)
+
+    assert code == 1
+    assert lines == [
+        "vantage: sent 1 queued run to http://alpha:8765, "
+        "kept runs of projects it does not have (e2e), "
+        "kept runs of projects the token's user may not record in (firmware, boards) (4 waiting)"
+    ]
+    assert queue.entries["http://alpha:8765"] == ["r1", "r2", "r3", "r5"]
+
+
+def test_a_summary_of_an_older_plugin_is_told_without_forbidden_projects(
+    queue: _Queue, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pytest-vantage older than this vantage, installed beside it, has
+    no `forbidden_projects` to say."""
+    _queued(queue, _default_database(tmp_path), alpha=["r1", "r2"])
+    queue.projects["r1"] = "firmware"
+    queue.missing.add("firmware")
+    queue.older = True
+
+    code, lines, _err = _push(capsys)
+
+    assert code == 1
+    assert lines == [
+        "vantage: sent 1 queued run to http://alpha:8765, "
+        "kept runs of projects it does not have (firmware) (1 waiting)"
+    ]
 
 
 def test_only_the_targeted_server_decides_the_exit_status(

@@ -22,6 +22,7 @@ from memory_store import InMemoryExecutionStore
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
     LOGIN_TOKEN_LIFETIME,
+    MANAGE_SCOPE,
     READ_SCOPE,
     RECORD_SCOPE,
     SCOPES,
@@ -149,7 +150,7 @@ def test_only_an_admin_token_of_an_admin_gets_through(
 ) -> None:
     any_store.create_user("alice", admin=True, created_at=_NOW)
     any_store.create_user("bob", admin=False, created_at=_NOW)
-    without_admin = _token(any_store, "alice", READ_SCOPE, RECORD_SCOPE)
+    without_admin = _token(any_store, "alice", *(SCOPES - {ADMIN_SCOPE}))
     of_non_admin = _token(any_store, "bob", *SCOPES)
     client = TestClient(create_app(any_store))
 
@@ -524,11 +525,25 @@ def test_repeated_scopes_are_one(admin: TestClient) -> None:
 
 def test_the_admin_scope_is_for_an_admin_only(admin: TestClient, any_store: ExecutionStore) -> None:
     refused = admin.post("/api/v1/tokens", json={"user": "bob", "scopes": ["admin"]})
+    with_manage = admin.post("/api/v1/tokens", json={"user": "bob", "scopes": ["manage", "admin"]})
     granted = admin.post("/api/v1/tokens", json={"user": "alice", "scopes": ["admin"]})
 
     _assert_rejected(refused, 409, "not_an_admin", ["scopes"])
+    _assert_rejected(with_manage, 409, "not_an_admin", ["scopes"])
     assert any_store.list_tokens(user="bob") == ()
     assert granted.status_code == 201
+
+
+def test_any_user_may_hold_the_manage_scope(admin: TestClient, any_store: ExecutionStore) -> None:
+    """Their role in each project bounds what it changes, so it needs no
+    admin."""
+    response = admin.post("/api/v1/tokens", json={"user": "bob", "scopes": ["manage"]})
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["scopes"] == ["manage"]
+    grant = any_store.authenticate(token_digest(body["token"]), now=_NOW)
+    assert grant is not None and grant.scopes == frozenset({MANAGE_SCOPE})
 
 
 @pytest.mark.parametrize("user", ["ghost", "Ghost", "g" * 65])
@@ -546,6 +561,9 @@ def test_scopes_that_are_not_scopes_are_refused(admin: TestClient, scopes: list[
     response = admin.post("/api/v1/tokens", json={"user": "bob", "scopes": scopes})
 
     _assert_rejected(response, 422, "invalid_scopes", ["scopes"])
+    assert response.json()["detail"] == (
+        "A token holds one or more of admin, manage, read and record."
+    )
 
 
 @pytest.mark.parametrize(

@@ -20,7 +20,7 @@ from loopback_server import LoopbackServer
 from memory_store import InMemoryExecutionStore
 from starlette.types import ASGIApp, Receive, Scope, Send
 from vantage.core.domain.access import RECORD_SCOPE, new_token, token_digest
-from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.core.domain.projects import DEFAULT_PROJECT, EDITOR_ROLE
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
@@ -503,7 +503,10 @@ def test_a_bad_path_or_query_parameter_is_422_invalid_parameter(
     shared `RequestValidationError` handler. None of these requests carries
     a report, so none may be told its report is malformed: a client that
     switches on `error` must tell a bad page parameter from a bad session
-    report."""
+    report. A run id route finds its run before it reads its query, so the
+    run is stored first."""
+    assert client.post("/api/v1/runs", json=_well_formed_report("e" * 32)).status_code == 201
+
     response = client.request(method, path, params=params)
 
     assert response.status_code == 422
@@ -512,6 +515,27 @@ def test_a_bad_path_or_query_parameter_is_422_invalid_parameter(
         "detail": "A path or query parameter is not valid.",
         "fields": [field],
     }
+
+
+@pytest.mark.parametrize(
+    ("path", "params"),
+    [
+        ("results", {"limit": "x"}),
+        ("results", {"offset": -1}),
+        ("result", {}),
+    ],
+    ids=["results-limit", "results-offset", "result-without-node-id"],
+)
+def test_an_unknown_run_is_404_before_its_query_is_looked_at(
+    client: TestClient, path: str, params: dict[str, Any]
+) -> None:
+    """A run id route finds its run, and checks the caller may read it,
+    before it reads its query, as a project route finds its project: the
+    query of a run nobody has is never the thing to fix."""
+    response = client.get(f"/api/v1/runs/{'e' * 32}/{path}", params=params)
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_run"
 
 
 # --- Whole-report rejection and atomicity ----------------------------------
@@ -735,10 +759,14 @@ def test_a_project_is_checked_before_the_runs_owner_and_the_owner_before_its_pro
     """A report naming a project that does not exist is refused whoever
     made the run. One from a user who did not make the run is `foreign_run`
     whatever project it names: `project_mismatch` would tell that user
-    which project another user's run is not in."""
+    which project another user's run is not in. Both users are editors of
+    `web`, so neither is refused for their role there
+    (`test_membership_access.py`)."""
     for name in ("alice", "bob"):
         any_store.create_user(name, admin=False, created_at=_NOW)
     any_store.create_project("web", created_at=_NOW)
+    for name in ("alice", "bob"):
+        any_store.set_member(name, project="web", role=EDITOR_ROLE)
     alices, bobs = (_record_bearer(any_store, name) for name in ("alice", "bob"))
     client = TestClient(create_app(any_store))
     started = client.post("/api/v1/runs", json=_project_report({}, finished=False), headers=alices)

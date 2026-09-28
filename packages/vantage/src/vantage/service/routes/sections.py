@@ -25,9 +25,13 @@ long as a large body takes.
 U+FFFD (`ingestion/text.py`), so a delete naming U+0000 matches no section and
 is answered without asking the store.
 
-**Reading sections needs the read scope, changing them the admin scope**,
-once the server has a user (`service/access.py`): the definitions group
-every user's results, so they are changed by those who run the server.
+**Reading sections needs the read scope and the viewer role in the
+project, changing them the manage scope and the editor role**, once the
+server has a user (`service/access.py`): the definitions group the results
+of everyone who records in the project, so they are changed by those who
+may record there, with a scope a token made for the plugin does not hold
+by default. A run's summary needs what reading the run needs
+(`requires_read_run`).
 
 **Section definitions are read fresh on every request, never cached.** No
 `app.state` field remembers them between requests, so an edit takes effect
@@ -43,12 +47,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Path, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
-from vantage.core.domain.execution import IDENTITY_PATTERN
 from vantage.core.domain.projects import Project
 from vantage.core.domain.sections import (
     MAX_SECTIONS,
@@ -60,10 +63,14 @@ from vantage.core.domain.sections import (
     normalize_prefix,
     summarize_sections,
 )
-from vantage.core.ports.storage import ExecutionStore, NamespaceFullError
+from vantage.core.ports.storage import ExecutionStore, NamespaceFullError, RunDetail
 from vantage.ingestion.decode import decode_json
 from vantage.ingestion.text import NUL
-from vantage.service.access import requires_admin_project, requires_read, requires_read_project
+from vantage.service.access import (
+    requires_edit_project,
+    requires_read_project,
+    requires_read_run,
+)
 from vantage.service.body import read_bounded_body, require_json_media_type
 from vantage.service.dependencies import get_store
 from vantage.service.errors import (
@@ -72,7 +79,6 @@ from vantage.service.errors import (
     InvalidSectionPrefixError,
     ReservedSectionNameError,
     TooManySectionsError,
-    UnknownRunError,
     UnknownSectionError,
     UnreadableSettingError,
 )
@@ -184,7 +190,7 @@ def _upsert(store: ExecutionStore, project: str, body: bytes) -> tuple[bool, Sec
 @router.post("/projects/{project}/config/sections")
 async def upsert_section(
     request: Request,
-    project: Project = Depends(requires_admin_project),
+    project: Project = Depends(requires_edit_project),
     store: ExecutionStore = Depends(get_store),
 ) -> Response:
     require_json_media_type(request)
@@ -196,7 +202,7 @@ async def upsert_section(
 @router.delete("/projects/{project}/config/sections", status_code=204)
 def delete_section(
     name: str = Query(...),
-    project: Project = Depends(requires_admin_project),
+    project: Project = Depends(requires_edit_project),
     store: ExecutionStore = Depends(get_store),
 ) -> Response:
     stored_name = _stored_name(name)
@@ -221,20 +227,16 @@ def _section_summary_response(summary: SectionSummary) -> SectionSummaryResponse
     )
 
 
-@router.get("/runs/{run_id}/sections", dependencies=[Depends(requires_read)])
+@router.get("/runs/{run_id}/sections")
 def get_run_sections(
-    run_id: str = Path(pattern=IDENTITY_PATTERN), store: ExecutionStore = Depends(get_store)
+    detail: RunDetail = Depends(requires_read_run), store: ExecutionStore = Depends(get_store)
 ) -> RunSectionSummaryResponse:
     """`GET /api/v1/runs/{run_id}/sections`, against the sections of the
     project the run was created in. An unknown `run_id` is
-    `404 unknown_run`. `summarize_sections` does every count and every
-    rounding, once."""
-    detail = store.get_run_detail(run_id)
-    if detail is None:
-        raise UnknownRunError()
-
+    `404 unknown_run`, from `requires_read_run`. `summarize_sections` does
+    every count and every rounding, once."""
     definitions = _load_definitions(store, detail.project)
-    case_outcomes = store.get_run_case_outcomes(run_id)
+    case_outcomes = store.get_run_case_outcomes(detail.execution.identity.value)
     summary = summarize_sections(case_outcomes, definitions)
     return RunSectionSummaryResponse(
         items=[_section_summary_response(item) for item in summary.items],

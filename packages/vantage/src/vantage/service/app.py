@@ -12,12 +12,13 @@ disk, on the store's own lock, on another process's write -- and one made on
 the loop would stall every other request until it returned, heartbeats
 included. So every route that reaches the store is a plain `def`, which
 FastAPI runs in its threadpool. `POST /runs`, `POST /projects`, a
-project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`,
-`PUT /users/{name}/password`, `POST /tokens`, `POST /login` and
-`POST /password` are `async` only to stream their bodies under a size cap,
-and hand the rest to the threadpool themselves (`service/body.py`). The
-capabilities and interface-document routes never block and stay `async`, so
-they answer even while every worker thread waits on the store.
+project's `POST .../config/sections` and `PUT .../members/{user}`,
+`POST /users`, `PATCH /users/{name}`, `PUT /users/{name}/password`,
+`POST /tokens`, `POST /login` and `POST /password` are `async` only to
+stream their bodies under a size cap, and hand the rest to the threadpool
+themselves (`service/body.py`). The capabilities and interface-document
+routes never block and stay `async`, so they answer even while every
+worker thread waits on the store.
 
 **Every route but four needs a token once the database has a user**
 (`service/access.py`): the capability advertisement and the interface
@@ -25,9 +26,11 @@ document stay open, since a client asks them before it can know it needs
 one, and logging in and changing a password take a name and a password
 instead. `app.state.access_required` starts false and becomes true, for
 good, the first time a request finds a user. The users and tokens routes
-need an admin's token whether or not the database has a user. `create_app`
-never makes a user: `cli.py` gives a database its first admin before
-serving it.
+need an admin's token, and the members routes a user's, whether or not the
+database has a user. Within a project a request also needs a role there,
+read from the store on every request and never kept in `app.state`.
+`create_app` never makes a user: `cli.py` gives a database its first admin
+before serving it.
 
 **At most two password hashes at once, and 32 requests waiting for one**
 (`app.state.password_slots`, `service/slots.py`). Each hash takes about
@@ -68,6 +71,7 @@ from vantage.core.ports.storage import ExecutionStore
 from vantage.service.errors import register_error_handlers
 from vantage.service.routes.capabilities import router as capabilities_router
 from vantage.service.routes.login import router as login_router
+from vantage.service.routes.members import router as members_router
 from vantage.service.routes.projects import router as projects_router
 from vantage.service.routes.read import router as read_router
 from vantage.service.routes.runs import router as runs_router
@@ -124,6 +128,7 @@ def create_app(
     app.include_router(sections_router, prefix="/api/v1")
     app.include_router(users_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(members_router, prefix="/api/v1")
     app.include_router(login_router, prefix="/api/v1")
     register_error_handlers(app)
     return app

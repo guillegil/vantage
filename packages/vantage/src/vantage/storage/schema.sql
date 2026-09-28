@@ -67,11 +67,12 @@ CREATE TABLE IF NOT EXISTS access_token (
     label       TEXT NOT NULL,
     can_read    INTEGER NOT NULL CHECK (can_read IN (0, 1)),
     can_record  INTEGER NOT NULL CHECK (can_record IN (0, 1)),
+    can_manage  INTEGER NOT NULL CHECK (can_manage IN (0, 1)),
     can_admin   INTEGER NOT NULL CHECK (can_admin IN (0, 1)),
     created_at  TEXT NOT NULL,
     revoked_at  TEXT NULL,
     expires_at  TEXT NULL,
-    CHECK (can_read + can_record + can_admin > 0)
+    CHECK (can_read + can_record + can_manage + can_admin > 0)
 );
 
 -- ---------------------------------------------------------------------------
@@ -83,6 +84,22 @@ CREATE TABLE IF NOT EXISTS access_token (
 CREATE TABLE IF NOT EXISTS project (
     name        TEXT PRIMARY KEY,
     created_at  TEXT NOT NULL
+);
+
+-- ---------------------------------------------------------------------------
+-- project_member -- one row per member of a project, with their role in it.
+-- `default` takes none: every user is an editor of it without one, and an
+-- admin acts as an owner of every project (`effective_role`). The adapters
+-- refuse a `default` row rather than a CHECK, so `DEFAULT_PROJECT` stays the
+-- only statement of that name. Users and projects are never deleted, so a
+-- row never dangles; a disabled user's rows stay, and grant nothing while
+-- their tokens authenticate nothing.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS project_member (
+    project  TEXT NOT NULL REFERENCES project (name),
+    account  TEXT NOT NULL REFERENCES account (name),
+    role     TEXT NOT NULL CHECK (role IN ('viewer', 'editor', 'owner')),
+    PRIMARY KEY (project, account)
 );
 
 -- ---------------------------------------------------------------------------
@@ -246,6 +263,9 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 -- a full scan without it.
 -- `access_token(digest)`, from its UNIQUE constraint: authenticating a
 -- request.
+-- `project_member`'s primary key: a project's members and one member's
+-- role. `project_member(account, project)`: a user's memberships, which the
+-- project list is filtered by.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_project_started_at
     ON run (project, started_at, id);
@@ -257,3 +277,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_test_case_project_node_id
     ON test_case (project, node_id);
 CREATE INDEX IF NOT EXISTS idx_run_metadata_key_value
     ON run_metadata (key, value);
+CREATE INDEX IF NOT EXISTS idx_project_member_account
+    ON project_member (account, project);

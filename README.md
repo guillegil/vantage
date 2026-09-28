@@ -248,6 +248,11 @@ vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.
   the run is stored and queued too, and the warning names the command an
   admin adds it with. Once the project exists, the queue delivers the run
   into it.
+- **The token's user may not record in the run's project**
+  (`403 not_a_member` or `403 insufficient_role`; see
+  [Members and roles](#members-and-roles)): the run is stored and queued
+  too, and the warning names the command that makes the user an editor of
+  the project. Once they are one, the queue delivers the run.
 - **The final report is refused outright** (any other 4xx, a redirect, an
   answer that does not acknowledge the run): the warning is the usual
   `vantage: error while reporting: ...`, and the run is not queued, since
@@ -258,7 +263,7 @@ plugin sends the runs queued for that server, oldest first, within the
 report timeout, and prints one line with the test summary:
 `vantage: sent 3 queued runs to http://ci-vantage:8765 (0 waiting)`. It stops
 when the server is unreachable again, answers a 408 or 429, refuses the
-token with a 401 or 403, or the time is spent, and says why. A run the server answers with a 5xx stays queued and
+token with a 401 or 403 (but for the two below), or the time is spent, and says why. A run the server answers with a 5xx stays queued and
 the next is sent; one it refuses with any other 4xx can never succeed, and
 is dropped with a warning naming its run id. Each run is only ever sent to
 the address it was queued for, compared exactly as written, so
@@ -266,7 +271,10 @@ the address it was queued for, compared exactly as written, so
 servers to the queue. A run of a project the server does not have stays
 queued, and the rest of that project's runs are not tried again until the
 next send; the line says so with `; kept runs of projects it does not
-have: ...`, before any `; stopped: ...`.
+have: ...`. So does a run of a project the token's user may not record in
+(`403 not_a_member` or `insufficient_role`), with `; kept runs of projects
+the token's user may not record in: ...`; the send goes on, since the same
+token may record in other projects. Both come before any `; stopped: ...`.
 `vantage push` sends the queue on demand.
 
 Under pytest-xdist only the controller stores or queues a run.
@@ -303,9 +311,12 @@ those queued for `--to`, written exactly as it was configured. It needs
 - Each run goes with the token in `VANTAGE_TOKEN`, if one is set, as the
   plugin sends it; one that could never be a token is refused in one line
   that does not repeat it. A run recorded by another user's token is
-  refused by the server and dropped.
+  refused by the server and dropped, once the token's user may record in
+  the run's project; until then it is kept, as below.
 - A run of a project the server does not have stays queued, and the line
   names the project: `, kept runs of projects it does not have (firmware)`.
+  So does a run of a project the token's user may not record in:
+  `, kept runs of projects the token's user may not record in (firmware)`.
 
 - `--database` is the local database the outbox sits beside, as given to
   `--vantage-local-database`; by default the same default database
@@ -651,10 +662,18 @@ still run and the suite's exit status is never changed.
   VANTAGE_TOKEN does not grant the record scope` (a login token never
   does), or `the run was recorded by another user`. The start report and
   the final report each warn once.
+- **The server does not let the token's user record in the run's project**
+  (`403 not_a_member` or `insufficient_role`): the warning names the
+  project and the command that makes the user an editor of it (see
+  [Members and roles](#members-and-roles)). The start report and the final
+  report each warn once. A heartbeat refused that way, the user having lost
+  the role while the session ran, stops heartbeats with `the user of the
+  token in VANTAGE_TOKEN may no longer record in this run's project`.
 - **The final report fails** (HTTP error, rejected report): if the start
   report got through, the run stays unfinished on the server and later reads
   as `abandoned`; otherwise nothing is recorded on the server. The backup
-  modes keep the run locally, and queue it unless the server refused it.
+  modes keep the run locally, and queue it unless the server would refuse
+  it again.
 - **The final report times out:** the plugin stops waiting at the deadline,
   but the server may still finish storing the report, so the run may be
   recorded as finished after all. The warning cannot tell which.
@@ -747,9 +766,9 @@ with exit status 1 and nothing created; `vantage push`, `vantage project`,
 - **A database pytest-vantage's local store made, until it has a user, has
   no authentication.** Anyone who can reach the port can record runs, add
   projects, change the section definitions and read everything recorded,
-  failure text included. Only the users, tokens, login and password routes
-  refuse, with `409 open_server`, so its first user is always made with
-  `vantage user add`. Any `--host` other than `127.0.0.1` logs a warning
+  failure text included. Only the users, tokens, members, login and
+  password routes refuse, with `409 open_server`, so its first user is
+  always made with `vantage user add`. Any `--host` other than `127.0.0.1` logs a warning
   saying so at startup, as long as the database has no user; a database of
   the server's own has one by then, and never warns.
 - **Whichever creates the default database first decides what it is.** On
@@ -775,7 +794,7 @@ side:
 
 | Route | Returns |
 | --- | --- |
-| `GET /api/v1/projects` | Every project, `default` included |
+| `GET /api/v1/projects` | The projects you have a role in, `default` included, each with that `role` |
 | `POST /api/v1/projects` | Adds one: `{"name": "firmware"}` |
 | `GET /api/v1/projects/{project}/runs` | The project's runs, newest first, each `running`, `finished`, `interrupted` or `abandoned` |
 | `GET /api/v1/runs/{run_id}` | One run, and the project it belongs to |
@@ -835,10 +854,118 @@ vantage project list
   `vantage user`, and creates a SQLite database that is not there yet.
   `POST /api/v1/projects` does the same over HTTP with an admin's token;
   only on a database pytest-vantage's local store made, while it has no
-  user, may anyone.
-- The run list, a test's history and the sections live under
+  user, may anyone. A new project has no members, its maker included.
+- The run list, a test's history, the sections and the members live under
   `/api/v1/projects/{project}/`; a project nobody has answers `404`. Every
-  route that names a run id reads the run whatever its project.
+  route that names a run id finds the run whatever its project, and then
+  needs the same role in that project as the project's own routes.
+
+#### Members and roles
+
+Once a database has users, each user acts in a project with a role:
+
+| Role | May |
+| --- | --- |
+| `viewer` | read the project: its runs, results, history, section definitions and members |
+| `editor` | also record runs into it and change its section definitions |
+| `owner` | also manage its members |
+
+- **`default` is everyone's.** Every user is an editor of `default`
+  without being made one, so a server with one team needs no members at
+  all. `default` has no members, and none can be set or removed there.
+- **Every other project starts with no members**; an admin adds them.
+- **An admin may do everything in every project**, as its owner, whether
+  or not they are a member of it.
+- A database with no user checks no role (see
+  [Running the server](#running-the-server)).
+
+```bash
+vantage project member set firmware alice owner   # adds alice, or changes her role
+vantage project member set firmware bob viewer
+vantage project member list firmware
+vantage project member remove firmware bob
+```
+
+- Each command finds the database as `vantage user` does, and none creates
+  one. None asks for a token: whoever can open the database acts with full
+  authority, which is how a project whose owners are all gone gets one
+  back.
+- `member set` says `added bob to firmware as viewer`, or
+  `bob is now viewer in firmware`, and points out a disabled user, whose
+  role grants nothing until `vantage user update bob --enable`, and an
+  admin, whom a role changes nothing for. `member list` prints a `USER`
+  and `ROLE` table.
+- A project or user that does not exist, removing a user who is not a
+  member, and setting or removing a member of `default` are each refused
+  in one line; `member list default` says every user is an editor of it.
+
+Over HTTP the same goes through `/api/v1/projects/{project}/members` (see
+[Over HTTP](#over-http)):
+
+- `GET .../members` lists the members, by user, to anyone who may read the
+  project, since every run's `recorded_by` already shows user names.
+  `everyone` is the role every user holds there without being a member:
+  `editor` in `default`, whose list is empty, and null elsewhere.
+
+  ```json
+  {"items": [{"user": "alice", "role": "owner"}, {"user": "bob", "role": "viewer"}],
+   "everyone": null}
+  ```
+
+- `PUT .../members/{user}` with `{"role": "editor"}` adds the user
+  (`201`) or sets their role (`200`), and `DELETE .../members/{user}`
+  removes them (`204`). Both need an owner of the project, or an admin,
+  with a token holding `manage`. A user nobody has is `404 unknown_user`,
+  one who is not a member `404 unknown_member`, and `default`
+  `409 default_project`.
+- An owner may make other members owners, and may demote or remove any
+  member, themselves included: an admin can always put a project right. A
+  disabled user or an admin may be made a member.
+- On a database with no user they answer `409 open_server`: nobody is a
+  member of anything there.
+
+**Scopes and roles narrow each other.** A request needs the scope its
+route declares (see [Users and tokens](#users-and-tokens)) and, within a
+project, a role there: an owner's token holding only `read` only reads,
+and a token holding `record` records only where its user is at least an
+editor. A user with no role in the project is refused with
+`403 not_a_member`, one whose role is too low with `403 insufficient_role`;
+`GET /api/v1/projects` lists only the projects the user has a role in, each
+with that `role`. A change of role applies from the next request, on every
+server sharing the database.
+
+**Recording from CI.** Give CI a user of its own, an editor of the
+projects it records, rather than an admin's token:
+
+```bash
+vantage user add ci-firmware
+vantage project member set firmware ci-firmware editor
+vantage token create ci-firmware --label ci    # read and record: all pytest-vantage needs
+```
+
+That token records in `firmware` and in `default`, and nowhere else, and
+changes no section and no member.
+
+**When the plugin's user may not record.** A session whose token's user
+is not a member of the run's project, or only a viewer of it, is refused,
+and warns with one of these:
+
+```
+http://ci-vantage:8765 does not let the user of the token in VANTAGE_TOKEN record in project firmware, which they are not a member of; an owner of it or an admin adds them with: vantage project member set firmware USER editor
+http://ci-vantage:8765 lets the user of the token in VANTAGE_TOKEN only read project firmware; recording needs the editor role, which an owner of it or an admin gives with: vantage project member set firmware USER editor
+```
+
+The backup modes keep the run until the user is an editor there (see
+[When the server cannot take the run](#when-the-server-cannot-take-the-run)).
+
+Two consequences follow:
+
+- Any user may change `default`'s section definitions, with a token
+  holding `manage`, such as their login token, since every user is an
+  editor there.
+- A database pytest-vantage's local store made, once `vantage user add`
+  gives it users, has no members in the projects its sessions made: make
+  its first user an admin, who adds the others.
 
 ### Users and tokens
 
@@ -873,12 +1000,15 @@ vantage user update bob --disable              # or --enable, --admin, --no-admi
   neither the `server` extra nor a running server. Only `user add` and
   `project add` create a database that is not there yet.
 - A token holds one or more scopes. `read` reads projects, runs, results,
-  history and sections; `record` sends reports and heartbeats, all
-  `pytest-vantage` needs; `admin` adds projects, changes the section
-  definitions and manages users and tokens, and only an admin user's token
-  may hold it. It grants nothing once
-  its user stops being one. A token holds `read` and `record` unless
-  `--scope` names others.
+  history, sections and members; `record` sends reports and heartbeats, all
+  `pytest-vantage` needs; `manage` changes a project's section definitions
+  where its user is an editor, and its members where they are an owner;
+  `admin` adds projects and manages users and tokens, and only an admin
+  user's token may hold it. It grants nothing once
+  its user stops being one. Within a project, what a scope allows is
+  bounded by the user's role there (see
+  [Members and roles](#members-and-roles)). A token holds `read` and
+  `record` unless `--scope` names others.
 - `token create` prints the token alone on stdout, so
   `VANTAGE_TOKEN=$(vantage token create ci --scope record)` captures it and
   nothing else. It is shown once: the database keeps only its SHA-256.
@@ -913,10 +1043,10 @@ a password.
   never when one is checked. The database keeps only its scrypt hash.
   `vantage user list` says in `PASSWORD` who has one.
 - `POST /api/v1/login` trades a name and a password for a **login token**.
-  It holds `read`, and `admin` for an admin, but never `record`: recording
-  needs a token made for it, so a login token that leaks cannot record
-  runs. It expires 12 hours after the login, with no refresh: log in again.
-  It is for people, not for CI, whose token comes from
+  It holds `read` and `manage`, and `admin` for an admin, but never
+  `record`: recording needs a token made for it, so a login token that
+  leaks cannot record runs. It expires 12 hours after the login, with no
+  refresh: log in again. It is for people, not for CI, whose token comes from
   `vantage token create` or `POST /api/v1/tokens` and never expires.
 - Setting a user's password, whichever way, revokes every login token of
   theirs; tokens made otherwise are left alone. `vantage token list` shows
@@ -945,11 +1075,14 @@ a password.
 
 #### Over HTTP
 
-Admins can manage users and tokens through the API as the commands do, from
-anywhere that reaches the server. Every route here but the first two needs
-an admin's token holding the `admin` scope: an admin's login token holds
-it, as does one made with `vantage token create NAME --scope admin`; the
-default made token does not.
+Admins can manage users and tokens through the API as the commands do, and
+owners a project's members, from anywhere that reaches the server. The
+users and tokens routes need an admin's token holding the `admin` scope:
+an admin's login token holds it, as does one made with
+`vantage token create NAME --scope admin`; the default made token does
+not. The members routes need a token holding `read` to list and `manage`
+to change, as every login token does, and a role in the project (see
+[Members and roles](#members-and-roles)).
 
 | Route | Does |
 | --- | --- |
@@ -962,8 +1095,12 @@ default made token does not.
 | `GET /api/v1/tokens[?user=NAME]` | Every token, or one user's, revoked ones included, oldest first |
 | `POST /api/v1/tokens` | Makes a token: `{"user": "ci", "scopes": ["record"], "label": "nightly"}` |
 | `POST /api/v1/tokens/{id}/revoke` | Revokes a token |
+| `GET /api/v1/projects/{project}/members` | The project's members, by user |
+| `PUT /api/v1/projects/{project}/members/{user}` | Adds a member or sets their role: `{"role": "editor"}` |
+| `DELETE /api/v1/projects/{project}/members/{user}` | Removes a member |
 
-Logging in as an admin, then making a token for CI with the login token:
+Logging in as an admin, then making a user for CI, an editor of
+`firmware`, and a token for it, with the login token:
 
 ```bash
 # Asks for alice's password, which never reaches a command line.
@@ -975,6 +1112,9 @@ ADMIN_TOKEN=$(python3 -c 'import getpass, json; print(json.dumps({"name": "alice
 curl -s -X POST http://vantage.example:8765/api/v1/users \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"name": "ci", "admin": false}'
+curl -s -X PUT http://vantage.example:8765/api/v1/projects/firmware/members/ci \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"role": "editor"}'
 curl -s -X POST http://vantage.example:8765/api/v1/tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"user": "ci", "scopes": ["record"], "label": "nightly"}'
@@ -998,8 +1138,9 @@ curl -s -X POST http://vantage.example:8765/api/v1/tokens \
   still cannot log in.
 - A database pytest-vantage's local store made, while it has no user,
   answers every one of these routes `409 open_server`, even though it
-  serves everything else to anyone: nobody there has a password, and a
-  first user made over HTTP would belong to whoever asked first. A token
+  serves everything else to anyone: nobody there has a password or is a
+  member of anything, and a first user made over HTTP would belong to
+  whoever asked first. A token
   sent to the ones that take one is refused with `401`, as everywhere.
 - A new token is in the `201` answer of `POST /tokens` or `POST /login`
   alone, marked `Cache-Control: no-store`, and never again: lists show its
