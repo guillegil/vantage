@@ -1070,7 +1070,7 @@ logical schema, and change together.
 | `run_metadata_file`, `run_metadata` | each declared file's status; each key's status and value, whether a file or the session gave it, its display name, and whether the declaration named it |
 | `project_setting` | a project's namespaced JSON values; its section definitions live here |
 | `account`, `access_token` | one row per user, never deleted, with their password's scrypt hash or null; one per token made, by its digest, with its scopes (`can_read`, `can_record`, `can_manage`, `can_admin`, at least one set), when it was revoked and, for a login token alone, when it expires. A made token's row is kept for good, a login token's deleted once it has expired, at its user's next login |
-| `meta` | the schema version, who made the database (`origin`: `local` or `server`), and when and by whom it was created |
+| `meta` | the schema version, who made the database (`origin`: `local` or `server`), when it was created and, if the account that made it has a name, by whom |
 
 **Timestamps are fixed-width UTC text**, `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`,
 written only through `isoformat_utc`. The service converts every incoming
@@ -1248,6 +1248,49 @@ switches refuse it, because the two are started differently: the server is
 started on purpose by whoever runs it, while a value committed to a test
 repository applies to everyone who checks it out.
 
+## The container image
+
+The root `Dockerfile` builds the server in two stages from one Python base
+image, named by tag with its Debian release. The first copies in uv, pinned
+by version, and runs `uv sync --locked --no-editable --package vantage
+--extra server --extra postgres` into `/opt/vantage`: exactly what
+`uv.lock` pins, hashes checked, with both workspace members built into
+wheels, so the environment needs nothing from the source tree. `--locked`,
+not `--frozen`: a lock that no longer matches the pyproject files fails the
+build, where `--frozen` would build an image without whatever the lock
+lacks. The second stage receives `/opt/vantage` alone, owned by root, with
+bytecode compiled at build time, since the server's user cannot write it
+there; it must be the same base, as the environment links to its
+interpreter. `.dockerignore` admits exactly what the first stage copies.
+
+The server runs as uid and gid 10001, fixed so a bind mount can be given
+to them, as PID 1 in exec form, with no init. uvicorn handles the SIGTERM
+`docker stop` sends and the app's shutdown closes the store; the SIGTERM
+uvicorn then raises again, which ends the process anywhere else, is
+ignored by the kernel for a PID namespace's init, so `main` returns
+through its `finally` with exit status 0. The same rule drops a SIGTERM
+that arrives before uvicorn has installed its handlers, so a stop in the
+first moments of a start waits for Docker's SIGKILL. A shell as PID 1
+would drop every SIGTERM; an init would pass it on, and a clean stop would
+exit 143.
+
+The database is named by `ENV VANTAGE_DATABASE=/data/vantage.db`, never
+by a flag in the command, which would beat an operator's `-e
+VANTAGE_DATABASE=postgresql://...`; `docker exec ... vantage user ...`
+inherits it and so manages the database being served. `/data` is created
+0700 for the server's user and declared a volume, whose owner and mode a
+new named volume copies, and it is the working directory, where SQLite and
+Python put their temporary files when the root filesystem is read-only.
+`--host 0.0.0.0` warns about nothing, since `create_first_admin` runs
+before `warn_if_bound_wide`. The health check asks `/capabilities`, which
+needs no token and never waits on the store, with the image's own Python,
+as the image has no curl.
+
+`tests/test_dockerfile.py` reads both files, resolving the image's command
+with `vantage`'s own parser and resolution; CI's `image` job builds the
+image and runs it on a fresh volume. Nothing is pushed anywhere, and
+`tests/test_ci_workflow.py` fails on a workflow that would.
+
 ## Test support
 
 The workspace has one pytest configuration, `[tool.pytest.ini_options]` in the
@@ -1289,7 +1332,7 @@ server run only when `VANTAGE_TEST_POSTGRES_URL` names one, as a superuser
 on any database, and are skipped with a reason naming the variable
 otherwise; each gets a database of its own, created and dropped around it.
 The `tests/` directory at the root checks the CI workflow's shell steps, the
-PostgreSQL job's wiring and the pre-commit configuration.
+PostgreSQL job's wiring, the pre-commit configuration and the `Dockerfile`.
 
 The plugin's mode tests (`test_local_modes.py`) give each session a stand-in
 for `vantage.local`, written into its conftest, to see exactly what the
@@ -1304,6 +1347,6 @@ whole suite on Python 3.12 against a `postgres:17` service container, the
 one job that sets `VANTAGE_TEST_POSTGRES_URL`; a check that Python 3.9
 refuses to install the plugin; the whole suite with every non-loopback
 outbound connection rejected and counted; the clean-environment installs of
-both wheels; and
+both wheels; the server image, built and run on a fresh volume; and
 ruff, `mypy --strict`, deptry and a build of both wheels. `pip-audit` runs
 weekly (`audit.yml`).

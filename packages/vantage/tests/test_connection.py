@@ -7,6 +7,7 @@ stamped with a different schema version or holding some other schema.
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import sqlite3
 from collections.abc import Callable
@@ -559,30 +560,41 @@ def test_opening_a_database_with_the_current_schema_version_succeeds_and_applies
     assert captured == []
 
 
-def test_creating_a_database_survives_a_username_lookup_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "lookup_failure",
+    [KeyError("getpwuid(): uid not found: 1234"), OSError("No username set in the environment")],
+    ids=["before-3.13", "3.13"],
+)
+def test_creating_a_database_as_a_nameless_uid_leaves_out_created_by_quietly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    lookup_failure: Exception,
 ) -> None:
-    """Before 3.13, `getpass.getuser()` raises `KeyError` from `pwd.getpwuid`
-    in a container run as an unmapped uid with no `LOGNAME`/`USER` set.
+    """`getpass.getuser()` fails for a uid with no passwd entry and no
+    `LOGNAME`/`USER` -- a container run with `--user` to own a bind mount
+    -- with `KeyError` before 3.13 and `OSError` since.
 
-    `created_by` is a convenience row; losing it must not stop the server
-    from starting.
+    Nothing is wrong then: the database is made without `created_by`, as
+    the PostgreSQL adapter makes one, and nothing is logged.
     """
 
     def _no_such_user() -> str:
-        raise KeyError("getpwuid(): uid not found: 1234")
+        raise lookup_failure
 
     monkeypatch.setattr("vantage.storage.connection.getpass.getuser", _no_such_user)
 
-    conn = open_database(tmp_path / "store" / "vantage.db")
+    with caplog.at_level(logging.WARNING, logger=connection.__name__):
+        conn = open_database(tmp_path / "store" / "vantage.db")
     try:
         stored = dict(conn.execute("SELECT key, value FROM meta").fetchall())
     finally:
         conn.close()
 
-    # The database exists and is usable; only the convenience row is absent.
     assert stored["schema_version"] == str(_SCHEMA_VERSION)
+    assert "created_at" in stored
     assert "created_by" not in stored
+    assert [r.getMessage() for r in caplog.records if r.name == connection.__name__] == []
 
 
 def _wal_switch_locked(monkeypatch: pytest.MonkeyPatch, times: int | None) -> list[str]:

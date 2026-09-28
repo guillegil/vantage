@@ -52,6 +52,8 @@ its `postgres` extra.
   to responses.
 - Pydantic lives in `vantage.ingestion` and `vantage.service` only;
   everything else uses stdlib `dataclasses` and hand-written validation.
+- The root `Dockerfile` and `.dockerignore` build the server image from the
+  lock; `tests/test_dockerfile.py` guards them, CI's `image` job runs it.
 - Test-support modules sit in `packages/*/tests` on the root `pythonpath` and
   never ship. The only pytest config is `[tool.pytest.ini_options]` in the root
   `pyproject.toml`.
@@ -181,6 +183,10 @@ its `postgres` extra.
   environment, a URL, a rejection, a `repr` or a log record. The only one
   ever printed is the generated admin password: once, on stderr, never
   through `logging`, by the start that stored it.
+- **The image** installs `vantage[server,postgres]` with `uv sync --locked
+  --no-editable`, runs `vantage` as PID 1 in exec form as uid 10001, and
+  names its database by `VANTAGE_DATABASE=/data/vantage.db`, never a flag.
+  Nothing is pushed to any registry.
 - **Python 3.10 floor:** no `StrEnum`, `datetime.UTC`, `tomllib`. Vocabularies
   are `frozenset`s of `str`, never enums.
 - No domain class name starts with `Test` (pytest would collect it).
@@ -206,6 +212,8 @@ vantage project add firmware                 # a project runs can name
 vantage project member set firmware alice editor  # alice records and edits sections there
 pytest --vantage --vantage-project firmware  # a run of that project
 pytest --vantage --vantage-mode local        # record into the local database
+docker build -t vantage .                    # the server image
+docker run -d -p 8765:8765 -v vantage-data:/data vantage   # admin password in docker logs
 ```
 
 ## Before finishing
@@ -218,7 +226,8 @@ variable), the suite with non-loopback networking blocked, the
 clean-environment installs (the plugin alone; `vantage` without its extra,
 serving refused, `vantage push` and a local-mode session there;
 `vantage[server]` serving, its fresh database given `admin` in one line),
-the Python 3.9 install refusal and both wheel builds.
+the server image built and run on a fresh volume (`image`), the Python 3.9
+install refusal and both wheel builds.
 
 ## Conventions
 

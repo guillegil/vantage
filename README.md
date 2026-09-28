@@ -12,7 +12,8 @@ bisecting for.
 ## Status
 
 Early and unreleased (0.1.0). Neither distribution is published yet, so
-install from a checkout. There is no web interface yet: recorded history is
+install from a checkout; the server's container image is built from one
+too. There is no web interface yet: recorded history is
 read through the server's JSON API. The database has no migrations, so a
 server upgrade that changes the schema refuses the old database and needs a
 new one.
@@ -50,6 +51,7 @@ Python 3.10 to 3.13.
 | `vantage` | the plugin, local storage (with Pydantic and PyYAML), `vantage push`, and `vantage user`, `vantage token` and `vantage project` | every mode, the local ones included |
 | `vantage[server]` | also FastAPI and Uvicorn: the `vantage` server | serving recorded runs, from a local file or a shared database |
 | `vantage[server,postgres]` | also psycopg and its connection pool | a server storing in PostgreSQL |
+| The `Dockerfile`'s image | `vantage[server,postgres]` as `uv.lock` pins it, on Python 3.13 | the server in a container (see [In a container](#in-a-container)) |
 
 Neither distribution is published yet, so install from a checkout. Name the
 plugin's directory alongside `vantage`'s: `vantage` depends on
@@ -1204,6 +1206,125 @@ VANTAGE_DATABASE=postgresql://vantage@db.example/vantage vantage
   with a different schema version, or one holding tables but no version, is
   refused with one line and left as it is.
 
+### In a container
+
+The repository's `Dockerfile` builds an image of the server:
+`vantage[server,postgres]` exactly as `uv.lock` pins it, on Python 3.13.
+Nothing is published, so build it from a checkout, with Docker 25 or
+later:
+
+```bash
+docker build -t vantage .
+docker run -d --name vantage -p 8765:8765 -v vantage-data:/data vantage
+docker logs vantage 2>&1 | grep 'Shown this once'    # the first start's admin password
+docker exec -it vantage vantage user password admin  # change it at once
+```
+
+- The image runs `vantage --host 0.0.0.0` on port 8765, as the
+  unprivileged user and group 10001, with
+  `VANTAGE_DATABASE=/data/vantage.db`. `/data` is a volume: a new named
+  volume takes its owner and mode 0700, and the database is created in it
+  at 0600. Serving every interface of the container warns about nothing,
+  since the database has its admin by then.
+- The container's log keeps the admin's password for as long as the
+  container exists. To have none logged, make your own admin before the
+  first start; the server then makes no `admin`:
+
+  ```bash
+  docker run --rm -v vantage-data:/data vantage user add alice --admin
+  docker run --rm -it -v vantage-data:/data vantage user password alice
+  ```
+
+- `vantage user`, `vantage token` and `vantage project` run with
+  `docker exec`, as the server's user and on the database it serves, which
+  they find in the same `VANTAGE_DATABASE`:
+
+  ```bash
+  docker exec vantage vantage user add ci
+  docker exec vantage vantage project add firmware
+  docker exec vantage vantage project member set firmware ci editor
+  VANTAGE_TOKEN="$(docker exec vantage vantage token create ci --label firmware-ci)"
+  ```
+
+  Leave out `-t` when capturing a token: a terminal ends it with a carriage
+  return and mixes in what the command says on stderr. Never add `-u root`:
+  a database file root creates is one the server cannot open. With the
+  server stopped, the same commands run in a container of their own, as
+  `docker run --rm -v vantage-data:/data vantage user list`.
+- Arguments after the image name replace `--host 0.0.0.0`, so repeat it:
+  `docker run ... vantage --host 0.0.0.0 --grace-period 1800`. Without it
+  the server listens only inside the container, where no published port
+  reaches it, and still reports itself healthy. Publish another port with
+  `-p 9000:8765` rather than `--port`, which the health check does not
+  follow.
+- A bind mount must be writable by uid 10001: `sudo install -d -o 10001 -g
+  10001 -m 0700 /srv/vantage`, then `-v /srv/vantage:/data`. Or run the
+  container as the directory's owner, `--user "$(id -u):$(id -g)"`, and
+  `docker exec` runs as that user too. A directory the server cannot write
+  is refused in one line: `vantage: /data exists but is not writable by
+  this process; cannot create or open /data/vantage.db.`
+- To store in PostgreSQL, set `VANTAGE_DATABASE` to its URL and the
+  password in `PGPASSWORD`, from a file rather than the command line:
+  `docker run -d --name vantage -p 8765:8765 --env-file vantage.env
+  vantage`, with `VANTAGE_DATABASE=postgresql://vantage@db.example:5432/vantage`
+  and `PGPASSWORD=...` in `vantage.env`, mode 0600. `/data` goes unused;
+  `docker rm -v` removes the volume Docker made for it. With Compose, and
+  `VANTAGE_DB_PASSWORD=...` in a `.env` file beside it, mode 0600:
+
+  ```yaml
+  services:
+    db:
+      image: postgres:17
+      environment:
+        POSTGRES_USER: vantage
+        POSTGRES_DB: vantage
+        POSTGRES_PASSWORD: ${VANTAGE_DB_PASSWORD:?set it in .env}
+      volumes:
+        - db-data:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD", "pg_isready", "-U", "vantage", "-d", "vantage"]
+        interval: 2s
+        retries: 30
+      restart: unless-stopped
+    vantage:
+      image: vantage  # built with docker build -t vantage .
+      environment:
+        VANTAGE_DATABASE: postgresql://vantage@db:5432/vantage
+        PGPASSWORD: ${VANTAGE_DB_PASSWORD:?set it in .env}
+      ports:
+        - "8765:8765"
+      depends_on:
+        db:
+          condition: service_healthy
+      restart: unless-stopped
+  volumes:
+    db-data:
+  ```
+
+  `docker compose logs vantage` shows the admin's password, and `docker
+  compose exec -T vantage vantage token create admin` makes a token.
+- `docker stop` sends SIGTERM: the server finishes the requests in
+  flight, closes the store and exits 0, well within Docker's 10-second
+  grace period. A stop sent in the first second or so of a start, before
+  the server is serving, goes unseen, and Docker kills it once the grace
+  period is over; nothing is lost. With `docker run --init` a clean stop
+  exits 143 instead.
+- The health check asks `GET /api/v1/capabilities`, which needs no token,
+  every second while the server starts and every minute after, one line of
+  the access log each time. It shows the server answers, not that its
+  database does.
+- It runs on a read-only root filesystem as well, `--read-only --cap-drop
+  ALL --security-opt no-new-privileges`, putting its temporary files in
+  `/data`.
+- To upgrade, build the new image, then `docker stop vantage`, `docker rm
+  vantage` and the same `docker run`. There are no migrations: an image built for another schema
+  version refuses the database in one line and exits 1, again at every
+  restart a restart policy makes, and leaves it as it was. Run the previous
+  image again, or move the file aside and start over. To back up a SQLite
+  database, `docker stop vantage`, then `docker cp
+  vantage:/data/vantage.db ./vantage-backup.db` copies all of it, at mode
+  0600.
+
 ## Development
 
 A uv workspace with both distributions. The tools are in the `dev` extra.
@@ -1218,6 +1339,7 @@ uv run --extra dev mypy .                          # strict
 uv run --extra dev deptry .                        # undeclared or unused dependencies
 uv run --extra dev pip-audit                       # known vulnerabilities
 uv build --wheel --all-packages -o dist            # both wheels
+docker build -t vantage .                          # the server image
 
 # The PostgreSQL tests too, against a server you can create databases on:
 VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:secret@127.0.0.1:5432/postgres \
@@ -1231,7 +1353,9 @@ drops it afterwards, so the URL must name a user allowed to do both.
 `pre-commit install` (with pre-commit installed separately, for example
 `uv tool install pre-commit`) runs ruff on each commit, and mypy and the
 tests not marked `slow` on each push. CI runs the whole suite on Python 3.10
-to 3.13, with and without pytest-xdist, and once more against PostgreSQL 17.
+to 3.13, with and without pytest-xdist, and once more against PostgreSQL 17,
+and builds the server image and runs it as [In a container](#in-a-container)
+does.
 
 How the code is organised, and why: [`docs/architecture.md`](docs/architecture.md).
 

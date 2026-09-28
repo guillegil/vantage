@@ -1,0 +1,9 @@
+# Only what the image is built from: a .venv, a cache, a database or a
+# stray credential in the checkout never reaches the builder.
+*
+!pyproject.toml
+!uv.lock
+!packages/*/pyproject.toml
+!packages/*/src
+**/__pycache__
+**/*.py[cod]

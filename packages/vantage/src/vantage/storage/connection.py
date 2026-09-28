@@ -258,21 +258,33 @@ def _check_schema_version(conn: sqlite3.Connection, path: Path) -> None:
 
 def _stamp_creation_metadata(conn: sqlite3.Connection) -> None:
     """Best-effort `created_at`/`created_by` rows in `meta`, written after
-    schema creation. Nothing keys off these, so a failure is logged and
-    swallowed rather than raised.
+    schema creation. Nothing keys off these, so a failure to write them is
+    logged and swallowed rather than raised; `created_by` is left out,
+    silently, when the account has no name, as the PostgreSQL adapter
+    leaves it out.
     """
+    created_by = _account_name()
     try:
         conn.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', ?)",
             (isoformat_utc(datetime.now(timezone.utc)),),
         )
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('created_by', ?)",
-            (getpass.getuser(),),
-        )
-    except (sqlite3.Error, OSError, KeyError, ImportError):
-        # Before 3.13, `getpass.getuser()` raises `KeyError` when the uid has
-        # no passwd entry (a container run as an unmapped uid) and
-        # `ImportError` on Windows with no `USERNAME` set; 3.13+ raises
-        # `OSError`. None of them may abort server startup.
+        if created_by is not None:
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('created_by', ?)",
+                (created_by,),
+            )
+    except sqlite3.Error:
         _LOGGER.warning("failed to stamp created_at/created_by in meta", exc_info=True)
+
+
+def _account_name() -> str | None:
+    """The name of the account this process runs as, or `None` when it has
+    none: a uid with no passwd entry and no `LOGNAME` or `USER`, as in a
+    container run with `--user` to own a bind mount."""
+    try:
+        return getpass.getuser()
+    except (OSError, KeyError, ImportError):
+        # Before 3.13 an unnamed uid raises `KeyError`, and `ImportError`
+        # on Windows with no `USERNAME`; 3.13+ raises `OSError`.
+        return None

@@ -37,7 +37,9 @@ first, and the driver's own logging is silenced while the store opens.
 **The store is closed by the app's shutdown** (`create_app`'s
 `close_store_on_shutdown`). On SIGTERM uvicorn shuts the app down and then
 raises the signal again with its default action, which ends the process
-inside `Server.run`, so a `finally` here never runs on that path.
+inside `Server.run`, so a `finally` here never runs on that path -- except
+as a container's PID 1, which the kernel does not let a default action end:
+there `main` returns through its `finally`, with exit status 0.
 
 **A database of the server's own starts with an admin.** Before serving,
 a database with no user gets the admin `admin`, with a random password
