@@ -804,7 +804,7 @@ components:
     SessionUserResponse:
       type: object
       required: [name, admin]
-      properties: {name: {type: string}, admin: {type: boolean, description: "Whether the user is an admin now."}}
+      properties: {name: {type: string}, admin: {type: boolean, description: "Whether this credential may use the admin routes now: its token holds the admin scope and its user is an admin."}}
     SessionResponse:
       type: object
       required: [open, user, expires_at]

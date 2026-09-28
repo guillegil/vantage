@@ -145,11 +145,14 @@ _READING_METHODS = frozenset({"GET", "HEAD"})
 @dataclass(frozen=True, slots=True)
 class Caller:
     """Who a request acts as: the user its token belongs to, or `None` on
-    a server that has no user, whether that user is an admin now, and when
-    the token stops authenticating -- set for a login token alone."""
+    a server that has no user, whether that user is an admin now, whether
+    the token may administer now -- it holds the admin scope and its user
+    is an admin -- and when the token stops authenticating, set for a login
+    token alone."""
 
     user: str | None
     admin: bool = False
+    administers: bool = False
     expires_at: datetime | None = None
 
 
@@ -183,7 +186,12 @@ def _authorize_token(store: ExecutionStore, token: str, scope: str) -> Caller:
         raise UnauthenticatedError.invalid()
     if not grant.allows(scope):
         raise InsufficientScopeError(scope)
-    return Caller(user=grant.user, admin=grant.admin, expires_at=grant.expires_at)
+    return Caller(
+        user=grant.user,
+        admin=grant.admin,
+        administers=grant.allows(ADMIN_SCOPE),
+        expires_at=grant.expires_at,
+    )
 
 
 def authorize(request: Request, scope: str) -> Caller:

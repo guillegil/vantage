@@ -105,7 +105,7 @@ def get_session(caller: Caller = Depends(requires_read)) -> SessionResponse:
         return SessionResponse(open=True, user=None, expires_at=None)
     return SessionResponse(
         open=False,
-        user=SessionUserResponse(name=caller.user, admin=caller.admin),
+        user=SessionUserResponse(name=caller.user, admin=caller.administers),
         expires_at=caller.expires_at,
     )
 

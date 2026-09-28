@@ -470,7 +470,8 @@ def test_the_authorization_header_decides_alone(
 
     _assert_rejected(forged, 401, "unauthenticated", [])
     _assert_rejected(malformed, 401, "unauthenticated", [])
-    assert as_alice.json()["user"] == {"name": "alice", "admin": True}
+    # Alice's own read token, which cannot administer, whoever's the cookie is.
+    assert as_alice.json()["user"] == {"name": "alice", "admin": False}
     assert recorded.status_code == 201, recorded.text
 
 
@@ -592,6 +593,29 @@ def test_the_session_ends_with_its_token(
         session = _expired_login(any_store, "bob")
 
     _assert_rejected(_whoami(client, _cookie(session)), 401, "unauthenticated", [])
+
+
+@pytest.mark.parametrize("credential", ["made-without-admin", "promoted-after-sign-in"])
+def test_a_credential_that_cannot_administer_says_so_whatever_its_user_is(
+    client: TestClient, any_store: ExecutionStore, credential: str
+) -> None:
+    """`admin` answers whether this credential may use the admin routes,
+    not whether its user is an admin: an admin's token made without the
+    admin scope, and a login from before its user was made an admin, both
+    say false, as the admin routes then answer."""
+    if credential == "made-without-admin":
+        headers = _bearer(_token(any_store, "alice", READ_SCOPE))
+        name = "alice"
+    else:
+        headers = _cookie(_signed_in(client, "bob"))
+        any_store.update_user("bob", admin=True)
+        name = "bob"
+
+    asked = _whoami(client, headers)
+    administering = client.get("/api/v1/users", headers=headers)
+
+    assert asked.json()["user"] == {"name": name, "admin": False}
+    assert administering.status_code == 403
 
 
 def test_a_session_of_a_user_no_longer_an_admin_administers_nothing(
