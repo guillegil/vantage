@@ -685,8 +685,9 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   passes every role check.
 - **`service/access.py`** is the dependency every route declares but
   `/capabilities` and `/openapi.yaml`, which a client asks before it can
-  know it needs a token, and `/login` and `/password`, which take a name
-  and a password instead. A route outside any project declares a scope
+  know it needs a token, `/login`, `/password` and `POST /session`, which
+  take a name and a password instead, and `DELETE /session`, which only
+  ends what the cookie holds (see [Browser sessions](#browser-sessions)). A route outside any project declares a scope
   alone: `requires_read` on `GET /projects`, `requires_record` on a
   report, `requires_admin` on adding a project, and `requires_admin_token`
   on the users and tokens routes, `PUT /users/{name}/password` included.
@@ -696,7 +697,8 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   server is open it asks the store whether a user exists on every request,
   because `vantage user add` may run against the database meanwhile; once
   one does, `app.state.access_required` keeps the answer, and the store is
-  not asked again. A token sent to an open server is refused, not ignored.
+  not asked again. A token sent to an open server in the `Authorization`
+  header is refused, not ignored; a session cookie is ignored there.
   A 401, or a `403 insufficient_scope`, carries RFC 6750's
   `WWW-Authenticate` challenge (`ChallengeError`), naming the scope that
   was missing and never the token; a refusal of a role carries none, since
@@ -745,7 +747,10 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
     another; an editor of the project still does. `vantage.local` passes
     no `admit`.
 - **Every refusal of who asks comes before every refusal of what is
-  asked.** Within a project path: `401`, `403 insufficient_scope`, on the
+  asked.** A request carrying only a session cookie is first refused
+  `403 cross_site_request` unless it came from vantage's own pages, before
+  the cookie is looked up. Within a project path: `401`,
+  `403 insufficient_scope`, on the
   members routes `409 open_server`, `404 unknown_project`,
   `403 not_a_member`, `403 insufficient_role`, then the route's own checks
   of its body, query and path. Within a run-id path: `401`,
@@ -821,10 +826,11 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   back, since a revocation is never undone. The one row that read can miss
   is an expired login token's, deleted by its user's next login, before
   the revocation or after it: the token is then unknown, `404
-  unknown_token`, as it would be to anyone. The two answers carrying a
-  token, the `201` of `POST /tokens` and of `POST /login`, are
-  `Cache-Control: no-store`, and `CreatedTokenResponse` keeps the token out
-  of its `repr`. The password request models keep passwords out of their
+  unknown_token`, as it would be to anyone. The three answers carrying a
+  token, the `201` of `POST /tokens`, of `POST /login` and of
+  `POST /session` (in its cookie), set `Cache-Control: no-store`
+  themselves, and `CreatedTokenResponse` keeps the token out of its
+  `repr`. The password request models keep passwords out of their
   `repr` and hide their input in validation errors, whose text otherwise
   repeats the whole body of one missing a field, and the routes raise
   their `422` `from None`. A value that cannot be a name matches no user
@@ -875,11 +881,80 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   project, not the token: the run is kept and the send goes on, passing
   over that project's runs (see [Projects](#projects)).
 
+### Browser sessions
+
+A browser signs in with `POST /session` (`service/routes/session.py`) and
+holds its login token in a cookie, never in page script; the plugin, CI
+and scripts keep sending a token in `Authorization`.
+
+- **The cookie.** `__Host-vantage_session` (`SESSION_COOKIE` in
+  `service/access.py`), set as `HttpOnly; Max-Age=43200; Path=/;
+  SameSite=strict; Secure`. HttpOnly keeps the token from any script the
+  page runs, so an injection into the client cannot carry it off; the
+  `__Host-` prefix makes a browser keep it only when it is Secure, for `/`
+  and with no `Domain`, so no sibling host can set or overwrite it.
+  Browsers keep a Secure cookie over HTTPS and on `http://127.0.0.1` and
+  `http://localhost`, and drop it over plain HTTP to any other host. The
+  answer's body names the user, whether they are an admin and when the
+  session ends, never the token, and is `no-store`. The token is exactly
+  the one `/login` makes: the password work is one coroutine,
+  `log_in_with_password` in `routes/login.py`, which both routes await, so
+  the media type, the bounded body, the slots, the check and every refusal
+  are the same. It is not a flag on `/login`, whose body holds the token.
+- **One credential decides.** `authorize` reads the `Authorization` header
+  first, and when there is one the cookie is never read: a script sending
+  a token acts as that token, whatever cookie its browser holds. Without a
+  header, an open server serves the anonymous caller whatever cookie comes
+  along: the cookie authenticates nobody there, and one left by a server
+  on another port of the same host must not refuse anybody. On a closed
+  server the cookie is then looked up as a Bearer token would be, and
+  `Caller` gains the token's `expires_at`, which `GET /session` answers;
+  `Grant` carries the token's id and expiry for that, and for sign-out.
+- **Same-origin, and why SameSite is not enough.** SameSite=Strict keeps
+  the cookie from other *sites*, but a site is a host, not an origin: a
+  page served on another port of the same host is same-site and gets the
+  cookie on every method. `POST /tokens/{token_id}/revoke` reads no body
+  and an admin's login token holds admin, so without more a neighbouring
+  page could revoke tokens. `require_same_origin` therefore refuses a
+  cookie request, `403 cross_site_request`, before the cookie is looked up,
+  unless the browser marked it `Sec-Fetch-Site: same-origin`; a `GET` or
+  `HEAD` also passes marked `none` (typed or bookmarked) or not marked at
+  all (a script, or a browser too old to send the header, neither of which
+  can read a cross-origin answer). Page script cannot set the header.
+  There is no fallback to `Origin` or `Host`: a proxy that rewrites
+  `Host` would make one refuse legitimate requests, and every browser that
+  keeps a Secure cookie in a secure context sends `Sec-Fetch-Site`. Over
+  plain HTTP to another host a browser sends none, and keeps no cookie
+  either; the detail of the refusal says where sessions work.
+  `POST /session` and `DELETE /session` require it too
+  (`requires_same_origin`), whether or not a cookie is sent, so another
+  port's page can neither sign the browser in as someone else, so that
+  what it does next is theirs, nor sign it out.
+- **Who is asking.** `GET /session` answers for any credential: the
+  user's name, whether they are an admin now, and the token's own
+  `expires_at` -- null for a made token. An open server answers `open:
+  true` with no user, and a closed one asked with no credential answers
+  `401`, which is how the client learns to show its sign-in page.
+- **Signing out and expiry.** `DELETE /session` revokes the token the
+  cookie holds, when it is well formed and still authenticates
+  (`revoke_token(grant.token_id, user=grant.user)`), and always answers
+  `204` with a clearing `Set-Cookie`, on any server; an absent, malformed,
+  expired or revoked cookie is simply cleared. It never reads the
+  `Authorization` header, whose tokens `POST /tokens/{token_id}/revoke`
+  revokes, and sends no `Clear-Site-Data`, which would clear every other
+  service's cookies on the host. A session also ends when its token does:
+  after twelve hours, at any password set for its user, and while the user
+  is disabled; demoting the user takes its admin scope's power at once, as
+  for any token. A `401` never clears the cookie: a stale one is ignored on
+  an open server and overwritten by the next sign-in on a closed one.
+- **Cookies do not separate ports.** Every service on the same host name
+  receives the cookie, so vantage wants a host name of its own.
+
 ## Request handling and concurrency
 
 `create_app(store, grace_period_seconds=900, client=None)` builds the app,
 mounts the `runs`, `read`, `capabilities`, `sections`, `users`, `projects`,
-`members` and `login` routers under `/api/v1`,
+`members`, `login` and `session` routers under `/api/v1`,
 registers the error handlers, and adds two middlewares, neither of which
 calls the store: `WebClient`, only when given a client directory, and
 `SecurityHeaders`, always (see [The web client](#the-web-client)). The
@@ -898,9 +973,10 @@ would stall every other request, heartbeats included.
   run in the threadpool through `run_in_threadpool`. `POST /projects`, a
   project's `POST .../config/sections` and `PUT .../members/{user}`,
   `POST /users`, `PATCH /users/{name}`,
-  `PUT /users/{name}/password`, `POST /tokens`, `POST /login` and
-  `POST /password` read their bodies the same way, under caps of their
-  own. The three password routes then run their scrypt and store calls in
+  `PUT /users/{name}/password`, `POST /tokens`, `POST /login`,
+  `POST /session` and `POST /password` read their bodies the same way,
+  under caps of their own. The four password routes then run their scrypt
+  and store calls in
   one threadpool call each, once a password slot is free (see
   [Users, tokens and who may do what](#users-tokens-and-who-may-do-what)).
 - **Every other route that reaches the store is a plain `def`**, which
@@ -908,7 +984,8 @@ would stall every other request, heartbeats included.
 - **`GET /capabilities` and `GET /openapi.yaml` are `async`** and never block,
   so they answer even while every worker thread waits on the store. The
   dependencies that only read `app.state` are `async` for the same reason:
-  an attribute read is not worth a thread. Those that authorize a request,
+  an attribute read is not worth a thread; so is `requires_same_origin`,
+  which reads a header alone. Those that authorize a request,
   or refuse one on an open server, read the store, and are plain `def`s.
 
 **The store's lock.** `SqliteExecutionStore` keeps one `sqlite3` connection,

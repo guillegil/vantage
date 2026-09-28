@@ -289,6 +289,10 @@ def _read_bindings(
             lambda: client.get("/api/v1/users"),
             lambda: client.get("/api/v1/users", headers=refused),  # 403, or 409 when open
         ),
+        ("GET", "/session"): (
+            lambda: client.get("/api/v1/session"),
+            lambda: client.get("/api/v1/session", headers=refused),
+        ),
         ("GET", "/tokens"): (
             lambda: client.get("/api/v1/tokens"),
             lambda: client.get("/api/v1/tokens", params={"user": "alice"}),

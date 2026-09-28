@@ -322,6 +322,26 @@ class InsufficientScopeError(ChallengeError):
         )
 
 
+class CrossSiteRequestError(RejectionError):
+    """A browser session's cookie on a request the browser did not mark
+    `Sec-Fetch-Site: same-origin` -- or, for a read, marked as coming from
+    another site or another port of this one. SameSite keeps the cookie
+    from other sites, not from other ports of the same host, so without
+    this a page served beside vantage could act with its session. A 403
+    without a challenge, since no token of the same user would help; the
+    header's value is never repeated."""
+
+    status_code = 403
+    error = "cross_site_request"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A browser session is accepted only from vantage's own pages: the browser must mark "
+            "the request Sec-Fetch-Site: same-origin, which browsers do over HTTPS and on this "
+            "machine's loopback address."
+        )
+
+
 class OpenServerError(RejectionError):
     """A users, tokens, login, password or members route asked of a
     database with no user, which only a database pytest-vantage's local
@@ -793,6 +813,7 @@ def register_error_handlers(app: FastAPI) -> None:
 __all__ = [
     "MAX_REPORT_BYTES",
     "ChallengeError",
+    "CrossSiteRequestError",
     "DefaultProjectMembersError",
     "IncompleteBodyError",
     "InsufficientRoleError",

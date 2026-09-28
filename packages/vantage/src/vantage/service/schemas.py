@@ -441,6 +441,29 @@ class PasswordSetRequest(BaseModel):
     password: str = Field(repr=False)
 
 
+# --- Browser sessions -------------------------------------------------------
+
+
+class SessionUserResponse(BaseModel):
+    """Who a session acts as: the user, and whether its token may
+    administer now."""
+
+    name: str
+    admin: bool
+
+
+class SessionResponse(BaseModel):
+    """The response body for `POST /api/v1/session` and `GET
+    /api/v1/session`, never holding the token itself. On an open server
+    `open` is true and there is no user; otherwise `user` is the caller,
+    and `expires_at` is when its token stops authenticating -- set for a
+    login token alone."""
+
+    open: bool
+    user: SessionUserResponse | None
+    expires_at: datetime | None
+
+
 # --- Projects ---------------------------------------------------------------
 
 

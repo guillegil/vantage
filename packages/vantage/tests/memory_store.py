@@ -782,7 +782,13 @@ class InMemoryExecutionStore:
             return None
         if token.expires_at is not None and token.expires_at <= now:
             return None
-        return Grant(user=user.name, admin=user.admin, scopes=token.scopes)
+        return Grant(
+            user=user.name,
+            admin=user.admin,
+            scopes=token.scopes,
+            token_id=token.id,
+            expires_at=token.expires_at,
+        )
 
     @_locked
     def metadata(self, run_id: str) -> RunMetadata:

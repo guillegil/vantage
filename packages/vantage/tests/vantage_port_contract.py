@@ -2683,11 +2683,17 @@ class ExecutionStoreContract:
         assert store.authenticate(token_digest("t"), now=_ACCESS_AT) is None
 
     def test_a_live_token_grants_its_scopes_as_its_user(self, store: ExecutionStore) -> None:
+        """The grant names the token, and a made token has no end."""
         store.create_user("alice", admin=False, created_at=_ACCESS_AT)
-        _token(store, "alice", "secret", scopes={READ_SCOPE, RECORD_SCOPE})
+        _token(store, "alice", "earlier")
+        made = _token(store, "alice", "secret", scopes={READ_SCOPE, RECORD_SCOPE})
 
         assert store.authenticate(token_digest("secret"), now=_ACCESS_AT) == Grant(
-            user="alice", admin=False, scopes=frozenset({READ_SCOPE, RECORD_SCOPE})
+            user="alice",
+            admin=False,
+            scopes=frozenset({READ_SCOPE, RECORD_SCOPE}),
+            token_id=made.id,
+            expires_at=None,
         )
         assert store.authenticate(token_digest("other"), now=_ACCESS_AT) is None
 
@@ -2715,7 +2721,7 @@ class ExecutionStoreContract:
         assert store.get_token(made.id) == made
         assert store.list_tokens(user="alice") == (made,)
         assert store.authenticate(token_digest("secret"), now=_ACCESS_AT) == Grant(
-            user="alice", admin=True, scopes=frozenset(scopes)
+            user="alice", admin=True, scopes=frozenset(scopes), token_id=made.id, expires_at=None
         )
 
     def test_a_grant_carries_its_users_standing_now(self, store: ExecutionStore) -> None:
@@ -3541,7 +3547,7 @@ class ExecutionStoreContract:
         assert store.get_token(login.id) == login
         assert store.list_tokens(user="alice") == (login,)
         assert store.authenticate(token_digest("login"), now=_ACCESS_AT) == Grant(
-            user="alice", admin=admin, scopes=scopes
+            user="alice", admin=admin, scopes=scopes, token_id=login.id, expires_at=expires_at
         )
 
     def test_a_login_stores_nothing_unless_the_hash_it_checked_is_still_an_enabled_users(
@@ -3641,14 +3647,18 @@ class ExecutionStoreContract:
         the instant."""
         _user(store, "alice")
         expires_at = _ACCESS_AT + LOGIN_TOKEN_LIFETIME
-        _logged_in(store, "alice", "login", expires_at=expires_at)
+        login = _logged_in(store, "alice", "login", expires_at=expires_at)
         zone = timezone(timedelta(hours=offset_hours))
 
         def _grant(now: datetime) -> Grant | None:
             return store.authenticate(token_digest("login"), now=now.astimezone(zone))
 
         assert _grant(expires_at - timedelta(microseconds=1)) == Grant(
-            user="alice", admin=False, scopes=frozenset({READ_SCOPE, MANAGE_SCOPE})
+            user="alice",
+            admin=False,
+            scopes=frozenset({READ_SCOPE, MANAGE_SCOPE}),
+            token_id=login.id,
+            expires_at=expires_at,
         )
         assert _grant(expires_at) is None
         assert _grant(expires_at + timedelta(days=365)) is None

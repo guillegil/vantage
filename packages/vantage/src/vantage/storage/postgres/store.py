@@ -637,7 +637,8 @@ _REVOKE_TOKEN = """
 """  # noqa: S105
 
 _AUTHENTICATE = """
-    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_manage, t.can_admin
+    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_manage, t.can_admin,
+           t.id, t.expires_at
     FROM vantage.access_token t
     JOIN vantage.account a ON a.name = t.account
     WHERE t.digest = %s AND t.revoked_at IS NULL AND NOT a.disabled
@@ -1607,11 +1608,13 @@ class PostgresExecutionStore:
         row = self._fetchone(_AUTHENTICATE, (digest, now))
         if row is None:
             return None
-        name, admin, can_read, can_record, can_manage, can_admin = row
+        name, admin, can_read, can_record, can_manage, can_admin, token_id, expires_at = row
         return Grant(
             user=cast(str, name),
             admin=bool(admin),
             scopes=_decode_scopes(can_read, can_record, can_manage, can_admin),
+            token_id=cast(int, token_id),
+            expires_at=_opt_utc(expires_at),
         )
 
     def close(self) -> None:

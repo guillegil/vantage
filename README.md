@@ -768,8 +768,8 @@ with exit status 1 and nothing created; `vantage push`, `vantage project`,
 - **A database pytest-vantage's local store made, until it has a user, has
   no authentication.** Anyone who can reach the port can record runs, add
   projects, change the section definitions and read everything recorded,
-  failure text included. Only the users, tokens, members, login and
-  password routes refuse, with `409 open_server`, so its first user is
+  failure text included. Only the users, tokens, members, login, sign-in
+  and password routes refuse, with `409 open_server`, so its first user is
   always made with `vantage user add`. Any `--host` other than `127.0.0.1` logs a warning
   saying so at startup, as long as the database has no user; a database of
   the server's own has one by then, and never warns.
@@ -1098,6 +1098,7 @@ to change, as every login token does, and a role in the project (see
 | --- | --- |
 | `POST /api/v1/login` | Answers a login token for a name and its password: `{"name": "alice", "password": "..."}` |
 | `POST /api/v1/password` | Changes one's own password, given the current one: `{"name": "alice", "password": "...", "new_password": "..."}` |
+| `POST`, `GET`, `DELETE /api/v1/session` | Signs a browser in, says who is asking, and signs it out (see [Signing in from a browser](#signing-in-from-a-browser)) |
 | `GET /api/v1/users` | Every user, disabled ones included, by name |
 | `POST /api/v1/users` | Adds an enabled user, without a password: `{"name": "bob", "admin": false}` |
 | `PATCH /api/v1/users/{name}` | Sets `admin`, `disabled` or both: `{"disabled": true}` |
@@ -1153,7 +1154,8 @@ curl -s -X POST http://vantage.example:8765/api/v1/tokens \
   whoever asked first. A token
   sent to the ones that take one is refused with `401`, as everywhere.
 - A new token is in the `201` answer of `POST /tokens` or `POST /login`
-  alone, marked `Cache-Control: no-store`, and never again: lists show its
+  alone (or in the cookie `POST /session` sets), marked
+  `Cache-Control: no-store`, and never again: lists show its
   id, user, scopes, label and times (`expires_at` null but for a login
   token), never the token.
 - An admin cannot demote or disable their own user over HTTP
@@ -1170,6 +1172,44 @@ curl -s -X POST http://vantage.example:8765/api/v1/tokens \
 - The lists come whole, not paged. The commands' checks apply with the same
   wording, and a rejection never repeats a name, a label, a password or a
   token.
+
+#### Signing in from a browser
+
+A browser signs in with a user's name and password through
+`POST /api/v1/session`, which checks them as `POST /api/v1/login` does and
+keeps the same 12-hour login token in a cookie, `__Host-vantage_session`,
+that the page's script can never read. The answer names the user and when
+the session ends, never the token. `GET /api/v1/session` says who is
+asking, whether by the cookie or a token in `Authorization`, and
+`DELETE /api/v1/session` signs out, revoking the cookie's token. Signing
+out, the 12 hours passing, any password set for the user and disabling the
+user each end the session; a session never records runs, since a login
+token never holds `record`.
+
+- **A token in `Authorization` decides alone.** A request that sends one
+  is judged by it, whatever cookie comes along, so the plugin, CI and
+  scripts work as before. A server with no user ignores the cookie.
+- **The cookie counts only on requests from vantage's own pages.** The
+  browser marks where a request comes from (`Sec-Fetch-Site`), and a
+  request carrying only the cookie is refused, `403 cross_site_request`,
+  unless it is marked as coming from vantage itself; a `GET` typed into
+  the address bar counts too. The same goes for signing in and out.
+- **Signing in needs HTTPS or this machine.** Browsers keep the cookie only
+  over HTTPS, and on `http://127.0.0.1` and `http://localhost`. Opened over
+  plain HTTP from another machine, a sign-in holds nowhere. To browse a
+  server from elsewhere, either put it behind a TLS reverse proxy that sets
+  HSTS, or reach it through an SSH tunnel and open
+  `http://127.0.0.1:8765`:
+
+  ```bash
+  ssh -L 8765:127.0.0.1:8765 vantage-host
+  ```
+
+- **Cookies do not separate ports.** Every service on the same host name,
+  whatever its port, receives vantage's session cookie, and a page any of
+  them serves is same-site to vantage. Vantage refuses what such a page
+  asks with the cookie, but the cookie still reaches those services: give
+  vantage a host name of its own.
 
 ### Storing in PostgreSQL
 

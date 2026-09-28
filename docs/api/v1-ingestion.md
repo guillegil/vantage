@@ -27,13 +27,14 @@ local store made it. So a fresh server needs a token from its first report
 on. Only a database the local store made is served without one, and only
 until it has a user (`vantage user add`): such a server takes every
 request here without a token, checks no role, and only the routes that
-manage who may do so (users, tokens, members, login and password) answer
-`409 open_server`.
+manage who may do so (users, tokens, members, login, sign-in and
+password) answer `409 open_server`.
 
 Every other server needs a token on every route but
-`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml`, and
-`POST /api/v1/login` and `POST /api/v1/password`, which take a name and a
-password instead:
+`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml`;
+`POST /api/v1/login`, `POST /api/v1/session` and `POST /api/v1/password`,
+which take a name and a password instead; and `DELETE /api/v1/session`,
+which signs a browser out:
 
 ```
 Authorization: Bearer vantage_...
@@ -44,7 +45,11 @@ A token belongs to one user and holds one or more scopes: `read`,
 from an admin's `POST /api/v1/tokens`, and never expires. The two
 ingestion routes need `record`, which is all a token for a test runner
 needs, and which a login token (`POST /api/v1/login`, for people reading,
-expiring after 12 hours) never holds.
+expiring after 12 hours) never holds. A browser holds its login token in
+the session cookie `POST /api/v1/session` sets, which is taken wherever a
+header is, but only without one: a request that sends `Authorization` is
+judged by it alone, whatever cookie comes with it, wherever the request
+comes from.
 
 Recording also needs a role in the project: its user must be an editor of
 the project a report names, or, for a heartbeat, of the project the run
@@ -56,8 +61,9 @@ owner of it or an admin makes a user an editor
 
 The server answers:
 
-- No `Authorization` header, on a server with users: `401 unauthenticated`,
-  with `WWW-Authenticate: Bearer realm="vantage"`.
+- No `Authorization` header and no session cookie, on a server with
+  users: `401 unauthenticated`, with
+  `WWW-Authenticate: Bearer realm="vantage"`.
 - A header that carries no bearer token, or a token that is unknown,
   revoked, expired or of a disabled user, on any server:
   `401 unauthenticated`, the challenge adding `error="invalid_token"`. A

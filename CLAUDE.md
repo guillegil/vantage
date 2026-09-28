@@ -147,11 +147,21 @@ its `postgres` extra.
   only a local database is ever served open, until its first
   `vantage user add`; the first user closes a database for good, since
   users are disabled, never deleted. Every route but `/capabilities`,
-  `/openapi.yaml`, `/login` and `/password` declares its scope through
-  `service/access.py` (`read`, `record`, `manage`, `admin`), and
-  `test_interface_document.py` checks each against the document; `/login`
-  and `/password` take a name and a password instead of a token
-  (`requires_closed_server`). A token is stored only as its SHA-256,
+  `/openapi.yaml`, `/login`, `/password` and `POST`/`DELETE /session`
+  declares its scope through `service/access.py` (`read`, `record`,
+  `manage`, `admin`), and `test_interface_document.py` checks each against
+  the document, with the token in the header and in the session cookie;
+  `/login`, `/password` and `POST /session` take a name and a password
+  instead of a token (`requires_closed_server`). A browser holds a login
+  token in the HttpOnly, Secure, SameSite=Strict cookie `SESSION_COOKIE`
+  (`routes/session.py`), never in page script. `authorize` takes one
+  credential: an `Authorization` header decides alone; without one an
+  open server ignores the cookie; otherwise the cookie is looked up only
+  after `require_same_origin` passes -- `Sec-Fetch-Site: same-origin`, or
+  for `GET`/`HEAD` `none` or absent -- else `403 cross_site_request`,
+  since SameSite does not separate ports. `POST` and `DELETE /session`
+  require it whatever they carry (`requires_same_origin`); `DELETE` only
+  revokes the cookie's token and always clears it. A token is stored only as its SHA-256,
   printed once by whatever made it, read by the plugin from
   `VANTAGE_TOKEN` alone, and never written to the outbox, a message or a
   `repr`. A password is stored only as a scrypt PHC string
@@ -165,7 +175,8 @@ its `postgres` extra.
   the user whose token created it (`ForeignRunError`, `409 foreign_run`).
   The users and tokens routes (`routes/users.py`) need an admin's token on
   every server, and they, the members routes (`routes/members.py`),
-  `/login` and `/password` answer `409 open_server` while the database
+  `/login`, `/password` and `POST /session` answer `409 open_server` while
+  the database
   has no user: the first user is the CLI's, or the first start's, alone.
   `POST /projects` needs an admin.
 - **Roles.** Within a project a caller also needs a role there, `viewer`
@@ -181,8 +192,9 @@ its `postgres` extra.
   `requires_manage_members` (`_project_access`), `{run_id}` through
   `requires_read_run` or `requires_record_run` (`_run_access`), and
   `POST /runs` checks the report's project through `ingest`'s `admit`.
-  Who asks is refused before what is asked: `401`,
-  `403 insufficient_scope`, the members routes' `409 open_server`, a run
+  Who asks is refused before what is asked: `401`, a cookie's
+  `403 cross_site_request`, `403 insufficient_scope`, the members routes'
+  `409 open_server`, a run
   id's `422`, `404 unknown_project` or `unknown_run`, then
   `403 not_a_member` or `insufficient_role` (no challenge), and only then
   the route's own body and query checks; `POST /runs` checks the role

@@ -5,16 +5,17 @@ openapi: 3.1.0
 info:
   title: Vantage API
   version: "1"
-  description: "read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data. Every run belongs to one project, named by the report that creates it or default; the run list, a test's history, the section definitions and the members are a project's and live under /projects/{project}, while every path naming a run id reads that run whatever its project. Every rejection -- each 4xx and 5xx listed here, and the 404 or 405 for a path nothing serves or a method a path does not take -- has the Rejection body. The vantage command gives every database it serves an admin user named admin before serving it, printing its password once, unless the database has a user already or pytest-vantage's local store made it. So only a local store's database is ever served with no user: it serves every path without a token but the users-tagged and members-tagged ones, which answer 409 open_server until vantage user add makes its first user. Once a user exists, every path but /capabilities, /openapi.yaml, /login and /password needs Authorization: Bearer <token>, a token of an enabled user that has not been revoked or expired and grants the path's scope: read for what read-tagged paths return, record for a report or a heartbeat, manage for changing a project's sections or members, admin for adding projects and the other users-tagged paths -- the admin scope granting nothing once its user is no longer an admin. Within a project the token's user also needs a role there: viewer to read it, editor to record runs in it and change its sections as well, owner to change its members as well. Every user is an editor of default, which has no members; an admin acts as an owner of every project, a member of it or not; a server with no user checks no role. Scopes and roles only narrow each other: an owner's token granting only read only reads. A user with no role in the project is refused with 403 not_a_member, one whose role is below the one needed with 403 insufficient_role, and neither body names the project. Every refusal of who asks comes before every refusal of what is asked: 401, then 403 insufficient_scope, then 409 open_server on a users-tagged or members-tagged path, then the project the path names (404 unknown_project) or the run (422 for its id, 404 unknown_run), then the role, and only then the path's own checks of its body and query. /login and /password take a user's name and password instead, and ignore any token. Every 401, and every 403 insufficient_scope, carries a WWW-Authenticate header, a 403's naming the scope the token lacked. Every answer described here carries Content-Security-Policy: default-src 'none'; frame-ancestors 'none', Cache-Control: no-store, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer, X-Frame-Options: DENY, Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Resource-Policy: same-origin. Paths outside /api are the web client's, which this document does not describe; an unversioned path under /api answers 404."
+  description: "read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data. Every run belongs to one project, named by the report that creates it or default; the run list, a test's history, the section definitions and the members are a project's and live under /projects/{project}, while every path naming a run id reads that run whatever its project. Every rejection -- each 4xx and 5xx listed here, and the 404 or 405 for a path nothing serves or a method a path does not take -- has the Rejection body. The vantage command gives every database it serves an admin user named admin before serving it, printing its password once, unless the database has a user already or pytest-vantage's local store made it. So only a local store's database is ever served with no user: it serves every path without a token but the users-tagged and members-tagged ones, which answer 409 open_server until vantage user add makes its first user. Once a user exists, every path but /capabilities, /openapi.yaml, /login, /password, POST /session and DELETE /session needs a token -- sent as Authorization: Bearer <token>, or held by the session cookie __Host-vantage_session that POST /session sets in a browser -- of an enabled user, not revoked or expired, granting the path's scope: read for what read-tagged paths return, record for a report or a heartbeat, manage for changing a project's sections or members, admin for adding projects and the other users-tagged paths -- the admin scope granting nothing once its user is no longer an admin. Within a project the token's user also needs a role there: viewer to read it, editor to record runs in it and change its sections as well, owner to change its members as well. Every user is an editor of default, which has no members; an admin acts as an owner of every project, a member of it or not; a server with no user checks no role. Scopes and roles only narrow each other: an owner's token granting only read only reads. A user with no role in the project is refused with 403 not_a_member, one whose role is below the one needed with 403 insufficient_role, and neither body names the project. A request is authorized by one credential. The Authorization header decides alone: when it is sent, the cookie is not read. The cookie is read only without the header, never on a server with no user, and only on a request the browser marks Sec-Fetch-Site: same-origin -- or, for a GET, marks none or not at all; any other request carrying it is refused with 403 cross_site_request before the cookie is looked up, since SameSite keeps a cookie from other sites but not from another port of the same host. Browsers keep the cookie only over HTTPS or on a loopback address, and over plain HTTP to another host send no Sec-Fetch-Site. Every refusal of who asks comes before every refusal of what is asked: 401 for no credential, then 403 cross_site_request, then 401 for a token that is not valid, then 403 insufficient_scope, then 409 open_server on a users-tagged or members-tagged path, then the project the path names (404 unknown_project) or the run (422 for its id, 404 unknown_run), then the role, and only then the path's own checks of its body and query. /login, /password and POST /session take a user's name and password instead, and ignore any token; DELETE /session reads the cookie alone. Every 401, and every 403 insufficient_scope, carries a WWW-Authenticate header, a 403's naming the scope the token lacked. Every answer described here carries Content-Security-Policy: default-src 'none'; frame-ancestors 'none', Cache-Control: no-store, X-Content-Type-Options: nosniff, Referrer-Policy: no-referrer, X-Frame-Options: DENY, Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Resource-Policy: same-origin. Paths outside /api are the web client's, which this document does not describe; an unversioned path under /api answers 404."
 servers:
   - url: /api/v1
 security:
   - bearer: []
+  - session: []
   - {}
 tags:
   - {name: read, description: Leaves stored data unchanged.}
   - {name: write, description: Changes stored data.}
-  - {name: users, description: "Users, their passwords and their tokens. /login and /password take a user's name and password; every other users-tagged path needs a token granting the admin scope, on every server. A server with no user -- one serving a database pytest-vantage's local store made -- answers 409 open_server to all of them."}
+  - {name: users, description: "Users, their passwords and their tokens. /login, /password and POST /session take a user's name and password; every other users-tagged path needs a token granting the admin scope, on every server. A server with no user -- one serving a database pytest-vantage's local store made -- answers 409 open_server to all of them."}
   - {name: members, description: "A project's members, each with a role in it: viewer, editor or owner. Listing them needs the read scope and the viewer role in the project; setting or removing one, the manage scope and the owner role. default has none, since every user is an editor of it. A server with no user -- one serving a database pytest-vantage's local store made -- answers 409 open_server to all of them."}
 paths:
   /runs:
@@ -28,8 +29,8 @@ paths:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
         "200": {description: "The run already existed. This report's finish fields, results and metadata were applied where the run did not have them yet; nothing already stored was replaced. A run already finished takes nothing from a later report.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json) -- NaN and Infinity are not JSON -- or the client disconnected before sending all of it (incomplete_body).", content: &rejection {application/json: {schema: {$ref: '#/components/schemas/Rejection'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the record scope (insufficient_scope); or its user is not a member of the project the report names (not_a_member), or their role in it is below editor (insufficient_role). Nothing of the report is stored.", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the record scope (insufficient_scope); or its user is not a member of the project the report names (not_a_member), or their role in it is below editor (insufficient_role). Nothing of the report is stored. A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project of the name the report gives exists (unknown_project); fields is [project]. Nothing of the report is stored.", content: *rejection}
         "409": {description: "The run was recorded by another user, or without a token when this report has one, or with one when it has none (foreign_run); or it was created in another project (project_mismatch). Nothing of the report is stored.", content: *rejection}
         "413": {description: "The body exceeds 1 MiB (payload_too_large).", content: *rejection}
@@ -44,8 +45,8 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: The run., content: {application/json: {schema: {$ref: '#/components/schemas/RunDetailResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/metadata:
@@ -58,8 +59,8 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: The run's metadata., content: {application/json: {schema: {$ref: '#/components/schemas/RunMetadataResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/heartbeat:
@@ -71,8 +72,8 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: Acknowledged., content: {application/json: {schema: {$ref: '#/components/schemas/HeartbeatAcknowledgement'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the record scope (insufficient_scope); or its user is not a member of the run's project (not_a_member), or their role in it is below editor (insufficient_role).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the record scope (insufficient_scope); or its user is not a member of the run's project (not_a_member), or their role in it is below editor (insufficient_role). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "409": {description: "The run was recorded by another user, or without a token when this heartbeat has one, or with one when it has none (foreign_run).", content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
@@ -87,8 +88,8 @@ paths:
         - $ref: '#/components/parameters/offset'
       responses:
         "200": {description: A page of results., content: {application/json: {schema: {$ref: '#/components/schemas/ResultsResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "422": {description: "run_id is not 32 lowercase hex characters; or, once the run is found and the caller may read it, limit below 1 or offset out of range -- not a page (invalid_parameter).", content: *rejection}
   /runs/{run_id}/result:
@@ -102,8 +103,8 @@ paths:
         - {name: node_id, in: query, required: true, schema: {type: string}}
       responses:
         "200": {description: The result., content: {application/json: {schema: {$ref: '#/components/schemas/ResultDetailResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No run with that id has been recorded (unknown_run), or the run has no result with that node_id (unknown_result).", content: *rejection}
         "422": {description: "run_id is not 32 lowercase hex characters (invalid_parameter); or, once the run is found and the caller may read it, node_id missing (invalid_identity).", content: *rejection}
   /capabilities:
@@ -135,8 +136,8 @@ paths:
         - $ref: '#/components/parameters/run_id'
       responses:
         "200": {description: The run's section summary., content: {application/json: {schema: {$ref: '#/components/schemas/RunSectionSummaryResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
         "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
@@ -148,8 +149,8 @@ paths:
       description: Returned whole, not paged. An admin gets every project, with the role owner; anyone on a server with no user gets every project too, with a null role; anyone else gets default, as an editor, and each project they are a member of, with their role in it.
       responses:
         "200": {description: The projects the caller has a role in., content: {application/json: {schema: {$ref: '#/components/schemas/ProjectListResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
     post:
       operationId: create_project
       tags: [write]
@@ -159,8 +160,8 @@ paths:
       responses:
         "201": {description: "The project, with the role its maker acts with in it: owner, or null on a server with no user.", content: {application/json: {schema: {$ref: '#/components/schemas/ProjectResponse'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "409": {description: "A project with that name exists already, default included (project_exists).", content: *rejection}
         "413": {description: "The body exceeds 4 KiB (payload_too_large).", content: *rejection}
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
@@ -180,8 +181,8 @@ paths:
         - {name: metadata_value, in: query, required: false, schema: {type: array, items: {type: string}, maxItems: 16}}
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "422": {description: "limit below 1 or offset out of range -- not a page; or a cursor no page handed out, or a cursor with a non-zero offset; or metadata_key and metadata_value repeated a different number of times, or more than 16 pairs (invalid_parameter).", content: *rejection}
   /projects/{project}/tests/history:
@@ -198,8 +199,8 @@ paths:
         - $ref: '#/components/parameters/cursor'
       responses:
         "200": {description: "A page of history entries; empty, not an error, for an unknown node_id.", content: {application/json: {schema: {$ref: '#/components/schemas/HistoryResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "422": {description: "node_id missing (invalid_identity); or limit below 1 or offset out of range, or a cursor no page handed out, or a cursor with a non-zero offset (invalid_parameter).", content: *rejection}
   /projects/{project}/config/sections:
@@ -211,8 +212,8 @@ paths:
         - $ref: '#/components/parameters/project'
       responses:
         "200": {description: Every stored section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionListResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
     post:
@@ -227,8 +228,8 @@ paths:
         "201": {description: Stored, a new section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
         "200": {description: Updated; the name was already stored., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below editor (insufficient_role).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below editor (insufficient_role). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "413": {description: "The body exceeds 64 KiB (payload_too_large).", content: *rejection}
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
@@ -243,30 +244,30 @@ paths:
         - {name: name, in: query, required: true, schema: {type: string}}
       responses:
         "204": {description: Deleted.}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below editor (insufficient_role).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below editor (insufficient_role). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project); or the project stores no section of that name (unknown_section).", content: *rejection}
         "422": {description: name missing (invalid_parameter)., content: *rejection}
   /projects/{project}/members:
     get:
       operationId: list_members
       tags: [read, members]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: The project's members, by user, as vantage project member list prints them.
       description: Returned whole, not paged. everyone is the role every user holds in the project without being a member -- editor in default, whose items are always empty, and null in every other project. A viewer may list them, since every run's recorded_by already shows user names.
       parameters:
         - $ref: '#/components/parameters/project'
       responses:
         "200": {description: The project's members., content: {application/json: {schema: {$ref: '#/components/schemas/MemberListResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "409": {description: "The server has no user yet, so nobody is a member of anything; the vantage command adds the first (open_server).", content: *rejection}
   /projects/{project}/members/{user}:
     put:
       operationId: set_member
       tags: [write, members]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Make a user a member of the project with a role, or set a member's role, as vantage project member set does.
       description: "Idempotent: setting a member's role again, the same one included, answers 200. An owner may give any role, owner included, and demote any member, themselves included; an admin acts as an owner of every project without being a member, so an admin can always repair one. An admin or a disabled user may be made a member; a disabled user's role grants nothing while their tokens authenticate nothing. After who asks and the project, the media type is checked, then default, then a name no user can have, answered before the body is read; a user nobody has is answered last. Neither the name nor the role is ever repeated in a rejection."
       parameters:
@@ -277,8 +278,8 @@ paths:
         "201": {description: Added, a new member., content: {application/json: {schema: {$ref: '#/components/schemas/MemberResponse'}}}}
         "200": {description: The role set; the user was a member already., content: {application/json: {schema: {$ref: '#/components/schemas/MemberResponse'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below owner (insufficient_role), as every user's but an admin's is in default.", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below owner (insufficient_role), as every user's but an admin's is in default. A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project); or no user with that name exists, or none can (unknown_user).", content: *rejection}
         "409": {description: "The server has no user yet, so nobody is a member of anything; the vantage command adds the first (open_server); or the project is default, which has no members, since every user is an editor of it (default_project).", content: *rejection}
         "413": {description: "The body exceeds 4 KiB (payload_too_large).", content: *rejection}
@@ -287,7 +288,7 @@ paths:
     delete:
       operationId: remove_member
       tags: [write, members]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Remove a user from the project's members, as vantage project member remove does.
       description: "The body is not read. An owner may remove any member, themselves and the last owner included: an admin acts as an owner of every project without being a member. A user who is not a member answers 404 whether or not the user exists, so a repeated DELETE does too."
       parameters:
@@ -295,34 +296,34 @@ paths:
         - $ref: '#/components/parameters/member_user'
       responses:
         "204": {description: Removed.}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below owner (insufficient_role), as every user's but an admin's is in default.", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below owner (insufficient_role), as every user's but an admin's is in default. A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project); or the user is not a member of the project, whether or not a user of that name exists or can (unknown_member).", content: *rejection}
         "409": {description: "The server has no user yet, so nobody is a member of anything; the vantage command adds the first (open_server); or the project is default, which has no members, since every user is an editor of it (default_project).", content: *rejection}
   /users:
     get:
       operationId: list_users
       tags: [read, users]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Every user, disabled ones included, by name.
       description: Returned whole, not paged, as vantage user list prints them.
       responses:
         "200": {description: Every user., content: {application/json: {schema: {$ref: '#/components/schemas/UserListResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server).", content: *rejection}
     post:
       operationId: create_user
       tags: [write, users]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Add an enabled user, as vantage user add does.
       description: The first user is never made here -- a server with no user answers 409 open_server -- but only by the vantage command. The user has no password, and so cannot log in, until PUT /users/{name}/password or vantage user password sets one. The name is never repeated in a rejection.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/UserCreateRequest'}}}}
       responses:
         "201": {description: The user, enabled., content: {application/json: {schema: {$ref: '#/components/schemas/UserResponse'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server); or a user with that name exists already (user_exists).", content: *rejection}
         "413": {description: "The body exceeds 16 KiB (payload_too_large).", content: *rejection}
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
@@ -331,7 +332,7 @@ paths:
     patch:
       operationId: update_user
       tags: [write, users]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Make a user an admin or not, enabled or disabled, as vantage user update does.
       description: "Each field given and not null is set; at least one must be. An admin cannot demote or disable their own user here: another admin can, or vantage user update on the database. A disabled user's tokens authenticate nothing, and it cannot log in, until it is enabled again. A password is set by PUT /users/{name}/password."
       parameters:
@@ -340,8 +341,8 @@ paths:
       responses:
         "200": {description: The user as it now stands., content: {application/json: {schema: {$ref: '#/components/schemas/UserResponse'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No user with that name exists, or none can (unknown_user).", content: *rejection}
         "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server); or the change would demote or disable the caller's own user (own_account).", content: *rejection}
         "413": {description: "The body exceeds 16 KiB (payload_too_large).", content: *rejection}
@@ -351,7 +352,7 @@ paths:
     put:
       operationId: set_password
       tags: [write, users]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Set a user's password, as vantage user password does.
       description: "No current password is asked, even of an admin setting their own: their token can already make admin tokens. Every login token of the user is revoked; the tokens vantage token create or POST /tokens made are left alone. Nobody is enabled or made an admin here: a disabled user given a password still cannot log in. A U+0000 in the password is taken as U+FFFD, as it is at login. The password is never repeated in a rejection."
       parameters:
@@ -360,8 +361,8 @@ paths:
       responses:
         "204": {description: Set.}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No user with that name exists, or none can (unknown_user); a name none can have is answered before the body is read.", content: *rejection}
         "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server).", content: *rejection}
         "413": {description: "The body exceeds 16 KiB (payload_too_large).", content: *rejection}
@@ -372,20 +373,20 @@ paths:
     get:
       operationId: list_tokens
       tags: [read, users]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Every token, or one user's, revoked ones included, oldest first.
       description: Returned whole, not paged, as vantage token list prints them. A token is never in it -- only its SHA-256 is stored. A login token is listed, with its expires_at, until its user's next login after it expired deletes it.
       parameters:
         - $ref: '#/components/parameters/token_user'
       responses:
         "200": {description: The tokens., content: {application/json: {schema: {$ref: '#/components/schemas/TokenListResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server).", content: *rejection}
     post:
       operationId: create_token
       tags: [write, users]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Make a token for a user, as vantage token create does, and answer it this once.
       description: "The token is in this answer only, which is not to be stored (Cache-Control: no-store). A token holds read and record unless scopes names others: manage for any user, bounded by the user's role in each project, and admin only for an admin user. A U+0000 in the label is stored as U+FFFD; a lone surrogate in it is rejected. A disabled user's token is made, and authenticates nothing until the user is enabled. Minting a token for another user lets its bearer record runs as that user."
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TokenCreateRequest'}}}}
@@ -395,8 +396,8 @@ paths:
           headers: {Cache-Control: {description: "no-store: the token is shown this once.", schema: {type: string}}}
           content: {application/json: {schema: {$ref: '#/components/schemas/CreatedTokenResponse'}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No user with that name exists, or none can (unknown_user).", content: *rejection}
         "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server); or the admin scope was asked for a user who is not an admin (not_an_admin).", content: *rejection}
         "413": {description: "The body exceeds 16 KiB (payload_too_large).", content: *rejection}
@@ -406,15 +407,15 @@ paths:
     post:
       operationId: revoke_token
       tags: [write, users]
-      security: [{bearer: []}]
+      security: [{bearer: []}, {session: []}]
       summary: Revoke a token.
       description: Idempotent. A token revoked already answers 200 with the time it was first revoked. The token authenticates nothing from the next request on, the caller's own included. The body is not read.
       parameters:
         - $ref: '#/components/parameters/token_id'
       responses:
         "200": {description: The token, revoked., content: {application/json: {schema: {$ref: '#/components/schemas/TokenResponse'}}}}
-        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope). A session cookie on a request the browser did not mark Sec-Fetch-Site: same-origin is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: "No token with that id exists (unknown_token), as for a login token that expired and was deleted at its user's next login.", content: *rejection}
         "409": {description: "The server has no user yet, so no token can manage users; the vantage command adds the first (open_server).", content: *rejection}
         "422": {description: "token_id is not an integer from 1 to 9223372036854775807 (invalid_parameter).", content: *rejection}
@@ -455,9 +456,54 @@ paths:
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
         "422": {description: "The body does not match PasswordChangeRequest -- a field missing, of the wrong type or unknown (invalid_password_request); or new_password is not 15 to 256 characters once NFKC-normalised, or holds a control character other than U+0000, or a lone surrogate (invalid_password); fields is [new_password].", content: *rejection}
         "503": {description: "As many requests are checking or setting a password as the server lets wait -- two hashing and 32 waiting -- so this one is refused at once (password_checks_busy), with Retry-After: 1.", content: *rejection}
+  /session:
+    post:
+      operationId: sign_in
+      tags: [write, users]
+      security: []
+      summary: Sign a browser in with a user's name and password, for a session cookie.
+      description: "Checked as /login checks it, in the same order, for the same login token: read and manage, and admin for a user who is an admin, never record, expiring 12 hours after it was made, and revoked sooner by DELETE /session or by any password set for its user. The token is in the Set-Cookie header alone, never in the body, and page script cannot read it. Browsers keep the cookie only over HTTPS or on a loopback address. The browser must mark the request Sec-Fetch-Site: same-origin, whether or not it carries a cookie, so no other site or port of the same host can sign it in as someone else. Any Authorization header and any cookie are ignored."
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
+      responses:
+        "201":
+          description: Signed in. The body names the user and when the session ends, never the token.
+          headers:
+            Set-Cookie: {description: "__Host-vantage_session=<login token>; HttpOnly; Max-Age=43200; Path=/; SameSite=strict; Secure -- the login token, living as long as it does.", schema: {type: string}}
+            Cache-Control: {description: "no-store.", schema: {type: string}}
+          content: {application/json: {schema: {$ref: '#/components/schemas/SessionResponse'}}}
+        "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
+        "401": {description: "The name and password are not those of an enabled user with a password, as for /login (invalid_credentials). Every cause gets the same body and WWW-Authenticate header, after the same work, and no cookie.", content: *rejection}
+        "403": {description: "The browser did not mark the request Sec-Fetch-Site: same-origin (cross_site_request). Answered before the body is read.", content: *rejection}
+        "409": {description: "The server has no user yet, so nobody can sign in; the vantage command adds the first (open_server). Answered before the body is read.", content: *rejection}
+        "413": {description: "The body exceeds 16 KiB (payload_too_large).", content: *rejection}
+        "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
+        "422": {description: "The body does not match LoginRequest -- a field missing, of the wrong type or unknown (invalid_login_request).", content: *rejection}
+        "503": {description: "As many requests are checking or setting a password as the server lets wait -- two hashing and 32 waiting -- so this one is refused at once (password_checks_busy), with Retry-After: 1.", content: *rejection}
+    get:
+      operationId: get_session
+      tags: [read]
+      summary: Who the caller is, and when their session ends.
+      description: "Answers for any credential another path takes, the session cookie or a token in the Authorization header: the user's name, whether they are an admin now, and when the token stops authenticating -- 12 hours after a login, never for a token vantage token create or POST /tokens made. A server with no user answers open, with no user. A server with users asked with no credential answers 401, which is how a browser client learns to sign in."
+      responses:
+        "200": {description: The caller., content: {application/json: {schema: {$ref: '#/components/schemas/SessionResponse'}}}}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
+    delete:
+      operationId: sign_out
+      tags: [write]
+      security: []
+      summary: Sign a browser out.
+      description: "Revokes the token the session cookie holds, if it still authenticates, and clears the cookie. A cookie that is absent, malformed, expired or revoked is cleared alike, on any server, a server with no user included. The Authorization header is never read: POST /tokens/{token_id}/revoke revokes a token sent that way."
+      responses:
+        "204":
+          description: Signed out.
+          headers:
+            Set-Cookie: {description: "__Host-vantage_session=\"\"; HttpOnly; Max-Age=0; Path=/; SameSite=strict; Secure -- the cookie cleared.", schema: {type: string}}
+        "403": {description: "The browser did not mark the request Sec-Fetch-Site: same-origin (cross_site_request). Nothing is revoked or cleared.", content: *rejection}
 components:
   securitySchemes:
     bearer: {type: http, scheme: bearer, description: "A token `vantage token create` printed, or the admin API or /login returned. Each holds one or more of the read, record, manage and admin scopes; one /login returned expires 12 hours after it was made."}
+    session: {type: apiKey, in: cookie, name: __Host-vantage_session, description: "The login token POST /session set in a browser, HttpOnly, Secure and SameSite=Strict. Read only when no Authorization header is sent, never on a server with no user, and only on a request the browser marks Sec-Fetch-Site: same-origin -- or, for a GET, none or not at all."}
   parameters:
     run_id: {name: run_id, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{32}$'}}
     # No `maximum`. A caller asking for more than 200 gets 200, not a
@@ -724,6 +770,16 @@ components:
       required: [password]
       additionalProperties: false
       properties: {password: {type: string, format: password, writeOnly: true, description: "The password to set: 15 to 256 characters once NFKC-normalised, none of them a control character or a lone surrogate."}}
+    # A browser session. The token is never in it: POST /session puts it in
+    # a cookie page script cannot read.
+    SessionUserResponse:
+      type: object
+      required: [name, admin]
+      properties: {name: {type: string}, admin: {type: boolean, description: "Whether the user is an admin now."}}
+    SessionResponse:
+      type: object
+      required: [open, user, expires_at]
+      properties: {open: {type: boolean, description: "Whether the server has no user, and so serves anyone without signing in."}, user: {oneOf: [{$ref: '#/components/schemas/SessionUserResponse'}, {type: "null"}], description: "Who the caller is; null on a server with no user."}, expires_at: {type: [string, "null"], format: date-time, description: "When the caller's token stops authenticating: set for a login token, the session cookie's included; null for a token vantage token create or POST /tokens made, and on a server with no user."}}
     # Projects. A project is never renamed or deleted; its name follows the
     # user-name rule.
     ProjectCreateRequest:

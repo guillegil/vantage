@@ -8,7 +8,9 @@ inject runs. What it may read or change in a project is bounded by the
 user's role there (`service/access.py`). It expires after
 `LOGIN_TOKEN_LIFETIME`, with no refresh, and every password set for its
 user revokes it. The token is in that one answer only, marked
-`Cache-Control: no-store`.
+`Cache-Control: no-store`. A browser signs in through `POST /session`
+instead, which runs the same check (`log_in_with_password`) and keeps the
+token in a cookie page script cannot read (`routes/session.py`).
 
 **Changing your own password takes the current one**, not a token, so a
 stolen login token cannot take the account over, and the password the
@@ -144,13 +146,14 @@ def _log_in(store: ExecutionStore, payload: LoginRequest, secret: str) -> Token 
     )
 
 
-@router.post("/login", dependencies=[Depends(requires_closed_server)])
-async def log_in(
-    request: Request,
-    store: ExecutionStore = Depends(get_store),
-    slots: PasswordSlots = Depends(get_password_slots),
-) -> JSONResponse:
-    """Answer a login token for a name and its password."""
+async def log_in_with_password(
+    request: Request, store: ExecutionStore, slots: PasswordSlots
+) -> tuple[str, Token]:
+    """The login token `request`'s body earns, and what the store keeps of
+    it: the media type, the bounded body, its parse, a password slot and
+    the check, each refused as `/login` refuses it, the password's failure
+    as `InvalidCredentialsError`. `/login` answers the token itself, and
+    `POST /session` puts it in a cookie (`routes/session.py`)."""
     require_json_media_type(request)
     body = await read_bounded_body(request, MAX_USERS_BODY_BYTES)
     payload = await run_in_threadpool(_parse, body, LoginRequest, InvalidLoginRequestError)
@@ -158,6 +161,17 @@ async def log_in(
     token = await _hashing(request, slots, _log_in, store, payload, secret)
     if token is None:
         raise InvalidCredentialsError()
+    return secret, token
+
+
+@router.post("/login", dependencies=[Depends(requires_closed_server)])
+async def log_in(
+    request: Request,
+    store: ExecutionStore = Depends(get_store),
+    slots: PasswordSlots = Depends(get_password_slots),
+) -> JSONResponse:
+    """Answer a login token for a name and its password."""
+    secret, token = await log_in_with_password(request, store, slots)
     created = CreatedTokenResponse(
         token=secret,
         id=token.id,
@@ -248,4 +262,4 @@ async def set_password(
     return Response(status_code=204)
 
 
-__all__ = ["router"]
+__all__ = ["log_in_with_password", "router"]

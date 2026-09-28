@@ -44,6 +44,7 @@ from vantage.core.ports.storage import (
     ProjectExistsError,
     RunMetadata,
 )
+from vantage.service.access import SESSION_COOKIE
 from vantage.service.app import create_app
 from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
 from vantage.storage import connection, sqlite_store
@@ -563,6 +564,7 @@ _HELD_MEMBER_RUN = "e" * 32
 # `_HELD_PROJECT`, and a token of his, id 2.
 _BOB_PASSWORD = "bob's password, long enough"  # noqa: S105
 _BOB_TOKEN = new_token()
+_SAME_ORIGIN = {"Sec-Fetch-Site": "same-origin"}
 
 _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "create_run": ("POST", "/api/v1/runs", {"json": _report("d" * 32)}, "record_session"),
@@ -635,6 +637,19 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
         "/api/v1/login",
         {"json": {"name": "bob", "password": _BOB_PASSWORD}},
         "get_password_hash",
+    ),
+    "sign_in": (
+        "POST",
+        "/api/v1/session",
+        {"json": {"name": "bob", "password": _BOB_PASSWORD}, "headers": _SAME_ORIGIN},
+        "get_password_hash",
+    ),
+    "get_session": ("GET", "/api/v1/session", {}, "authenticate"),
+    "sign_out": (
+        "DELETE",
+        "/api/v1/session",
+        {"headers": {"Cookie": f"{SESSION_COOKIE}={_BOB_TOKEN}", **_SAME_ORIGIN}},
+        "authenticate",
     ),
     "change_password": (
         "POST",

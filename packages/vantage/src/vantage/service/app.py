@@ -20,17 +20,19 @@ included. So every route that reaches the store is a plain `def`, which
 FastAPI runs in its threadpool. `POST /runs`, `POST /projects`, a
 project's `POST .../config/sections` and `PUT .../members/{user}`,
 `POST /users`, `PATCH /users/{name}`, `PUT /users/{name}/password`,
-`POST /tokens`, `POST /login` and `POST /password` are `async` only to
-stream their bodies under a size cap, and hand the rest to the threadpool
-themselves (`service/body.py`). The capabilities and interface-document
+`POST /tokens`, `POST /login`, `POST /session` and `POST /password` are
+`async` only to stream their bodies under a size cap, and hand the rest to
+the threadpool themselves (`service/body.py`). The capabilities and interface-document
 routes never block and stay `async`, so they answer even while every
 worker thread waits on the store.
 
-**Every route but four needs a token once the database has a user**
-(`service/access.py`): the capability advertisement and the interface
-document stay open, since a client asks them before it can know it needs
-one, and logging in and changing a password take a name and a password
-instead. `app.state.access_required` starts false and becomes true, for
+**Every route but six needs a token once the database has a user**
+(`service/access.py`), in the `Authorization` header or a browser
+session's cookie: the capability advertisement and the interface document
+stay open, since a client asks them before it can know it needs one;
+logging in, signing a browser in and changing a password take a name and a
+password instead; and signing a browser out needs nothing, since it only
+ends what the cookie holds. `app.state.access_required` starts false and becomes true, for
 good, the first time a request finds a user. The users and tokens routes
 need an admin's token, and the members routes a user's, whether or not the
 database has a user. Within a project a request also needs a role there,
@@ -85,6 +87,7 @@ from vantage.service.routes.projects import router as projects_router
 from vantage.service.routes.read import router as read_router
 from vantage.service.routes.runs import router as runs_router
 from vantage.service.routes.sections import router as sections_router
+from vantage.service.routes.session import router as session_router
 from vantage.service.routes.users import router as users_router
 from vantage.service.slots import PasswordSlots
 from vantage.service.web import SecurityHeaders, WebClient, load_client
@@ -146,6 +149,7 @@ def create_app(
     app.include_router(projects_router, prefix="/api/v1")
     app.include_router(members_router, prefix="/api/v1")
     app.include_router(login_router, prefix="/api/v1")
+    app.include_router(session_router, prefix="/api/v1")
     register_error_handlers(app)
     if client is not None:
         app.add_middleware(WebClient, files=load_client(client))
