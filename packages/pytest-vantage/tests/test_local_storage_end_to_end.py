@@ -710,6 +710,10 @@ def test_vantage_starting_on_a_database_local_mode_made_serves_it_open(
     )
 
     result.assert_outcomes(passed=1)
+    # Pytester echoes the inner session's stderr, which may hold whatever
+    # the environment prints there -- a readline warning for an unknown
+    # TERM, say; only what the bootstrap prints is asserted on.
+    capsys.readouterr()
     store = SqliteExecutionStore(database)
     try:
         create_first_admin(store, SqliteTarget(database))
