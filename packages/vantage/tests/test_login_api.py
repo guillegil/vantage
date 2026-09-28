@@ -1,9 +1,9 @@
 """Passwords over HTTP (`service/routes/login.py`): logging in trades a name
-and a password for a login token that reads, and administers for an admin,
-but never records, and expires; changing your own password takes the
-current one; an admin sets anyone's; every password set revokes that
-user's login tokens and no other; every failed check reads alike and costs
-the same; at most two hashes run at once, 32 wait and any more are
+and a password for a login token that reads and manages, and administers
+for an admin, but never records, and expires; changing your own password
+takes the current one; an admin sets anyone's; every password set revokes
+that user's login tokens and no other; every failed check reads alike and
+costs the same; at most two hashes run at once, 32 wait and any more are
 refused; and no password ever comes back.
 
 Run against every adapter (`any_store`) where an answer rests on what the
@@ -203,21 +203,29 @@ def test_a_login_answers_an_uncached_token_expiring_twelve_hours_on(
 
 @pytest.mark.parametrize(
     ("name", "scopes", "administers"),
-    [("alice", ["admin", "read"], 200), ("bob", ["read"], 403)],
+    [("alice", ["admin", "manage", "read"], 200), ("bob", ["manage", "read"], 403)],
     ids=["admin", "not-an-admin"],
 )
-def test_a_login_token_reads_and_administers_as_its_user_stands_but_never_records(
+def test_a_login_token_reads_manages_and_administers_as_its_user_stands_but_never_records(
     client: TestClient, name: str, scopes: list[str], administers: int
 ) -> None:
     """Recording is for a made token, so a login that leaks cannot inject
-    runs; the admin scope is only ever an admin's."""
+    runs; what it manages is bounded by its user's role in each project --
+    every user edits `default`'s sections -- and the admin scope is only
+    ever an admin's."""
     response = _log_in(client, name)
     token = response.json()["token"]
 
     records = client.post("/api/v1/runs", json={}, headers=_bearer(token))
+    manages = client.post(
+        "/api/v1/projects/default/config/sections",
+        json={"name": "unit", "prefix": "tests/unit"},
+        headers=_bearer(token),
+    )
 
     assert response.json()["scopes"] == scopes
     assert _reads(client, token) == 200
+    assert manages.status_code == 201, manages.text
     assert client.get("/api/v1/users", headers=_bearer(token)).status_code == administers
     _assert_rejected(records, 403, "insufficient_scope", [])
     assert records.headers["WWW-Authenticate"] == (

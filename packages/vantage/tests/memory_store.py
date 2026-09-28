@@ -1,10 +1,10 @@
 """An in-memory `ExecutionStore`, a test double kept beside the tests: the
-`vantage` command always serves a `SqliteExecutionStore`, so nothing shipped
-needs it.
+`vantage` command serves a `SqliteExecutionStore` or a
+`PostgresExecutionStore`, so nothing shipped needs it.
 
-The shared contract suite (``vantage_port_contract.py``) runs against both
-this and the SQLite adapter, so the port is proven by two independent
-mechanisms rather than one implementation agreeing with itself. It is a real
+The shared contract suite (``vantage_port_contract.py``) runs against this
+and both adapters, so the port is proven by independent mechanisms rather
+than one implementation agreeing with itself. It is a real
 implementation, not a stub: it mirrors the SQLite adapter's catalogue
 monotonicity, first-write-wins results keyed by ``(run_id, node_id)``, and
 the run upsert guard -- a finish-write (`exit_status` is not `None`) applies
@@ -40,6 +40,7 @@ from typing import Concatenate, ParamSpec, TypeVar
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
     LOGIN_TOKEN_LABEL,
+    MANAGE_SCOPE,
     READ_SCOPE,
     Grant,
     Token,
@@ -47,7 +48,7 @@ from vantage.core.domain.access import (
 )
 from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
-from vantage.core.domain.projects import DEFAULT_PROJECT, Project
+from vantage.core.domain.projects import DEFAULT_PROJECT, Membership, Project, check_role
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
@@ -122,6 +123,10 @@ def _locked(
     return locked
 
 
+# What every login token holds; an admin's holds the admin scope as well.
+_LOGIN_SCOPES = frozenset({READ_SCOPE, MANAGE_SCOPE})
+
+
 def _past(after: RunKey | None, started_at: datetime, run_id: str) -> bool:
     """Whether a run comes after `after` in the newest-first order, as the
     SQLite adapter's `_AFTER_RUN_KEY` decides it; every run does without a
@@ -160,6 +165,9 @@ class InMemoryExecutionStore:
         self._tokens: dict[int, Token] = {}
         self._token_ids: dict[str, int] = {}
         self._next_token_id = itertools.count(1)
+        # Each member's role, keyed by project and user, as the adapters'
+        # primary key is.
+        self._members: dict[tuple[str, str], str] = {}
 
     @_locked
     def record_session(
@@ -552,6 +560,52 @@ class InMemoryExecutionStore:
     def list_projects(self) -> Sequence[Project]:
         return tuple(sorted(self._projects.values(), key=lambda project: project.name))
 
+    def _memberships(
+        self, *, project: str | None = None, user: str | None = None
+    ) -> list[Membership]:
+        """The member rows of `project`, or of `user`, sorted by the other
+        key in code point order, as the adapters' `ORDER BY` sorts them; for
+        a caller already holding the lock."""
+        return sorted(
+            (
+                Membership(project=row_project, user=row_user, role=role)
+                for (row_project, row_user), role in self._members.items()
+                if project in (None, row_project) and user in (None, row_user)
+            ),
+            key=lambda membership: (membership.project, membership.user),
+        )
+
+    @_locked
+    def get_member_role(self, user: str, *, project: str) -> str | None:
+        return self._members.get((project, user))
+
+    @_locked
+    def list_members(self, *, project: str) -> Sequence[Membership]:
+        return tuple(self._memberships(project=project))
+
+    @_locked
+    def list_memberships(self, user: str) -> Sequence[Membership]:
+        return tuple(self._memberships(user=user))
+
+    @_locked
+    def set_member(self, user: str, *, project: str, role: str) -> bool:
+        # The adapters' order: what no row may hold, then the project, then
+        # the user.
+        if project == DEFAULT_PROJECT:
+            raise ValueError("default takes no members: every user is an editor of it")
+        check_role(role)
+        if project not in self._projects:
+            raise UnknownProjectError(f"there is no project named {project!r}")
+        if user not in self._users:
+            raise UnknownUserError(f"there is no user named {user!r}")
+        created = (project, user) not in self._members
+        self._members[(project, user)] = role
+        return created
+
+    @_locked
+    def remove_member(self, user: str, *, project: str) -> bool:
+        return self._members.pop((project, user), None) is not None
+
     @_locked
     def access_required(self) -> bool:
         return bool(self._users)
@@ -648,7 +702,7 @@ class InMemoryExecutionStore:
             id=next(self._next_token_id),
             user=name,
             label=LOGIN_TOKEN_LABEL,
-            scopes=frozenset({READ_SCOPE, ADMIN_SCOPE} if user.admin else {READ_SCOPE}),
+            scopes=_LOGIN_SCOPES | {ADMIN_SCOPE} if user.admin else _LOGIN_SCOPES,
             created_at=created_at,
             revoked_at=None,
             expires_at=expires_at,
@@ -767,3 +821,4 @@ class InMemoryExecutionStore:
         self._password_hashes.clear()
         self._tokens.clear()
         self._token_ids.clear()
+        self._members.clear()

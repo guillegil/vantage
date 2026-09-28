@@ -59,11 +59,12 @@ CREATE TABLE vantage.access_token (
     label       text NOT NULL,
     can_read    boolean NOT NULL,
     can_record  boolean NOT NULL,
+    can_manage  boolean NOT NULL,
     can_admin   boolean NOT NULL,
     created_at  timestamptz NOT NULL,
     revoked_at  timestamptz NULL,
     expires_at  timestamptz NULL,
-    CHECK (can_read OR can_record OR can_admin)
+    CHECK (can_read OR can_record OR can_manage OR can_admin)
 );
 
 -- A project name is at most 64 characters, so it is indexed as it is.
@@ -71,6 +72,15 @@ CREATE TABLE vantage.access_token (
 CREATE TABLE vantage.project (
     name        text COLLATE "C" PRIMARY KEY,
     created_at  timestamptz NOT NULL
+);
+
+-- `default` takes no rows. The adapter refuses one rather than a CHECK, so
+-- `DEFAULT_PROJECT` stays the only statement of that name.
+CREATE TABLE vantage.project_member (
+    project  text COLLATE "C" NOT NULL REFERENCES vantage.project (name),
+    account  text COLLATE "C" NOT NULL REFERENCES vantage.account (name),
+    role     text NOT NULL CHECK (role IN ('viewer', 'editor', 'owner')),
+    PRIMARY KEY (project, account)
 );
 
 CREATE TABLE vantage.run (
@@ -193,6 +203,9 @@ CREATE TABLE vantage.run_metadata (
 -- conflict target, and every lookup by node id or by metadata key and value.
 -- `access_token(digest)`, from its UNIQUE constraint: authenticating a
 -- request.
+-- `project_member`'s primary key: a project's members and one member's
+-- role. `project_member(account, project)`: a user's memberships, which the
+-- project list is filtered by.
 CREATE INDEX run_project_started_at ON vantage.run (project, started_at, id);
 CREATE INDEX result_run_id ON vantage.result (run_id, id);
 CREATE INDEX result_test_case_id ON vantage.result (test_case_id);
@@ -204,3 +217,4 @@ CREATE UNIQUE INDEX run_metadata_file_key
 CREATE UNIQUE INDEX run_metadata_key ON vantage.run_metadata (run_id, vantage.text_key(key));
 CREATE INDEX run_metadata_key_value
     ON vantage.run_metadata (vantage.text_key(key), vantage.text_key(value));
+CREATE INDEX project_member_account ON vantage.project_member (account, project);

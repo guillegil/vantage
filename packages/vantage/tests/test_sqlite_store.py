@@ -15,8 +15,13 @@ from typing import Any, TypeVar
 
 import pytest
 from sqlite_rows import read_metadata
-from vantage.core.domain.access import LOGIN_TOKEN_LIFETIME, token_digest
-from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.core.domain.access import (
+    LOGIN_TOKEN_LABEL,
+    LOGIN_TOKEN_LIFETIME,
+    MANAGE_SCOPE,
+    token_digest,
+)
+from vantage.core.domain.projects import DEFAULT_PROJECT, EDITOR_ROLE, VIEWER_ROLE, Membership
 from vantage.core.ports.storage import (
     ExecutionStore,
     MetadataEntry,
@@ -552,6 +557,119 @@ def test_only_the_local_stores_own_origin_keeps_a_database_from_its_first_admin(
         store.close()
 
     assert created is not None
+
+
+_INSERT_MEMBER = "INSERT INTO project_member (project, account, role) VALUES (?, ?, ?)"
+
+
+@pytest.mark.parametrize(
+    "role",
+    ["admin", "Owner", "owner ", ""],
+    ids=["not-a-role", "capitalised", "trailing-space", "empty"],
+)
+def test_the_schema_refuses_a_member_row_holding_a_role_outside_the_roles(
+    tmp_path: Path, role: str
+) -> None:
+    """The store refuses such a role before writing; the CHECK keeps one
+    written any other way out too, so every row read back holds a role
+    `effective_role` knows."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        store.create_user("alice", admin=False, created_at=_ADMIN_AT)
+        store.create_project("firmware", created_at=_ADMIN_AT)
+        conn = store._conn  # noqa: SLF001
+
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            conn.execute(_INSERT_MEMBER, ("firmware", "alice", role))
+        conn.execute(_INSERT_MEMBER, ("firmware", "alice", VIEWER_ROLE))
+
+        members = store.list_members(project="firmware")
+    finally:
+        store.close()
+
+    assert members == (Membership(project="firmware", user="alice", role=VIEWER_ROLE),)
+
+
+@pytest.mark.parametrize(
+    ("project", "account"), [("nope", "alice"), ("firmware", "nobody")], ids=["project", "user"]
+)
+def test_the_schema_refuses_a_member_row_naming_a_missing_project_or_user(
+    tmp_path: Path, project: str, account: str
+) -> None:
+    """Projects and users are never deleted, so a row naming one keeps
+    naming one; the foreign keys keep a row written past the store's probes
+    from naming nothing in the first place."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        store.create_user("alice", admin=False, created_at=_ADMIN_AT)
+        store.create_project("firmware", created_at=_ADMIN_AT)
+        conn = store._conn  # noqa: SLF001
+
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            conn.execute(_INSERT_MEMBER, (project, account, VIEWER_ROLE))
+
+        stored = conn.execute("SELECT COUNT(*) FROM project_member").fetchone()
+    finally:
+        store.close()
+
+    assert stored == (0,)
+
+
+def test_a_member_row_no_store_may_write_is_refused_before_any_statement(tmp_path: Path) -> None:
+    """`default` and a role outside the roles are refused before the store
+    runs anything -- not even `BEGIN IMMEDIATE`, so a refusal never waits
+    for another process's write lock."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    statements: list[str] = []
+    try:
+        store._conn.set_trace_callback(statements.append)  # noqa: SLF001
+        for project, role in ((DEFAULT_PROJECT, EDITOR_ROLE), ("nope", "admin")):
+            with pytest.raises(ValueError):
+                store.set_member("nobody", project=project, role=role)
+    finally:
+        store._conn.set_trace_callback(None)  # noqa: SLF001
+        store.close()
+
+    assert statements == []
+
+
+def test_each_scope_is_stored_in_a_flag_column_of_its_own(tmp_path: Path) -> None:
+    """`manage` has a column of its own, set for a made token holding it
+    and for every login token, whose `can_record` never is. Read straight
+    off the rows, since decoding the columns the way they were encoded
+    would hide a flag stored in another scope's column."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        store.create_first_admin("admin", password_hash=_HASH, created_at=_ADMIN_AT)
+        store.create_user("alice", admin=False, created_at=_ADMIN_AT)
+        store.set_password("alice", password_hash=_HASH, changed_at=_ADMIN_AT)
+        store.create_token(
+            "alice",
+            digest=token_digest("made"),
+            label="made",
+            scopes=frozenset({MANAGE_SCOPE}),
+            created_at=_ADMIN_AT,
+        )
+        for user in ("alice", "admin"):
+            store.create_login_token(
+                user,
+                password_hash=_HASH,
+                digest=token_digest(f"login-{user}"),
+                created_at=_ADMIN_AT,
+                expires_at=_ADMIN_AT + LOGIN_TOKEN_LIFETIME,
+            )
+        rows = store._conn.execute(  # noqa: SLF001
+            "SELECT account, label, can_read, can_record, can_manage, can_admin"
+            " FROM access_token ORDER BY id"
+        ).fetchall()
+    finally:
+        store.close()
+
+    assert rows == [
+        ("alice", "made", 0, 0, 1, 0),
+        ("alice", LOGIN_TOKEN_LABEL, 1, 0, 1, 0),
+        ("admin", LOGIN_TOKEN_LABEL, 1, 0, 1, 1),
+    ]
 
 
 def _forced(row: _Row, **fields: str | None) -> _Row:

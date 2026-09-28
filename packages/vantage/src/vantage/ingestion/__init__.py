@@ -15,6 +15,7 @@ only; never a web framework or a storage adapter -- the store is handed in.
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -50,6 +51,7 @@ def ingest(
     received_at: datetime,
     recorded_by: str | None = None,
     create_missing_project: bool = False,
+    admit: Callable[[str], None] | None = None,
 ) -> Ingested:
     """Validate `report`, a decoded JSON payload, convert it and record it
     in `store` as received at `received_at`, sent by the user `recorded_by`,
@@ -66,6 +68,12 @@ def ingest(
     `create_missing_project`, the project the report names is made first if
     the store lacks it -- for the local store, whose database belongs to
     whoever writes it, so there is nobody else to make it.
+
+    `admit`, if given, is called with the project the report names once the
+    report is valid and converted, and before anything is made or recorded:
+    whatever it raises passes through, and nothing is stored. The server
+    checks there that the project exists and that the sender may record in
+    it; the local store passes none.
     """
     try:
         payload = SessionReport.model_validate(report)
@@ -78,6 +86,8 @@ def ingest(
     metadata = to_run_metadata(payload.metadata)
 
     project = DEFAULT_PROJECT if payload.project is None else payload.project
+    if admit is not None:
+        admit(project)
     if create_missing_project and store.get_project(project) is None:
         # Not for a report of a run already filed in another project: the
         # store refuses it, and a refused report changes nothing, so it

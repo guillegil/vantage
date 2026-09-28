@@ -1199,8 +1199,19 @@ def test_result_detail_unknown_identifier_leaves_stored_data_unchanged(
     assert store.get_run_detail(run_id) == before_detail
 
 
-def test_result_detail_missing_node_id_is_422(client: TestClient) -> None:
-    response = client.get(f"/api/v1/runs/{_run_id(76)}/result")
+def test_result_detail_missing_node_id_is_422(client: TestClient, store: ExecutionStore) -> None:
+    """Of a run that exists: the run is found before the query is read, so
+    an unknown one is `404 unknown_run` whatever its query."""
+    now = datetime.now(timezone.utc)
+    run_id = _run_id(76)
+    store.record_session(
+        _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
+        results=[],
+        received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
+    )
+
+    response = client.get(f"/api/v1/runs/{run_id}/result")
 
     assert response.status_code == 422
     assert response.json()["error"] == "invalid_identity"

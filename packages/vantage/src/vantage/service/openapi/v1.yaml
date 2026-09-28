@@ -5,7 +5,7 @@ openapi: 3.1.0
 info:
   title: Vantage API
   version: "1"
-  description: "read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data. Every run belongs to one project, named by the report that creates it or default; the run list, a test's history and the section definitions are a project's and live under /projects/{project}, while every path naming a run id reads that run whatever its project. Every rejection -- each 4xx and 5xx listed here, and the 404 or 405 for a path nothing serves or a method a path does not take -- has the Rejection body. The vantage command gives every database it serves an admin user named admin before serving it, printing its password once, unless the database has a user already or pytest-vantage's local store made it. So only a local store's database is ever served with no user: it serves every path without a token but the users-tagged ones, which answer 409 open_server until vantage user add makes its first user. Once a user exists, every path but /capabilities, /openapi.yaml, /login and /password needs Authorization: Bearer <token>, a token of an enabled user that has not been revoked or expired and grants the path's scope: read for what read-tagged paths return, record for a report or a heartbeat, admin for changing sections, adding projects and the other users-tagged paths -- the admin scope granting nothing once its user is no longer an admin. /login and /password take a user's name and password instead, and ignore any token. Every 401 and 403 carries a WWW-Authenticate header, a 403's naming the scope the token lacked."
+  description: "read-tagged paths are guaranteed to leave stored data unchanged; write-tagged paths change stored data. Every run belongs to one project, named by the report that creates it or default; the run list, a test's history, the section definitions and the members are a project's and live under /projects/{project}, while every path naming a run id reads that run whatever its project. Every rejection -- each 4xx and 5xx listed here, and the 404 or 405 for a path nothing serves or a method a path does not take -- has the Rejection body. The vantage command gives every database it serves an admin user named admin before serving it, printing its password once, unless the database has a user already or pytest-vantage's local store made it. So only a local store's database is ever served with no user: it serves every path without a token but the users-tagged and members-tagged ones, which answer 409 open_server until vantage user add makes its first user. Once a user exists, every path but /capabilities, /openapi.yaml, /login and /password needs Authorization: Bearer <token>, a token of an enabled user that has not been revoked or expired and grants the path's scope: read for what read-tagged paths return, record for a report or a heartbeat, manage for changing a project's sections or members, admin for adding projects and the other users-tagged paths -- the admin scope granting nothing once its user is no longer an admin. Within a project the token's user also needs a role there: viewer to read it, editor to record runs in it and change its sections as well, owner to change its members as well. Every user is an editor of default, which has no members; an admin acts as an owner of every project, a member of it or not; a server with no user checks no role. Scopes and roles only narrow each other: an owner's token granting only read only reads. A user with no role in the project is refused with 403 not_a_member, one whose role is below the one needed with 403 insufficient_role, and neither body names the project. Every refusal of who asks comes before every refusal of what is asked: 401, then 403 insufficient_scope, then 409 open_server on a users-tagged or members-tagged path, then the project the path names (404 unknown_project) or the run (422 for its id, 404 unknown_run), then the role, and only then the path's own checks of its body and query. /login and /password take a user's name and password instead, and ignore any token. Every 401, and every 403 insufficient_scope, carries a WWW-Authenticate header, a 403's naming the scope the token lacked."
 servers:
   - url: /api/v1
 security:
@@ -15,20 +15,21 @@ tags:
   - {name: read, description: Leaves stored data unchanged.}
   - {name: write, description: Changes stored data.}
   - {name: users, description: "Users, their passwords and their tokens. /login and /password take a user's name and password; every other users-tagged path needs a token granting the admin scope, on every server. A server with no user -- one serving a database pytest-vantage's local store made -- answers 409 open_server to all of them."}
+  - {name: members, description: "A project's members, each with a role in it: viewer, editor or owner. Listing them needs the read scope and the viewer role in the project; setting or removing one, the manage scope and the owner role. default has none, since every user is an editor of it. A server with no user -- one serving a database pytest-vantage's local store made -- answers 409 open_server to all of them."}
 paths:
   /runs:
     post:
       operationId: create_run
       tags: [write]
       summary: Report a session's run and its results.
-      description: The run belongs to the project the report's project names, or to default when it names none; the project must exist, since a server never makes one from a report. Every U+0000, and every lone surrogate, in a key or string value of the body is stored as U+FFFD, and so is every U+0000 a declared metadata document escapes. Metadata values never reject a report. The server bounds them the way the plugin does -- it drops a file repeating an earlier file's path, over-long and repeated keys, a session value with a status it cannot have, and every key past the per-run entry bound, files first; it records a document past the per-file or per-report size as too_large or over_budget without parsing it, and a value past the per-value size as value_too_large. Each key is stored once, by the first report carrying it.
+      description: The run belongs to the project the report's project names, or to default when it names none; the project must exist, since a server never makes one from a report, and the token's user must be an editor of it. The report names its project in its body, so the body is checked before the project, the project before the user's role in it, and that role before the run, so a user who may not record in the project learns nothing of the runs in it. Every U+0000, and every lone surrogate, in a key or string value of the body is stored as U+FFFD, and so is every U+0000 a declared metadata document escapes. Metadata values never reject a report. The server bounds them the way the plugin does -- it drops a file repeating an earlier file's path, over-long and repeated keys, a session value with a status it cannot have, and every key past the per-run entry bound, files first; it records a document past the per-file or per-report size as too_large or over_budget without parsing it, and a value past the per-value size as value_too_large. Each key is stored once, by the first report carrying it.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/SessionReport'}}}}
       responses:
         "201": {description: "Stored, a new run.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
         "200": {description: "The run already existed. This report's finish fields, results and metadata were applied where the run did not have them yet; nothing already stored was replaced. A run already finished takes nothing from a later report.", content: {application/json: {schema: {$ref: '#/components/schemas/Acknowledgement'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json) -- NaN and Infinity are not JSON -- or the client disconnected before sending all of it (incomplete_body).", content: &rejection {application/json: {schema: {$ref: '#/components/schemas/Rejection'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the record scope (insufficient_scope).", content: *rejection}
+        "403": {description: "The token does not grant the record scope (insufficient_scope); or its user is not a member of the project the report names (not_a_member), or their role in it is below editor (insufficient_role). Nothing of the report is stored.", content: *rejection}
         "404": {description: "No project of the name the report gives exists (unknown_project); fields is [project]. Nothing of the report is stored.", content: *rejection}
         "409": {description: "The run was recorded by another user, or without a token when this report has one, or with one when it has none (foreign_run); or it was created in another project (project_mismatch). Nothing of the report is stored.", content: *rejection}
         "413": {description: "The body exceeds 1 MiB (payload_too_large).", content: *rejection}
@@ -44,8 +45,8 @@ paths:
       responses:
         "200": {description: The run., content: {application/json: {schema: {$ref: '#/components/schemas/RunDetailResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
-        "404": {description: No run with that id has been recorded., content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/metadata:
     get:
@@ -58,8 +59,8 @@ paths:
       responses:
         "200": {description: The run's metadata., content: {application/json: {schema: {$ref: '#/components/schemas/RunMetadataResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
-        "404": {description: No run with that id has been recorded., content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/heartbeat:
     post:
@@ -71,8 +72,8 @@ paths:
       responses:
         "200": {description: Acknowledged., content: {application/json: {schema: {$ref: '#/components/schemas/HeartbeatAcknowledgement'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the record scope (insufficient_scope).", content: *rejection}
-        "404": {description: No run with that id has been recorded., content: *rejection}
+        "403": {description: "The token does not grant the record scope (insufficient_scope); or its user is not a member of the run's project (not_a_member), or their role in it is below editor (insufficient_role).", content: *rejection}
+        "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "409": {description: "The run was recorded by another user, or without a token when this heartbeat has one, or with one when it has none (foreign_run).", content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/results:
@@ -87,9 +88,9 @@ paths:
       responses:
         "200": {description: A page of results., content: {application/json: {schema: {$ref: '#/components/schemas/ResultsResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
-        "404": {description: No run with that id has been recorded., content: *rejection}
-        "422": {description: "limit below 1 or offset out of range -- not a page; or run_id is not 32 lowercase hex characters (invalid_parameter).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
+        "422": {description: "run_id is not 32 lowercase hex characters; or, once the run is found and the caller may read it, limit below 1 or offset out of range -- not a page (invalid_parameter).", content: *rejection}
   /runs/{run_id}/result:
     get:
       operationId: get_result
@@ -102,9 +103,9 @@ paths:
       responses:
         "200": {description: The result., content: {application/json: {schema: {$ref: '#/components/schemas/ResultDetailResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
         "404": {description: "No run with that id has been recorded (unknown_run), or the run has no result with that node_id (unknown_result).", content: *rejection}
-        "422": {description: "node_id missing (invalid_identity); or run_id is not 32 lowercase hex characters (invalid_parameter).", content: *rejection}
+        "422": {description: "run_id is not 32 lowercase hex characters (invalid_parameter); or, once the run is found and the caller may read it, node_id missing (invalid_identity).", content: *rejection}
   /capabilities:
     get:
       operationId: capabilities
@@ -135,28 +136,28 @@ paths:
       responses:
         "200": {description: The run's section summary., content: {application/json: {schema: {$ref: '#/components/schemas/RunSectionSummaryResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
-        "404": {description: No run with that id has been recorded., content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member).", content: *rejection}
+        "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
         "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
         "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
   /projects:
     get:
       operationId: list_projects
       tags: [read]
-      summary: Every project, default included, by name.
-      description: Returned whole, not paged.
+      summary: The projects the caller has a role in, by name.
+      description: Returned whole, not paged. An admin gets every project, with the role owner; anyone on a server with no user gets every project too, with a null role; anyone else gets default, as an editor, and each project they are a member of, with their role in it.
       responses:
-        "200": {description: Every project., content: {application/json: {schema: {$ref: '#/components/schemas/ProjectListResponse'}}}}
+        "200": {description: The projects the caller has a role in., content: {application/json: {schema: {$ref: '#/components/schemas/ProjectListResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
         "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
     post:
       operationId: create_project
       tags: [write]
       summary: Add a project, as vantage project add does.
-      description: A project is never renamed or deleted. The name is never repeated in a rejection.
+      description: A project is never renamed or deleted. It starts with no members, its maker included, since an admin acts as an owner of every project without being a member; PUT /projects/{project}/members/{user} adds them. The name is never repeated in a rejection.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ProjectCreateRequest'}}}}
       responses:
-        "201": {description: The project., content: {application/json: {schema: {$ref: '#/components/schemas/ProjectResponse'}}}}
+        "201": {description: "The project, with the role its maker acts with in it: owner, or null on a server with no user.", content: {application/json: {schema: {$ref: '#/components/schemas/ProjectResponse'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
         "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
@@ -180,7 +181,7 @@ paths:
       responses:
         "200": {description: A page of runs., content: {application/json: {schema: {$ref: '#/components/schemas/RunListResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "422": {description: "limit below 1 or offset out of range -- not a page; or a cursor no page handed out, or a cursor with a non-zero offset; or metadata_key and metadata_value repeated a different number of times, or more than 16 pairs (invalid_parameter).", content: *rejection}
   /projects/{project}/tests/history:
@@ -198,7 +199,7 @@ paths:
       responses:
         "200": {description: "A page of history entries; empty, not an error, for an unknown node_id.", content: {application/json: {schema: {$ref: '#/components/schemas/HistoryResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "422": {description: "node_id missing (invalid_identity); or limit below 1 or offset out of range, or a cursor no page handed out, or a cursor with a non-zero offset (invalid_parameter).", content: *rejection}
   /projects/{project}/config/sections:
@@ -211,7 +212,7 @@ paths:
       responses:
         "200": {description: Every stored section., content: {application/json: {schema: {$ref: '#/components/schemas/SectionListResponse'}}}}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the read scope (insufficient_scope).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "500": {description: A stored section's value could not be parsed (unreadable_setting)., content: *rejection}
     post:
@@ -227,7 +228,7 @@ paths:
         "200": {description: Updated; the name was already stored., content: {application/json: {schema: {$ref: '#/components/schemas/SectionResponse'}}}}
         "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below editor (insufficient_role).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
         "413": {description: "The body exceeds 64 KiB (payload_too_large).", content: *rejection}
         "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
@@ -243,9 +244,61 @@ paths:
       responses:
         "204": {description: Deleted.}
         "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
-        "403": {description: "The token does not grant the admin scope, or its user is not an admin (insufficient_scope).", content: *rejection}
+        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below editor (insufficient_role).", content: *rejection}
         "404": {description: "No project with that name exists, or none can (unknown_project); or the project stores no section of that name (unknown_section).", content: *rejection}
         "422": {description: name missing (invalid_parameter)., content: *rejection}
+  /projects/{project}/members:
+    get:
+      operationId: list_members
+      tags: [read, members]
+      security: [{bearer: []}]
+      summary: The project's members, by user, as vantage project member list prints them.
+      description: Returned whole, not paged. everyone is the role every user holds in the project without being a member -- editor in default, whose items are always empty, and null in every other project. A viewer may list them, since every run's recorded_by already shows user names.
+      parameters:
+        - $ref: '#/components/parameters/project'
+      responses:
+        "200": {description: The project's members., content: {application/json: {schema: {$ref: '#/components/schemas/MemberListResponse'}}}}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the project (not_a_member).", content: *rejection}
+        "404": {description: "No project with that name exists, or none can (unknown_project).", content: *rejection}
+        "409": {description: "The server has no user yet, so nobody is a member of anything; the vantage command adds the first (open_server).", content: *rejection}
+  /projects/{project}/members/{user}:
+    put:
+      operationId: set_member
+      tags: [write, members]
+      security: [{bearer: []}]
+      summary: Make a user a member of the project with a role, or set a member's role, as vantage project member set does.
+      description: "Idempotent: setting a member's role again, the same one included, answers 200. An owner may give any role, owner included, and demote any member, themselves included; an admin acts as an owner of every project without being a member, so an admin can always repair one. An admin or a disabled user may be made a member; a disabled user's role grants nothing while their tokens authenticate nothing. After who asks and the project, the media type is checked, then default, then a name no user can have, answered before the body is read; a user nobody has is answered last. Neither the name nor the role is ever repeated in a rejection."
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/member_user'
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MemberSetRequest'}}}}
+      responses:
+        "201": {description: Added, a new member., content: {application/json: {schema: {$ref: '#/components/schemas/MemberResponse'}}}}
+        "200": {description: The role set; the user was a member already., content: {application/json: {schema: {$ref: '#/components/schemas/MemberResponse'}}}}
+        "400": {description: "The body is not UTF-8 JSON (invalid_json), or the client disconnected before sending all of it (incomplete_body).", content: *rejection}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below owner (insufficient_role), as every user's but an admin's is in default.", content: *rejection}
+        "404": {description: "No project with that name exists, or none can (unknown_project); or no user with that name exists, or none can (unknown_user).", content: *rejection}
+        "409": {description: "The server has no user yet, so nobody is a member of anything; the vantage command adds the first (open_server); or the project is default, which has no members, since every user is an editor of it (default_project).", content: *rejection}
+        "413": {description: "The body exceeds 4 KiB (payload_too_large).", content: *rejection}
+        "415": {description: "Content-Type is not application/json (unsupported_media_type).", content: *rejection}
+        "422": {description: "The body does not match MemberSetRequest -- a field missing, of the wrong type or unknown (invalid_member_request); or the role is not viewer, editor or owner (invalid_role), fields is [role].", content: *rejection}
+    delete:
+      operationId: remove_member
+      tags: [write, members]
+      security: [{bearer: []}]
+      summary: Remove a user from the project's members, as vantage project member remove does.
+      description: "The body is not read. An owner may remove any member, themselves and the last owner included: an admin acts as an owner of every project without being a member. A user who is not a member answers 404 whether or not the user exists, so a repeated DELETE does too."
+      parameters:
+        - $ref: '#/components/parameters/project'
+        - $ref: '#/components/parameters/member_user'
+      responses:
+        "204": {description: Removed.}
+        "401": {description: "No token, on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- on any server (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the manage scope (insufficient_scope); or its user is not a member of the project (not_a_member), or their role in it is below owner (insufficient_role), as every user's but an admin's is in default.", content: *rejection}
+        "404": {description: "No project with that name exists, or none can (unknown_project); or the user is not a member of the project, whether or not a user of that name exists or can (unknown_member).", content: *rejection}
+        "409": {description: "The server has no user yet, so nobody is a member of anything; the vantage command adds the first (open_server); or the project is default, which has no members, since every user is an editor of it (default_project).", content: *rejection}
   /users:
     get:
       operationId: list_users
@@ -334,7 +387,7 @@ paths:
       tags: [write, users]
       security: [{bearer: []}]
       summary: Make a token for a user, as vantage token create does, and answer it this once.
-      description: "The token is in this answer only, which is not to be stored (Cache-Control: no-store). A token holds read and record unless scopes names others; the admin scope only for an admin user. A U+0000 in the label is stored as U+FFFD; a lone surrogate in it is rejected. A disabled user's token is made, and authenticates nothing until the user is enabled. Minting a token for another user lets its bearer record runs as that user."
+      description: "The token is in this answer only, which is not to be stored (Cache-Control: no-store). A token holds read and record unless scopes names others: manage for any user, bounded by the user's role in each project, and admin only for an admin user. A U+0000 in the label is stored as U+FFFD; a lone surrogate in it is rejected. A disabled user's token is made, and authenticates nothing until the user is enabled. Minting a token for another user lets its bearer record runs as that user."
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/TokenCreateRequest'}}}}
       responses:
         "201":
@@ -371,7 +424,7 @@ paths:
       tags: [write, users]
       security: []
       summary: Trade a user's name and password for a login token, and answer it this once.
-      description: "The token is in this answer only, which is not to be stored (Cache-Control: no-store). It holds the read scope, and the admin scope for a user who is an admin, never record: a report or a heartbeat takes a token vantage token create or POST /tokens made. It expires 12 hours after it was made, with no refresh, and any password set for its user revokes it sooner. Any Authorization header is ignored. Nothing counts, delays or locks out failed attempts; each costs the same deliberately slow password check. A U+0000 in the password is taken as U+FFFD, as it is where a password is set. The password is never repeated in a rejection."
+      description: "The token is in this answer only, which is not to be stored (Cache-Control: no-store). It holds the read and manage scopes, and the admin scope for a user who is an admin, never record: a report or a heartbeat takes a token vantage token create or POST /tokens made. It expires 12 hours after it was made, with no refresh, and any password set for its user revokes it sooner. Any Authorization header is ignored. Nothing counts, delays or locks out failed attempts; each costs the same deliberately slow password check. A U+0000 in the password is taken as U+FFFD, as it is where a password is set. The password is never repeated in a rejection."
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/LoginRequest'}}}}
       responses:
         "201":
@@ -404,7 +457,7 @@ paths:
         "503": {description: "As many requests are checking or setting a password as the server lets wait -- two hashing and 32 waiting -- so this one is refused at once (password_checks_busy), with Retry-After: 1.", content: *rejection}
 components:
   securitySchemes:
-    bearer: {type: http, scheme: bearer, description: "A token `vantage token create` printed, or the admin API or /login returned. Each holds one or more of the read, record and admin scopes; one /login returned expires 12 hours after it was made."}
+    bearer: {type: http, scheme: bearer, description: "A token `vantage token create` printed, or the admin API or /login returned. Each holds one or more of the read, record, manage and admin scopes; one /login returned expires 12 hours after it was made."}
   parameters:
     run_id: {name: run_id, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{32}$'}}
     # No `maximum`. A caller asking for more than 200 gets 200, not a
@@ -416,6 +469,7 @@ components:
     offset: {name: offset, in: query, required: false, schema: {type: integer, format: int64, minimum: 0, maximum: 9223372036854775807}}
     project: {name: project, in: path, required: true, description: "A project's name; one no project can have answers 404.", schema: {type: string}}
     user_name: {name: name, in: path, required: true, description: "A user's name; one no user can have answers 404.", schema: {type: string}}
+    member_user: {name: user, in: path, required: true, description: "A user's name; one no user can have answers 404.", schema: {type: string}}
     token_user: {name: user, in: query, required: false, description: "Only this user's tokens; a name nobody has lists none.", schema: {type: string}}
     token_id: {name: token_id, in: path, required: true, schema: {type: integer, format: int64, minimum: 1, maximum: 9223372036854775807}}
     cursor: {name: cursor, in: query, required: false, description: "The next_cursor a previous page of the same list returned. The page starts just past the last run that page listed, so runs recorded in between never repeat or shift a run onto it, as they do under an offset. Opaque: pass it back unchanged. Not combined with a non-zero offset.", schema: {type: string, maxLength: 128}}
@@ -439,9 +493,9 @@ components:
     #     annotation admits `None`;
     #   * each `$ref`, against the model the field actually holds;
     #   * `additionalProperties`, against the model's `extra` setting;
-    #   * every declared `enum`, against `OUTCOMES` / `PRESENTATIONS` and the
-    #     metadata vocabularies -- the domain frozensets that decide what the
-    #     server can emit;
+    #   * every declared `enum`, against `OUTCOMES` / `PRESENTATIONS`, the
+    #     metadata vocabularies, `SCOPES` and `ROLES` -- the domain frozensets
+    #     that decide what the server can emit;
     #   * which properties are passwords, `format: password` and `writeOnly`,
     #     against the request fields a model keeps out of its `repr`.
     #
@@ -629,7 +683,7 @@ components:
       type: object
       required: [user]
       additionalProperties: false
-      properties: {user: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, read, record]}, minItems: 1, default: [read, record]}, label: {type: string, maxLength: 200, default: ""}}
+      properties: {user: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, manage, read, record]}, minItems: 1, default: [read, record]}, label: {type: string, maxLength: 200, default: ""}}
     UserResponse:
       type: object
       required: [name, admin, disabled, created_at, has_password]
@@ -641,7 +695,7 @@ components:
     TokenResponse:
       type: object
       required: [id, user, label, scopes, created_at, revoked_at, expires_at]
-      properties: {id: {type: integer, format: int64}, user: {type: string}, label: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, read, record]}}, created_at: {type: string, format: date-time}, revoked_at: {type: [string, "null"], format: date-time}, expires_at: {type: [string, "null"], format: date-time, description: "When a login token stops authenticating; null for a token vantage token create or POST /tokens made, which never expires."}}
+      properties: {id: {type: integer, format: int64}, user: {type: string}, label: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, manage, read, record]}}, created_at: {type: string, format: date-time}, revoked_at: {type: [string, "null"], format: date-time}, expires_at: {type: [string, "null"], format: date-time, description: "When a login token stops authenticating; null for a token vantage token create or POST /tokens made, which never expires."}}
     TokenListResponse:
       type: object
       required: [items]
@@ -649,7 +703,7 @@ components:
     CreatedTokenResponse:
       type: object
       required: [token, id, user, label, scopes, created_at, revoked_at, expires_at]
-      properties: {token: {type: string, description: "The token, shown this once."}, id: {type: integer, format: int64}, user: {type: string}, label: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, read, record]}}, created_at: {type: string, format: date-time}, revoked_at: {type: [string, "null"], format: date-time}, expires_at: {type: [string, "null"], format: date-time, description: "When a login token stops authenticating; null for a token vantage token create or POST /tokens made, which never expires."}}
+      properties: {token: {type: string, description: "The token, shown this once."}, id: {type: integer, format: int64}, user: {type: string}, label: {type: string}, scopes: {type: array, items: {type: string, enum: [admin, manage, read, record]}}, created_at: {type: string, format: date-time}, revoked_at: {type: [string, "null"], format: date-time}, expires_at: {type: [string, "null"], format: date-time, description: "When a login token stops authenticating; null for a token vantage token create or POST /tokens made, which never expires."}}
     # Passwords. The rule a password to set follows is stated, not declared
     # as `minLength` / `maxLength`, which count characters before
     # normalising, so a strict client would refuse a password the server
@@ -679,9 +733,26 @@ components:
       properties: {name: {type: string, pattern: '^[a-z0-9][a-z0-9._-]{0,63}$'}}
     ProjectResponse:
       type: object
-      required: [name, created_at]
-      properties: {name: {type: string}, created_at: {type: string, format: date-time}}
+      required: [name, created_at, role]
+      properties: {name: {type: string}, created_at: {type: string, format: date-time}, role: {type: [string, "null"], enum: [editor, owner, viewer, null], description: "The role the caller acts with in the project: owner for an admin, editor in default, otherwise their member row's; null on a server with no user, which checks no role."}}
     ProjectListResponse:
       type: object
       required: [items]
       properties: {items: {type: array, items: {$ref: '#/components/schemas/ProjectResponse'}}}
+    # Members. A role is viewer, editor or owner, each allowed what the ones
+    # before it are. default takes none: every user is an editor of it,
+    # which `everyone` says. The request body refuses an unknown field, and
+    # takes the role only as a JSON string.
+    MemberSetRequest:
+      type: object
+      required: [role]
+      additionalProperties: false
+      properties: {role: {type: string, enum: [editor, owner, viewer]}}
+    MemberResponse:
+      type: object
+      required: [user, role]
+      properties: {user: {type: string}, role: {type: string, enum: [editor, owner, viewer]}}
+    MemberListResponse:
+      type: object
+      required: [items, everyone]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/MemberResponse'}}, everyone: {type: [string, "null"], enum: [editor, owner, viewer, null], description: "The role every user holds in the project without being a member: editor in default, null elsewhere."}}

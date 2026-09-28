@@ -10,7 +10,10 @@ the project its first report gave it, and each project keeps its own
 catalogue rows and its own section bound, however its writers interleave
 with another project's. And the first admin and logins: servers starting
 at once on one new database create one admin, and a login overlapping a
-password change never leaves a live token made with the old password.
+password change never leaves a live token made with the old password. And
+members: one member added at once through several stores is added once, a
+set racing a remove ends as whichever committed last, and adding members
+never deadlocks with their users' disables, enables and logins.
 
 Every thread is a daemon and is joined with a timeout, as in
 `test_concurrency.py`: a deadlock must fail the test, not hang the suite.
@@ -31,7 +34,7 @@ from psycopg import sql
 from vantage.core.domain.access import LOGIN_TOKEN_LIFETIME, Token, User, token_digest
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
-from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.core.domain.projects import DEFAULT_PROJECT, OWNER_ROLE, ROLES, VIEWER_ROLE
 from vantage.core.domain.sections import MAX_SECTIONS
 from vantage.core.ports.storage import (
     MetadataEntry,
@@ -694,3 +697,152 @@ def test_logins_overlapping_a_password_change_leave_no_live_token_of_the_old_pas
         expires_at=changed_at + LOGIN_TOKEN_LIFETIME,
     )
     assert late is None
+
+
+@_DEFAULT_ISOLATIONS
+def test_racing_to_add_one_member_across_stores_adds_one_row_once(
+    stores: list[PostgresExecutionStore],
+    postgres_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    default_isolation: str | None,
+) -> None:
+    """Twelve calls making one user a member of one project, with every
+    role, through three stores: exactly one says it added the row, one row
+    holds whichever role came last, and nothing fails. Whether a call added
+    the row is decided by its own write; a probe for the row before it would
+    let every racer find none and say it added it."""
+    # A user probe that takes a while keeps every racer past its probes
+    # before the first one writes, however the threads are scheduled.
+    monkeypatch.setattr(
+        store_module,
+        "_PROBE_USER",
+        "WITH pause AS MATERIALIZED (SELECT pg_sleep(0.02))"
+        " SELECT 1 FROM vantage.account, pause WHERE name = %s",
+    )
+    stores[0].create_user("alice", admin=False, created_at=_BASE)
+    stores[0].create_project("firmware", created_at=_BASE)
+    roles = sorted(ROLES)
+    added: list[bool] = []
+
+    def _set(store: PostgresExecutionStore, role: str) -> None:
+        added.append(store.set_member("alice", project="firmware", role=role))
+
+    errors = _run_concurrently(
+        [partial(_set, stores[seat % 3], roles[seat // 4]) for seat in range(12)]
+    )
+
+    assert errors == []
+    assert sorted(added) == [False] * 11 + [True]
+    (member,) = stores[1].list_members(project="firmware")
+    assert member.user == "alice"
+    assert member.role in ROLES
+    with psycopg.connect(postgres_url) as conn:
+        rows = conn.execute("SELECT count(*) FROM vantage.project_member").fetchall()
+    assert rows == [(1,)]
+
+
+@_DEFAULT_ISOLATIONS
+def test_a_member_set_and_removed_at_once_ends_as_whichever_committed_last(
+    stores: list[PostgresExecutionStore],
+    monkeypatch: pytest.MonkeyPatch,
+    default_isolation: str | None,
+) -> None:
+    """A viewer made an owner through one store while another removes them:
+    either the set lands first and the remove takes the row away, or the
+    remove does and the set adds the row again. So the member is an owner
+    exactly when the set says it added them, the remove always removes
+    something, and neither fails -- repeated, since one race may not
+    overlap."""
+    # The set holds its row a while after writing it, and every other
+    # remove starts a moment late, so a remove meets the set's row lock as
+    # often as it goes first; the two are otherwise over too fast to meet.
+    upsert = store_module._UPSERT_MEMBER
+    monkeypatch.setattr(
+        store_module,
+        "_UPSERT_MEMBER",
+        f"WITH upserted AS ({upsert}),"  # noqa: S608
+        " pause AS MATERIALIZED (SELECT pg_sleep(0.02) FROM upserted)"
+        " SELECT upserted.* FROM upserted, pause",
+    )
+    stores[0].create_user("alice", admin=False, created_at=_BASE)
+    stores[0].create_project("firmware", created_at=_BASE)
+
+    for attempt in range(20):
+        stores[0].set_member("alice", project="firmware", role=VIEWER_ROLE)
+        set_added: list[bool] = []
+        removed: list[bool] = []
+
+        def _set() -> None:
+            set_added.append(stores[1].set_member("alice", project="firmware", role=OWNER_ROLE))
+
+        def _remove(late: bool = attempt % 2 == 1) -> None:
+            if late:
+                time.sleep(0.01)
+            removed.append(stores[2].remove_member("alice", project="firmware"))
+
+        errors = _run_concurrently([_set, _remove])
+
+        assert errors == [], attempt
+        assert removed == [True], attempt
+        roles = [member.role for member in stores[0].list_members(project="firmware")]
+        assert roles == ([OWNER_ROLE] if set_added == [True] else []), attempt
+
+
+def test_adding_members_while_their_users_are_disabled_enabled_and_log_in_never_deadlocks(
+    stores: list[PostgresExecutionStore], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A member row's insert takes `FOR KEY SHARE` on its project's and its
+    user's rows, which conflicts neither with the `FOR NO KEY UPDATE` a
+    disable or an enable takes on the user's row nor with a login's `FOR
+    SHARE`. Three stores each add the same four users to a project of their
+    own, over and over, while disabling, enabling and logging in those
+    users, and nothing fails -- with the store's retry off, so a deadlock it
+    would run again fails the test rather than hide. No login finds an
+    expired token of its user to delete, which two logins of one user may
+    deadlock on, and which the retry is there for."""
+    monkeypatch.setattr(store_module, "_MAX_ATTEMPTS", 1)
+    users = [f"user{index}" for index in range(4)]
+    projects = [f"project{index}" for index in range(3)]
+    for user in users:
+        stores[0].create_user(user, admin=False, created_at=_BASE)
+        stores[0].set_password(user, password_hash=_HASH, changed_at=_BASE)
+    for project in projects:
+        stores[0].create_project(project, created_at=_BASE)
+    roles = sorted(ROLES)
+
+    # Every seat takes the users in the same order, so the seats keep
+    # meeting on one user's row.
+    turns = [users[turn % len(users)] for turn in range(20)]
+
+    def _members(store: PostgresExecutionStore, seat: int) -> None:
+        for turn, user in enumerate(turns):
+            store.remove_member(user, project=projects[seat])
+            store.set_member(user, project=projects[seat], role=roles[turn % len(roles)])
+
+    def _standing(store: PostgresExecutionStore, seat: int) -> None:
+        for user in turns:
+            store.update_user(user, disabled=True)
+            store.update_user(user, disabled=False)
+
+    def _logins(store: PostgresExecutionStore, seat: int) -> None:
+        for turn, user in enumerate(turns):
+            store.create_login_token(
+                user,
+                password_hash=_HASH,
+                digest=token_digest(f"login-{seat}-{turn}"),
+                created_at=_BASE,
+                expires_at=_BASE + LOGIN_TOKEN_LIFETIME,
+            )
+
+    errors = _run_concurrently(
+        [
+            partial(work, stores[seat], seat)
+            for seat in range(3)
+            for work in (_members, _standing, _logins)
+        ]
+    )
+
+    assert errors == []
+    for project in projects:
+        assert [member.user for member in stores[0].list_members(project=project)] == users
+    assert [user.disabled for user in stores[1].list_users()] == [False] * len(users)

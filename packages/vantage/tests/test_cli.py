@@ -976,6 +976,37 @@ def test_managing_projects_needs_no_server_extra(tmp_path: Path) -> None:
     ]
 
 
+def test_managing_project_members_needs_no_server_extra(tmp_path: Path) -> None:
+    """`vantage project member` is `vantage project`'s, handed to `manage`
+    with it, so it runs where serving cannot as well."""
+    database = tmp_path / "v.db"
+    store = SqliteExecutionStore(database)
+    try:
+        now = datetime.now(timezone.utc)
+        store.create_user("bob", admin=False, created_at=now)
+        store.create_project("firmware", created_at=now)
+    finally:
+        store.close()
+    missing = ["fastapi", "starlette", "uvicorn"]
+
+    def member(*argv: str) -> subprocess.CompletedProcess[str]:
+        return _run_without(
+            missing, ["project", "member", *argv, "--database", str(database)], home=tmp_path
+        )
+
+    added = member("set", "firmware", "bob", "owner")
+    listed = member("list", "firmware")
+    removed = member("remove", "firmware", "bob")
+
+    assert (added.returncode, added.stderr) == (0, "vantage: added bob to firmware as owner\n")
+    assert listed.returncode == 0, listed.stderr
+    assert [row.split() for row in listed.stdout.splitlines()] == [
+        ["USER", "ROLE"],
+        ["bob", "owner"],
+    ]
+    assert (removed.returncode, removed.stderr) == (0, "vantage: removed bob from firmware\n")
+
+
 @pytest.mark.usefixtures("never_served")
 def test_main_hands_project_to_manage_and_serves_nothing(
     capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch

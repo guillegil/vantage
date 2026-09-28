@@ -1,6 +1,6 @@
 """`vantage user`, `vantage token` and `vantage project`: managing a
-database's users, their tokens and its projects where the database is
-(`service/manage.py`).
+database's users, their tokens, its projects and their members where the
+database is (`service/manage.py`).
 
 The commands run in process through `cli.main`, as the `vantage` entry
 point runs them, and every result is read back through a store of its own,
@@ -30,6 +30,7 @@ from vantage.core.domain.access import (
     ADMIN_SCOPE,
     DEFAULT_SCOPES,
     LOGIN_TOKEN_LIFETIME,
+    MANAGE_SCOPE,
     READ_SCOPE,
     RECORD_SCOPE,
     new_token,
@@ -198,6 +199,9 @@ def test_listing_users_of_a_database_with_none_prints_nothing(
         ["token", "list"],
         ["token", "revoke", "1"],
         ["project", "list"],
+        ["project", "member", "set", "firmware", "bob", "viewer"],
+        ["project", "member", "list", "firmware"],
+        ["project", "member", "remove", "firmware", "bob"],
     ],
 )
 def test_no_command_but_adding_a_user_creates_a_database(
@@ -322,6 +326,35 @@ def test_an_admin_token_for_an_admin(
     assert grant is not None and grant.allows(ADMIN_SCOPE)
 
 
+def test_a_manage_token_for_a_user_who_is_no_admin(
+    capsys: pytest.CaptureFixture[str], database: Path, stored: ExecutionStore
+) -> None:
+    """Any user's token may hold manage: their role in each project bounds
+    what it grants there."""
+    status, out, err = _run(
+        capsys, "token", "create", "bob", "--scope", "manage", "--database", str(database)
+    )
+
+    (created,) = stored.list_tokens()
+    assert (status, err) == (
+        0,
+        f"vantage: created token {created.id} of bob with manage; it is shown this once\n",
+    )
+    grant = stored.authenticate(token_digest(out.strip()), now=datetime.now(timezone.utc))
+    assert grant is not None and grant.scopes == {MANAGE_SCOPE}
+
+
+def test_token_create_help_says_what_each_scope_grants(capsys: pytest.CaptureFixture[str]) -> None:
+    status, out, _err = _run(capsys, "token", "create", "--help")
+
+    assert status == 0
+    assert (
+        "read: read runs; record: send reports, what pytest-vantage needs; manage: edit a "
+        "project's sections as its editor and its members as its owner; admin: manage users, "
+        "tokens and projects, for an admin user (default: read and record)."
+    ) in " ".join(out.split())
+
+
 @pytest.mark.parametrize(
     ("argv", "refusal"),
     [
@@ -414,7 +447,7 @@ def test_a_login_token_is_listed_with_when_it_expires(
     assert status == 0
     assert _column(out, "EXPIRES") == ["", "2026-09-28T20:30:00Z"]
     assert _column(out, "LABEL") == ["laptop", "login"]
-    assert _column(out, "SCOPES")[1] == "admin,read"
+    assert _column(out, "SCOPES")[1] == "admin,manage,read"
 
 
 def test_revoking_a_token_stops_it_authenticating(
@@ -918,6 +951,253 @@ def test_a_postgresql_databases_projects_are_managed_the_same_way(
     assert taken == (1, "", "vantage: there is already a project named default\n")
     assert status == 0
     assert [row.split()[0] for row in out.splitlines()] == ["NAME", DEFAULT_PROJECT, "firmware"]
+
+
+# --- Members --------------------------------------------------------------------------
+
+_USER_NAME_RULE = (
+    "vantage: a user name is 1 to 64 characters of a-z, 0-9, '.', '_' and '-', "
+    "starting with a letter or a digit\n"
+)
+_DEFAULT_TAKES_NO_MEMBERS = (
+    "vantage: every user is an editor of default, which has no members to set or remove\n"
+)
+
+
+@pytest.fixture
+def firmware(stored: ExecutionStore) -> None:
+    """A project `firmware` in `stored`, with no member yet."""
+    stored.create_project("firmware", created_at=datetime.now(timezone.utc))
+
+
+def _members(store: ExecutionStore) -> list[tuple[str, str]]:
+    """`firmware`'s members and their roles, as the store holds them."""
+    return [(member.user, member.role) for member in store.list_members(project="firmware")]
+
+
+def _member(capsys: pytest.CaptureFixture[str], database: Path, *argv: str) -> tuple[int, str, str]:
+    """`vantage project member *argv` on `database`: its exit status, stdout
+    and stderr."""
+    return _run(capsys, "project", "member", *argv, "--database", str(database))
+
+
+@pytest.mark.usefixtures("firmware")
+def test_setting_a_member_adds_them_and_setting_them_again_changes_their_role(
+    capsys: pytest.CaptureFixture[str], database: Path, stored: ExecutionStore
+) -> None:
+    added = _member(capsys, database, "set", "firmware", "bob", "viewer")
+    changed = _member(capsys, database, "set", "firmware", "bob", "editor")
+    again = _member(capsys, database, "set", "firmware", "bob", "editor")
+
+    assert added == (0, "", "vantage: added bob to firmware as viewer\n")
+    assert changed == again == (0, "", "vantage: bob is now editor in firmware\n")
+    assert _members(stored) == [("bob", "editor")]
+
+
+@pytest.mark.usefixtures("firmware")
+@pytest.mark.parametrize(
+    ("name", "disabled", "notes"),
+    [
+        (
+            "bob",
+            True,
+            "vantage: bob is disabled, so this grants nothing until they are enabled: "
+            "vantage user update bob --enable\n",
+        ),
+        (
+            "alice",
+            False,
+            "vantage: alice is an admin, who may do everything in every project whatever "
+            "their role in it\n",
+        ),
+        (
+            "alice",
+            True,
+            "vantage: alice is disabled, so this grants nothing until they are enabled: "
+            "vantage user update alice --enable\n"
+            "vantage: alice is an admin, who may do everything in every project whatever "
+            "their role in it\n",
+        ),
+    ],
+    ids=["disabled", "admin", "disabled-admin"],
+)
+def test_a_member_whose_role_grants_nothing_yet_is_set_saying_why(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    name: str,
+    disabled: bool,
+    notes: str,
+) -> None:
+    """Either may be made a member: the role applies once a disabled user
+    is enabled, or an admin is one no longer."""
+    stored.update_user(name, disabled=disabled)
+
+    status, out, err = _member(capsys, database, "set", "firmware", name, "viewer")
+
+    assert (status, out) == (0, "")
+    assert err == f"vantage: added {name} to firmware as viewer\n{notes}"
+    assert _members(stored) == [(name, "viewer")]
+
+
+@pytest.mark.usefixtures("firmware")
+def test_members_list_by_name_with_their_roles(
+    capsys: pytest.CaptureFixture[str], database: Path, stored: ExecutionStore
+) -> None:
+    stored.set_member("bob", project="firmware", role="viewer")
+    stored.set_member("alice", project="firmware", role="owner")
+
+    status, out, err = _member(capsys, database, "list", "firmware")
+
+    assert (status, err) == (0, "")
+    assert [row.split() for row in out.splitlines()] == [
+        ["USER", "ROLE"],
+        ["alice", "owner"],
+        ["bob", "viewer"],
+    ]
+
+
+@pytest.mark.usefixtures("firmware")
+def test_listing_the_members_of_a_project_with_none_prints_nothing(
+    capsys: pytest.CaptureFixture[str], database: Path
+) -> None:
+    assert _member(capsys, database, "list", "firmware") == (0, "", "")
+
+
+@pytest.mark.usefixtures("stored")
+def test_listing_the_members_of_default_says_every_user_is_an_editor_of_it(
+    capsys: pytest.CaptureFixture[str], database: Path
+) -> None:
+    """`default` takes no member rows, so there is no table to print."""
+    assert _member(capsys, database, "list", DEFAULT_PROJECT) == (
+        0,
+        "",
+        "vantage: every user is an editor of default, which has no members\n",
+    )
+
+
+@pytest.mark.usefixtures("firmware")
+def test_removing_a_member_takes_them_off_the_project(
+    capsys: pytest.CaptureFixture[str], database: Path, stored: ExecutionStore
+) -> None:
+    stored.set_member("alice", project="firmware", role="owner")
+    stored.set_member("bob", project="firmware", role="viewer")
+
+    removed = _member(capsys, database, "remove", "firmware", "bob")
+    again = _member(capsys, database, "remove", "firmware", "bob")
+
+    assert removed == (0, "", "vantage: removed bob from firmware\n")
+    assert again == (1, "", "vantage: bob is not a member of firmware\n")
+    assert _members(stored) == [("alice", "owner")]
+
+
+@pytest.mark.parametrize(
+    ("argv", "refusal"),
+    [
+        (["set", "Firmware", "bob", "viewer"], _PROJECT_NAME_RULE),
+        (["list", "Firmware"], _PROJECT_NAME_RULE),
+        (["remove", "Firmware", "bob"], _PROJECT_NAME_RULE),
+        (["set", "Firmware", "Bob", "viewer"], _PROJECT_NAME_RULE),
+        (["set", "firmware", "Bob", "viewer"], _USER_NAME_RULE),
+        (["remove", "firmware", "Bob"], _USER_NAME_RULE),
+        (["set", DEFAULT_PROJECT, "bob", "viewer"], _DEFAULT_TAKES_NO_MEMBERS),
+        (["remove", DEFAULT_PROJECT, "bob"], _DEFAULT_TAKES_NO_MEMBERS),
+    ],
+    ids=[
+        "set-project",
+        "list-project",
+        "remove-project",
+        "set-project-and-user",
+        "set-user",
+        "remove-user",
+        "set-default",
+        "remove-default",
+    ],
+)
+def test_a_member_command_its_arguments_refuse_is_one_line_and_needs_no_database(
+    capsys: pytest.CaptureFixture[str], database: Path, argv: list[str], refusal: str
+) -> None:
+    """The names, the project's first, and whether the project is
+    `default`, which takes no members, are checked before the database is
+    opened: the refusal is the same without one, and creates none."""
+    assert _member(capsys, database, *argv) == (1, "", refusal)
+    assert not database.parent.exists()
+
+
+def test_an_unknown_role_is_a_usage_error_that_creates_nothing(
+    capsys: pytest.CaptureFixture[str], database: Path
+) -> None:
+    status, out, err = _member(capsys, database, "set", "firmware", "bob", "admin")
+
+    assert (status, out) == (2, "")
+    assert "argument role: invalid choice: 'admin'" in err
+    assert not database.parent.exists()
+
+
+@pytest.mark.usefixtures("firmware")
+@pytest.mark.parametrize(
+    ("argv", "refusal"),
+    [
+        (["set", "boards", "bob", "viewer"], "vantage: there is no project named boards\n"),
+        (["set", "firmware", "carol", "viewer"], "vantage: there is no user named carol\n"),
+        (["set", "boards", "carol", "viewer"], "vantage: there is no project named boards\n"),
+        (["list", "boards"], "vantage: there is no project named boards\n"),
+        (["remove", "boards", "alice"], "vantage: there is no project named boards\n"),
+        (["remove", "boards", "carol"], "vantage: there is no project named boards\n"),
+        (["remove", "firmware", "carol"], "vantage: carol is not a member of firmware\n"),
+    ],
+    ids=[
+        "set-project",
+        "set-user",
+        "set-both",
+        "list-project",
+        "remove-project",
+        "remove-both",
+        "remove-user",
+    ],
+)
+def test_a_member_command_naming_what_is_not_there_is_one_line_and_changes_nothing(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    argv: list[str],
+    refusal: str,
+) -> None:
+    """The project is looked for first, so naming neither is answered with
+    the project; a removal asks for no user, so one nobody has is no
+    member."""
+    stored.set_member("alice", project="firmware", role="owner")
+
+    assert _member(capsys, database, *argv) == (1, "", refusal)
+    assert _members(stored) == [("alice", "owner")]
+
+
+def test_a_postgresql_databases_members_are_managed_the_same_way(
+    capsys: pytest.CaptureFixture[str], postgres_url: str
+) -> None:
+    _run(capsys, "user", "add", "bob", "--database", postgres_url)
+    _run(capsys, "project", "add", "firmware", "--database", postgres_url)
+
+    def member(*argv: str) -> tuple[int, str, str]:
+        return _run(capsys, "project", "member", *argv, "--database", postgres_url)
+
+    added = member("set", "firmware", "bob", "viewer")
+    changed = member("set", "firmware", "bob", "editor")
+    no_project = member("set", "boards", "carol", "viewer")
+    no_user = member("set", "firmware", "carol", "viewer")
+    status, out, err = member("list", "firmware")
+    removed = member("remove", "firmware", "bob")
+    again = member("remove", "firmware", "bob")
+
+    assert added == (0, "", "vantage: added bob to firmware as viewer\n")
+    assert changed == (0, "", "vantage: bob is now editor in firmware\n")
+    assert no_project == (1, "", "vantage: there is no project named boards\n")
+    assert no_user == (1, "", "vantage: there is no user named carol\n")
+    assert (status, err) == (0, "")
+    assert [row.split() for row in out.splitlines()] == [["USER", "ROLE"], ["bob", "editor"]]
+    assert removed == (0, "", "vantage: removed bob from firmware\n")
+    assert again == (1, "", "vantage: bob is not a member of firmware\n")
+    assert member("list", "firmware") == (0, "", "")
 
 
 def test_managing_users_needs_no_server_extra(tmp_path: Path) -> None:

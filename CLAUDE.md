@@ -70,9 +70,12 @@ its `postgres` extra.
   0600). A queued run is sent only to the address it was queued for,
   compared exactly; senders claim an entry before sending it; bounds are
   1,000 runs and 256 MiB. A run a server refused for its token (401/403)
-  or its project (`404 unknown_project`) is kept; the rest of a refused
-  project's runs are passed over within one send. `vantage push` sends it
-  with the plugin's own code and never needs the `server` extra.
+  or its project (`404 unknown_project`, or `403 not_a_member` or
+  `insufficient_role` for the token's user) is kept; the rest of a refused
+  project's runs are passed over within one send (`missing_projects`,
+  `forbidden_projects`), and a refused project never stops the send.
+  `vantage push` sends it with the plugin's own code and never needs the
+  `server` extra.
 - **Opt-in only by typed flag.** `--vantage`, `--vantage-failure-text` and
   `--vantage-metadata` count only when present in `config.invocation_params.args`;
   from `addopts`, `PYTEST_ADDOPTS` or an `@file` they are ignored with a warning.
@@ -108,7 +111,7 @@ its `postgres` extra.
   (`isoformat_utc`), so text order is time order, and as `timestamptz` in
   PostgreSQL, read back as UTC.
 - **Schema:** each adapter applies its whole schema at first use and stamps
-  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 9,
+  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 10,
   one version for both). Any other stamp is refused; there are no
   migrations. Changing either schema means bumping that literal. No table
   or column exists before code writes it.
@@ -130,7 +133,7 @@ its `postgres` extra.
   `vantage user add`; the first user closes a database for good, since
   users are disabled, never deleted. Every route but `/capabilities`,
   `/openapi.yaml`, `/login` and `/password` declares its scope through
-  `service/access.py` (`read`, `record`, `admin`), and
+  `service/access.py` (`read`, `record`, `manage`, `admin`), and
   `test_interface_document.py` checks each against the document; `/login`
   and `/password` take a name and a password instead of a token
   (`requires_closed_server`). A token is stored only as its SHA-256,
@@ -139,17 +142,37 @@ its `postgres` extra.
   `repr`. A password is stored only as a scrypt PHC string
   (`core/domain/passwords.py`), which carries its own cost, and every
   check costs one scrypt, two at a time per process and 32 waiting, then
-  `503 password_checks_busy` (`service/slots.py`). A login token holds `read` (and `admin`
-  for an admin), never `record`, expires after 12 hours, and is revoked by
-  any password set for its user; a made token never expires and survives
-  password changes. A run takes reports and heartbeats only from the user
-  whose token created it (`ForeignRunError`, `409 foreign_run`). The users
-  and tokens routes (`routes/users.py`) need an admin's token on every
-  server, and they, `/login` and `/password` answer `409 open_server`
-  while the database has no user: the first user is the CLI's, or the
-  first start's, alone. Per-project routes resolve `{project}` through
-  `requires_read_project`/`requires_admin_project`, after authorizing;
-  `POST /projects` needs what changing sections needs.
+  `503 password_checks_busy` (`service/slots.py`). A login token holds
+  `read` and `manage` (and `admin` for an admin), never `record`, expires
+  after 12 hours, and is revoked by any password set for its user; a made
+  token never expires and survives password changes; `DEFAULT_SCOPES`
+  stays `read` and `record`. A run takes reports and heartbeats only from
+  the user whose token created it (`ForeignRunError`, `409 foreign_run`).
+  The users and tokens routes (`routes/users.py`) need an admin's token on
+  every server, and they, the members routes (`routes/members.py`),
+  `/login` and `/password` answer `409 open_server` while the database
+  has no user: the first user is the CLI's, or the first start's, alone.
+  `POST /projects` needs an admin.
+- **Roles.** Within a project a caller also needs a role there, `viewer`
+  (read), `editor` (also record, and change sections with `manage`) or
+  `owner` (also manage members with `manage`), from a `project_member`
+  row. `effective_role` (`core/domain/projects.py`) alone states the two
+  rules no row holds: every user is an editor of `default`, which takes no
+  rows, and an admin acts as an owner of every project. Scopes and roles
+  only narrow each other; an open server's anonymous caller passes every
+  role check. Roles are read from the store on every request, never kept
+  in `app.state`. `{project}` is resolved through `requires_read_project`,
+  `requires_edit_project`, `requires_read_members` or
+  `requires_manage_members` (`_project_access`), `{run_id}` through
+  `requires_read_run` or `requires_record_run` (`_run_access`), and
+  `POST /runs` checks the report's project through `ingest`'s `admit`.
+  Who asks is refused before what is asked: `401`,
+  `403 insufficient_scope`, the members routes' `409 open_server`, a run
+  id's `422`, `404 unknown_project` or `unknown_run`, then
+  `403 not_a_member` or `insufficient_role` (no challenge), and only then
+  the route's own body and query checks; `POST /runs` checks the role
+  after `422 invalid_report` and `404 unknown_project`, and before its
+  `409`s.
 - **Passwords never printed.** A PostgreSQL URL is shown only through
   `redacted`, and a driver message only through `redact_message`
   (`core/config/database.py`); the driver's loggers are silenced while the
@@ -180,6 +203,7 @@ vantage user add alice --admin               # the first user closes a local sto
 vantage user password alice                  # asks twice on the terminal; to log in with
 vantage token create alice                   # prints a token once; VANTAGE_TOKEN for the plugin
 vantage project add firmware                 # a project runs can name
+vantage project member set firmware alice editor  # alice records and edits sections there
 pytest --vantage --vantage-project firmware  # a run of that project
 pytest --vantage --vantage-mode local        # record into the local database
 ```

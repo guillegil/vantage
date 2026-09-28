@@ -2,10 +2,12 @@
 `PUT /api/v1/users/{name}/password`.
 
 **Logging in trades a name and a password for a login token**, which holds
-the read scope, and the admin scope for an admin, never the record scope:
-recording is for a made token, so a leaked login cannot inject runs. It
-expires after `LOGIN_TOKEN_LIFETIME`, with no refresh, and every password
-set for its user revokes it. The token is in that one answer only, marked
+the read and manage scopes, and the admin scope for an admin, never the
+record scope: recording is for a made token, so a leaked login cannot
+inject runs. What it may read or change in a project is bounded by the
+user's role there (`service/access.py`). It expires after
+`LOGIN_TOKEN_LIFETIME`, with no refresh, and every password set for its
+user revokes it. The token is in that one answer only, marked
 `Cache-Control: no-store`.
 
 **Changing your own password takes the current one**, not a token, so a

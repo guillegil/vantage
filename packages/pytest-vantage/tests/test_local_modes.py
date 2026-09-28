@@ -1,7 +1,7 @@
 """The four modes -- `server`, `local`, `server+backup`, `server+local` --
 from the plugin's side: which settings each reads and refuses, where each
 sends and stores a run, what it queues, what it warns, and the queue sent
-once a session reaches its server again.
+once a session reaches its server again, or by `vantage push`.
 
 The server side is a real `vantage` server. The local database is a
 stand-in for `vantage.local`, installed by the conftest each test writes: it
@@ -28,6 +28,7 @@ from pytest_vantage.config import VantageConfigError, resolve_local_database, re
 from pytest_vantage.outbox import Outbox, outbox_path
 from pytest_vantage.transport import send
 from vantage.core.domain.execution import Execution
+from vantage.core.domain.projects import EDITOR_ROLE, VIEWER_ROLE
 from vantage.service.errors import RejectionError
 from vantage_test_server import ServerGate, VantageTestServer
 
@@ -791,6 +792,120 @@ def test_server_mode_with_a_project_the_server_lacks_warns_and_leaves_the_exit_s
     assert not outbox_path(database).exists()
 
 
+_NOT_A_MEMBER = (
+    "HTTP 403: {address} does not let the user of the token in VANTAGE_TOKEN record in project "
+    "firmware, which they are not a member of; an owner of it or an admin adds them with: "
+    "vantage project member set firmware USER editor"
+)
+
+_ONLY_A_VIEWER = (
+    "HTTP 403: {address} lets the user of the token in VANTAGE_TOKEN only read project "
+    "firmware; recording needs the editor role, which an owner of it or an admin gives with: "
+    "vantage project member set firmware USER editor"
+)
+
+
+@pytest.mark.parametrize(
+    ("role", "refusal", "test_body", "exit_status"),
+    [
+        (None, _NOT_A_MEMBER, "assert True", 0),
+        (VIEWER_ROLE, _ONLY_A_VIEWER, "assert False", 1),
+    ],
+    ids=["not-a-member", "a-viewer"],
+)
+def test_server_mode_in_a_project_its_user_may_not_record_in_warns_and_leaves_the_exit_status(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    role: str | None,
+    refusal: str,
+    test_body: str,
+    exit_status: int,
+) -> None:
+    """The server has the project and takes the token, but the token's
+    user may not record there: the start and the finish are refused, each
+    path warns once, naming the project and the command that lets the user
+    in but never the token, and the suite ends as it would have without
+    the plugin. Server mode keeps nothing."""
+    vantage_server.add_project("firmware")
+    token = vantage_server.token("bob", admin=False)
+    if role is not None:
+        vantage_server.set_member("bob", "firmware", role)
+    monkeypatch.setenv("VANTAGE_TOKEN", token)
+    database = _stand_in(pytester)
+    pytester.makepyfile(test_sample=f"def test_it():\n    {test_body}\n")
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", "--vantage-project=firmware", f"--vantage-server={vantage_server.address}"
+    )
+
+    assert result.ret == exit_status
+    output = _output(result)
+    refused = refusal.format(address=vantage_server.address)
+    assert output.count("VantageWarning:") == 2, output
+    assert f"vantage: error while reporting session liveness: {refused}\n" in output
+    assert f"vantage: error while reporting: {refused}\n" in output
+    assert token not in output
+    assert vantage_server.executions() == []
+    assert vantage_server.requests.count(("POST", "/api/v1/runs")) == 2
+    assert not database.exists()
+    assert not outbox_path(database).exists()
+
+
+def test_a_run_its_user_may_not_record_is_queued_until_they_are_an_editor_of_its_project(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In `server+backup` the refused run is worth keeping, as one of a
+    project the server lacks: stored and queued. A later session, whose own
+    run is in a project its user records in, sends the queue and keeps that
+    run, naming its project; once an owner or an admin makes the user an
+    editor there, the next one delivers it into that project, as that
+    user."""
+    vantage_server.add_project("firmware")
+    token = vantage_server.token("bob", admin=False)
+    monkeypatch.setenv("VANTAGE_TOKEN", token)
+    database = _stand_in(pytester)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+    args = (
+        "--vantage",
+        "--vantage-mode=server+backup",
+        f"--vantage-server={vantage_server.address}",
+    )
+
+    refused = pytester.runpytest_subprocess(*args, "--vantage-project=firmware")
+    kept = pytester.runpytest_subprocess(*args)
+    vantage_server.set_member("bob", "firmware", EDITOR_ROLE)
+    delivered = pytester.runpytest_subprocess(*args)
+
+    assert refused.ret == 0
+    output = _output(refused)
+    refusal = _NOT_A_MEMBER.format(address=vantage_server.address)
+    # One warning for the refused start, one for where the run went.
+    assert output.count("VantageWarning:") == 2, output
+    assert f"vantage: error while reporting session liveness: {refusal}\n" in output
+    assert (
+        f"vantage: {vantage_server.address} did not take this run ({refusal}); "
+        f"this run was stored in {database} and queued (1 run waiting to be sent)"
+    ) in output
+    (stored,) = _stored_sessions(database)
+    queued_id = _run_id_of(stored)
+    kept.stdout.fnmatch_lines(
+        [
+            f"vantage: sent 0 queued runs to {vantage_server.address} (1 waiting); "
+            "kept runs of projects the token's user may not record in: firmware"
+        ]
+    )
+    assert _output(kept).count("VantageWarning:") == 0
+    delivered.stdout.fnmatch_lines(
+        [f"vantage: sent 1 queued run to {vantage_server.address} (0 waiting)"]
+    )
+    assert _output(delivered).count("VantageWarning:") == 0
+    assert _queued(database) == []
+    assert len(vantage_server.executions()) == 3
+    assert vantage_server.project_of(queued_id) == "firmware"
+    assert vantage_server.recorded_by(queued_id) == "bob"
+
+
 def test_server_plus_backup_stores_nothing_locally_when_the_server_takes_the_run(
     pytester: pytest.Pytester, vantage_server: VantageTestServer
 ) -> None:
@@ -825,6 +940,56 @@ def _queue_directly(database: Path, server: str, run_id: str, *, valid: bool = T
     }
     with Outbox(outbox_path(database)) as box:
         box.enqueue(server, run_id, [{"run": run, "results": []}])
+
+
+def _push(*argv: str) -> subprocess.CompletedProcess[str]:
+    """`vantage push`, in a process of its own, as a user runs it."""
+    return subprocess.run(  # noqa: S603 -- the interpreter running this test
+        [sys.executable, "-c", "from vantage.service.cli import main; main()", "push", *argv],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+def test_vantage_push_keeps_a_run_its_user_may_not_record_until_they_are_an_editor(
+    pytester: pytest.Pytester, vantage_server: VantageTestServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`vantage push`, with the same token, keeps the run while its user
+    only reads its project, and says so -- exiting 1, a run still waiting
+    -- then delivers it once they are an editor there."""
+    vantage_server.add_project("firmware")
+    token = vantage_server.token("bob", admin=False)
+    vantage_server.set_member("bob", "firmware", VIEWER_ROLE)
+    monkeypatch.setenv("VANTAGE_TOKEN", token)
+    database = _stand_in(pytester)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+    pytester.runpytest_subprocess(
+        "--vantage",
+        "--vantage-mode=server+backup",
+        "--vantage-project=firmware",
+        f"--vantage-server={vantage_server.address}",
+    )
+    ((_, run_id, _),) = _queued(database)
+
+    kept = _push("--database", str(database))
+    vantage_server.set_member("bob", "firmware", EDITOR_ROLE)
+    sent = _push("--database", str(database))
+
+    assert (kept.returncode, kept.stdout) == (
+        1,
+        f"vantage: sent 0 queued runs to {vantage_server.address}, kept runs of projects "
+        "the token's user may not record in (firmware) (1 waiting)\n",
+    )
+    assert token not in kept.stdout + kept.stderr
+    assert (sent.returncode, sent.stdout) == (
+        0,
+        f"vantage: sent 1 queued run to {vantage_server.address} (0 waiting)\n",
+    )
+    assert _queued(database) == []
+    assert vantage_server.project_of(run_id) == "firmware"
+    assert vantage_server.recorded_by(run_id) == "bob"
 
 
 def test_a_queued_run_the_server_rejects_is_dropped_with_a_warning_naming_it(

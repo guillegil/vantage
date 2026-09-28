@@ -23,7 +23,7 @@ from vantage.core.domain.projection import (
     project_failure,
     project_vcs,
 )
-from vantage.core.domain.projects import Project
+from vantage.core.domain.projects import Membership, Project
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 
 MAX_PAGE_ITEMS = 200
@@ -296,8 +296,8 @@ class NamespaceFullError(Exception):
 
 
 class UnknownProjectError(Exception):
-    """`record_session` or `upsert_setting` named a project that does not
-    exist. Nothing was written."""
+    """`record_session`, `upsert_setting` or `set_member` named a project
+    that does not exist. Nothing was written."""
 
 
 class ProjectExistsError(Exception):
@@ -320,7 +320,7 @@ class UserExistsError(Exception):
 
 
 class UnknownUserError(Exception):
-    """`create_token` was given a user nobody has."""
+    """`create_token` or `set_member` was given a user nobody has."""
 
 
 class ExecutionStore(Protocol):
@@ -340,6 +340,11 @@ class ExecutionStore(Protocol):
     it, so the service replaces it with U+FFFD in everything it decodes, and
     every adapter stores the same text. A lookup by a value holding one
     therefore matches nothing, on every adapter.
+
+    A project's members are rows of a role per user (`Membership`); the
+    stores hold rows only, and never apply the two rules no row holds --
+    every user an editor of `default`, which takes none, and an admin an
+    owner everywhere -- which `effective_role` states for the service.
 
     `count_executions`, `get_results`, `count_results` and
     `get_catalogue_entry` are called by no route: they are how the tests,
@@ -557,6 +562,35 @@ class ExecutionStore(Protocol):
         point order."""
         ...
 
+    def get_member_role(self, user: str, *, project: str) -> str | None:
+        """Return the role `user`'s member row in `project` holds, or None
+        if there is none -- always None in `default`, which takes none."""
+        ...
+
+    def list_members(self, *, project: str) -> Sequence[Membership]:
+        """Return `project`'s member rows, ordered by user in code point
+        order; none for a project that does not exist, or for `default`."""
+        ...
+
+    def list_memberships(self, user: str) -> Sequence[Membership]:
+        """Return `user`'s member rows, ordered by project in code point
+        order."""
+        ...
+
+    def set_member(self, user: str, *, project: str, role: str) -> bool:
+        """Make `user` a member of `project` with `role`, or set an existing
+        member's role, in one write, and return True only if it added the
+        row. Raises `ValueError`, writing nothing and asking nothing, for a
+        role not in `ROLES` or for `default`; `UnknownProjectError`, then
+        `UnknownUserError`, when the project or the user does not exist. A
+        disabled user or an admin may be made a member."""
+        ...
+
+    def remove_member(self, user: str, *, project: str) -> bool:
+        """Remove `user`'s member row in `project`. Returns False if there
+        was none."""
+        ...
+
     def access_required(self) -> bool:
         """Whether any user exists. Users are never deleted, so once this is
         true it stays true. `vantage` gives every database but one
@@ -630,13 +664,14 @@ class ExecutionStore(Protocol):
         expires_at: datetime,
     ) -> Token | None:
         """Store a login token of `name` by its `digest`, labelled
-        `LOGIN_TOKEN_LABEL`, holding the read scope and, for an admin, the
-        admin scope, and expiring at `expires_at` -- only while the user is
-        enabled and their stored hash is still `password_hash`, the one the
-        password was checked against, so a login never outlives a password
-        change made while it was checked. The same write deletes that
-        user's other login tokens that expired by `created_at`. Returns None,
-        storing nothing, if that does not hold."""
+        `LOGIN_TOKEN_LABEL`, holding the read and manage scopes and, for an
+        admin, the admin scope, never record, and expiring at `expires_at`
+        -- only while the user is enabled and their stored hash is still
+        `password_hash`, the one the password was checked against, so a
+        login never outlives a password change made while it was checked.
+        The same write deletes that user's other login tokens that expired
+        by `created_at`. Returns None, storing nothing, if that does not
+        hold."""
         ...
 
     def create_token(

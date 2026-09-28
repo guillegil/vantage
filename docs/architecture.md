@@ -76,8 +76,9 @@ Values both sides must agree on (the 1 MiB body cap, the 64 KiB text-field
 cap, the metadata bounds and statuses, the outcome vocabulary, the timestamp
 format, the heartbeat interval behind the default grace period, the shape of
 a token and the statuses and error codes of the refusals of a token, the
-project-name rule, `default` and the status and code of an unknown project)
-are kept as a copy on each side. `packages/pytest-vantage/tests/test_server_contract.py`
+project-name rule, `default`, the status and code of an unknown project,
+and those of a refusal of the token's user in a project) are kept as a
+copy on each side. `packages/pytest-vantage/tests/test_server_contract.py`
 imports both and compares every copy.
 
 ## Clean architecture with Protocol ports
@@ -88,11 +89,12 @@ core on nothing but the standard library.
 
 - **`vantage.core`** holds the domain as frozen standard-library dataclasses
   (`Execution`, `Identity`, `VcsContext`, `Result`, `CaseIdentity`,
-  `FailureEvidence`, `CapturedOutput`, `CatalogueEntry`, and `User`,
-  `Token` and `Grant` in `domain/access.py`), the pure rules (how a run is
-  presented, list projections, section summaries, metadata vocabularies,
-  token scopes, user names, how a token is made and digested), and the
-  server's configuration resolution.
+  `FailureEvidence`, `CapturedOutput`, `CatalogueEntry`, `User`, `Token`
+  and `Grant` in `domain/access.py`, and `Project` and `Membership` in
+  `domain/projects.py`), the pure rules (how a run is presented, list
+  projections, section summaries, metadata vocabularies, token scopes,
+  user and project names, the role a user acts with in a project, how a
+  token is made and digested), and the server's configuration resolution.
 - **The storage port** is `ExecutionStore` in `core/ports/storage.py`, a
   `typing.Protocol`. An adapter satisfies it by shape, without importing or
   subclassing the protocol itself. It does import the core's domain and
@@ -105,7 +107,10 @@ core on nothing but the standard library.
   `ingest(report, store, received_at=...)` validates a decoded report
   against its Pydantic models (`ingestion/schemas.py`), converts it into core
   dataclasses (`conversion.py`, declared YAML metadata included) and calls
-  `store.record_session`, so no Pydantic type reaches the core or storage. It
+  `store.record_session`, so no Pydantic type reaches the core or storage;
+  the server also hands it an `admit` that may refuse the report's project
+  first (see
+  [Users, tokens and who may do what](#users-tokens-and-who-may-do-what)). It
   knows nothing of HTTP: a report it cannot take raises a plain
   `RejectionError` carrying a status code, an error code, a fixed sentence
   and field paths, which the service turns into a response and the local
@@ -345,9 +350,11 @@ tests run.
 **What is queued.** Sending stops at the first failed report. A failure a
 later attempt can fix -- no connection, a broken one, a timeout, a 5xx, a
 408 or 429 asking for the request again later, a 401 or 403 refusing the
-token, a `404 unknown_project` an admin can fix by adding the project
+token, a `404 unknown_project` an admin can fix by adding the project, a
+`403 not_a_member` or `insufficient_role` an owner of the project or an
+admin can fix by making the token's user an editor of it
 (`outbox.worth_retrying`; the transport raises `ProjectRefusedError` for
-the last) -- queues that report and the ones after it; the reports the server
+the last two) -- queues that report and the ones after it; the reports the server
 acknowledged are not queued again, and a replay of any of them would change
 nothing anyway. Any other 4xx, a redirect or an answer that does not
 acknowledge the run would fail the same way next time and is not queued. A server unreachable at the start queues every report. The session
@@ -491,29 +498,37 @@ the envelope because `run` refuses an unknown field.
   and a report resolves its results' catalogue rows within its own project,
   so two projects never share a test however alike their node ids; a
   test's history, the run list with its metadata filter, horizon and
-  cursor, and the section definitions (`project_setting`) are each read
-  within one. Everything addressed by a run id is not: a run id names one
-  run across projects, and `get_run_detail` says which project it is in.
+  cursor, the section definitions (`project_setting`) and the members
+  (`project_member`) are each read within one. Everything addressed by a
+  run id is not: a run id names one run across projects, and
+  `get_run_detail` says which project it is in, which the caller's role is
+  then checked in.
 - **The port** takes `project` as a required keyword wherever a call reads
   or writes within one, so no call silently falls back to `default`; the
   one default is ingestion's, for an absent field.
-- **Routes.** The run list, a test's history and the sections live under
-  `/api/v1/projects/{project}/`. `requires_read_project` and
-  `requires_admin_project` (`service/access.py`) authorize first, then
-  answer a name no project can have without asking the store, then look
-  the project up; that is where a check that the caller is one of the
-  project's members goes, once projects have members. `POST /projects`
-  needs what changing sections needs.
+- **Routes.** The run list, a test's history, the sections and the members
+  live under `/api/v1/projects/{project}/`. Their dependencies
+  (`_project_access` in `service/access.py`) authorize first, then answer a
+  name no project can have without asking the store, then look the project
+  up, then check the caller's role in it (see
+  [Users, tokens and who may do what](#users-tokens-and-who-may-do-what)).
+  `POST /projects` needs an admin, and adds no member: an admin acts as
+  the owner of every project without one.
 - **The plugin** resolves `--vantage-project`, `VANTAGE_PROJECT`, then the
   `vantage_project` ini value, as it resolves the address, and names the
   project in every report and in its header. The outbox keeps a run the
-  server refused for its project, and `send_queued` passes over the rest of
-  that project's runs within one call, reporting it in `missing_projects`.
+  server refused for its project -- one it does not have, or one the
+  token's user may not record in -- and `send_queued` passes over the rest
+  of that project's runs within one call, reporting it in
+  `missing_projects` or `forbidden_projects`. Neither stops the send: each
+  refuses that one project, and the same token may still record in
+  others.
 
 ## Users, tokens and who may do what
 
-A database with no user is open: every route but the users, tokens, login
-and password ones answers anyone, as the server did before it had users.
+A database with no user is open: every route but the users, tokens,
+members, login and password ones answers anyone, and checks no role, as
+the server did before it had users.
 Only a database pytest-vantage's local store made is ever served that way,
 and only until its first `vantage user add`: `vantage` gives any other
 database a user before serving it. The first user closes a database. Users
@@ -602,8 +617,8 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   each `401` with its address.
 - **Login tokens.** `POST /login` (`service/routes/login.py`) checks the
   password and hands the hash it verified to `create_login_token`: one
-  write that inserts a token labelled `login`, holding `read` and the
-  account's `admin`, never `record`, and expiring `LOGIN_TOKEN_LIFETIME`
+  write that inserts a token labelled `login`, holding `read`, `manage` and
+  the account's `admin`, never `record`, and expiring `LOGIN_TOKEN_LIFETIME`
   (12 hours) later -- only while the user is enabled and the stored hash is
   still that one, so a login never outlives a password change made while
   it was checked. The same write deletes that user's login tokens expired
@@ -640,48 +655,155 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   column's unique index. A token has nothing to guess, so a fast hash is
   enough, and nobody can choose a digest's text, so the lookup needs no
   constant-time comparison. A token is shown once, by whatever made it.
-- **Scopes.** A token holds one or more of `read`, `record` and `admin`
-  (the `can_*` columns). `Grant.allows` needs the admin scope and an admin
-  user: `authenticate` reads the user's standing each time, so demoting a
-  user takes their admin tokens' power at once. A revoked token, an
-  expired one, and any token of a disabled user authenticate nothing.
+- **Scopes.** A token holds one or more of `read`, `record`, `manage` and
+  `admin` (the `can_*` columns). `Grant.allows` needs the admin scope and
+  an admin user: `authenticate` reads the user's standing each time, so
+  demoting a user takes their admin tokens' power at once. `manage`, which
+  changes a project's section definitions and members, needs no admin:
+  any user's token may hold it, and the user's role in each project bounds
+  it. So a token made for pytest-vantage (`DEFAULT_SCOPES`, `read` and
+  `record`) never changes sections or members, and an admin can make a
+  token that edits sections without it managing users. A revoked token,
+  an expired one, and any token of a disabled user authenticate nothing.
+- **Roles.** Once a database has users, a user acts in a project with a
+  role, `viewer`, `editor` or `owner`, each allowing what the one before
+  it does and more (`core/domain/projects.py`): a viewer reads the
+  project, an editor also records runs into it and changes its section
+  definitions, an owner also manages its members. A role is a
+  `project_member` row, but for two rules no row holds, stated once, in
+  `effective_role`: every user is an editor of `default`, which takes no
+  rows, so a server with one team needs no membership at all; and an
+  admin acts as an owner of every project, so one can always put a
+  project right. The admin standing is the one `authenticate` read for
+  this request: a demoted admin loses the override at their next request,
+  and only their rows count then. A disabled user's rows stay, and apply
+  again once they are enabled. A request needs its route's scope and,
+  within a project, a role covering the one the route needs
+  (`role_covers`): scopes and roles only narrow each other, so an owner's
+  read-only token only reads, and an admin's `read` and `record` token
+  reads and records everywhere. The anonymous caller of an open server
+  passes every role check.
 - **`service/access.py`** is the dependency every route declares but
   `/capabilities` and `/openapi.yaml`, which a client asks before it can
   know it needs a token, and `/login` and `/password`, which take a name
-  and a password instead: `requires_read` on the `read`-tagged routes but
-  the users and tokens ones,
-  `requires_record` on a report and a heartbeat, `requires_admin` on
-  changing sections, and `requires_admin_token` on the users and tokens
-  routes, `PUT /users/{name}/password` included. It is a plain `def`, since
-  it reads the store, so on `POST /runs` it runs in the threadpool before
-  the body is read. While the
+  and a password instead. A route outside any project declares a scope
+  alone: `requires_read` on `GET /projects`, `requires_record` on a
+  report, `requires_admin` on adding a project, and `requires_admin_token`
+  on the users and tokens routes, `PUT /users/{name}/password` included.
+  A route within one declares its scope and the role it needs there (see
+  the next point). Each is a plain `def`, since it reads the store, so on
+  `POST /runs` it runs in the threadpool before the body is read. While the
   server is open it asks the store whether a user exists on every request,
   because `vantage user add` may run against the database meanwhile; once
   one does, `app.state.access_required` keeps the answer, and the store is
   not asked again. A token sent to an open server is refused, not ignored.
-  A 401 or 403 carries RFC 6750's `WWW-Authenticate` challenge
-  (`ChallengeError`), naming the scope that was missing and never the
-  token. `/login` and `/password` declare `requires_closed_server`
-  instead, a plain `def` too, which answers `409 open_server` on an open
-  server before the body is read and ignores an `Authorization` header:
-  nobody has a password there.
+  A 401, or a `403 insufficient_scope`, carries RFC 6750's
+  `WWW-Authenticate` challenge (`ChallengeError`), naming the scope that
+  was missing and never the token; a refusal of a role carries none, since
+  no other token of the same user would help. `/login` and `/password`
+  declare `requires_closed_server` instead, a plain `def` too, which
+  answers `409 open_server` on an open server before the body is read and
+  ignores an `Authorization` header: nobody has a password there.
+- **Where the role is checked.** `require_role` refuses a caller with no
+  role in the project, `403 not_a_member`, and one whose role is below
+  what is needed, `403 insufficient_role`; neither body names the project
+  or a member. Only a member row needs the store: an admin's role and
+  every user's in `default` are `effective_role`'s alone. Three places
+  call it:
+  - `_project_access(scope, role, *, needs_user=False)` builds the
+    dependency of every route with `{project}` in its path:
+    `requires_read_project` (read, viewer: the run list, a test's history,
+    the sections), `requires_edit_project` (manage, editor: changing
+    sections), `requires_read_members` (read, viewer) and
+    `requires_manage_members` (manage, owner). It authorizes, refuses an
+    open server's anonymous caller with `409 open_server` where
+    `needs_user` says so, answers a name no project can have without
+    asking the store, looks the project up, checks the role, and returns
+    the `Project`.
+  - `_run_access(authorizes, role)` builds the dependency of every route
+    with `{run_id}` in its path: `requires_read_run` (viewer: a run's
+    detail, metadata, results, one result and section summary) and
+    `requires_record_run` (editor: the heartbeat). It takes the caller as
+    a sub-dependency and the run id as its own path parameter: FastAPI
+    resolves sub-dependencies before a dependant's own parameters, so a
+    caller refused for who they are is never told the id is malformed,
+    whereas authorizing inside its body would answer the `422` first. It reads
+    `get_run_detail` (`404 unknown_run`), checks the role in the run's
+    project and returns the `RunDetail`. A route taking it declares no
+    `run_id` of its own, which would report a malformed id twice, and
+    reads the id from the detail. This is where a check that a run is
+    shared with the caller, or private to its recorder, would go.
+  - `POST /runs` learns its project only from the report:
+    `ingest(..., admit=...)` calls `admit` with the report's project once
+    the report is valid and converted, before anything is made or
+    recorded, and whatever it raises passes through with nothing stored.
+    The route's `admit` answers `404 unknown_project` for a project the
+    store lacks, then checks the editor role. `record_session`'s own
+    `UnknownProjectError`, `ForeignRunError` and `ProjectMismatchError`
+    stay behind it, so a sender who may not record in a project never
+    learns through a `409` of a run in it, or of one with the same id in
+    another; an editor of the project still does. `vantage.local` passes
+    no `admit`.
+- **Every refusal of who asks comes before every refusal of what is
+  asked.** Within a project path: `401`, `403 insufficient_scope`, on the
+  members routes `409 open_server`, `404 unknown_project`,
+  `403 not_a_member`, `403 insufficient_role`, then the route's own checks
+  of its body, query and path. Within a run-id path: `401`,
+  `403 insufficient_scope`, `422` for `path.run_id`, `404 unknown_run`,
+  the role, then the query (`limit`, `offset`, `node_id`) and the route's
+  own `404 unknown_result` or `409 foreign_run`. The run is resolved
+  before its query is validated, as a project is, so `?limit=x` on a run
+  the caller may not read is a `403`, and on one never recorded a `404`.
+  A run id the plugin makes is a random `uuid4`, so answering
+  `unknown_run` before a `403` reveals nothing guessable. `POST /runs`:
+  `401` and `403 insufficient_scope` before the body is read, `415`,
+  `413` or `400 incomplete_body`, `400 invalid_json`, `422 invalid_report`,
+  `404 unknown_project` (`fields: ["project"]`), `403 not_a_member` or
+  `insufficient_role`, `409 foreign_run`, `409 project_mismatch`. The
+  heartbeat: `401`, `403 insufficient_scope`, `422`, `404 unknown_run`,
+  the role, `409 foreign_run`.
+- **Roles are read on every request**, never kept in `app.state`:
+  `access_required` can be, since it is a one-way latch, and a membership
+  is not. A change applies from the next request on every server process;
+  a request already authorized finishes on the role it read, as one
+  authorized just before its token was revoked does. `GET /projects`
+  reads the caller's rows (`list_memberships`), then the projects, and
+  lists each one `effective_role` gives them a role in, with that role;
+  every row names a project that exists and is never deleted, so each is
+  in the later list, and a row changed between the two reads gives the
+  answer a moment earlier or later would. An admin gets every project as
+  `owner`, and an open server's anonymous caller every project with a
+  null `role`.
+- **No last-owner guard.** Nothing stops an owner demoting or removing
+  themselves, or the last owner: an admin acts as an owner of every
+  project and can put any one right over HTTP, `vantage project member`
+  does it on the database, and every new project starts with no owner
+  anyway. A guard would be a count-then-delete needing a lock on the
+  project row, to prevent a state that is already recovered from.
 - **Who recorded a run.** `record_session` takes `recorded_by`, the
   caller's user or `None`. The report that creates a run stores it, and
   every later report must come from the same caller, or the store raises
   `ForeignRunError` before looking at whether the run is finished, and
   writes nothing; the route answers `409 foreign_run`. The run id is the
   client's, so this is what keeps one user from finishing another's run.
-  The heartbeat route reads the run's `recorded_by` first, which never
-  changes once the run exists, so the check races nothing.
-- **Managing them.** `vantage user` and `vantage token`
-  (`service/manage.py`) resolve and open the database as the server does,
-  never import the web framework, and create a database only for `user
-  add`. `token create` prints the token alone on stdout. `user password`
+  The heartbeat's `requires_record_run` reads the run's detail first, with
+  its recorder and project, neither of which changes once the run exists,
+  so the checks race nothing.
+- **Managing them.** `vantage user`, `vantage token` and `vantage project
+  member` (`service/manage.py`) resolve and open the database as the
+  server does, never import the web framework, and create a database only
+  for `user add`. `token create` prints the token alone on stdout. `user password`
   never takes a password from an argument or the environment, which `ps`
   and shell history would show: it asks twice through `getpass`, and only
   on a terminal, since with stdin a pipe `getpass` would read the terminal
   behind it or echo where there is none; or it reads stdin, less one
-  trailing newline, with `--password-stdin`.
+  trailing newline, with `--password-stdin`. `project member` checks the
+  names, and refuses to set or remove a member of `default`, before it
+  opens the database; `set` points out a disabled user, whose role grants
+  nothing until they are enabled, and an admin, whom a role changes
+  nothing for. None of these commands asks for a token or a role: whoever
+  can open the database acts with full authority, which is how a server
+  with no admin left, or a project with no owner, is recovered.
 - **Managing them over HTTP.** `service/routes/users.py` gives an admin
   what the two commands give, with the same domain checks in the same
   order. `requires_admin_token` is `requires_admin` that also refuses the
@@ -707,6 +829,27 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   repeats the whole body of one missing a field, and the routes raise
   their `422` `from None`. A value that cannot be a name matches no user
   without asking the store, which keeps U+0000 from every adapter.
+- **Members over HTTP.** `service/routes/members.py` gives an owner what
+  `vantage project member` gives. The three routes refuse an open
+  server's anonymous caller with `409 open_server`, as the users routes
+  do: nobody is a member of anything until users exist. `default` takes
+  no rows, so setting or removing one there is `409 default_project` for
+  an admin, and `403 insufficient_role` for anyone else, whose role there
+  is editor. `PUT` then checks, in order: the media type, `default`, a
+  `{user}` no user can have (`404 unknown_user` with `fields: []`, before
+  the body is read and without asking the store), the body (`413`,
+  `400`), its shape (`422 invalid_member_request`), the role
+  (`422 invalid_role`, from `check_role`, so it has a code of its own),
+  and last the store: `201` when `set_member` added the row, `200` when
+  it set an existing member's role, the same one included, and
+  `404 unknown_user` for a user nobody has. `DELETE` answers
+  `404 unknown_member` alike for a name nobody can have, a user nobody
+  has and a user who is not a member, so a repeated one is a `404`, as a
+  section's is. `unknown_user` tells an owner which names exist, which
+  adding a colleague by name needs; the list shows a viewer user names,
+  which every run's `recorded_by` shows them anyway. Every write is one
+  store call, and the only read before it, the caller's role, is stale by
+  one request at most, as a token's standing is.
 - **The plugin** reads its token from `VANTAGE_TOKEN` alone, only once
   `--vantage` is typed; a committed ini file or a command line would show it
   to others. It goes in `Authorization` on every report and heartbeat, never
@@ -714,19 +857,29 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   ever reaches the configured address. A vantage server's 401, 403 or 409,
   recognised by the error its body names, becomes an `AccessRefusedError`,
   still an `HTTPError` with that status, whose message says what to fix.
+  A `403 not_a_member` or `insufficient_role` to a report becomes a
+  `ProjectRefusedError`, as a `404 unknown_project` does, its `error`
+  saying which, naming the project and the `vantage project member set`
+  that lets the user record there; to a heartbeat, which names no project,
+  an `AccessRefusedError` saying the user may no longer record in the
+  run's project, raised only when a token was sent. A 403 with any other
+  code, a proxy's page say, stays a plain `HTTPError`.
   `ReportSettings`' `repr` leaves the token out.
 - **The outbox never holds a token.** A 401 or 403 is worth retrying
   (`outbox.worth_retrying`): the reports are queued, and a sender with
   another token -- `vantage push` reads `VANTAGE_TOKEN` too -- can deliver
   them. A sender refused that way stops, as for an unreachable server,
   since every run would be refused alike; a 409 drops the run, since no
-  token but its recorder's will ever be taken for it.
+  token but its recorder's will ever be taken for it. A
+  `403 not_a_member` or `insufficient_role` refuses the token's user one
+  project, not the token: the run is kept and the send goes on, passing
+  over that project's runs (see [Projects](#projects)).
 
 ## Request handling and concurrency
 
 `create_app(store, grace_period_seconds=900)` builds the app, mounts the
-`runs`, `read`, `capabilities`, `sections`, `users`, `projects` and `login`
-routers under `/api/v1`, and
+`runs`, `read`, `capabilities`, `sections`, `users`, `projects`, `members`
+and `login` routers under `/api/v1`, and
 registers the error handlers. The `vantage` command runs it under Uvicorn, in
 one process.
 
@@ -740,7 +893,8 @@ would stall every other request, heartbeats included.
   (`ingestion/decode.py`) and `vantage.ingestion.ingest` -- validation,
   conversion (YAML parsing of metadata included) and the store write -- then
   run in the threadpool through `run_in_threadpool`. `POST /projects`, a
-  project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`,
+  project's `POST .../config/sections` and `PUT .../members/{user}`,
+  `POST /users`, `PATCH /users/{name}`,
   `PUT /users/{name}/password`, `POST /tokens`, `POST /login` and
   `POST /password` read their bodies the same way, under caps of their
   own. The three password routes then run their scrypt and store calls in
@@ -814,6 +968,18 @@ another process by construction, never by a check first:
   lock keyed on the project and the namespace, so the section bound holds
   per project across servers.
 - `create_project` is one insert that does nothing on a taken name.
+- `set_member` is one transaction: it probes the project, then the user,
+  then upserts the member row, `ON CONFLICT (project, account) DO UPDATE`.
+  Projects and users are never deleted, so what the probes find stays,
+  and the foreign keys back them; probing first names the missing row
+  correctly. Whether the row was added is the upsert's own
+  `RETURNING xmax = 0`, so of two calls adding one member exactly one says
+  it did. The write locks the one member row, and its foreign keys take
+  `FOR KEY SHARE` on the project and user rows, which conflicts with
+  nothing else the store takes on them: `update_user`'s row lock is
+  `FOR NO KEY UPDATE`, a login's `FOR SHARE`. `remove_member` is one
+  `DELETE`, and a set racing a remove on one row ends as whichever commits
+  last; both ends are valid.
 - `touch_last_contact` is one conditional `UPDATE`, and never moves the
   contact backwards.
 - `create_user` is one insert that does nothing on a taken name, and
@@ -850,8 +1016,8 @@ and no UTF-8 encoder takes a lone surrogate, so `decode_json`
 (`ingestion/decode.py`, with `ingestion/text.py`) replaces every U+0000 in a
 key or string value of a body with U+FFFD, and every lone surrogate too for
 `POST /runs` and the local store; a project's `POST .../config/sections`,
-`POST /projects` and the users and tokens bodies refuse a lone surrogate
-instead. `metadata_parse`
+`POST /projects` and the members, users and tokens bodies refuse a lone
+surrogate instead. `metadata_parse`
 replaces a U+0000 that a declared document spells as an escape the same
 way. Every adapter therefore stores the same text. A value that is only
 looked up with -- a node id, a metadata filter, a section name to delete --
@@ -882,7 +1048,7 @@ the repository root the plugin sends.
 
 **`schema.sql` is applied whole, once.** On first open, when the `meta` table
 does not exist, the whole file runs in one `BEGIN IMMEDIATE` transaction that
-also stamps `meta.schema_version` (currently 9) and `meta.origin` (see
+also stamps `meta.schema_version` (currently 10) and `meta.origin` (see
 [Users, tokens and who may do what](#users-tokens-and-who-may-do-what)) and
 writes the `default` project. Reopening issues no DDL. A
 database carrying any other stamp, older, newer, missing or not a number, is
@@ -897,12 +1063,13 @@ logical schema, and change together.
 | Table | Holds |
 | --- | --- |
 | `project` | one row per project, `default` from the database's creation; never renamed or deleted |
+| `project_member` | one row per member of a project, with their role in it (`viewer`, `editor` or `owner`, a `CHECK`), keyed by project and user, with an index on `(account, project)` for a user's memberships; none in `default`, which the adapters refuse in code rather than a `CHECK`, so `DEFAULT_PROJECT` stays the only statement of that name. A disabled user's rows stay |
 | `run` | one row per session: its project, times, exit status, interruption, VCS fields, last contact, the user who recorded it |
 | `test_case` | the catalogue: one row per node id ever seen in a project, with first and last sighting |
 | `result` | one row per test per run, unique on `(run_id, node_id)` |
 | `run_metadata_file`, `run_metadata` | each declared file's status; each key's status and value, whether a file or the session gave it, its display name, and whether the declaration named it |
 | `project_setting` | a project's namespaced JSON values; its section definitions live here |
-| `account`, `access_token` | one row per user, never deleted, with their password's scrypt hash or null; one per token made, by its digest, with its scopes, when it was revoked and, for a login token alone, when it expires. A made token's row is kept for good, a login token's deleted once it has expired, at its user's next login |
+| `account`, `access_token` | one row per user, never deleted, with their password's scrypt hash or null; one per token made, by its digest, with its scopes (`can_read`, `can_record`, `can_manage`, `can_admin`, at least one set), when it was revoked and, for a login token alone, when it expires. A made token's row is kept for good, a login token's deleted once it has expired, at its user's next login |
 | `meta` | the schema version, who made the database (`origin`: `local` or `server`), and when and by whom it was created |
 
 **Timestamps are fixed-width UTC text**, `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`,
@@ -933,6 +1100,13 @@ its row: run, catalogue, results, metadata.
   replay changes nothing. A metadata key is inserted only while the run
   holds fewer than 200, counted in the same statement, so the bound holds
   over every report of the run and the metadata route needs no paging.
+
+**A member is set in one transaction** too: the project, the user and the
+member row are probed, then the row is upserted, under the same
+`BEGIN IMMEDIATE`, so the answer names what is missing, project first,
+and the row probe tells an added member from a changed one, as the run's
+does. `default` and a role outside `ROLES` are refused with `ValueError`
+before the database is asked.
 
 Booleans are `0`/`1`; `vcs_dirty` is null when unknown, never `0`. The long
 free-text columns (the commit subject, and a result's failure message,

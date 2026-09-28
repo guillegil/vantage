@@ -192,7 +192,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         epilog=(
             "vantage push sends the runs pytest-vantage queued for a server it could not "
             "reach, vantage user manages the users of the database, vantage token their "
-            "tokens and vantage project its projects; each one's --help says how."
+            "tokens and vantage project its projects and their members; each one's --help "
+            "says how."
         ),
     )
     parser.add_argument(

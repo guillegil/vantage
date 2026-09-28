@@ -454,14 +454,48 @@ class ProjectCreateRequest(BaseModel):
 
 
 class ProjectResponse(BaseModel):
-    """One project."""
+    """One project. `role` is the one the caller acts with in it: `owner`
+    for an admin, `editor` in `default`, otherwise their member row's; `None`
+    on a server with no user, which checks no role."""
 
     name: str
     created_at: datetime
+    role: str | None
 
 
 class ProjectListResponse(BaseModel):
-    """The response body for `GET /api/v1/projects`: every project, by
-    name."""
+    """The response body for `GET /api/v1/projects`: every project the
+    caller has a role in -- every project, for an admin or on a server with
+    no user -- by name."""
 
     items: list[ProjectResponse]
+
+
+# --- Members ----------------------------------------------------------------
+
+
+class MemberSetRequest(BaseModel):
+    """The request body for `PUT /api/v1/projects/{project}/members/{user}`.
+    The role is checked by the domain's own rule, which the command line
+    applies too."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    role: str
+
+
+class MemberResponse(BaseModel):
+    """One member of a project, and their role in it."""
+
+    user: str
+    role: str
+
+
+class MemberListResponse(BaseModel):
+    """The response body for `GET /api/v1/projects/{project}/members`: the
+    project's members, by user. `everyone` is the role every user holds
+    there without a row -- `editor` in `default`, which has no members --
+    and `None` elsewhere."""
+
+    items: list[MemberResponse]
+    everyone: str | None

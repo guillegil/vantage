@@ -19,11 +19,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import vantage.local
 from fastapi.testclient import TestClient
 from password_fixtures import cheap_hash
 from vantage.core.config.database import SqliteTarget
 from vantage.core.config.resolution import resolve_server_config
-from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.core.domain.projects import DEFAULT_PROJECT, VIEWER_ROLE
+from vantage.ingestion import Ingested, ingest
 from vantage.local import LocalStoreError, default_database_path, store_reports
 from vantage.service.app import create_app
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -331,6 +333,34 @@ def test_a_run_named_again_in_another_project_is_one_line_and_stays_where_it_was
     message = _refusal(database, _in_project("boards"))
 
     assert message.startswith(f"cannot store run {_RUN_ID} in the database at {database}: ")
+    assert _project_of(database, _RUN_ID) == "firmware"
+
+
+def test_the_local_store_asks_nobodys_role_in_a_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nobody sends a report here but the database's owner, so `ingest` is
+    handed no `admit`: a run lands in a project whose members, which a
+    server gave the database, include nobody who could have sent it."""
+    database = tmp_path / "vantage.db"
+    server = SqliteExecutionStore(database)
+    try:
+        server.create_user("alice", admin=False, created_at=datetime.now(timezone.utc))
+        server.create_project("firmware", created_at=datetime.now(timezone.utc))
+        server.set_member("alice", project="firmware", role=VIEWER_ROLE)
+    finally:
+        server.close()
+    admitted: list[object] = []
+
+    def _ingest(*args: Any, **kwargs: Any) -> Ingested:
+        admitted.append(kwargs.get("admit"))
+        return ingest(*args, **kwargs)
+
+    monkeypatch.setattr(vantage.local, "ingest", _ingest)
+
+    store_reports(database, _in_project("firmware"))
+
+    assert admitted == [None, None]
     assert _project_of(database, _RUN_ID) == "firmware"
 
 

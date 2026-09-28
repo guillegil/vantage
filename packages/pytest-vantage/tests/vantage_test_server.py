@@ -119,19 +119,30 @@ class VantageTestServer(LoopbackServer):
         """Make the project `name`, as an admin would."""
         self.store.create_project(name, created_at=datetime.now(timezone.utc))
 
+    def set_member(self, user: str, project: str, role: str) -> None:
+        """Give `user` the role `role` in `project`, as an owner of it or an
+        admin would."""
+        self.store.set_member(user, project=project, role=role)
+
+    def remove_member(self, user: str, project: str) -> None:
+        """Take away `user`'s role in `project`, as an owner of it or an
+        admin would."""
+        self.store.remove_member(user, project=project)
+
     def project_of(self, run_id: str) -> str:
         """The project the server filed `run_id` in."""
         detail = self.store.get_run_detail(run_id)
         assert detail is not None, f"no run {run_id}"
         return detail.project
 
-    def token(self, user: str, *scopes: str) -> str:
+    def token(self, user: str, *scopes: str, admin: bool = True) -> str:
         """A new token of `user` holding `scopes`, read and record when none
         is named. The user is made first if nobody has that name, as an
-        admin, which closes the server: from then on it needs a token."""
+        admin unless `admin` is false, which closes the server: from then
+        on it needs a token."""
         now = datetime.now(timezone.utc)
         if self.store.get_user(user) is None:
-            self.store.create_user(user, admin=True, created_at=now)
+            self.store.create_user(user, admin=admin, created_at=now)
         token = new_token()
         self.store.create_token(
             user,

@@ -79,10 +79,10 @@ def test_a_fresh_database_is_stamped_with_the_current_schema_version(tmp_path: P
     assert row == (str(_SCHEMA_VERSION),)
 
 
-def test_a_new_database_is_stamped_9_and_holds_the_default_project_alone(
+def test_a_new_database_is_stamped_10_and_holds_the_default_project_alone(
     tmp_path: Path,
 ) -> None:
-    """Version 9 is the schema with passwords, login tokens and the origin.
+    """Version 10 is the schema with project members and the manage scope.
     A report naming no project is recorded in `default`, so a new database
     has that project before anything is written to it -- and no other."""
     conn = open_database(tmp_path / "store" / "vantage.db")
@@ -92,7 +92,7 @@ def test_a_new_database_is_stamped_9_and_holds_the_default_project_alone(
     finally:
         conn.close()
 
-    assert stamp == ("9",)
+    assert stamp == ("10",)
     assert [name for name, _created_at in projects] == [DEFAULT_PROJECT]
     ((_name, created_at),) = projects
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00", created_at)
@@ -413,7 +413,8 @@ def test_a_version_7_database_is_refused_and_left_as_it_was(tmp_path: Path) -> N
     with pytest.raises(SchemaVersionError) as refused:
         open_database(db_path)
 
-    assert "schema_version is 7, but this build requires schema_version 9;" in str(refused.value)
+    expected = f"schema_version is 7, but this build requires schema_version {_SCHEMA_VERSION};"
+    assert expected in str(refused.value)
     assert db_path.read_bytes() == before
     assert sorted(path.name for path in db_path.parent.iterdir()) == ["vantage.db"]
 
@@ -445,10 +446,52 @@ def test_a_version_8_database_is_refused_and_left_as_it_was(tmp_path: Path) -> N
     with pytest.raises(SchemaVersionError) as refused:
         open_database(db_path)
 
-    assert "schema_version is 8, but this build requires schema_version 9;" in str(refused.value)
+    expected = f"schema_version is 8, but this build requires schema_version {_SCHEMA_VERSION};"
+    assert expected in str(refused.value)
     assert db_path.read_bytes() == before
     assert sorted(path.name for path in db_path.parent.iterdir()) == ["vantage.db"]
     assert "origin" not in _meta(db_path)
+
+
+def test_a_version_9_database_is_refused_and_left_as_it_was(tmp_path: Path) -> None:
+    """A database from the build before project members has tokens without
+    the manage flag and no member table. Given the table empty, each of its
+    projects but `default` would shut out every user but an admin, even one
+    who recorded there. It is refused, not given the column or the table:
+    that would be a migration, and there are none."""
+    db_path = tmp_path / "store" / "vantage.db"
+    db_path.parent.mkdir(parents=True)
+    with contextlib.closing(sqlite3.connect(str(db_path))) as old, old:
+        old.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        old.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '9')")
+        old.execute("INSERT INTO meta (key, value) VALUES ('origin', 'server')")
+        old.execute("CREATE TABLE project (name TEXT PRIMARY KEY, created_at TEXT NOT NULL)")
+        old.execute("INSERT INTO project VALUES ('default', '2026-09-01T10:00:00.000000+00:00')")
+        old.execute(
+            "CREATE TABLE account (name TEXT PRIMARY KEY, admin INTEGER NOT NULL,"
+            " disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,"
+            " password_hash TEXT NULL)"
+        )
+        old.execute(
+            "CREATE TABLE access_token (id INTEGER PRIMARY KEY, account TEXT NOT NULL,"
+            " digest TEXT NOT NULL UNIQUE, label TEXT NOT NULL, can_read INTEGER NOT NULL,"
+            " can_record INTEGER NOT NULL, can_admin INTEGER NOT NULL,"
+            " created_at TEXT NOT NULL, revoked_at TEXT NULL, expires_at TEXT NULL)"
+        )
+    before = db_path.read_bytes()
+
+    with pytest.raises(SchemaVersionError) as refused:
+        open_database(db_path)
+
+    expected = f"schema_version is 9, but this build requires schema_version {_SCHEMA_VERSION};"
+    assert expected in str(refused.value)
+    assert db_path.read_bytes() == before
+    assert sorted(path.name for path in db_path.parent.iterdir()) == ["vantage.db"]
+    with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
+        tables = [name for (name,) in conn.execute("SELECT name FROM sqlite_master")]
+        columns = [row[1] for row in conn.execute("PRAGMA table_info(access_token)")]
+    assert "project_member" not in tables
+    assert "can_manage" not in columns
 
 
 def test_a_schema_that_fails_partway_is_rolled_back_and_its_lock_released_at_once(

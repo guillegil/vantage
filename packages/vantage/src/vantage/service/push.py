@@ -13,7 +13,9 @@ dropped when the server refuses it outright.
 A server with users needs a token, which comes from `VANTAGE_TOKEN` as it
 does for the plugin, and goes with every run sent; the queue never holds
 one. A 401 or 403 leaves the server's runs queued, for a push with a token
-the server accepts.
+the server accepts; a 403 saying the token's user may not record in one
+project leaves only that project's runs queued, for once an owner of it or
+an admin makes them an editor there.
 
 Nothing here imports FastAPI or uvicorn: a test machine with `vantage` and
 no `server` extra sends its queue.
@@ -129,6 +131,12 @@ def _summary_line(summary: SendSummary) -> str:
     missing: tuple[str, ...] = getattr(summary, "missing_projects", ())
     if missing:
         line += f", kept runs of projects it does not have ({', '.join(missing)})"
+    # Absent from a pytest-vantage older than this vantage as well.
+    forbidden: tuple[str, ...] = getattr(summary, "forbidden_projects", ())
+    if forbidden:
+        line += (
+            f", kept runs of projects the token's user may not record in ({', '.join(forbidden)})"
+        )
     if summary.stopped is not None:
         line += f", then stopped: {summary.stopped}"
     return f"vantage: {line} ({summary.waiting} waiting)"

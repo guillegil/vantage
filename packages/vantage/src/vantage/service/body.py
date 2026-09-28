@@ -2,12 +2,12 @@
 size cap, then a strict parse.
 
 Shared by the routes that take a body: `POST /runs`, `POST /projects`, a
-project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`,
-`PUT /users/{name}/password`, `POST /tokens`, `POST /login` and
-`POST /password`. None declares its body as a parameter, because
-FastAPI would then read the whole body, with no bound, and parse it on the
-event loop every request shares, before the route's first line runs.
-Instead:
+project's `POST .../config/sections` and `PUT .../members/{user}`,
+`POST /users`, `PATCH /users/{name}`, `PUT /users/{name}/password`,
+`POST /tokens`, `POST /login` and `POST /password`. None declares its body
+as a parameter, because FastAPI would then read the whole body, with no
+bound, and parse it on the event loop every request shares, before the
+route's first line runs. Instead:
 
 1. `require_json_media_type` checks `Content-Type` from the header alone.
 2. `read_bounded_body` streams the body and stops the moment the running

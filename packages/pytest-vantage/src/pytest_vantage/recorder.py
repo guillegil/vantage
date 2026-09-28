@@ -653,10 +653,12 @@ class Recorder:
 
         Only a failure a retry can fix is queued: no answer, a 5xx, a 408
         or 429 asking for the report again later, a 401 or 403 refusing the
-        token, which `vantage push` with another one can deliver, or a 404
-        `unknown_project`, which an admin fixes by adding the project. Any
-        other 4xx, a redirect or an answer that does not acknowledge the run
-        would fail the same way every time. Reports the server has
+        token, which `vantage push` with another one can deliver, a 404
+        `unknown_project`, which an admin fixes by adding the project, or a
+        403 `not_a_member` or `insufficient_role`, which an owner of the
+        project or an admin fixes by making the token's user an editor of
+        it. Any other 4xx, a redirect or an answer that does not acknowledge
+        the run would fail the same way every time. Reports the server has
         acknowledged are not queued again.
         """
         from pytest_vantage.outbox import unreachable, worth_retrying
@@ -795,6 +797,9 @@ class Recorder:
         if summary.missing_projects:
             projects = ", ".join(summary.missing_projects)
             line = f"{line}; kept runs of projects it does not have: {projects}"
+        if summary.forbidden_projects:
+            projects = ", ".join(summary.forbidden_projects)
+            line = f"{line}; kept runs of projects the token's user may not record in: {projects}"
         if summary.stopped is not None:
             line = f"{line}; stopped: {summary.stopped}"
         self._summary.append(line)
