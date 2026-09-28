@@ -9,6 +9,14 @@ constant-time comparison.
 
 A user is disabled, never deleted, so a run always names an existing user
 as the one who recorded it, and a server that has had a user stays closed.
+A database the server made has a user from its first start: `vantage`
+gives it the admin `admin` before serving it.
+
+A user who has a password (`core/domain/passwords.py`) can trade it for a
+login token, which expires after `LOGIN_TOKEN_LIFETIME` and is revoked
+whenever that user's password is set. Every other token is made by an
+admin or on the command line, never expires, and survives password
+changes.
 """
 
 from __future__ import annotations
@@ -18,7 +26,7 @@ import re
 import secrets
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 READ_SCOPE = "read"
 """Read runs, results, history and the section definitions."""
@@ -49,6 +57,12 @@ TOKEN_PREFIX = "vantage_"  # noqa: S105
 """Makes a token recognisable where it should not be, such as in a
 committed file a secret scanner reads."""
 
+LOGIN_TOKEN_LABEL = "login"  # noqa: S105
+"""The label of every token a login hands out."""
+
+LOGIN_TOKEN_LIFETIME = timedelta(hours=12)
+"""How long a login token authenticates. There is no refresh: log in again."""
+
 _TOKEN_RE = re.compile(r"\A[\x21-\x7e]{1,512}\Z")
 
 
@@ -74,10 +88,11 @@ def check_user_name(name: str) -> str:
     return name
 
 
-def _labelable(character: str) -> bool:
+def plain_character(character: str) -> bool:
     """Neither a control character, which would break the one line a token
-    is listed on, nor a lone surrogate, which no store can encode -- the
-    command line hands one over for a byte its locale cannot decode."""
+    is listed on or hide in a password, nor a lone surrogate, which no store
+    can encode -- the command line hands one over for a byte its locale
+    cannot decode."""
     point = ord(character)
     return not (point < 0x20 or 0x7F <= point < 0xA0 or 0xD800 <= point <= 0xDFFF)
 
@@ -85,7 +100,7 @@ def _labelable(character: str) -> bool:
 def check_token_label(label: str) -> str:
     """`label`, if it can label a token: at most `MAX_TOKEN_LABEL_CHARS`
     characters, none of them a control character or a lone surrogate."""
-    if len(label) > MAX_TOKEN_LABEL_CHARS or not all(map(_labelable, label)):
+    if len(label) > MAX_TOKEN_LABEL_CHARS or not all(map(plain_character, label)):
         raise InvalidTokenLabelError(
             f"a token label is at most {MAX_TOKEN_LABEL_CHARS} characters, "
             "with no control characters"
@@ -121,18 +136,23 @@ def token_digest(token: str) -> str:
 @dataclass(frozen=True, slots=True)
 class User:
     """One user of the server. `admin` users may hold the admin scope;
-    a `disabled` one's tokens authenticate nothing."""
+    a `disabled` one's tokens authenticate nothing. `has_password` says
+    whether the user can log in; the password's hash never leaves the
+    store but through `get_password_hash`."""
 
     name: str
     admin: bool
     disabled: bool
     created_at: datetime
+    has_password: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class Token:
     """One token, without the token itself, which is never stored. A
-    revoked token keeps its row, with the time it was revoked."""
+    revoked token keeps its row, with the time it was revoked. Only a login
+    token has an `expires_at`; its row is deleted once it has expired, at
+    its user's next login, so the lists of tokens stay short."""
 
     id: int
     user: str
@@ -140,6 +160,7 @@ class Token:
     scopes: frozenset[str]
     created_at: datetime
     revoked_at: datetime | None
+    expires_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

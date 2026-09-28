@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.storage.connection import open_database
 from vantage.storage.version import SchemaVersionError
 
@@ -119,8 +120,8 @@ def test_existing_permissive_database_still_records_and_warns(
     with caplog.at_level(logging.WARNING):
         conn = open_database(db_path)
     conn.execute(
-        "INSERT INTO run (id, received_at, started_at) VALUES (?, ?, ?)",
-        ("a" * 32, "2026-08-15T09:00:00+00:00", "2026-08-15T09:00:00+00:00"),
+        "INSERT INTO run (id, project, received_at, started_at) VALUES (?, ?, ?, ?)",
+        ("a" * 32, DEFAULT_PROJECT, "2026-08-15T09:00:00+00:00", "2026-08-15T09:00:00+00:00"),
     )
     row = conn.execute("SELECT COUNT(*) FROM run").fetchone()
     conn.close()
@@ -182,8 +183,8 @@ def test_wal_and_shm_sidecars_created_0600(tmp_path: Path, permissive_umask: Non
     conn = open_database(db_path)
     try:
         conn.execute(
-            "INSERT INTO run (id, received_at, started_at) VALUES (?, ?, ?)",
-            ("a" * 32, "2026-08-15T09:00:00+00:00", "2026-08-15T09:00:00+00:00"),
+            "INSERT INTO run (id, project, received_at, started_at) VALUES (?, ?, ?, ?)",
+            ("a" * 32, DEFAULT_PROJECT, "2026-08-15T09:00:00+00:00", "2026-08-15T09:00:00+00:00"),
         )
         wal_path = db_path.with_name(db_path.name + "-wal")
         shm_path = db_path.with_name(db_path.name + "-shm")

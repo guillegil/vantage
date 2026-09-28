@@ -11,6 +11,7 @@ import json
 import logging
 import socket
 import threading
+from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -18,6 +19,9 @@ from fastapi.testclient import TestClient
 from loopback_server import LoopbackServer
 from memory_store import InMemoryExecutionStore
 from starlette.types import ASGIApp, Receive, Scope, Send
+from vantage.core.domain.access import RECORD_SCOPE, new_token, token_digest
+from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES, safe_segment
 from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
@@ -314,7 +318,10 @@ def _post_streamed(app: Any, path: str, chunk: bytes, chunks: int) -> tuple[int 
 
 @pytest.mark.parametrize(
     ("path", "cap"),
-    [("/api/v1/runs", MAX_REPORT_BYTES), ("/api/v1/config/sections", MAX_SECTION_BODY_BYTES)],
+    [
+        ("/api/v1/runs", MAX_REPORT_BYTES),
+        ("/api/v1/projects/default/config/sections", MAX_SECTION_BODY_BYTES),
+    ],
     ids=["runs", "sections"],
 )
 def test_reading_a_body_stops_at_the_chunk_that_crosses_the_cap(
@@ -330,7 +337,7 @@ def test_reading_a_body_stops_at_the_chunk_that_crosses_the_cap(
     assert status == 413
     assert asked == cap // len(chunk) + 1
     assert store.count_executions() == 0
-    assert store.list_settings("test_sections") == ()
+    assert store.list_settings("test_sections", project=DEFAULT_PROJECT) == ()
 
 
 def test_wrong_content_type_is_415(client: TestClient, store: InMemoryExecutionStore) -> None:
@@ -393,6 +400,7 @@ def test_the_415_body_never_reflects_the_content_type_header(
 @pytest.mark.parametrize(
     ("method", "path", "status", "error"),
     [
+        ("GET", "/api/v1/runs", 405, "method_not_allowed"),
         ("PUT", "/api/v1/runs", 405, "method_not_allowed"),
         ("DELETE", "/api/v1/runs", 405, "method_not_allowed"),
         ("GET", f"/api/v1/runs/{'e' * 32}/heartbeat", 405, "method_not_allowed"),
@@ -475,12 +483,17 @@ def test_heartbeat_for_unknown_run_is_404(client: TestClient) -> None:
     [
         ("POST", "/api/v1/runs/not-a-hex-id/heartbeat", {}, "path.run_id"),
         ("GET", "/api/v1/runs/ABC", {}, "path.run_id"),
-        ("GET", "/api/v1/runs", {"limit": 0}, "query.limit"),
-        ("GET", "/api/v1/runs", {"offset": -1}, "query.offset"),
+        ("GET", "/api/v1/projects/default/runs", {"limit": 0}, "query.limit"),
+        ("GET", "/api/v1/projects/default/runs", {"offset": -1}, "query.offset"),
         ("GET", f"/api/v1/runs/{'e' * 32}/results", {"limit": "x"}, "query.limit"),
-        ("GET", "/api/v1/tests/history", {"node_id": "n", "limit": 0}, "query.limit"),
+        (
+            "GET",
+            "/api/v1/projects/default/tests/history",
+            {"node_id": "n", "limit": 0},
+            "query.limit",
+        ),
         ("GET", "/api/v1/runs/zzz/sections", {}, "path.run_id"),
-        ("DELETE", "/api/v1/config/sections", {}, "query.name"),
+        ("DELETE", "/api/v1/projects/default/config/sections", {}, "query.name"),
     ],
 )
 def test_a_bad_path_or_query_parameter_is_422_invalid_parameter(
@@ -555,6 +568,207 @@ def test_duplicate_node_id_rejection_never_echoes_the_node_id_value(
     assert "results" in body["fields"]
     for field in body["fields"]:
         assert safe_segment(field) == field
+
+
+# --- The report's project ----------------------------------------------------
+
+_PROJECT_RUN = "5" + "d" * 31
+_NOW = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
+_FIRST_NODE = "tests/test_a.py::test_one"
+_LATER_NODE = "tests/test_a.py::test_two"
+
+
+def _project_report(
+    extra: dict[str, Any], *, finished: bool = True, node_id: str = _FIRST_NODE
+) -> dict[str, Any]:
+    """`_well_formed_report` of `_PROJECT_RUN` carrying one result, with
+    `extra` merged into its envelope."""
+    report = _well_formed_report(_PROJECT_RUN)
+    if not finished:
+        report["run"].update(finished_at=None, exit_status=None)
+    report["results"] = [_result_entry(node_id)]
+    report.update(extra)
+    return report
+
+
+def _project_names(store: ExecutionStore) -> list[str]:
+    return [project.name for project in store.list_projects()]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"project": None}, {"project": DEFAULT_PROJECT}],
+    ids=["absent", "null", "named"],
+)
+def test_a_report_naming_no_project_or_default_is_stored_in_default(
+    any_store: ExecutionStore, extra: dict[str, Any]
+) -> None:
+    """A client that predates projects sends no key, and a hand-written
+    report may send `null`: both keep working, into the project every
+    database has."""
+    client = TestClient(create_app(any_store))
+
+    response = client.post("/api/v1/runs", json=_project_report(extra))
+
+    assert response.status_code == 201, response.text
+    detail = any_store.get_run_detail(_PROJECT_RUN)
+    assert detail is not None and detail.project == DEFAULT_PROJECT
+    assert any_store.get_catalogue_entry(_FIRST_NODE, project=DEFAULT_PROJECT) is not None
+    assert client.get(f"/api/v1/runs/{_PROJECT_RUN}").json()["project"] == DEFAULT_PROJECT
+
+
+_IMPOSSIBLE_PROJECTS = {
+    "empty": "",
+    "upper_case": "Bad",
+    "sixty_five_characters": "a" * 65,
+    "not_a_string": 5,
+    "path_traversal": "../x",
+    "nul_character": "a\x00b",
+}
+
+
+@pytest.mark.parametrize("project", _IMPOSSIBLE_PROJECTS.values(), ids=_IMPOSSIBLE_PROJECTS.keys())
+def test_a_project_no_project_can_be_named_is_422_and_stores_nothing(
+    any_store: ExecutionStore, project: object
+) -> None:
+    """Refused as a malformed report, before any store is asked: a name
+    that could reach a path, a log line or PostgreSQL's text (which
+    refuses U+0000, turned to U+FFFD by the decoder) never gets that far,
+    and the answer is the same from every adapter."""
+    client = TestClient(create_app(any_store))
+
+    response = client.post("/api/v1/runs", json=_project_report({"project": project}))
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": "invalid_report",
+        "detail": "The submitted report does not match the expected shape.",
+        "fields": ["project"],
+    }
+    assert any_store.count_executions() == 0
+    assert any_store.count_results() == 0
+    assert _project_names(any_store) == [DEFAULT_PROJECT]
+
+
+def test_a_sixty_four_character_project_is_accepted(any_store: ExecutionStore) -> None:
+    """The longest name the rule allows, so the 65-character refusal above
+    is the length limit and not something else about the name."""
+    name = "a" * 64
+    any_store.create_project(name, created_at=_NOW)
+    client = TestClient(create_app(any_store))
+
+    response = client.post("/api/v1/runs", json=_project_report({"project": name}))
+
+    assert response.status_code == 201, response.text
+    detail = any_store.get_run_detail(_PROJECT_RUN)
+    assert detail is not None and detail.project == name
+
+
+def test_a_project_the_server_does_not_have_is_404_and_stores_nothing(
+    any_store: ExecutionStore,
+) -> None:
+    """A server never makes a project from a report, only an admin does,
+    so a mistyped name cannot scatter runs over projects nobody chose.
+    The refusal never repeats the name the client sent."""
+    client = TestClient(create_app(any_store))
+
+    response = client.post("/api/v1/runs", json=_project_report({"project": "firmware"}))
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error": "unknown_project",
+        "detail": "No project with that name exists.",
+        "fields": ["project"],
+    }
+    assert "firmware" not in response.text
+    assert any_store.count_executions() == 0
+    assert any_store.count_results() == 0
+    assert any_store.get_catalogue_entry(_FIRST_NODE, project=DEFAULT_PROJECT) is None
+    assert _project_names(any_store) == [DEFAULT_PROJECT]
+
+
+@pytest.mark.parametrize("finished", [False, True], ids=["unfinished", "finished"])
+@pytest.mark.parametrize(
+    ("first", "later", "created_in"),
+    [({}, {"project": "web"}, DEFAULT_PROJECT), ({"project": "web"}, {}, "web")],
+    ids=["default_then_web", "web_then_absent"],
+)
+def test_a_later_report_naming_another_project_is_409_and_stores_nothing(
+    any_store: ExecutionStore,
+    finished: bool,
+    first: dict[str, Any],
+    later: dict[str, Any],
+    created_in: str,
+) -> None:
+    """A run never moves: its first report settles its project, and a
+    later one naming another (a report with no project names `default`)
+    is refused whole, whether the run is still going or has finished."""
+    any_store.create_project("web", created_at=_NOW)
+    client = TestClient(create_app(any_store))
+    accepted = client.post("/api/v1/runs", json=_project_report(first, finished=finished))
+    assert accepted.status_code == 201, accepted.text
+    before = any_store.get_run_detail(_PROJECT_RUN)
+
+    response = client.post(
+        "/api/v1/runs", json=_project_report(later, finished=True, node_id=_LATER_NODE)
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "error": "project_mismatch",
+        "detail": "This run was recorded in another project.",
+        "fields": ["project"],
+    }
+    after = any_store.get_run_detail(_PROJECT_RUN)
+    assert after is not None and after.project == created_in
+    assert after == before
+    assert [result.identity.node_id for result in any_store.get_results(_PROJECT_RUN)] == [
+        _FIRST_NODE
+    ]
+    for project in (DEFAULT_PROJECT, "web"):
+        assert any_store.get_catalogue_entry(_LATER_NODE, project=project) is None
+
+
+def test_a_project_is_checked_before_the_runs_owner_and_the_owner_before_its_project(
+    any_store: ExecutionStore,
+) -> None:
+    """A report naming a project that does not exist is refused whoever
+    made the run. One from a user who did not make the run is `foreign_run`
+    whatever project it names: `project_mismatch` would tell that user
+    which project another user's run is not in."""
+    for name in ("alice", "bob"):
+        any_store.create_user(name, admin=False, created_at=_NOW)
+    any_store.create_project("web", created_at=_NOW)
+    alices, bobs = (_record_bearer(any_store, name) for name in ("alice", "bob"))
+    client = TestClient(create_app(any_store))
+    started = client.post("/api/v1/runs", json=_project_report({}, finished=False), headers=alices)
+    assert started.status_code == 201, started.text
+
+    unknown = client.post(
+        "/api/v1/runs", json=_project_report({"project": "firmware"}), headers=bobs
+    )
+    foreign = client.post("/api/v1/runs", json=_project_report({"project": "web"}), headers=bobs)
+    mismatch = client.post("/api/v1/runs", json=_project_report({"project": "web"}), headers=alices)
+
+    assert (unknown.status_code, unknown.json()["error"]) == (404, "unknown_project")
+    assert (foreign.status_code, foreign.json()["error"]) == (409, "foreign_run")
+    assert (mismatch.status_code, mismatch.json()["error"]) == (409, "project_mismatch")
+    detail = any_store.get_run_detail(_PROJECT_RUN)
+    assert detail is not None and detail.project == DEFAULT_PROJECT
+    assert detail.execution.exit_status is None
+
+
+def _record_bearer(store: ExecutionStore, user: str) -> dict[str, str]:
+    """A new record-scope token of `user`, as the header that sends it."""
+    token = new_token()
+    store.create_token(
+        user,
+        digest=token_digest(token),
+        label="",
+        scopes=frozenset({RECORD_SCOPE}),
+        created_at=_NOW,
+    )
+    return {"Authorization": f"Bearer {token}"}
 
 
 # --- Raw-socket truncation --------------------------------------------------

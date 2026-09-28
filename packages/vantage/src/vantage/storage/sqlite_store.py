@@ -53,6 +53,7 @@ from typing import TypeVar, cast
 
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
+    LOGIN_TOKEN_LABEL,
     READ_SCOPE,
     RECORD_SCOPE,
     Grant,
@@ -65,6 +66,7 @@ from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
 )
+from vantage.core.domain.projects import Project
 from vantage.core.domain.result import (
     CapturedOutput,
     CaseIdentity,
@@ -81,14 +83,17 @@ from vantage.core.ports.storage import (
     MetadataFile,
     NamespaceFullError,
     Page,
+    ProjectExistsError,
+    ProjectMismatchError,
+    ProjectSetting,
     ResultListEntry,
     RunDetail,
     RunKey,
     RunListEntry,
     RunMetadata,
+    UnknownProjectError,
     UnknownUserError,
     UserExistsError,
-    UserSetting,
 )
 from vantage.storage.connection import isoformat_utc, open_database
 
@@ -99,22 +104,24 @@ T = TypeVar("T")
 # limit.
 _MAX_PLACEHOLDERS = 500
 
-# `last_contact_at` and `recorded_by` are set on the insert branch only;
-# the `DO UPDATE SET` list never names them. The `vcs_*` columns update
+# `project`, `last_contact_at` and `recorded_by` are set on the insert branch
+# only; the `DO UPDATE SET` list never names them, so no statement moves a
+# run to another project. The `vcs_*` columns update
 # under the same `exit_status` guard, each through `COALESCE(excluded,
 # run)`, so a report without VCS data never nulls a value an earlier report
 # recorded. `vcs_commit_subject_truncated` follows whichever subject is
 # kept, so the flag always describes the stored subject. The guard also
-# names the recorder, though `record_session` refuses another user's
-# report before it gets here: a statement that could finish someone else's
-# run should not rely on its caller to stop it.
+# names the recorder and the project, though `record_session` refuses
+# another user's or another project's report before it gets here: a
+# statement that could finish someone else's run should not rely on its
+# caller to stop it.
 _UPSERT_RUN = """
     INSERT INTO run (
-        id, received_at, last_contact_at, started_at, finished_at,
+        id, project, received_at, last_contact_at, started_at, finished_at,
         exit_status, interrupted, interrupt_reason,
         vcs_commit, vcs_branch, vcs_commit_subject, vcs_commit_subject_truncated,
         vcs_dirty, vcs_root, recorded_by
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
         finished_at      = excluded.finished_at,
         exit_status      = excluded.exit_status,
@@ -131,11 +138,14 @@ _UPSERT_RUN = """
                  ELSE run.vcs_commit_subject_truncated END
      WHERE run.exit_status IS NULL AND excluded.exit_status IS NOT NULL
        AND run.recorded_by IS excluded.recorded_by
+       AND run.project = excluded.project
 """
 
 _PROBE_RUN_EXISTS = "SELECT 1 FROM run WHERE id = ?"
 
-_SELECT_RUN_STATE = "SELECT exit_status, recorded_by FROM run WHERE id = ?"
+_SELECT_RUN_STATE = "SELECT exit_status, recorded_by, project FROM run WHERE id = ?"
+
+_PROBE_PROJECT = "SELECT 1 FROM project WHERE name = ?"
 
 # Monotonic: a `contacted_at` earlier than or equal to the stored one changes
 # zero rows.
@@ -185,30 +195,35 @@ _LIST_SUBJECT_PREFIX_BYTES = 4 * (LIST_COMMIT_SUBJECT_CHARS + 1)
 _LIST_MESSAGE_PREFIX_BYTES = 4 * (LIST_FAILURE_MESSAGE_CHARS + 1)
 
 # `get_execution` and `get_run_detail` share one statement;
-# `last_contact_at` and `recorded_by` come last so the first twelve values
-# decode as an `Execution`.
+# `last_contact_at`, `recorded_by` and `project` come last so the first
+# twelve values decode as an `Execution`.
 _SELECT_RUN = f"""
-    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by FROM run WHERE run.id = ?
+    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by, run.project
+    FROM run WHERE run.id = ?
 """  # noqa: S608
 
 _SELECT_RUN_LIST = f"""
     SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by FROM run
 """  # noqa: S608
 
+# One project's runs, bound after the subject prefix width, read backwards
+# along `idx_run_project_started_at`.
 _LIST_RUNS = f"""
     {_SELECT_RUN_LIST}
+    WHERE run.project = ?
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT ? OFFSET ?
-"""
+"""  # noqa: S608
 
 # The runs past a `RunKey` in the newest-first order, bound as its
 # `started_at`, then its id: a tie on `started_at` is settled by id, as the
-# order settles it, and `idx_run_started_at` starts the scan at the key.
+# order settles it, and `idx_run_project_started_at` starts the scan at the
+# key.
 _AFTER_RUN_KEY = "(run.started_at, run.id) < (?, ?)"
 
 _LIST_RUNS_AFTER = f"""
     {_SELECT_RUN_LIST}
-    WHERE {_AFTER_RUN_KEY}
+    WHERE run.project = ? AND {_AFTER_RUN_KEY}
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT ? OFFSET ?
 """  # noqa: S608
@@ -221,48 +236,57 @@ _RUNS_HOLDING_PAIR = "SELECT rm.run_id FROM run_metadata rm WHERE rm.key = ? AND
 
 def _list_runs_by_metadata(pair_count: int, *, after: bool = False) -> str:
     """`_LIST_RUNS` narrowed to the runs holding each of `pair_count`
-    `(key, value)` pairs, bound after the subject prefix width, and with
-    `after` to the runs past a `RunKey` (`_AFTER_RUN_KEY`), bound next.
+    `(key, value)` pairs, bound after the subject prefix width, then to the
+    project, bound next, and with `after` to the runs past a `RunKey`
+    (`_AFTER_RUN_KEY`), bound after that.
 
     `id IN (subquery)`, not a correlated `EXISTS`: with `EXISTS`, SQLite
     anchors on `rm.run_id = run.id` and probes the primary-key autoindex
     once per `run` row, so cost grows with the total run count. Each pair's
     uncorrelated `SELECT` seeks `idx_run_metadata_key_value` once, the
     `INTERSECT` keeps the runs every pair found, and each is then looked up
-    by primary key. `test_list_runs_by_metadata_uses_the_key_value_index`
-    pins the plan. Only the module's own constants are interpolated."""
+    by primary key. The project is compared as `+run.project`, which keeps
+    SQLite from using `idx_run_project_started_at` for it: without
+    statistics it would otherwise scan every run of the project and probe
+    the list for each, so cost would grow with the project's run count.
+    `test_list_runs_by_metadata_uses_the_key_value_index` pins the plan.
+    Only the module's own constants are interpolated."""
     holding_every_pair = " INTERSECT ".join([_RUNS_HOLDING_PAIR] * pair_count)
     past_key = f"AND {_AFTER_RUN_KEY}" if after else ""
     return f"""
         {_SELECT_RUN_LIST}
-        WHERE run.id IN ({holding_every_pair}) {past_key}
+        WHERE run.id IN ({holding_every_pair}) AND +run.project = ? {past_key}
         ORDER BY run.started_at DESC, run.id DESC
         LIMIT ? OFFSET ?
     """  # noqa: S608
 
 
-# How many runs started before `key` first appeared, as one statement so it
-# reads one state of the database. `first_seen` is the earliest `started_at`
-# among runs holding any `run_metadata` row for `key`, whatever its status or
-# source, found through `idx_run_metadata_key_value`; the count is served by
-# `idx_run_started_at`. A key no run ever carried has no `first_seen`, and
-# every run predates it.
+# How many of a project's runs started before `key` first appeared in it,
+# as one statement so it reads one state of the database. `first_seen` is
+# the earliest `started_at` among the project's runs holding any
+# `run_metadata` row for `key`, whatever its status or source, found through
+# `idx_run_metadata_key_value` (the `+` keeps the project's own index out of
+# that seek, as in `_list_runs_by_metadata`); the count is served by
+# `idx_run_project_started_at`. A key none of the project's runs ever
+# carried has no `first_seen`, and every run of it predates the key. Binds
+# the project, the project, the key, the project.
 _COUNT_RUNS_PREDATING_KEY = """
     SELECT CASE WHEN first_seen.started_at IS NULL
-                THEN (SELECT COUNT(*) FROM run)
-                ELSE (SELECT COUNT(*) FROM run WHERE run.started_at < first_seen.started_at)
+                THEN (SELECT COUNT(*) FROM run WHERE run.project = ?)
+                ELSE (SELECT COUNT(*) FROM run
+                      WHERE run.project = ? AND run.started_at < first_seen.started_at)
            END
     FROM (
         SELECT MIN(run.started_at) AS started_at
         FROM run_metadata rm
         JOIN run ON run.id = rm.run_id
-        WHERE rm.key = ?
+        WHERE rm.key = ? AND +run.project = ?
     ) AS first_seen
 """
 
-# Conflict target is `node_id`, the catalogue's identity key. Every
-# right-hand side reads the row as it was before the update, so the order of
-# the assignments does not matter.
+# Conflict target is `(project, node_id)`, the catalogue's identity key, so
+# two projects never share a row. Every right-hand side reads the row as it
+# was before the update, so the order of the assignments does not matter.
 #
 # The row holds the one decomposition of `node_id` -- file, class, function,
 # parameter -- that every result of it reads through `test_case_id`. It
@@ -270,10 +294,10 @@ _COUNT_RUNS_PREDATING_KEY = """
 # late report of an older run never changes what newer runs read.
 _UPSERT_TEST_CASE = """
     INSERT INTO test_case (
-        node_id, file_path, class_name, function_name,
+        project, node_id, file_path, class_name, function_name,
         param_id, first_seen_at, last_seen_at, last_seen_run_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(node_id) DO UPDATE SET
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(project, node_id) DO UPDATE SET
         file_path        = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
                                 THEN excluded.file_path ELSE test_case.file_path END,
         class_name       = CASE WHEN excluded.last_seen_at > test_case.last_seen_at
@@ -413,8 +437,8 @@ _LIST_RESULTS = f"""
     LIMIT ? OFFSET ?
 """  # noqa: S608
 
-# `list_history`' SELECT: `node_id` resolves through the unique
-# `idx_test_case_node_id` to one `test_case.id`, then
+# `list_history`' SELECT: the project and `node_id` resolve through the
+# unique `idx_test_case_project_node_id` to one `test_case.id`, then
 # `idx_result_test_case_id` finds that test's results, then `run` is read by
 # primary key. Same execution columns and total order as `_LIST_RUNS`.
 _LIST_HISTORY = f"""
@@ -422,7 +446,7 @@ _LIST_HISTORY = f"""
     FROM test_case tc
     JOIN result r ON r.test_case_id = tc.id
     JOIN run ON run.id = r.run_id
-    WHERE tc.node_id = ?
+    WHERE tc.project = ? AND tc.node_id = ?
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT ? OFFSET ?
 """  # noqa: S608
@@ -432,7 +456,7 @@ _LIST_HISTORY_AFTER = f"""
     FROM test_case tc
     JOIN result r ON r.test_case_id = tc.id
     JOIN run ON run.id = r.run_id
-    WHERE tc.node_id = ? AND {_AFTER_RUN_KEY}
+    WHERE tc.project = ? AND tc.node_id = ? AND {_AFTER_RUN_KEY}
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT ? OFFSET ?
 """  # noqa: S608
@@ -440,29 +464,42 @@ _LIST_HISTORY_AFTER = f"""
 _SELECT_TEST_CASE = """
     SELECT node_id, file_path, class_name, function_name, param_id,
            first_seen_at, last_seen_at, last_seen_run_id
-    FROM test_case WHERE node_id = ?
+    FROM test_case WHERE project = ? AND node_id = ?
 """
 
 # Ordered by `key`, i.e. alphabetically by section name.
 _LIST_SETTINGS = """
-    SELECT namespace, key, value, updated_at
-    FROM user_setting WHERE namespace = ? ORDER BY key
+    SELECT project, namespace, key, value, updated_at
+    FROM project_setting WHERE project = ? AND namespace = ? ORDER BY key
 """
 
-_PROBE_SETTING_EXISTS = "SELECT 1 FROM user_setting WHERE namespace = ? AND key = ?"
+_PROBE_SETTING_EXISTS = """
+    SELECT 1 FROM project_setting WHERE project = ? AND namespace = ? AND key = ?
+"""
 
-_COUNT_SETTINGS = "SELECT COUNT(*) FROM user_setting WHERE namespace = ?"
+_COUNT_SETTINGS = "SELECT COUNT(*) FROM project_setting WHERE project = ? AND namespace = ?"
 
 _UPSERT_SETTING = """
-    INSERT INTO user_setting (namespace, key, value, updated_at)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT (namespace, key) DO UPDATE SET
+    INSERT INTO project_setting (project, namespace, key, value, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT (project, namespace, key) DO UPDATE SET
         value = excluded.value,
         updated_at = excluded.updated_at
 """
 
 # `_DELETE_SETTING`: `rowcount == 1` is the "it existed" answer.
-_DELETE_SETTING = "DELETE FROM user_setting WHERE namespace = ? AND key = ?"
+_DELETE_SETTING = "DELETE FROM project_setting WHERE project = ? AND namespace = ? AND key = ?"
+
+# Projects, keyed by name. `ON CONFLICT DO NOTHING` lets `create_project`
+# tell a taken name from any other failure by the row count alone.
+_INSERT_PROJECT = """
+    INSERT INTO project (name, created_at) VALUES (?, ?)
+    ON CONFLICT (name) DO NOTHING
+"""
+
+_SELECT_PROJECT = "SELECT name, created_at FROM project WHERE name = ?"
+
+_LIST_PROJECTS = "SELECT name, created_at FROM project ORDER BY name"
 
 # The per-run aggregate read. It filters on `result.run_id` and joins
 # `test_case` by primary key; `file_path` is only read, so it needs no index.
@@ -485,7 +522,49 @@ _INSERT_USER = """
     ON CONFLICT (name) DO NOTHING
 """
 
-_USER_COLUMNS = "name, admin, disabled, created_at"
+_USER_COLUMNS = "name, admin, disabled, created_at, password_hash IS NOT NULL"
+
+# Only on a database the local store did not make, and only while it has no
+# user: one statement, so it cannot race another first start.
+_INSERT_FIRST_ADMIN = """
+    INSERT INTO account (name, admin, disabled, created_at, password_hash)
+    SELECT ?, 1, 0, ?, ?
+    WHERE NOT EXISTS (SELECT 1 FROM account)
+      AND NOT EXISTS (SELECT 1 FROM meta WHERE key = 'origin' AND value = 'local')
+"""
+
+_SELECT_PASSWORD_HASH = "SELECT password_hash FROM account WHERE name = ? AND disabled = 0"  # noqa: S105
+
+_SET_PASSWORD = "UPDATE account SET password_hash = ? WHERE name = ?"  # noqa: S105
+
+# The compare-and-set a password change checked against the current
+# password makes: it loses to any change made while it was checked.
+_REPLACE_PASSWORD = """
+    UPDATE account SET password_hash = ?
+    WHERE name = ? AND password_hash = ? AND disabled = 0
+"""  # noqa: S105
+
+# Login tokens are the only ones with an expiry.
+_REVOKE_LOGIN_TOKENS = """
+    UPDATE access_token SET revoked_at = ?
+    WHERE account = ? AND expires_at IS NOT NULL AND revoked_at IS NULL
+"""  # noqa: S105
+
+# Inserts nothing unless the user is enabled and still has the hash the
+# password was checked against.
+_INSERT_LOGIN_TOKEN = """
+    INSERT INTO access_token (
+        account, digest, label, can_read, can_record, can_admin, created_at, expires_at
+    )
+    SELECT name, ?, ?, 1, 0, admin, ?, ? FROM account
+    WHERE name = ? AND password_hash = ? AND disabled = 0
+"""  # noqa: S105
+
+# Never the token just made, whatever its expiry.
+_DELETE_EXPIRED_LOGIN_TOKENS = """
+    DELETE FROM access_token
+    WHERE account = ? AND expires_at IS NOT NULL AND expires_at <= ? AND id <> ?
+"""  # noqa: S105
 
 _SELECT_USER = f"SELECT {_USER_COLUMNS} FROM account WHERE name = ?"  # noqa: S608
 
@@ -503,7 +582,9 @@ _INSERT_TOKEN = """
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
 """  # noqa: S105
 
-_TOKEN_COLUMNS = "id, account, label, can_read, can_record, can_admin, created_at, revoked_at"  # noqa: S105
+_TOKEN_COLUMNS = (
+    "id, account, label, can_read, can_record, can_admin, created_at, revoked_at, expires_at"  # noqa: S105
+)
 
 _SELECT_TOKEN = f"SELECT {_TOKEN_COLUMNS} FROM access_token WHERE id = ?"  # noqa: S608
 
@@ -524,6 +605,7 @@ _AUTHENTICATE = """
     FROM access_token t
     JOIN account a ON a.name = t.account
     WHERE t.digest = ? AND t.revoked_at IS NULL AND a.disabled = 0
+      AND (t.expires_at IS NULL OR t.expires_at > ?)
 """
 
 
@@ -547,17 +629,28 @@ def _decode_scopes(can_read: object, can_record: object, can_admin: object) -> f
 
 
 def _row_to_user(row: tuple[object, ...]) -> User:
-    name, admin, disabled, created_at = row
+    name, admin, disabled, created_at, has_password = row
     return User(
         name=cast(str, name),
         admin=bool(admin),
         disabled=bool(disabled),
         created_at=_datetime(created_at),
+        has_password=bool(has_password),
     )
 
 
 def _row_to_token(row: tuple[object, ...]) -> Token:
-    token_id, account, label, can_read, can_record, can_admin, created_at, revoked_at = row
+    (
+        token_id,
+        account,
+        label,
+        can_read,
+        can_record,
+        can_admin,
+        created_at,
+        revoked_at,
+        expires_at,
+    ) = row
     return Token(
         id=cast(int, token_id),
         user=cast(str, account),
@@ -565,6 +658,7 @@ def _row_to_token(row: tuple[object, ...]) -> Token:
         scopes=_decode_scopes(can_read, can_record, can_admin),
         created_at=_datetime(created_at),
         revoked_at=_opt_datetime(revoked_at),
+        expires_at=_opt_datetime(expires_at),
     )
 
 
@@ -802,8 +896,8 @@ def _row_to_catalogue_entry(row: tuple[object, ...]) -> CatalogueEntry:
 
 
 def _catalogue_rows(
-    execution: Execution, results: Sequence[Result]
-) -> list[tuple[str, str, str | None, str, str | None, str, str, str]]:
+    project: str, execution: Execution, results: Sequence[Result]
+) -> list[tuple[str, str, str, str | None, str, str | None, str, str, str]]:
     started_at = isoformat_utc(execution.started_at)
     run_id = execution.identity.value
     # Keyed by node_id so a report carrying the same node id twice (the
@@ -814,6 +908,7 @@ def _catalogue_rows(
     }
     return [
         (
+            project,
             identity.node_id,
             identity.file_path,
             identity.class_name,
@@ -912,7 +1007,12 @@ def _result_rows(
     ]
 
 
-def _resolve_test_case_ids(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, int]:
+def _resolve_test_case_ids(
+    conn: sqlite3.Connection, project: str, node_ids: Sequence[str]
+) -> dict[str, int]:
+    """The catalogue row id of each node id in `project`. Selecting by node
+    id alone would find another project's row of the same node id, and
+    attach this run's results to it."""
     resolved: dict[str, int] = {}
     for start in range(0, len(node_ids), _MAX_PLACEHOLDERS):
         batch = node_ids[start : start + _MAX_PLACEHOLDERS]
@@ -921,17 +1021,23 @@ def _resolve_test_case_ids(conn: sqlite3.Connection, node_ids: Sequence[str]) ->
         # text itself, so this is not the injection pattern S608 flags.
         placeholders = ",".join("?" * len(batch))
         rows = conn.execute(
-            f"SELECT id, node_id FROM test_case WHERE node_id IN ({placeholders})",  # noqa: S608
-            batch,
+            f"SELECT id, node_id FROM test_case WHERE project = ? AND node_id IN ({placeholders})",  # noqa: S608
+            (project, *batch),
         ).fetchall()
         for row_id, row_node_id in rows:
             resolved[cast(str, row_node_id)] = cast(int, row_id)
     return resolved
 
 
-def _row_to_user_setting(row: tuple[object, ...]) -> UserSetting:
-    namespace, key, value, updated_at = row
-    return UserSetting(
+def _row_to_project(row: tuple[object, ...]) -> Project:
+    name, created_at = row
+    return Project(name=cast(str, name), created_at=_datetime(created_at))
+
+
+def _row_to_project_setting(row: tuple[object, ...]) -> ProjectSetting:
+    project, namespace, key, value, updated_at = row
+    return ProjectSetting(
+        project=cast(str, project),
         namespace=cast(str, namespace),
         key=cast(str, key),
         value=cast(str, value),
@@ -961,8 +1067,10 @@ class SqliteExecutionStore:
     same file. Neither substitutes for the other.
     """
 
-    def __init__(self, path: Path) -> None:
-        self._conn = open_database(path)
+    def __init__(self, path: Path, *, local: bool = False) -> None:
+        """Open the database at `path`; `local` says pytest-vantage's local
+        store is opening it (`open_database`)."""
+        self._conn = open_database(path, local=local)
         self._lock = threading.Lock()
 
     @contextmanager
@@ -1016,23 +1124,28 @@ class SqliteExecutionStore:
         self,
         execution: Execution,
         *,
+        project: str,
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
         recorded_by: str | None = None,
     ) -> bool:
-        # One transaction, fixed order: existence probe, run upsert,
+        # One transaction, fixed order: project and run probes, run upsert,
         # catalogue upsert, surrogate-key resolve, result insert, metadata
         # inserts. The order is required -- `PRAGMA foreign_keys=ON` is set on
         # every connection, so each row's `run_id`/`test_case_id` referent
         # must exist first.
         run_id = execution.identity.value
         with self._write_transaction() as conn:
+            # Raising rolls the transaction back, though nothing is written
+            # yet.
+            if conn.execute(_PROBE_PROJECT, (project,)).fetchone() is None:
+                raise UnknownProjectError(f"there is no project named {project!r}")
             stored = conn.execute(_SELECT_RUN_STATE, (run_id,)).fetchone()
             if stored is not None and stored[1] != recorded_by:
-                # Raising rolls the transaction back, though nothing is
-                # written yet.
                 raise ForeignRunError(f"run {run_id} was recorded by another user")
+            if stored is not None and stored[2] != project:
+                raise ProjectMismatchError(f"run {run_id} was recorded in another project")
             if stored is not None and stored[0] is not None:
                 # A finished run is final: a report reaching it later is a
                 # replay and adds nothing, whatever results it carries.
@@ -1043,6 +1156,7 @@ class SqliteExecutionStore:
                 _UPSERT_RUN,
                 (
                     run_id,
+                    project,
                     isoformat_utc(received_at),
                     isoformat_utc(received_at),
                     isoformat_utc(execution.started_at),
@@ -1056,9 +1170,11 @@ class SqliteExecutionStore:
             )
 
             if results:
-                catalogue_rows = _catalogue_rows(execution, results)
+                catalogue_rows = _catalogue_rows(project, execution, results)
                 conn.executemany(_UPSERT_TEST_CASE, catalogue_rows)
-                test_case_ids = _resolve_test_case_ids(conn, [row[0] for row in catalogue_rows])
+                test_case_ids = _resolve_test_case_ids(
+                    conn, project, [row[1] for row in catalogue_rows]
+                )
                 conn.executemany(_INSERT_RESULT, _result_rows(execution, results, test_case_ids))
 
             if metadata.files:
@@ -1087,22 +1203,29 @@ class SqliteExecutionStore:
     def count_results(self) -> int:
         return self._count("SELECT COUNT(*) FROM result")
 
-    def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
-        row = self._fetchone(_SELECT_TEST_CASE, (node_id,))
+    def get_catalogue_entry(self, node_id: str, *, project: str) -> CatalogueEntry | None:
+        row = self._fetchone(_SELECT_TEST_CASE, (project, node_id))
         return None if row is None else _row_to_catalogue_entry(row)
 
     def list_runs(
-        self, *, limit: int, offset: int, after: RunKey | None = None
+        self, *, project: str, limit: int, offset: int, after: RunKey | None = None
     ) -> Page[RunListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         sql = _LIST_RUNS if after is None else _LIST_RUNS_AFTER
-        params = [_LIST_SUBJECT_PREFIX_BYTES, *_run_key_params(after), page_limit + 1, offset]
+        params = [
+            _LIST_SUBJECT_PREFIX_BYTES,
+            project,
+            *_run_key_params(after),
+            page_limit + 1,
+            offset,
+        ]
         rows = self._fetchall(sql, params)
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def list_runs_with_metadata_horizon(
         self,
         *,
+        project: str,
         filters: Sequence[tuple[str, str]],
         limit: int,
         offset: int,
@@ -1119,6 +1242,7 @@ class SqliteExecutionStore:
         params = [
             _LIST_SUBJECT_PREFIX_BYTES,
             *(part for pair in pairs for part in pair),
+            project,
             *_run_key_params(after),
             page_limit + 1,
             offset,
@@ -1126,7 +1250,11 @@ class SqliteExecutionStore:
         with self._read_snapshot() as conn:
             rows = conn.execute(sql, params).fetchall()
             predating = tuple(
-                int(conn.execute(_COUNT_RUNS_PREDATING_KEY, (key,)).fetchone()[0])
+                int(
+                    conn.execute(
+                        _COUNT_RUNS_PREDATING_KEY, (project, project, key, project)
+                    ).fetchone()[0]
+                )
                 for key in dict.fromkeys(key for key, _value in pairs)
             )
         return _page(rows, page_limit, _row_to_run_list_entry), predating
@@ -1139,6 +1267,7 @@ class SqliteExecutionStore:
             execution=_decode_execution(row[:12]),
             last_contact_at=_opt_datetime(row[12]),
             recorded_by=cast("str | None", row[13]),
+            project=cast(str, row[14]),
         )
 
     def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
@@ -1165,13 +1294,20 @@ class SqliteExecutionStore:
         return None if row is None else _row_to_result(row)
 
     def list_history(
-        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+        self,
+        *,
+        project: str,
+        node_id: str,
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> Page[HistoryEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         rows = self._fetchall(
             _LIST_HISTORY if after is None else _LIST_HISTORY_AFTER,
             (
                 _LIST_SUBJECT_PREFIX_BYTES,
+                project,
                 node_id,
                 *_run_key_params(after),
                 page_limit + 1,
@@ -1180,15 +1316,16 @@ class SqliteExecutionStore:
         )
         return _page(rows, page_limit, _row_to_history_entry)
 
-    def list_settings(self, namespace: str) -> Sequence[UserSetting]:
-        rows = self._fetchall(_LIST_SETTINGS, (namespace,))
-        return tuple(_row_to_user_setting(row) for row in rows)
+    def list_settings(self, namespace: str, *, project: str) -> Sequence[ProjectSetting]:
+        rows = self._fetchall(_LIST_SETTINGS, (project, namespace))
+        return tuple(_row_to_project_setting(row) for row in rows)
 
     def upsert_setting(
         self,
         namespace: str,
         key: str,
         *,
+        project: str,
         value: str,
         updated_at: datetime,
         max_keys: int | None = None,
@@ -1199,25 +1336,53 @@ class SqliteExecutionStore:
         # and the insert; raising rolls the transaction back.
         formatted = isoformat_utc(updated_at)
         with self._write_transaction() as conn:
-            created = conn.execute(_PROBE_SETTING_EXISTS, (namespace, key)).fetchone() is None
+            if conn.execute(_PROBE_PROJECT, (project,)).fetchone() is None:
+                raise UnknownProjectError(f"there is no project named {project!r}")
+            probe = (project, namespace, key)
+            created = conn.execute(_PROBE_SETTING_EXISTS, probe).fetchone() is None
             if created and max_keys is not None:
-                (held,) = conn.execute(_COUNT_SETTINGS, (namespace,)).fetchone()
+                (held,) = conn.execute(_COUNT_SETTINGS, (project, namespace)).fetchone()
                 if held >= max_keys:
                     raise NamespaceFullError(f"{namespace!r} already holds {held} keys")
-            conn.execute(_UPSERT_SETTING, (namespace, key, value, formatted))
+            conn.execute(_UPSERT_SETTING, (project, namespace, key, value, formatted))
         return created
 
-    def delete_setting(self, namespace: str, key: str) -> bool:
+    def delete_setting(self, namespace: str, key: str, *, project: str) -> bool:
         with self._lock:
-            cursor = self._conn.execute(_DELETE_SETTING, (namespace, key))
+            cursor = self._conn.execute(_DELETE_SETTING, (project, namespace, key))
             return cursor.rowcount == 1
 
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
         rows = self._fetchall(_SELECT_RUN_CASE_OUTCOMES, (execution_id,))
         return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
 
+    def create_project(self, name: str, *, created_at: datetime) -> Project:
+        with self._lock:
+            cursor = self._conn.execute(_INSERT_PROJECT, (name, isoformat_utc(created_at)))
+            if cursor.rowcount != 1:
+                raise ProjectExistsError(f"there is already a project named {name!r}")
+        return Project(name=name, created_at=created_at)
+
+    def get_project(self, name: str) -> Project | None:
+        row = self._fetchone(_SELECT_PROJECT, (name,))
+        return None if row is None else _row_to_project(row)
+
+    def list_projects(self) -> Sequence[Project]:
+        return tuple(_row_to_project(row) for row in self._fetchall(_LIST_PROJECTS, ()))
+
     def access_required(self) -> bool:
         return bool(self._count(_PROBE_ANY_USER))
+
+    def create_first_admin(
+        self, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        with self._write_transaction() as conn:
+            cursor = conn.execute(
+                _INSERT_FIRST_ADMIN, (name, isoformat_utc(created_at), password_hash)
+            )
+        if cursor.rowcount != 1:
+            return None
+        return User(name=name, admin=True, disabled=False, created_at=created_at, has_password=True)
 
     def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
         with self._lock:
@@ -1249,6 +1414,57 @@ class SqliteExecutionStore:
             )
             row = conn.execute(_SELECT_USER, (name,)).fetchone()
         return None if row is None else _row_to_user(row)
+
+    def get_password_hash(self, name: str) -> str | None:
+        row = self._fetchone(_SELECT_PASSWORD_HASH, (name,))
+        return None if row is None else cast("str | None", row[0])
+
+    def set_password(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        changed_at: datetime,
+        replacing: str | None = None,
+    ) -> bool:
+        with self._write_transaction() as conn:
+            if replacing is None:
+                cursor = conn.execute(_SET_PASSWORD, (password_hash, name))
+            else:
+                cursor = conn.execute(_REPLACE_PASSWORD, (password_hash, name, replacing))
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(_REVOKE_LOGIN_TOKENS, (isoformat_utc(changed_at), name))
+        return True
+
+    def create_login_token(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        digest: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> Token | None:
+        created = isoformat_utc(created_at)
+        with self._write_transaction() as conn:
+            cursor = conn.execute(
+                _INSERT_LOGIN_TOKEN,
+                (
+                    digest,
+                    LOGIN_TOKEN_LABEL,
+                    created,
+                    isoformat_utc(expires_at),
+                    name,
+                    password_hash,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            token_id = cursor.lastrowid
+            conn.execute(_DELETE_EXPIRED_LOGIN_TOKENS, (name, created, token_id))
+            row = conn.execute(_SELECT_TOKEN, (token_id,)).fetchone()
+        return _row_to_token(row)
 
     def create_token(
         self,
@@ -1293,8 +1509,8 @@ class SqliteExecutionStore:
             cursor = self._conn.execute(_REVOKE_TOKEN, (isoformat_utc(revoked_at), token_id, user))
             return cursor.rowcount == 1
 
-    def authenticate(self, digest: str) -> Grant | None:
-        row = self._fetchone(_AUTHENTICATE, (digest,))
+    def authenticate(self, digest: str, *, now: datetime) -> Grant | None:
+        row = self._fetchone(_AUTHENTICATE, (digest, isoformat_utc(now)))
         if row is None:
             return None
         name, admin, can_read, can_record, can_admin = row

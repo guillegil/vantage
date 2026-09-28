@@ -1,5 +1,10 @@
-"""The four sections routes: `GET`/`POST`/`DELETE /api/v1/config/sections`
-and `GET /api/v1/runs/{run_id}/sections`.
+"""The four sections routes: `GET`/`POST`/`DELETE
+/api/v1/projects/{project}/config/sections` and
+`GET /api/v1/runs/{run_id}/sections`.
+
+**Sections are a project's**: each project defines its own, bounded by
+`MAX_SECTIONS` on its own, and a run's summary uses the sections of the
+project the run was created in.
 
 **A section name is never a path segment.** A section name may contain `/`,
 and an encoded slash in a path is decoded before routing, so the name
@@ -44,6 +49,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 
 from vantage.core.domain.execution import IDENTITY_PATTERN
+from vantage.core.domain.projects import Project
 from vantage.core.domain.sections import (
     MAX_SECTIONS,
     SECTION_NAME_MAX_CHARS,
@@ -57,7 +63,7 @@ from vantage.core.domain.sections import (
 from vantage.core.ports.storage import ExecutionStore, NamespaceFullError
 from vantage.ingestion.decode import decode_json
 from vantage.ingestion.text import NUL
-from vantage.service.access import requires_admin, requires_read
+from vantage.service.access import requires_admin_project, requires_read, requires_read_project
 from vantage.service.body import read_bounded_body, require_json_media_type
 from vantage.service.dependencies import get_store
 from vantage.service.errors import (
@@ -91,13 +97,13 @@ character written as a 12-byte escaped surrogate pair, take under 14 KiB;
 the rest leaves room for whitespace around them."""
 
 
-def _load_definitions(store: ExecutionStore) -> list[SectionDefinition]:
-    """Every stored section, read fresh on every call -- never cached.
+def _load_definitions(store: ExecutionStore, project: str) -> list[SectionDefinition]:
+    """Every section `project` stores, read fresh on every call -- never cached.
     Raises `UnreadableSettingError` the moment one row's `value` fails
     `SectionValue` or its key is a reserved name, naming the row's key and
     never the value."""
     definitions: list[SectionDefinition] = []
-    for setting in store.list_settings(TEST_SECTIONS_NAMESPACE):
+    for setting in store.list_settings(TEST_SECTIONS_NAMESPACE, project=project):
         try:
             value = SectionValue.model_validate_json(setting.value)
             definition = SectionDefinition(name=setting.key, prefix=value.prefix)
@@ -126,14 +132,17 @@ def _encodable(text: str) -> bool:
     return True
 
 
-@router.get("/config/sections", dependencies=[Depends(requires_read)])
-def list_sections(store: ExecutionStore = Depends(get_store)) -> SectionListResponse:
-    definitions = _load_definitions(store)
+@router.get("/projects/{project}/config/sections")
+def list_sections(
+    project: Project = Depends(requires_read_project),
+    store: ExecutionStore = Depends(get_store),
+) -> SectionListResponse:
+    definitions = _load_definitions(store, project.name)
     items = [SectionResponse(name=d.name, prefix=d.prefix) for d in definitions]
     return SectionListResponse(items=items)
 
 
-def _upsert(store: ExecutionStore, body: bytes) -> tuple[bool, SectionResponse]:
+def _upsert(store: ExecutionStore, project: str, body: bytes) -> tuple[bool, SectionResponse]:
     """Parse, validate and store one complete upsert body, and return
     whether the name was new with the section as stored. Every step blocks,
     so `upsert_section` calls this in the threadpool."""
@@ -162,6 +171,7 @@ def _upsert(store: ExecutionStore, body: bytes) -> tuple[bool, SectionResponse]:
         created = store.upsert_setting(
             TEST_SECTIONS_NAMESPACE,
             name,
+            project=project,
             value=value,
             updated_at=datetime.now(timezone.utc),
             max_keys=MAX_SECTIONS,
@@ -171,18 +181,28 @@ def _upsert(store: ExecutionStore, body: bytes) -> tuple[bool, SectionResponse]:
     return created, SectionResponse(name=name, prefix=normalized_prefix)
 
 
-@router.post("/config/sections", dependencies=[Depends(requires_admin)])
-async def upsert_section(request: Request, store: ExecutionStore = Depends(get_store)) -> Response:
+@router.post("/projects/{project}/config/sections")
+async def upsert_section(
+    request: Request,
+    project: Project = Depends(requires_admin_project),
+    store: ExecutionStore = Depends(get_store),
+) -> Response:
     require_json_media_type(request)
     body = await read_bounded_body(request, MAX_SECTION_BODY_BYTES)
-    created, section = await run_in_threadpool(_upsert, store, body)
+    created, section = await run_in_threadpool(_upsert, store, project.name, body)
     return JSONResponse(status_code=201 if created else 200, content=section.model_dump())
 
 
-@router.delete("/config/sections", status_code=204, dependencies=[Depends(requires_admin)])
-def delete_section(name: str = Query(...), store: ExecutionStore = Depends(get_store)) -> Response:
+@router.delete("/projects/{project}/config/sections", status_code=204)
+def delete_section(
+    name: str = Query(...),
+    project: Project = Depends(requires_admin_project),
+    store: ExecutionStore = Depends(get_store),
+) -> Response:
     stored_name = _stored_name(name)
-    if NUL in stored_name or not store.delete_setting(TEST_SECTIONS_NAMESPACE, stored_name):
+    if NUL in stored_name or not store.delete_setting(
+        TEST_SECTIONS_NAMESPACE, stored_name, project=project.name
+    ):
         raise UnknownSectionError()
     return Response(status_code=204)
 
@@ -205,14 +225,15 @@ def _section_summary_response(summary: SectionSummary) -> SectionSummaryResponse
 def get_run_sections(
     run_id: str = Path(pattern=IDENTITY_PATTERN), store: ExecutionStore = Depends(get_store)
 ) -> RunSectionSummaryResponse:
-    """`GET /api/v1/runs/{run_id}/sections`. An unknown `run_id` is
-    `404 unknown_run`, checked the same cheap way `list_results` does
-    (`get_execution`, not a full detail read). `summarize_sections` does
-    every count and every rounding, once."""
-    if store.get_execution(run_id) is None:
+    """`GET /api/v1/runs/{run_id}/sections`, against the sections of the
+    project the run was created in. An unknown `run_id` is
+    `404 unknown_run`. `summarize_sections` does every count and every
+    rounding, once."""
+    detail = store.get_run_detail(run_id)
+    if detail is None:
         raise UnknownRunError()
 
-    definitions = _load_definitions(store)
+    definitions = _load_definitions(store, detail.project)
     case_outcomes = store.get_run_case_outcomes(run_id)
     summary = summarize_sections(case_outcomes, definitions)
     return RunSectionSummaryResponse(

@@ -18,10 +18,19 @@ at `GET /api/v1/openapi.yaml` (source:
 
 ## Authentication
 
-A server whose database has no user takes every request here without a
-token; only the users and tokens routes, which manage who may do so, answer
-`409 open_server`. Once a user exists (`vantage user add`), every route but
-`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml` needs one:
+A server needs a token once its database has a user, and a server's own
+database has one before anything is served: at its first start, `vantage`
+gives a database with no user the admin `admin`, unless pytest-vantage's
+local store made it. So a fresh server needs a token from its first report
+on. Only a database the local store made is served without one, and only
+until it has a user (`vantage user add`): such a server takes every
+request here without a token, and only the routes that manage who may do
+so (users, tokens, login and password) answer `409 open_server`.
+
+Every other server needs a token on every route but
+`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml`, and
+`POST /api/v1/login` and `POST /api/v1/password`, which take a name and a
+password instead:
 
 ```
 Authorization: Bearer vantage_...
@@ -29,15 +38,18 @@ Authorization: Bearer vantage_...
 
 A token belongs to one user and holds one or more scopes: `read`, `record`
 and `admin`. It comes from `vantage token create`, or from an admin's
-`POST /api/v1/tokens`. The two ingestion routes need `record`, which is all a token
-for a test runner needs. The server answers:
+`POST /api/v1/tokens`, and never expires. The two ingestion routes need
+`record`, which is all a token for a test runner needs, and which a login
+token (`POST /api/v1/login`, for people reading, expiring after 12 hours)
+never holds. The server answers:
 
 - No `Authorization` header, on a server with users: `401 unauthenticated`,
   with `WWW-Authenticate: Bearer realm="vantage"`.
-- A header that carries no bearer token, or a token that is unknown, revoked
-  or of a disabled user, on any server: `401 unauthenticated`, the challenge
-  adding `error="invalid_token"`. A token sent to a server without users is
-  refused the same way, not ignored.
+- A header that carries no bearer token, or a token that is unknown,
+  revoked, expired or of a disabled user, on any server:
+  `401 unauthenticated`, the challenge adding `error="invalid_token"`. A
+  token sent to a server without users is refused the same way, not
+  ignored.
 - A token that does not grant the route's scope: `403 insufficient_scope`,
   the challenge naming it, as in `scope="record"`.
 
@@ -95,6 +107,7 @@ is stored in one transaction.
 
 ```
 {
+  "project":  "firmware",
   "run":      {"id": "4f1c...", "started_at": "...", "finished_at": null,
                "exit_status": null, "interrupted": false, "interrupt_reason": null},
   "results":  [ ... ],
@@ -104,10 +117,10 @@ is stored in one transaction.
 }
 ```
 
-Only `run` is required. `results`, `vcs` and `metadata` may be absent or
-`null`; an absent `results` and an empty one both mean no results. Any other
-top-level key is ignored, so a newer client can add a section an older server
-does not know.
+Only `run` is required. `project`, `results`, `vcs` and `metadata` may be
+absent or `null`; an absent `results` and an empty one both mean no results.
+Any other top-level key is ignored, so a newer client can add a section an
+older server does not know.
 
 **Timestamps** are ISO 8601 strings. The server converts each to UTC and takes
 one without an offset as UTC; one that falls outside the years 1 to 9999 once
@@ -117,6 +130,22 @@ converted is rejected. Send them with an offset.
 some near misses instead of rejecting them (a numeric string for an integer,
 `"yes"` or `1` for a boolean, a Unix-time number or a date without a time for
 a timestamp); do not rely on that.
+
+#### `project`
+
+The project the run belongs to: a string of 1 to 64 characters of `a-z`,
+`0-9`, `.`, `_` and `-`, starting with a letter or a digit, or absent or
+`null` for `default`, which every server has. Anything else is
+`422 invalid_report` with `fields: ["project"]`. The server must have the
+project, since it never makes one from a report: one it does not have is
+`404 unknown_project` with `fields: ["project"]`, and nothing is stored.
+Projects are added by an admin (`vantage project add`, or
+`POST /api/v1/projects`).
+
+It is a top-level key rather than a field of `run`, which refuses unknown
+fields: a server that predates projects ignores it, so no server refuses a
+report for carrying it. `pytest-vantage` sends it in every report,
+`default` included.
 
 #### `run`
 
@@ -314,6 +343,11 @@ any of them.
 - **Metadata** is stored once per file path and per key: the first report
   to carry a key decides its value, and later copies are ignored. A run
   holds at most 200 keys over all its reports.
+- **One project per run.** The report that creates a run files it in its
+  project, for good. A later report naming another project is
+  `409 project_mismatch` and changes nothing, finished run or not; it is
+  checked after the user, so another user's report still reads
+  `foreign_run`.
 - **One user per run.** Every report must come from the user whose token
   sent the first, or with no token if the first came with none
   (see [Authentication](#authentication)); anything else is
@@ -333,9 +367,9 @@ run unfinished rather than finished with results missing. Its full sequence
 is: a start report (in progress, no results), heartbeats, any in-progress
 reports with results, and the finishing report. Without the
 `session_lifecycle` capability it sends only the last two. In its backup
-modes, a report that got no answer, a `5xx`, a `408`, a `429`, or a `401`
-or `403` refusing its token, is sent again later, unchanged, with the
-reports after it: by a later session or by `vantage push`, from another
+modes, a report that got no answer, a `5xx`, a `408`, a `429`, a `401`
+or `403` refusing its token, or a `404 unknown_project`, is sent again
+later, unchanged, with the reports after it: by a later session or by `vantage push`, from another
 process, possibly days later, and with that sender's token. A session that
 could not reach the server at its start sends no start report at all, and
 its reports arrive only that way.
@@ -364,7 +398,7 @@ ignored; `pytest-vantage` sends `{}` as `application/json`.
 - A run another user recorded answers `409 foreign_run`, and its last
   contact does not move.
 - A `run_id` that is not 32 lowercase hex characters answers
-  `422 invalid_report` with `fields: ["path.run_id"]`.
+  `422 invalid_parameter` with `fields: ["path.run_id"]`.
 
 The last-contact time is set when a run is created and advanced only by
 heartbeats. The read API presents a run with no finishing report as
@@ -384,15 +418,18 @@ its run `running`.
 | `201` | | The first report of a run. |
 | `400` | `invalid_json` | The body is not strict UTF-8, not JSON, or nested too deeply to parse. |
 | `400` | `incomplete_body` | The client disconnected before sending the whole body. It never sees this answer. |
-| `401` | `unauthenticated` | No token on a server that has users, or a token that is not valid on any server. |
+| `401` | `unauthenticated` | No token on a server that has users, or a token that is not valid (unknown, revoked, expired, or of a disabled user) on any server. |
 | `403` | `insufficient_scope` | The token does not grant the `record` scope. |
 | `404` | `unknown_run` | A heartbeat for a run never recorded. |
+| `404` | `unknown_project` | A report naming a project the server does not have. |
 | `404` | `not_found` | No route matches the path, unversioned paths included. |
 | `405` | `method_not_allowed` | The path exists but does not take this method. The `Allow` header lists the ones it takes. |
 | `409` | `foreign_run` | A report or heartbeat of a run another user recorded. |
+| `409` | `project_mismatch` | A report of a run created in another project. |
 | `413` | `payload_too_large` | The body passed 1,048,576 bytes. |
 | `415` | `unsupported_media_type` | `Content-Type` is absent or not `application/json`. |
-| `422` | `invalid_report` | The body does not match the shape above, or a heartbeat's `run_id` is malformed. |
+| `422` | `invalid_report` | The body does not match the shape above. |
+| `422` | `invalid_parameter` | A heartbeat's `run_id` is not 32 lowercase hex characters. |
 | `500` | | The server failed while handling the request (the database was unavailable, for example). The body is plain text, not a rejection. |
 
 ## The rejection body

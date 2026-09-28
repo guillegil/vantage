@@ -1,8 +1,10 @@
 """Managing users and tokens over HTTP (`service/routes/users.py`): only an
 admin's token may, on every server; the command line's checks apply, in its
-order; an admin cannot demote or disable themselves; a token is shown once
-and never cached; revoking is idempotent; nothing a caller sends comes back
-in a rejection.
+order; an admin cannot demote or disable themselves; a user says whether
+they have a password, never what it is; a token is shown once and never
+cached, and only a login token lists with an expiry; revoking is
+idempotent, until an expired login token is deleted; nothing a caller sends
+comes back in a rejection. Passwords are set in `test_login_api.py`.
 
 Run against every adapter (`any_store`): the routes are the service's, but
 every answer rests on what the store says of users and tokens.
@@ -19,6 +21,7 @@ from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
+    LOGIN_TOKEN_LIFETIME,
     READ_SCOPE,
     RECORD_SCOPE,
     SCOPES,
@@ -26,14 +29,17 @@ from vantage.core.domain.access import (
     new_token,
     token_digest,
 )
+from vantage.core.domain.passwords import hash_password
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.schemas import CreatedTokenResponse
 
-# `any_store`, each adapter in turn.
-pytest_plugins = ["store_fixtures"]
+# `any_store`, each adapter in turn; `cheap_passwords`, for the tests that
+# give a user a password.
+pytest_plugins = ["store_fixtures", "password_fixtures"]
 
 _NOW = datetime(2026, 9, 28, 9, 0, 0, tzinfo=timezone.utc)
+_PASSWORD = "correct horse battery staple"
 
 # Every operation, as `(method, path, body)`, for the tests that ask all of
 # them the same question.
@@ -242,7 +248,28 @@ def test_users_list_with_their_standing_disabled_ones_included(
         ("alice", True, False),
         ("bob", False, True),
     ]
-    assert set(items[0]) == {"name", "admin", "disabled", "created_at"}
+    assert set(items[0]) == {"name", "admin", "disabled", "created_at", "has_password"}
+
+
+def test_a_user_says_whether_they_have_a_password(
+    admin: TestClient, any_store: ExecutionStore, cheap_passwords: None
+) -> None:
+    """Never the password or its hash: whether the user can log in."""
+    created = admin.post("/api/v1/users", json={"name": "carol"})
+    stored = hash_password(_PASSWORD)
+    any_store.set_password("bob", password_hash=stored, changed_at=_NOW)
+
+    listed = admin.get("/api/v1/users")
+    updated = admin.patch("/api/v1/users/bob", json={"admin": True})
+
+    assert created.json()["has_password"] is False
+    assert [(item["name"], item["has_password"]) for item in listed.json()["items"]] == [
+        ("alice", False),
+        ("bob", True),
+        ("carol", False),
+    ]
+    assert updated.json()["has_password"] is True
+    assert stored not in listed.text and stored not in updated.text
 
 
 def test_a_taken_name_is_refused_and_the_user_left_as_it_was(
@@ -344,11 +371,11 @@ def test_enabling_a_user_again_lets_its_tokens_back_in(
     reader = TestClient(admin.app, headers=_bearer(bobs))
 
     admin.patch("/api/v1/users/bob", json={"disabled": True})
-    while_disabled = reader.get("/api/v1/runs")
+    while_disabled = reader.get("/api/v1/projects/default/runs")
     admin.patch("/api/v1/users/bob", json={"disabled": False})
 
     assert while_disabled.status_code == 401
-    assert reader.get("/api/v1/runs").status_code == 200
+    assert reader.get("/api/v1/projects/default/runs").status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -469,7 +496,7 @@ def test_a_created_token_is_answered_once_uncached_and_grants_its_scopes(
         "scopes": ["record"],
         "revoked_at": None,
     }
-    grant = any_store.authenticate(token_digest(secret))
+    grant = any_store.authenticate(token_digest(secret), now=_NOW)
     assert grant is not None and grant.scopes == frozenset({RECORD_SCOPE})
     listed = admin.get("/api/v1/tokens")
     assert secret not in listed.text
@@ -483,7 +510,7 @@ def test_a_token_holds_read_and_record_unless_told_otherwise(
 
     assert body["scopes"] == ["read", "record"]
     assert body["label"] == ""
-    grant = any_store.authenticate(token_digest(body["token"]))
+    grant = any_store.authenticate(token_digest(body["token"]), now=_NOW)
     assert grant is not None and grant.scopes == frozenset({READ_SCOPE, RECORD_SCOPE})
 
 
@@ -573,11 +600,11 @@ def test_a_token_for_a_disabled_user_is_made_and_works_once_they_are_enabled(
 
     body = admin.post("/api/v1/tokens", json={"user": "bob", "scopes": ["read"]}).json()
     reader = TestClient(admin.app, headers=_bearer(body["token"]))
-    while_disabled = reader.get("/api/v1/runs")
+    while_disabled = reader.get("/api/v1/projects/default/runs")
     any_store.update_user("bob", disabled=False)
 
     assert while_disabled.status_code == 401
-    assert reader.get("/api/v1/runs").status_code == 200
+    assert reader.get("/api/v1/projects/default/runs").status_code == 200
 
 
 def test_tokens_list_oldest_first_for_everyone_or_one_user(
@@ -597,7 +624,37 @@ def test_tokens_list_oldest_first_for_everyone_or_one_user(
         token.id for token in any_store.list_tokens(user="bob")
     ]
     assert bobs[0]["revoked_at"] is not None and bobs[1]["revoked_at"] is None
-    assert set(bobs[0]) == {"id", "user", "label", "scopes", "created_at", "revoked_at"}
+    assert set(bobs[0]) == {
+        "id",
+        "user",
+        "label",
+        "scopes",
+        "created_at",
+        "revoked_at",
+        "expires_at",
+    }
+
+
+def test_only_a_login_token_has_an_expiry(
+    admin: TestClient, any_store: ExecutionStore, cheap_passwords: None
+) -> None:
+    any_store.set_password("bob", password_hash=hash_password(_PASSWORD), changed_at=_NOW)
+    made = admin.post("/api/v1/tokens", json={"user": "bob"}).json()
+    logged_in = TestClient(admin.app).post(
+        "/api/v1/login", json={"name": "bob", "password": _PASSWORD}
+    )
+
+    items = admin.get("/api/v1/tokens").json()["items"]
+
+    assert made["expires_at"] is None
+    expires_at = logged_in.json()["expires_at"]
+    assert [(item["user"], item["label"], item["expires_at"]) for item in items] == [
+        ("alice", "", None),
+        ("bob", "", None),
+        ("bob", "login", expires_at),
+    ]
+    (login,) = [token for token in any_store.list_tokens(user="bob") if token.label == "login"]
+    assert login.expires_at == _instant(expires_at)
 
 
 @pytest.mark.parametrize("user", ["ghost", "NOT-A-NAME", "a\x00b"])
@@ -655,6 +712,7 @@ def test_the_token_never_shows_in_the_models_repr() -> None:
         scopes=["read"],
         created_at=_NOW,
         revoked_at=None,
+        expires_at=None,
     )
 
     assert "vantage_secret" not in repr(created)
@@ -677,14 +735,43 @@ def test_revoking_answers_the_token_and_again_the_same_first_time(
     assert first.json() == again.json()
     assert first.json()["revoked_at"] is not None
     assert "token" not in first.json()
-    assert any_store.authenticate(token_digest(secret)) is None
+    assert any_store.authenticate(token_digest(secret), now=_NOW) is None
     reader = TestClient(admin.app, headers=_bearer(secret))
-    assert reader.get("/api/v1/runs").status_code == 401
+    assert reader.get("/api/v1/projects/default/runs").status_code == 401
 
 
 def test_revoking_a_token_nobody_has_is_unknown_token(admin: TestClient) -> None:
     response = admin.post("/api/v1/tokens/999/revoke")
 
+    _assert_rejected(response, 404, "unknown_token", [])
+
+
+def test_a_login_token_deleted_once_expired_is_unknown_token(
+    admin: TestClient, any_store: ExecutionStore, cheap_passwords: None
+) -> None:
+    """An expired login token stays listed until its user logs in again,
+    which deletes it; revoking it then finds nothing."""
+    stored = hash_password(_PASSWORD)
+    any_store.set_password("bob", password_hash=stored, changed_at=_NOW)
+    long_ago = datetime.now(timezone.utc) - 2 * LOGIN_TOKEN_LIFETIME
+    expired = any_store.create_login_token(
+        "bob",
+        password_hash=stored,
+        digest=token_digest(new_token()),
+        created_at=long_ago,
+        expires_at=long_ago + LOGIN_TOKEN_LIFETIME,
+    )
+    assert expired is not None
+    listed_before = admin.get("/api/v1/tokens", params={"user": "bob"}).json()["items"]
+
+    logged_in = TestClient(admin.app).post(
+        "/api/v1/login", json={"name": "bob", "password": _PASSWORD}
+    )
+    listed_after = admin.get("/api/v1/tokens", params={"user": "bob"}).json()["items"]
+    response = admin.post(f"/api/v1/tokens/{expired.id}/revoke")
+
+    assert [item["id"] for item in listed_before] == [expired.id]
+    assert [item["id"] for item in listed_after] == [logged_in.json()["id"]]
     _assert_rejected(response, 404, "unknown_token", [])
 
 

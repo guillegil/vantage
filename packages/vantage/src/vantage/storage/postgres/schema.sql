@@ -39,12 +39,17 @@ CREATE TABLE vantage.meta (
     value text NOT NULL
 );
 
+-- `meta` holds `schema_version` and `origin`, written with the tables, and
+-- `created_at`/`created_by`. `origin` is always `server` here: the local
+-- store never opens PostgreSQL.
+--
 -- A user name is at most 64 characters, so it is indexed as it is.
 CREATE TABLE vantage.account (
-    name        text COLLATE "C" PRIMARY KEY,
-    admin       boolean NOT NULL,
-    disabled    boolean NOT NULL DEFAULT false,
-    created_at  timestamptz NOT NULL
+    name           text COLLATE "C" PRIMARY KEY,
+    admin          boolean NOT NULL,
+    disabled       boolean NOT NULL DEFAULT false,
+    created_at     timestamptz NOT NULL,
+    password_hash  text NULL
 );
 
 CREATE TABLE vantage.access_token (
@@ -57,11 +62,20 @@ CREATE TABLE vantage.access_token (
     can_admin   boolean NOT NULL,
     created_at  timestamptz NOT NULL,
     revoked_at  timestamptz NULL,
+    expires_at  timestamptz NULL,
     CHECK (can_read OR can_record OR can_admin)
+);
+
+-- A project name is at most 64 characters, so it is indexed as it is.
+-- `default` is written in the transaction that creates the schema.
+CREATE TABLE vantage.project (
+    name        text COLLATE "C" PRIMARY KEY,
+    created_at  timestamptz NOT NULL
 );
 
 CREATE TABLE vantage.run (
     id                            text COLLATE "C" PRIMARY KEY,
+    project                       text COLLATE "C" NOT NULL REFERENCES vantage.project (name),
     received_at                   timestamptz NOT NULL,
     last_contact_at               timestamptz NULL,
     started_at                    timestamptz NOT NULL,
@@ -78,9 +92,11 @@ CREATE TABLE vantage.run (
     recorded_by                   text COLLATE "C" NULL REFERENCES vantage.account (name)
 );
 
--- The catalogue. `node_id` is unique through `test_case_node_key` below.
+-- The catalogue. `(project, node_id)` is unique through
+-- `test_case_node_key` below.
 CREATE TABLE vantage.test_case (
     id                bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    project           text COLLATE "C" NOT NULL REFERENCES vantage.project (name),
     node_id           text NOT NULL,
     file_path         text NOT NULL,
     class_name        text NULL,
@@ -131,12 +147,13 @@ CREATE TABLE vantage.result (
 -- `value` is text, never `jsonb`, so it reads back byte for byte as
 -- written. A section name is at most 120 characters, so the key is
 -- indexed as it is, which keeps it ordered.
-CREATE TABLE vantage.user_setting (
+CREATE TABLE vantage.project_setting (
+    project     text COLLATE "C" NOT NULL REFERENCES vantage.project (name),
     namespace   text COLLATE "C" NOT NULL,
     key         text COLLATE "C" NOT NULL,
     value       text NOT NULL,
     updated_at  timestamptz NOT NULL,
-    PRIMARY KEY (namespace, key)
+    PRIMARY KEY (project, namespace, key)
 );
 
 -- `(run_id, source_file)` is unique through `run_metadata_file_key` below.
@@ -165,20 +182,22 @@ CREATE TABLE vantage.run_metadata (
 );
 
 -- Indexes -- each serves a statement in store.py.
--- `run(started_at, id)`: run-list and history order, read backwards, and
--- the metadata horizon count.
+-- `run(project, started_at, id)`: a project's run list and history order,
+-- read backwards, and the metadata horizon count; every read of the run
+-- list is within one project.
 -- `result(run_id, id)`: one run's results in insertion order, and every
 -- other per-run read.
 -- `result(test_case_id)`: one test's history.
 -- The `text_key` indexes: the uniqueness the SQLite schema declares on node
--- ids, metadata keys and declared files, each an upsert's conflict target,
--- and every lookup by node id or by metadata key and value.
+-- ids within a project, metadata keys and declared files, each an upsert's
+-- conflict target, and every lookup by node id or by metadata key and value.
 -- `access_token(digest)`, from its UNIQUE constraint: authenticating a
 -- request.
-CREATE INDEX run_started_at ON vantage.run (started_at, id);
+CREATE INDEX run_project_started_at ON vantage.run (project, started_at, id);
 CREATE INDEX result_run_id ON vantage.result (run_id, id);
 CREATE INDEX result_test_case_id ON vantage.result (test_case_id);
-CREATE UNIQUE INDEX test_case_node_key ON vantage.test_case (vantage.text_key(node_id));
+CREATE UNIQUE INDEX test_case_node_key
+    ON vantage.test_case (project, vantage.text_key(node_id));
 CREATE UNIQUE INDEX result_run_node_key ON vantage.result (run_id, vantage.text_key(node_id));
 CREATE UNIQUE INDEX run_metadata_file_key
     ON vantage.run_metadata_file (run_id, vantage.text_key(source_file));

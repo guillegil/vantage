@@ -83,7 +83,7 @@ class MetadataHorizonResponse(BaseModel):
 
 
 class RunListResponse(BaseModel):
-    """The response body for `GET /api/v1/runs`. No `total`, which would cost
+    """The response body for `GET /api/v1/projects/{project}/runs`. No `total`, which would cost
     a `COUNT(*)` on every page. `next_cursor` is the `cursor` for the page
     after this one, and `None` on the last page. `metadata_horizon` holds one
     entry per distinct filtered key, in the order first given, and is `None`
@@ -99,7 +99,8 @@ class RunDetailResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}`. Carries
     `interrupt_reason`, which the lean list entry omits -- the detail path
     keeps the full record reachable. `recorded_by` is as on
-    `RunListItemResponse`."""
+    `RunListItemResponse`; `project` is the one the run was created in,
+    whose history and sections the run is read against."""
 
     id: str
     started_at: datetime
@@ -110,6 +111,7 @@ class RunDetailResponse(BaseModel):
     presentation: str
     vcs: RunVcsResponse | None
     recorded_by: str | None
+    project: str
 
 
 class MetadataItemResponse(BaseModel):
@@ -252,7 +254,7 @@ class HistoryEntryResponse(BaseModel):
 
 
 class HistoryResponse(BaseModel):
-    """The response body for `GET /api/v1/tests/history`. `next_cursor`, as
+    """The response body for `GET /api/v1/projects/{project}/tests/history`. `next_cursor`, as
     on `RunListResponse`, is the `cursor` for the page after this one, and
     `None` on the last page."""
 
@@ -273,7 +275,7 @@ class SectionValue(BaseModel):
 
 
 class SectionUpsertRequest(BaseModel):
-    """The request body for `POST /api/v1/config/sections`."""
+    """The request body for `POST /api/v1/projects/{project}/config/sections`."""
 
     name: str
     prefix: str
@@ -288,7 +290,7 @@ class SectionResponse(BaseModel):
 
 
 class SectionListResponse(BaseModel):
-    """The response body for `GET /api/v1/config/sections`."""
+    """The response body for `GET /api/v1/projects/{project}/config/sections`."""
 
     items: list[SectionResponse]
 
@@ -356,12 +358,13 @@ class TokenCreateRequest(BaseModel):
 
 
 class UserResponse(BaseModel):
-    """One user."""
+    """One user. `has_password` says whether they can log in."""
 
     name: str
     admin: bool
     disabled: bool
     created_at: datetime
+    has_password: bool
 
 
 class UserListResponse(BaseModel):
@@ -372,7 +375,7 @@ class UserListResponse(BaseModel):
 
 class TokenResponse(BaseModel):
     """One token, without the token itself, which is never stored.
-    `scopes` is sorted."""
+    `scopes` is sorted; `expires_at` is set for a login token alone."""
 
     id: int
     user: str
@@ -380,6 +383,7 @@ class TokenResponse(BaseModel):
     scopes: list[str]
     created_at: datetime
     revoked_at: datetime | None
+    expires_at: datetime | None
 
 
 class TokenListResponse(BaseModel):
@@ -390,8 +394,9 @@ class TokenListResponse(BaseModel):
 
 
 class CreatedTokenResponse(BaseModel):
-    """The response body for `POST /api/v1/tokens`: the token, shown this
-    once and kept out of the `repr`, and what `TokenResponse` says of it."""
+    """The response body for `POST /api/v1/tokens` and `POST /api/v1/login`:
+    the token, shown this once and kept out of the `repr`, and what
+    `TokenResponse` says of it."""
 
     token: str = Field(repr=False)
     id: int
@@ -400,3 +405,63 @@ class CreatedTokenResponse(BaseModel):
     scopes: list[str]
     created_at: datetime
     revoked_at: datetime | None
+    expires_at: datetime | None
+
+
+# The password request bodies. `hide_input_in_errors` keeps a password out
+# of a validation error's text, which otherwise repeats the whole input of
+# a body missing a field, and `repr=False` keeps it out of the model's own.
+
+
+class LoginRequest(BaseModel):
+    """The request body for `POST /api/v1/login`."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    name: str
+    password: str = Field(repr=False)
+
+
+class PasswordChangeRequest(BaseModel):
+    """The request body for `POST /api/v1/password`: whose password, the
+    current one, and the new one."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    name: str
+    password: str = Field(repr=False)
+    new_password: str = Field(repr=False)
+
+
+class PasswordSetRequest(BaseModel):
+    """The request body for `PUT /api/v1/users/{name}/password`."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    password: str = Field(repr=False)
+
+
+# --- Projects ---------------------------------------------------------------
+
+
+class ProjectCreateRequest(BaseModel):
+    """The request body for `POST /api/v1/projects`. The name is checked by
+    the domain's own rule, which the command line applies too."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str
+
+
+class ProjectResponse(BaseModel):
+    """One project."""
+
+    name: str
+    created_at: datetime
+
+
+class ProjectListResponse(BaseModel):
+    """The response body for `GET /api/v1/projects`: every project, by
+    name."""
+
+    items: list[ProjectResponse]

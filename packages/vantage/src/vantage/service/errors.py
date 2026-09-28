@@ -25,6 +25,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from vantage.core.domain.passwords import PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS
 from vantage.ingestion.errors import (
     InvalidJsonError,
     InvalidReportError,
@@ -44,7 +45,8 @@ def _rejection_body(error: str, detail: str, fields: list[str] | None = None) ->
 
 
 class IncompleteBodyError(RejectionError):
-    """The client disconnected before sending the whole body.
+    """The client disconnected before sending the whole body -- or, on a
+    password route, while it waited for a slot, before any hash was made.
 
     Raised by `service/body.py`'s `read_bounded_body` when
     `request.stream()` raises `ClientDisconnect`. The client is gone and
@@ -138,7 +140,7 @@ class InvalidIdentityError(RejectionError):
 
 class InvalidMetadataFilterError(InvalidParameterError):
     """The `metadata_key` and `metadata_value` parameters of
-    `GET /api/v1/runs` do not make a filter: they are repeated a different
+    `GET /api/v1/projects/{project}/runs` do not make a filter: they are repeated a different
     number of times, or give more pairs than the route takes.
 
     A pair is two parameters rather than one `key=value` string because a
@@ -164,7 +166,7 @@ class InvalidMetadataFilterError(InvalidParameterError):
 
 
 class InvalidCursorError(InvalidParameterError):
-    """The `cursor` of `GET /api/v1/runs` or `GET /api/v1/tests/history` is
+    """The `cursor` of a project's run list or of a test's history in it is
     not one the server handed out as `next_cursor`, or comes with an offset.
     A cursor already says where the page starts, so an offset past it would
     be a second answer to the same question. `fields` names the parameters
@@ -214,6 +216,66 @@ class RunOfAnotherUserError(RejectionError):
         super().__init__("This run was recorded by another user.")
 
 
+class NoSuchProjectError(RejectionError):
+    """No project has that name, or none can. For a report, `fields` names
+    its `project`; the name itself is never repeated."""
+
+    status_code = 404
+    error = "unknown_project"
+
+    def __init__(self, fields: list[str] | None = None) -> None:
+        super().__init__("No project with that name exists.", fields)
+
+
+class RunOfAnotherProjectError(RejectionError):
+    """A report of a run that was created in another project. A run never
+    moves, so nothing of it is stored."""
+
+    status_code = 409
+    error = "project_mismatch"
+
+    def __init__(self) -> None:
+        super().__init__("This run was recorded in another project.", ["project"])
+
+
+class ProjectNameTakenError(RejectionError):
+    """`POST /projects` for a name another project has, `default` included."""
+
+    status_code = 409
+    error = "project_exists"
+
+    def __init__(self) -> None:
+        super().__init__("A project with that name exists already.", ["name"])
+
+
+class ProjectNameRefusedError(RejectionError):
+    """A name `POST /projects` cannot create. The name is not repeated."""
+
+    status_code = 422
+    error = "invalid_project_name"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A project name is 1 to 64 characters of a-z, 0-9, '.', '_' and '-', starting with "
+            "a letter or a digit.",
+            ["name"],
+        )
+
+
+class InvalidProjectRequestError(RejectionError):
+    """A `POST /projects` body of the wrong shape."""
+
+    status_code = 422
+    error = "invalid_project_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidProjectRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
+
+
 class ChallengeError(RejectionError):
     """A rejection that says how to authenticate, in a `WWW-Authenticate`
     header as RFC 6750 spells it for a bearer token. The header names the
@@ -226,9 +288,9 @@ class ChallengeError(RejectionError):
 
 class UnauthenticatedError(ChallengeError):
     """No token on a server that has users, or one that authenticates
-    nothing: malformed, unknown, revoked, or its user's disabled. The last
-    four read alike, so a caller cannot tell a revoked token from one that
-    never existed."""
+    nothing: malformed, unknown, revoked, expired, or its user's disabled.
+    All but the first read alike, so a caller cannot tell a revoked token
+    from one that never existed."""
 
     status_code = 401
     error = "unauthenticated"
@@ -240,7 +302,7 @@ class UnauthenticatedError(ChallengeError):
     @classmethod
     def invalid(cls) -> UnauthenticatedError:
         return cls(
-            "The token is not valid: unknown, revoked, or its user is disabled.",
+            "The token is not valid: unknown, revoked, expired, or its user is disabled.",
             ', error="invalid_token"',
         )
 
@@ -261,18 +323,96 @@ class InsufficientScopeError(ChallengeError):
 
 
 class OpenServerError(RejectionError):
-    """A users or tokens route asked without a token of a database with no
-    user. Nobody can act as an admin there, and the one thing an anonymous
-    caller could do -- make the first user -- only the `vantage` command
-    does. A 409 without a challenge, since no token would help."""
+    """A users, tokens, login or password route asked of a database with no
+    user, which only a database pytest-vantage's local store made can be
+    while served. Nobody can log in or act as an admin there, and the one
+    thing an anonymous caller could do -- make the first user -- only the
+    `vantage` command does. A 409 without a challenge, since no token would
+    help."""
 
     status_code = 409
     error = "open_server"
 
     def __init__(self) -> None:
         super().__init__(
-            "This server has no user yet, so nobody can manage users over HTTP: add the first "
-            "admin with vantage user add NAME --admin on its database."
+            "This server's database was made by pytest-vantage's local store and has no user, "
+            "so it serves every request without a token and nobody logs in or manages users "
+            "here: add the first admin with vantage user add NAME --admin on its database."
+        )
+
+
+class PasswordChecksBusyError(RejectionError):
+    """As many requests hold or wait for a password slot as the server lets
+    them (`service/slots.py`): refused at once rather than queued, with a
+    `Retry-After`, so a flood of logins can queue neither memory nor minutes
+    of hashing."""
+
+    status_code = 503
+    error = "password_checks_busy"
+    headers = {"Retry-After": "1"}
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The server is checking as many passwords as it will at once; try again shortly."
+        )
+
+
+class InvalidCredentialsError(ChallengeError):
+    """A login, or a password change, whose name and password do not match
+    an enabled user's: an unknown name, one nobody can have, a user with no
+    password or a disabled one, a wrong password, or a password changed
+    while it was being checked. Every case reads alike and costs the same
+    work, so a caller learns nothing of which names exist."""
+
+    status_code = 401
+    error = "invalid_credentials"
+
+    def __init__(self) -> None:
+        super().__init__("The name or password is not valid.", "")
+
+
+class InvalidLoginRequestError(RejectionError):
+    """A `POST /login` body that is not exactly a name and a password, both
+    strings. The fields are named, their values never repeated."""
+
+    status_code = 422
+    error = "invalid_login_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidLoginRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
+
+
+class InvalidPasswordRequestError(RejectionError):
+    """A `POST /password` or `PUT /users/{name}/password` body of the wrong
+    shape. The fields are named, their values never repeated."""
+
+    status_code = 422
+    error = "invalid_password_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidPasswordRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
+
+
+class PasswordRefusedError(RejectionError):
+    """A password that cannot be set (`check_password`). The password is not
+    repeated."""
+
+    status_code = 422
+    error = "invalid_password"
+
+    def __init__(self, fields: list[str]) -> None:
+        super().__init__(
+            f"A password is {PASSWORD_MIN_CHARS} to {PASSWORD_MAX_CHARS} characters, with no "
+            "control characters.",
+            fields,
         )
 
 
@@ -469,7 +609,8 @@ class InvalidSectionPrefixError(RejectionError):
 
 
 class UnknownSectionError(RejectionError):
-    """`DELETE /api/v1/config/sections` for a name that is not stored."""
+    """`DELETE /api/v1/projects/{project}/config/sections` for a name the
+    project does not store."""
 
     status_code = 404
     error = "unknown_section"
@@ -510,7 +651,7 @@ def _rejection_response(exc: RejectionError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content=_rejection_body(exc.error, exc.detail, exc.fields),
-        headers=exc.headers if isinstance(exc, ChallengeError) else None,
+        headers=exc.headers if isinstance(exc, (ChallengeError, PasswordChecksBusyError)) else None,
     )
 
 
@@ -540,7 +681,7 @@ def register_error_handlers(app: FastAPI) -> None:
     route's own 404, such as `unknown_run`, keeps its code.
 
     A `RequestValidationError` confined to the `node_id` query parameter
-    (`/tests/history`, `/runs/{run_id}/result`) is shaped as
+    (`/projects/{project}/tests/history`, `/runs/{run_id}/result`) is shaped as
     `InvalidIdentityError`; every other one as `InvalidParameterError`, so
     a client that sent no report is never told its report is malformed.
     """
@@ -579,23 +720,33 @@ __all__ = [
     "ChallengeError",
     "IncompleteBodyError",
     "InsufficientScopeError",
+    "InvalidCredentialsError",
     "InvalidIdentityError",
     "InvalidJsonError",
+    "InvalidLoginRequestError",
     "InvalidMetadataFilterError",
     "InvalidParameterError",
+    "InvalidPasswordRequestError",
+    "InvalidProjectRequestError",
     "InvalidReportError",
     "InvalidSectionError",
     "InvalidSectionNameError",
     "InvalidSectionPrefixError",
     "InvalidTokenRequestError",
     "InvalidUserRequestError",
+    "NoSuchProjectError",
     "NoSuchUserError",
     "NotAnAdminError",
     "OpenServerError",
     "OwnAccountError",
+    "PasswordChecksBusyError",
+    "PasswordRefusedError",
     "PayloadTooLargeError",
+    "ProjectNameRefusedError",
+    "ProjectNameTakenError",
     "RejectionError",
     "ReservedSectionNameError",
+    "RunOfAnotherProjectError",
     "RunOfAnotherUserError",
     "ScopesRefusedError",
     "TokenLabelRefusedError",

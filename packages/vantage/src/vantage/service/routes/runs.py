@@ -22,6 +22,11 @@ anything else is `RunOfAnotherUserError`, with nothing stored. The run id
 is the client's, so this is what stops one user's session from finishing,
 or keeping alive, another's.
 
+**The report names its project**, a top-level `project`, absent meaning
+`default`. One the server does not have is `404 unknown_project`, since a
+server never makes a project from a report; a report of a run created in
+another project is `409 project_mismatch`. Neither stores anything.
+
 **A lone surrogate is replaced, not rejected.** A `\\udXXX` escape with no
 partner is valid JSON, and pytest produces such text itself from file names
 decoded with `surrogateescape`. It cannot be encoded as UTF-8, so it would
@@ -40,13 +45,24 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from vantage.core.domain.execution import IDENTITY_PATTERN
-from vantage.core.ports.storage import ExecutionStore, ForeignRunError
+from vantage.core.ports.storage import (
+    ExecutionStore,
+    ForeignRunError,
+    ProjectMismatchError,
+    UnknownProjectError,
+)
 from vantage.ingestion import Ingested, ingest
 from vantage.ingestion.decode import decode_json
 from vantage.service.access import Caller, requires_record
 from vantage.service.body import read_bounded_body, require_json_media_type
 from vantage.service.dependencies import get_store
-from vantage.service.errors import MAX_REPORT_BYTES, RunOfAnotherUserError, UnknownRunError
+from vantage.service.errors import (
+    MAX_REPORT_BYTES,
+    NoSuchProjectError,
+    RunOfAnotherProjectError,
+    RunOfAnotherUserError,
+    UnknownRunError,
+)
 from vantage.service.schemas import Acknowledgement, HeartbeatAcknowledgement
 
 router = APIRouter()
@@ -62,6 +78,10 @@ def _record(store: ExecutionStore, body: bytes, recorded_by: str | None) -> Inge
         )
     except ForeignRunError:
         raise RunOfAnotherUserError() from None
+    except UnknownProjectError:
+        raise NoSuchProjectError(["project"]) from None
+    except ProjectMismatchError:
+        raise RunOfAnotherProjectError() from None
 
 
 @router.post("/runs")

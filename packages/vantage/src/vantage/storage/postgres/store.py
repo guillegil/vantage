@@ -14,8 +14,10 @@ serialised:
   `WHERE` declined -- never from a probe another process could overtake.
   The run row is then locked, so concurrent reports of one run write their
   results and count their metadata one at a time, and a report of another
-  user's run is refused there, rolling back a transaction that changed
-  nothing.
+  user's run, or of another project's, is refused there, rolling back a
+  transaction that changed nothing. A report naming a project that does
+  not exist is refused before anything is written; projects are never
+  renamed or deleted, so one found stays.
 - A user name is its key, so `create_user` is one insert that does nothing
   on a taken name, and `create_token` one insert that selects its user:
   users are never deleted, so the user it finds stays.
@@ -50,6 +52,7 @@ from psycopg import errors
 
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
+    LOGIN_TOKEN_LABEL,
     READ_SCOPE,
     RECORD_SCOPE,
     Grant,
@@ -62,6 +65,7 @@ from vantage.core.domain.projection import (
     LIST_COMMIT_SUBJECT_CHARS,
     LIST_FAILURE_MESSAGE_CHARS,
 )
+from vantage.core.domain.projects import Project
 from vantage.core.domain.result import (
     CapturedOutput,
     CaseIdentity,
@@ -78,14 +82,17 @@ from vantage.core.ports.storage import (
     MetadataFile,
     NamespaceFullError,
     Page,
+    ProjectExistsError,
+    ProjectMismatchError,
+    ProjectSetting,
     ResultListEntry,
     RunDetail,
     RunKey,
     RunListEntry,
     RunMetadata,
+    UnknownProjectError,
     UnknownUserError,
     UserExistsError,
-    UserSetting,
 )
 from vantage.storage.postgres.connection import (
     PgConnection,
@@ -115,11 +122,11 @@ _SNAPSHOT = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
 # run, even before `record_session` refuses it.
 _UPSERT_RUN = """
     INSERT INTO vantage.run AS run (
-        id, received_at, last_contact_at, started_at, finished_at,
+        id, project, received_at, last_contact_at, started_at, finished_at,
         exit_status, interrupted, interrupt_reason,
         vcs_commit, vcs_branch, vcs_commit_subject, vcs_commit_subject_truncated,
         vcs_dirty, vcs_root, recorded_by
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (id) DO UPDATE SET
         finished_at      = excluded.finished_at,
         exit_status      = excluded.exit_status,
@@ -136,13 +143,16 @@ _UPSERT_RUN = """
                  ELSE run.vcs_commit_subject_truncated END
      WHERE run.exit_status IS NULL AND excluded.exit_status IS NOT NULL
        AND run.recorded_by IS NOT DISTINCT FROM excluded.recorded_by
+       AND run.project = excluded.project
     RETURNING xmax = 0
 """
 
 # The conflict path of `_UPSERT_RUN` already holds this lock; taking it
 # explicitly holds it on every path, so the exit status it reads is still the
 # stored one.
-_LOCK_RUN = "SELECT exit_status, recorded_by FROM vantage.run WHERE id = %s FOR UPDATE"
+_LOCK_RUN = "SELECT exit_status, recorded_by, project FROM vantage.run WHERE id = %s FOR UPDATE"
+
+_PROBE_PROJECT = "SELECT 1 FROM vantage.project WHERE name = %s"
 
 _PROBE_RUN = "SELECT 1 FROM vantage.run WHERE id = %s"
 
@@ -177,10 +187,10 @@ _LIST_EXECUTION_COLUMNS = f"""
     run.vcs_commit_subject_truncated, run.vcs_dirty, run.vcs_root
 """
 
-# `last_contact_at` and `recorded_by` come last, so the first twelve values
-# decode as an `Execution`.
+# `last_contact_at`, `recorded_by` and `project` come last, so the first
+# twelve values decode as an `Execution`.
 _SELECT_RUN = f"""
-    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by
+    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by, run.project
     FROM vantage.run AS run WHERE run.id = %s
 """  # noqa: S608
 
@@ -191,18 +201,19 @@ _SELECT_RUN_LIST = f"""
 
 _LIST_RUNS = f"""
     {_SELECT_RUN_LIST}
+    WHERE run.project = %s
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT %s OFFSET %s
-"""
+"""  # noqa: S608
 
 # The runs past a `RunKey` in the newest-first order, bound as its
-# `started_at`, then its id: a row comparison, which `run_started_at`'s
-# `(started_at, id)` serves as one range.
+# `started_at`, then its id: a row comparison, which
+# `run_project_started_at`'s `(project, started_at, id)` serves as one range.
 _AFTER_RUN_KEY = "(run.started_at, run.id) < (%s, %s)"
 
 _LIST_RUNS_AFTER = f"""
     {_SELECT_RUN_LIST}
-    WHERE {_AFTER_RUN_KEY}
+    WHERE run.project = %s AND {_AFTER_RUN_KEY}
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT %s OFFSET %s
 """  # noqa: S608
@@ -220,36 +231,40 @@ _RUNS_HOLDING_PAIR = """
 
 def _list_runs_by_metadata(pair_count: int, *, after: bool = False) -> str:
     """`_LIST_RUNS` narrowed to the runs holding each of `pair_count` pairs,
-    and with `after` to the runs past a `RunKey` (`_AFTER_RUN_KEY`), bound
-    in that order before the limit and offset. Only the module's own
-    constants are interpolated."""
+    then to the project, and with `after` to the runs past a `RunKey`
+    (`_AFTER_RUN_KEY`), bound in that order before the limit and offset.
+    Only the module's own constants are interpolated."""
     holding_every_pair = " INTERSECT ".join([_RUNS_HOLDING_PAIR] * pair_count)
     past_key = f"AND {_AFTER_RUN_KEY}" if after else ""
     return f"""
         {_SELECT_RUN_LIST}
-        WHERE run.id IN ({holding_every_pair}) {past_key}
+        WHERE run.id IN ({holding_every_pair}) AND run.project = %s {past_key}
         ORDER BY run.started_at DESC, run.id DESC
         LIMIT %s OFFSET %s
     """  # noqa: S608
 
 
-# How many runs started before `key` first appeared, bound as key, key.
-# `first_seen` is the earliest start among runs holding any row for the key,
-# whatever its status or source; a key no run ever carried has none, and
-# every run predates it.
+# How many of a project's runs started before `key` first appeared in it,
+# bound as project, project, key, key, project. `first_seen` is the earliest
+# start among the project's runs holding any row for the key, whatever its
+# status or source; a key none of them ever carried has none, and every run
+# of the project predates it.
 _COUNT_RUNS_PREDATING_KEY = """
     SELECT CASE WHEN first_seen.started_at IS NULL
-                THEN (SELECT count(*) FROM vantage.run)
+                THEN (SELECT count(*) FROM vantage.run WHERE run.project = %s)
                 ELSE (SELECT count(*) FROM vantage.run
-                      WHERE run.started_at < first_seen.started_at)
+                      WHERE run.project = %s AND run.started_at < first_seen.started_at)
            END
     FROM (
         SELECT min(run.started_at) AS started_at
         FROM vantage.run_metadata rm
         JOIN vantage.run AS run ON run.id = rm.run_id
         WHERE vantage.text_key(rm.key) = vantage.text_key(%s) AND rm.key = %s
+          AND run.project = %s
     ) AS first_seen
 """
+
+_COUNT_PROJECT_RUNS = "SELECT count(*) FROM vantage.run WHERE project = %s"
 
 _COUNT_RUNS = "SELECT count(*) FROM vantage.run"
 
@@ -259,10 +274,10 @@ _COUNT_RUNS = "SELECT count(*) FROM vantage.run"
 # answers with the row's id whichever branch ran.
 _UPSERT_TEST_CASE = """
     INSERT INTO vantage.test_case AS tc (
-        node_id, file_path, class_name, function_name,
+        project, node_id, file_path, class_name, function_name,
         param_id, first_seen_at, last_seen_at, last_seen_run_id
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (vantage.text_key(node_id)) DO UPDATE SET
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (project, vantage.text_key(node_id)) DO UPDATE SET
         file_path        = CASE WHEN excluded.last_seen_at > tc.last_seen_at
                                 THEN excluded.file_path ELSE tc.file_path END,
         class_name       = CASE WHEN excluded.last_seen_at > tc.last_seen_at
@@ -403,7 +418,8 @@ _LIST_HISTORY = f"""
     FROM vantage.test_case tc
     JOIN vantage.result r ON r.test_case_id = tc.id
     JOIN vantage.run AS run ON run.id = r.run_id
-    WHERE vantage.text_key(tc.node_id) = vantage.text_key(%s) AND tc.node_id = %s
+    WHERE tc.project = %s
+      AND vantage.text_key(tc.node_id) = vantage.text_key(%s) AND tc.node_id = %s
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT %s OFFSET %s
 """  # noqa: S608
@@ -413,7 +429,8 @@ _LIST_HISTORY_AFTER = f"""
     FROM vantage.test_case tc
     JOIN vantage.result r ON r.test_case_id = tc.id
     JOIN vantage.run AS run ON run.id = r.run_id
-    WHERE vantage.text_key(tc.node_id) = vantage.text_key(%s) AND tc.node_id = %s
+    WHERE tc.project = %s
+      AND vantage.text_key(tc.node_id) = vantage.text_key(%s) AND tc.node_id = %s
       AND {_AFTER_RUN_KEY}
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT %s OFFSET %s
@@ -423,30 +440,50 @@ _SELECT_TEST_CASE = """
     SELECT node_id, file_path, class_name, function_name, param_id,
            first_seen_at, last_seen_at, last_seen_run_id
     FROM vantage.test_case
-    WHERE vantage.text_key(node_id) = vantage.text_key(%s) AND node_id = %s
+    WHERE project = %s
+      AND vantage.text_key(node_id) = vantage.text_key(%s) AND node_id = %s
 """
 
 _LIST_SETTINGS = """
-    SELECT namespace, key, value, updated_at
-    FROM vantage.user_setting WHERE namespace = %s ORDER BY key
+    SELECT project, namespace, key, value, updated_at
+    FROM vantage.project_setting WHERE project = %s AND namespace = %s ORDER BY key
 """
 
-_LOCK_NAMESPACE = "SELECT pg_advisory_xact_lock(%s, hashtext(%s))"
+# Keyed on the project and the namespace together; a project name holds no
+# `/`, so the text names one pair, and a hash collision only makes two
+# writers wait for each other.
+_LOCK_NAMESPACE = "SELECT pg_advisory_xact_lock(%s, hashtext(%s || '/' || %s))"
 
-_PROBE_SETTING = "SELECT 1 FROM vantage.user_setting WHERE namespace = %s AND key = %s"
+_PROBE_SETTING = """
+    SELECT 1 FROM vantage.project_setting WHERE project = %s AND namespace = %s AND key = %s
+"""
 
-_COUNT_SETTINGS = "SELECT count(*) FROM vantage.user_setting WHERE namespace = %s"
+_COUNT_SETTINGS = """
+    SELECT count(*) FROM vantage.project_setting WHERE project = %s AND namespace = %s
+"""
 
 _UPSERT_SETTING = """
-    INSERT INTO vantage.user_setting (namespace, key, value, updated_at)
-    VALUES (%s, %s, %s, %s)
-    ON CONFLICT (namespace, key) DO UPDATE SET
+    INSERT INTO vantage.project_setting (project, namespace, key, value, updated_at)
+    VALUES (%s, %s, %s, %s, %s)
+    ON CONFLICT (project, namespace, key) DO UPDATE SET
         value = excluded.value,
         updated_at = excluded.updated_at
     RETURNING xmax = 0
 """
 
-_DELETE_SETTING = "DELETE FROM vantage.user_setting WHERE namespace = %s AND key = %s"
+_DELETE_SETTING = """
+    DELETE FROM vantage.project_setting WHERE project = %s AND namespace = %s AND key = %s
+"""
+
+# Inserts nothing on a taken name, so the row count tells the two apart.
+_INSERT_PROJECT = """
+    INSERT INTO vantage.project (name, created_at) VALUES (%s, %s)
+    ON CONFLICT (name) DO NOTHING
+"""
+
+_SELECT_PROJECT = "SELECT name, created_at FROM vantage.project WHERE name = %s"
+
+_LIST_PROJECTS = "SELECT name, created_at FROM vantage.project ORDER BY name"
 
 _SELECT_RUN_CASE_OUTCOMES = """
     SELECT tc.file_path, r.outcome
@@ -465,7 +502,38 @@ _INSERT_USER = """
     ON CONFLICT (name) DO NOTHING
 """
 
-_USER_COLUMNS = "name, admin, disabled, created_at"
+_USER_COLUMNS = "name, admin, disabled, created_at, password_hash IS NOT NULL"
+
+# One statement, so of two servers starting on one new database, one
+# inserts: the other waits on the first's row and then finds a user.
+_INSERT_FIRST_ADMIN = f"""
+    INSERT INTO vantage.account (name, admin, disabled, created_at, password_hash)
+    SELECT %s, true, false, %s, %s
+    WHERE NOT EXISTS (SELECT 1 FROM vantage.account)
+      AND NOT EXISTS (SELECT 1 FROM vantage.meta WHERE key = 'origin' AND value = 'local')
+    ON CONFLICT (name) DO NOTHING
+    RETURNING {_USER_COLUMNS}
+"""  # noqa: S608
+
+_SELECT_PASSWORD_HASH = """
+    SELECT password_hash FROM vantage.account WHERE name = %s AND NOT disabled
+"""  # noqa: S105
+
+_SET_PASSWORD = "UPDATE vantage.account SET password_hash = %s WHERE name = %s RETURNING name"  # noqa: S105
+
+# The compare-and-set a password change checked against the current
+# password makes: it loses to any change made while it was checked.
+_REPLACE_PASSWORD = """
+    UPDATE vantage.account SET password_hash = %s
+    WHERE name = %s AND password_hash = %s AND NOT disabled
+    RETURNING name
+"""  # noqa: S105
+
+# Login tokens are the only ones with an expiry.
+_REVOKE_LOGIN_TOKENS = """
+    UPDATE vantage.access_token SET revoked_at = %s
+    WHERE account = %s AND expires_at IS NOT NULL AND revoked_at IS NULL
+"""  # noqa: S105
 
 _SELECT_USER = f"SELECT {_USER_COLUMNS} FROM vantage.account WHERE name = %s"  # noqa: S608
 
@@ -479,7 +547,9 @@ _UPDATE_USER = f"""
     RETURNING {_USER_COLUMNS}
 """  # noqa: S608
 
-_TOKEN_COLUMNS = "id, account, label, can_read, can_record, can_admin, created_at, revoked_at"  # noqa: S105
+_TOKEN_COLUMNS = (
+    "id, account, label, can_read, can_record, can_admin, created_at, revoked_at, expires_at"  # noqa: S105
+)
 
 # Inserts nothing, and returns no row, when there is no such user.
 _INSERT_TOKEN = f"""
@@ -489,6 +559,28 @@ _INSERT_TOKEN = f"""
     SELECT name, %s, %s, %s, %s, %s, %s FROM vantage.account WHERE name = %s
     RETURNING {_TOKEN_COLUMNS}
 """  # noqa: S608
+
+# Inserts nothing unless the user is enabled and still has the hash the
+# password was checked against. `FOR SHARE` conflicts with the row lock a
+# password change or a disable takes, so a login either commits first --
+# and the change then revokes its token -- or waits for the change and,
+# reading the row again, inserts nothing: under READ COMMITTED a plain
+# read would have gone on with the old hash.
+_INSERT_LOGIN_TOKEN = f"""
+    INSERT INTO vantage.access_token (
+        account, digest, label, can_read, can_record, can_admin, created_at, expires_at
+    )
+    SELECT a.name, %s, %s, true, false, a.admin, %s, %s
+      FROM vantage.account a
+     WHERE a.name = %s AND a.password_hash = %s AND NOT a.disabled
+       FOR SHARE OF a
+    RETURNING {_TOKEN_COLUMNS}
+"""  # noqa: S608
+
+# Never the token just made, whatever its expiry.
+_DELETE_EXPIRED_LOGIN_TOKENS = """
+    DELETE FROM vantage.access_token WHERE account = %s AND expires_at <= %s AND id <> %s
+"""  # noqa: S105
 
 _SELECT_TOKEN = f"SELECT {_TOKEN_COLUMNS} FROM vantage.access_token WHERE id = %s"  # noqa: S608
 
@@ -509,6 +601,7 @@ _AUTHENTICATE = """
     FROM vantage.access_token t
     JOIN vantage.account a ON a.name = t.account
     WHERE t.digest = %s AND t.revoked_at IS NULL AND NOT a.disabled
+      AND (t.expires_at IS NULL OR t.expires_at > %s)
 """
 
 # The ids a `bigint` identity column can hold; a lookup by any other
@@ -522,17 +615,28 @@ def _decode_scopes(can_read: object, can_record: object, can_admin: object) -> f
 
 
 def _row_to_user(row: Row) -> User:
-    name, admin, disabled, created_at = row
+    name, admin, disabled, created_at, has_password = row
     return User(
         name=cast(str, name),
         admin=bool(admin),
         disabled=bool(disabled),
         created_at=_utc(created_at),
+        has_password=bool(has_password),
     )
 
 
 def _row_to_token(row: Row) -> Token:
-    token_id, account, label, can_read, can_record, can_admin, created_at, revoked_at = row
+    (
+        token_id,
+        account,
+        label,
+        can_read,
+        can_record,
+        can_admin,
+        created_at,
+        revoked_at,
+        expires_at,
+    ) = row
     return Token(
         id=cast(int, token_id),
         user=cast(str, account),
@@ -540,6 +644,7 @@ def _row_to_token(row: Row) -> Token:
         scopes=_decode_scopes(can_read, can_record, can_admin),
         created_at=_utc(created_at),
         revoked_at=_opt_utc(revoked_at),
+        expires_at=_opt_utc(expires_at),
     )
 
 
@@ -778,9 +883,15 @@ def _row_to_catalogue_entry(row: Row) -> CatalogueEntry:
     )
 
 
-def _row_to_user_setting(row: Row) -> UserSetting:
-    namespace, key, value, updated_at = row
-    return UserSetting(
+def _row_to_project(row: Row) -> Project:
+    name, created_at = row
+    return Project(name=cast(str, name), created_at=_utc(created_at))
+
+
+def _row_to_project_setting(row: Row) -> ProjectSetting:
+    project, namespace, key, value, updated_at = row
+    return ProjectSetting(
+        project=cast(str, project),
         namespace=cast(str, namespace),
         key=cast(str, key),
         value=cast(str, value),
@@ -788,15 +899,17 @@ def _row_to_user_setting(row: Row) -> UserSetting:
     )
 
 
-def _catalogue_rows(execution: Execution, results: Sequence[Result]) -> list[Row]:
-    """One `_UPSERT_TEST_CASE` row per node id, in node-id order: every
-    report locks the rows it shares with another in the same order."""
+def _catalogue_rows(project: str, execution: Execution, results: Sequence[Result]) -> list[Row]:
+    """One `_UPSERT_TEST_CASE` row per node id of `project`, in node-id
+    order: every report locks the rows it shares with another in the same
+    order, and a report has one project."""
     run_id = execution.identity.value
     by_node_id: dict[str, CaseIdentity] = {
         _stored(result.identity.node_id): result.identity for result in results
     }
     return [
         _params(
+            project,
             node_id,
             identity.file_path,
             identity.class_name,
@@ -902,14 +1015,16 @@ def _upsert_catalogue(conn: PgConnection, rows: list[Row]) -> dict[str, object]:
             ids.append(None if row is None else row[0])
             if not cursor.nextset():
                 break
-    return {cast(str, row[0]): test_case_id for row, test_case_id in zip(rows, ids)}
+    return {cast(str, row[1]): test_case_id for row, test_case_id in zip(rows, ids)}
 
 
-def _count_runs_predating(conn: PgConnection, key: str) -> int:
+def _count_runs_predating(conn: PgConnection, project: str, key: str) -> int:
     if _unmatchable(key):
-        row = conn.execute(_COUNT_RUNS).fetchone()
+        row = conn.execute(_COUNT_PROJECT_RUNS, (project,)).fetchone()
     else:
-        row = conn.execute(_COUNT_RUNS_PREDATING_KEY, (key, key)).fetchone()
+        row = conn.execute(
+            _COUNT_RUNS_PREDATING_KEY, (project, project, key, key, project)
+        ).fetchone()
     return 0 if row is None else int(cast(int, row[0]))
 
 
@@ -962,6 +1077,7 @@ class PostgresExecutionStore:
         self,
         execution: Execution,
         *,
+        project: str,
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
@@ -969,9 +1085,12 @@ class PostgresExecutionStore:
     ) -> bool:
         # One transaction, in the order every foreign key needs: run,
         # catalogue, results, metadata.
+        if _unmatchable(project):
+            raise UnknownProjectError("there is no such project")
         run_id = execution.identity.value
         run_row = _params(
             run_id,
+            project,
             received_at,
             received_at,
             execution.started_at,
@@ -982,7 +1101,7 @@ class PostgresExecutionStore:
             *_vcs_columns(execution.vcs),
             recorded_by,
         )
-        catalogue_rows = _catalogue_rows(execution, results)
+        catalogue_rows = _catalogue_rows(project, execution, results)
         file_rows = [
             _params(run_id, file.source_file, file.content_type, file.status)
             for file in metadata.files
@@ -990,12 +1109,20 @@ class PostgresExecutionStore:
         entry_rows = _metadata_entry_rows(run_id, metadata)
 
         def write(conn: PgConnection) -> bool:
+            # Projects are never deleted, so the one found stays until the
+            # commit; the run's foreign key would refuse a missing one too,
+            # but only after writing, and as a driver error.
+            if conn.execute(_PROBE_PROJECT, (project,)).fetchone() is None:
+                raise UnknownProjectError(f"there is no project named {project!r}")
             upserted = conn.execute(_UPSERT_RUN, run_row).fetchone()
             locked = conn.execute(_LOCK_RUN, (run_id,)).fetchone()
+            # The upsert declined to touch another user's run, or another
+            # project's, and raising rolls back a transaction that changed
+            # nothing.
             if locked is not None and locked[1] != recorded_by:
-                # The upsert declined to touch another user's run, and
-                # raising rolls back a transaction that changed nothing.
                 raise ForeignRunError(f"run {run_id} was recorded by another user")
+            if locked is not None and locked[2] != project:
+                raise ProjectMismatchError(f"run {run_id} was recorded in another project")
             if upserted is None and locked is not None and locked[0] is not None:
                 # The upsert changed nothing and the run has an exit status,
                 # so it was finished before this report. A finished run is
@@ -1041,23 +1168,26 @@ class PostgresExecutionStore:
     def count_results(self) -> int:
         return self._count("SELECT count(*) FROM vantage.result")
 
-    def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
-        if _unmatchable(node_id):
+    def get_catalogue_entry(self, node_id: str, *, project: str) -> CatalogueEntry | None:
+        if _unmatchable(node_id, project):
             return None
-        row = self._fetchone(_SELECT_TEST_CASE, (node_id, node_id))
+        row = self._fetchone(_SELECT_TEST_CASE, (project, node_id, node_id))
         return None if row is None else _row_to_catalogue_entry(row)
 
     def list_runs(
-        self, *, limit: int, offset: int, after: RunKey | None = None
+        self, *, project: str, limit: int, offset: int, after: RunKey | None = None
     ) -> Page[RunListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
+        if _unmatchable(project):
+            return Page(items=(), has_more=False)
         sql = _LIST_RUNS if after is None else _LIST_RUNS_AFTER
-        rows = self._fetchall(sql, (*_run_key_params(after), page_limit + 1, offset))
+        rows = self._fetchall(sql, (project, *_run_key_params(after), page_limit + 1, offset))
         return _page(rows, page_limit, _row_to_run_list_entry)
 
     def list_runs_with_metadata_horizon(
         self,
         *,
+        project: str,
         filters: Sequence[tuple[str, str]],
         limit: int,
         offset: int,
@@ -1078,12 +1208,17 @@ class PostgresExecutionStore:
                     sql = _LIST_RUNS if after is None else _LIST_RUNS_AFTER
                 params = [
                     *(part for key, value in pairs for part in (key, key, value, value)),
+                    project,
                     *_run_key_params(after),
                     page_limit + 1,
                     offset,
                 ]
                 rows = conn.execute(sql, params).fetchall()
-            return rows, tuple(_count_runs_predating(conn, key) for key in keys)
+            return rows, tuple(_count_runs_predating(conn, project, key) for key in keys)
+
+        if _unmatchable(project):
+            # No project holds U+0000, so it has no runs to page or count.
+            return Page(items=(), has_more=False), tuple(0 for _key in keys)
 
         rows, predating = self._transaction(read, snapshot=True)
         return _page(rows, page_limit, _row_to_run_list_entry), predating
@@ -1098,6 +1233,7 @@ class PostgresExecutionStore:
             execution=_decode_execution(row[:12]),
             last_contact_at=_opt_utc(row[12]),
             recorded_by=cast("str | None", row[13]),
+            project=cast(str, row[14]),
         )
 
     def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
@@ -1130,57 +1266,70 @@ class PostgresExecutionStore:
         return None if row is None else _row_to_result(row)
 
     def list_history(
-        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+        self,
+        *,
+        project: str,
+        node_id: str,
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> Page[HistoryEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        if _unmatchable(node_id):
+        if _unmatchable(node_id, project):
             return Page(items=(), has_more=False)
         rows = self._fetchall(
             _LIST_HISTORY if after is None else _LIST_HISTORY_AFTER,
-            (node_id, node_id, *_run_key_params(after), page_limit + 1, offset),
+            (project, node_id, node_id, *_run_key_params(after), page_limit + 1, offset),
         )
         return _page(rows, page_limit, _row_to_history_entry)
 
-    def list_settings(self, namespace: str) -> Sequence[UserSetting]:
-        if _unmatchable(namespace):
+    def list_settings(self, namespace: str, *, project: str) -> Sequence[ProjectSetting]:
+        if _unmatchable(namespace, project):
             return ()
-        rows = self._fetchall(_LIST_SETTINGS, (namespace,))
-        return tuple(_row_to_user_setting(row) for row in rows)
+        rows = self._fetchall(_LIST_SETTINGS, (project, namespace))
+        return tuple(_row_to_project_setting(row) for row in rows)
 
     def upsert_setting(
         self,
         namespace: str,
         key: str,
         *,
+        project: str,
         value: str,
         updated_at: datetime,
         max_keys: int | None = None,
     ) -> bool:
+        if _unmatchable(project):
+            raise UnknownProjectError("there is no such project")
         namespace, key, value = _stored(namespace), _stored(key), _stored(value)
 
         def write(conn: PgConnection) -> bool:
-            # Every writer of the namespace takes this lock first, so the
-            # count below cannot be passed by a key another process adds
-            # before this transaction commits.
-            conn.execute(_LOCK_NAMESPACE, (_SETTINGS_LOCK_CLASS, namespace))
+            # Every writer of the project's namespace takes this lock first,
+            # so the count below cannot be passed by a key another process
+            # adds before this transaction commits.
+            conn.execute(_LOCK_NAMESPACE, (_SETTINGS_LOCK_CLASS, project, namespace))
+            if conn.execute(_PROBE_PROJECT, (project,)).fetchone() is None:
+                raise UnknownProjectError(f"there is no project named {project!r}")
             if (
                 max_keys is not None
-                and conn.execute(_PROBE_SETTING, (namespace, key)).fetchone() is None
+                and conn.execute(_PROBE_SETTING, (project, namespace, key)).fetchone() is None
             ):
-                counted = conn.execute(_COUNT_SETTINGS, (namespace,)).fetchone()
+                counted = conn.execute(_COUNT_SETTINGS, (project, namespace)).fetchone()
                 held = 0 if counted is None else int(cast(int, counted[0]))
                 if held >= max_keys:
                     raise NamespaceFullError(f"{namespace!r} already holds {held} keys")
-            upserted = conn.execute(_UPSERT_SETTING, (namespace, key, value, updated_at)).fetchone()
+            upserted = conn.execute(
+                _UPSERT_SETTING, (project, namespace, key, value, updated_at)
+            ).fetchone()
             return upserted is not None and bool(upserted[0])
 
         return self._transaction(write)
 
-    def delete_setting(self, namespace: str, key: str) -> bool:
-        if _unmatchable(namespace, key):
+    def delete_setting(self, namespace: str, key: str, *, project: str) -> bool:
+        if _unmatchable(namespace, key, project):
             return False
         with live_connection(self._pool) as conn:
-            return conn.execute(_DELETE_SETTING, (namespace, key)).rowcount == 1
+            return conn.execute(_DELETE_SETTING, (project, namespace, key)).rowcount == 1
 
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
         if _unmatchable(execution_id):
@@ -1188,9 +1337,31 @@ class PostgresExecutionStore:
         rows = self._fetchall(_SELECT_RUN_CASE_OUTCOMES, (execution_id,))
         return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
 
+    def create_project(self, name: str, *, created_at: datetime) -> Project:
+        with live_connection(self._pool) as conn:
+            inserted = conn.execute(_INSERT_PROJECT, _params(name, created_at)).rowcount
+        if inserted != 1:
+            raise ProjectExistsError(f"there is already a project named {name!r}")
+        return Project(name=name, created_at=created_at)
+
+    def get_project(self, name: str) -> Project | None:
+        if _unmatchable(name):
+            return None
+        row = self._fetchone(_SELECT_PROJECT, (name,))
+        return None if row is None else _row_to_project(row)
+
+    def list_projects(self) -> Sequence[Project]:
+        return tuple(_row_to_project(row) for row in self._fetchall(_LIST_PROJECTS, ()))
+
     def access_required(self) -> bool:
         row = self._fetchone(_PROBE_ANY_USER)
         return row is not None and bool(row[0])
+
+    def create_first_admin(
+        self, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        row = self._fetchone(_INSERT_FIRST_ADMIN, _params(name, created_at, password_hash))
+        return None if row is None else _row_to_user(row)
 
     def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
         with live_connection(self._pool) as conn:
@@ -1215,6 +1386,68 @@ class PostgresExecutionStore:
             return None
         row = self._fetchone(_UPDATE_USER, (admin, disabled, name))
         return None if row is None else _row_to_user(row)
+
+    def get_password_hash(self, name: str) -> str | None:
+        if _unmatchable(name):
+            return None
+        row = self._fetchone(_SELECT_PASSWORD_HASH, (name,))
+        return None if row is None else cast("str | None", row[0])
+
+    def set_password(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        changed_at: datetime,
+        replacing: str | None = None,
+    ) -> bool:
+        if _unmatchable(name):
+            return False
+
+        def work(conn: PgConnection) -> bool:
+            # The UPDATE locks the account row first, as a login's
+            # `FOR SHARE` does, so the two never deadlock; the revocation,
+            # a statement of its own, sees any login that committed before
+            # the lock was granted.
+            if replacing is None:
+                changed = conn.execute(_SET_PASSWORD, (password_hash, name)).fetchone()
+            else:
+                changed = conn.execute(
+                    _REPLACE_PASSWORD, (password_hash, name, replacing)
+                ).fetchone()
+            if changed is None:
+                return False
+            conn.execute(_REVOKE_LOGIN_TOKENS, (changed_at, name))
+            return True
+
+        return self._transaction(work)
+
+    def create_login_token(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        digest: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> Token | None:
+        if _unmatchable(name):
+            return None
+
+        def work(conn: PgConnection) -> Token | None:
+            row = conn.execute(
+                _INSERT_LOGIN_TOKEN,
+                (digest, LOGIN_TOKEN_LABEL, created_at, expires_at, name, password_hash),
+            ).fetchone()
+            if row is None:
+                return None
+            token = _row_to_token(row)
+            conn.execute(_DELETE_EXPIRED_LOGIN_TOKENS, (name, created_at, token.id))
+            return token
+
+        # Two logins of one user deleting the same expired rows can
+        # deadlock; `_transaction` runs the loser again.
+        return self._transaction(work)
 
     def create_token(
         self,
@@ -1265,10 +1498,10 @@ class PostgresExecutionStore:
             cursor = conn.execute(_REVOKE_TOKEN, (revoked_at, token_id, user))
             return cursor.rowcount == 1
 
-    def authenticate(self, digest: str) -> Grant | None:
+    def authenticate(self, digest: str, *, now: datetime) -> Grant | None:
         if _unmatchable(digest):
             return None
-        row = self._fetchone(_AUTHENTICATE, (digest,))
+        row = self._fetchone(_AUTHENTICATE, (digest, now))
         if row is None:
             return None
         name, admin, can_read, can_record, can_admin = row

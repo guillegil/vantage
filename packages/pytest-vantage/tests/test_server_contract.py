@@ -16,12 +16,12 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from pytest_vantage import budget, capture, metadata, recorder, transport, vcs
+from pytest_vantage import budget, capture, config, metadata, recorder, transport, vcs
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.metadata import CapturedFile, DeclaredKey, MetadataSection, session_value
 from pytest_vantage.session_metadata import plan_values
 from vantage.core.config import resolution
-from vantage.core.domain import access
+from vantage.core.domain import access, projects
 from vantage.core.domain import metadata as core_metadata
 from vantage.core.domain.result import OUTCOMES
 from vantage.core.ports.storage import MetadataEntry, RunMetadata
@@ -421,3 +421,42 @@ def test_every_refusal_the_plugin_explains_is_the_one_the_server_gives() -> None
     }
 
     assert transport._ACCESS_REFUSALS == refusals
+
+
+# --- projects -------------------------------------------------------------------
+
+
+def test_the_project_name_rule_is_the_servers() -> None:
+    """A name the plugin accepts and the server refuses loses the run to a
+    422 at the finish; one the plugin refuses and the server accepts
+    stops a session that would have been recorded."""
+    assert config._PROJECT_NAME_PATTERN == projects.PROJECT_NAME_PATTERN
+
+
+def test_the_plugin_describes_the_rule_in_the_servers_words() -> None:
+    """The usage error and the server's refusal state one rule, so they
+    should read alike."""
+    with pytest.raises(projects.InvalidProjectNameError) as server_side:
+        projects.check_project_name("Foo")
+    rule = str(server_side.value).removeprefix("a project name is ")
+
+    with pytest.raises(config.VantageConfigError) as plugin_side:
+        config.resolve_project(SimpleNamespace(getoption=lambda name, default=None: "Foo"))  # type: ignore[arg-type]
+
+    assert f"must be a project name: {rule} (got 'Foo')" in str(plugin_side.value)
+
+
+def test_a_run_naming_no_project_goes_where_the_server_puts_one_naming_none() -> None:
+    """The plugin names `default` in every report and in its header; the
+    server files a report naming none in its own default. The two must be
+    one project, or a queued report from before projects lands elsewhere."""
+    assert config.DEFAULT_PROJECT == projects.DEFAULT_PROJECT
+
+
+def test_the_unknown_project_refusal_the_plugin_keeps_is_the_one_the_server_gives() -> None:
+    """The outbox keeps a run the server refused for its project; any other
+    404 is dropped. Reading the wrong pair would drop runs an admin could
+    have let in, or keep forever runs no server will take."""
+    refusal = (errors.NoSuchProjectError.status_code, errors.NoSuchProjectError.error)
+
+    assert transport._UNKNOWN_PROJECT == refusal

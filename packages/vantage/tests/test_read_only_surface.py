@@ -19,6 +19,11 @@ through the store's own connection, with `count_executions()` and
 `_run_read_only_proof` can report a mismatch, so the read-only check is not
 vacuously green.
 
+**Two projects, each with a run, a result and a section.** The per-project
+reads are asked of both, and of a project that does not exist and one no
+project can be named, so a lookup that made the project it missed, or read
+across projects and wrote as it went, is caught.
+
 **On an open database and on a closed one.** Once a user exists every read
 authenticates first, so the closed run proves that authenticating writes
 nothing either, and it is the only way the users and tokens reads get past
@@ -33,6 +38,7 @@ import sqlite3
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -40,8 +46,11 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 from vantage.core.domain.access import RECORD_SCOPE, SCOPES, new_token, token_digest
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import MetadataEntry, MetadataFile, RunMetadata
 from vantage.service.app import create_app
+from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
+from vantage.service.schemas import SectionValue
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _execution, _result, _vcs
 
@@ -51,6 +60,8 @@ _DOCUMENT_BYTES = (
 _Call = Callable[[], object]
 
 _RUN_ID = "7" * 32
+_OTHER_RUN_ID = "9" * 32
+_OTHER_PROJECT = "firmware"
 _NODE_ID = "tests/test_read_only_probe.py::test_x"
 _SEEDED_AT = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
 
@@ -125,11 +136,12 @@ def _run_read_only_proof(
 
 
 def _seed_database(db_path: Path, *, closed: bool = False) -> dict[str, str]:
-    """One run, one result and its metadata, via `record_session`, from a
-    writer closed before the store under test opens. With `closed`, also an
-    admin `alice` with a token holding every scope, and a user `bob` with a
-    record-only one; the headers that send alice's token are returned, and
-    bob's are kept for `_read_bindings`."""
+    """Two projects, `default` and `_OTHER_PROJECT`, each with one run, one
+    result, the run's metadata and one section, from a writer closed before
+    the store under test opens. With `closed`, also an admin `alice` with a
+    token holding every scope, and a user `bob` with a record-only one; the
+    headers that send alice's token are returned, and bob's are kept for
+    `_read_bindings`."""
     writer = SqliteExecutionStore(db_path)
     headers: dict[str, str] = {}
     if closed:
@@ -144,27 +156,42 @@ def _seed_database(db_path: Path, *, closed: bool = False) -> dict[str, str]:
                 created_at=_SEEDED_AT,
             )
             headers[name] = f"Bearer {token}"
-    writer.record_session(
-        _execution(_RUN_ID, started=_SEEDED_AT, vcs=_vcs()),
-        results=(_result(_NODE_ID),),
-        received_at=_SEEDED_AT,
-        metadata=RunMetadata(
-            files=(MetadataFile(source_file="fw.json", content_type="json", status="captured"),),
-            entries=(
-                MetadataEntry(
-                    key="firmware_version", value="2.1", source_file="fw.json", status="captured"
+    writer.create_project(_OTHER_PROJECT, created_at=_SEEDED_AT)
+    for run_id, project in ((_RUN_ID, DEFAULT_PROJECT), (_OTHER_RUN_ID, _OTHER_PROJECT)):
+        writer.record_session(
+            _execution(run_id, started=_SEEDED_AT, vcs=_vcs()),
+            results=(_result(_NODE_ID),),
+            received_at=_SEEDED_AT,
+            metadata=RunMetadata(
+                files=(
+                    MetadataFile(source_file="fw.json", content_type="json", status="captured"),
                 ),
-                MetadataEntry(
-                    key="bench",
-                    value="lab-3",
-                    source_file=None,
-                    status="captured",
-                    source="session",
-                    declared=False,
+                entries=(
+                    MetadataEntry(
+                        key="firmware_version",
+                        value="2.1",
+                        source_file="fw.json",
+                        status="captured",
+                    ),
+                    MetadataEntry(
+                        key="bench",
+                        value="lab-3",
+                        source_file=None,
+                        status="captured",
+                        source="session",
+                        declared=False,
+                    ),
                 ),
             ),
-        ),
-    )
+            project=project,
+        )
+        writer.upsert_setting(
+            TEST_SECTIONS_NAMESPACE,
+            "Probe",
+            project=project,
+            value=SectionValue(prefix="tests/").model_dump_json(),
+            updated_at=_SEEDED_AT,
+        )
     writer.close()
     return headers
 
@@ -180,26 +207,37 @@ def _read_bindings(
     Every route with an error branch gets one call per branch (happy path,
     plus its `404` and/or `422` variants), so a read path that wrote only on
     a miss -- an audit log on `404`, say -- is caught too. A route with no
-    such branch keeps its single happy-path call. With `bob`, the
+    such branch keeps its single happy-path call. A per-project read is
+    asked of both seeded projects, and answers `404` for the missing ones.
+    With `bob`, the
     authorization header of a user who is no admin, the users and tokens
     reads are also asked with it, to be refused."""
     run = f"/api/v1/runs/{_RUN_ID}"
     refused = {} if bob is None else {"Authorization": bob}
     unknown_run = f"/api/v1/runs/{_UNKNOWN_RUN_ID}"
+    other_run = f"/api/v1/runs/{_OTHER_RUN_ID}"
+    projects = [f"/api/v1/projects/{name}" for name in (DEFAULT_PROJECT, _OTHER_PROJECT)]
+    # A name no project has, and one no project can have.
+    missing = [f"/api/v1/projects/{name}" for name in ("ghost", "NOT-A-NAME")]
+    node = {"node_id": _NODE_ID}
     return {
-        ("GET", "/runs"): (
-            lambda: client.get("/api/v1/runs"),
-            lambda: client.get("/api/v1/runs", params={"limit": 0}),  # 422
+        ("GET", "/projects"): (lambda: client.get("/api/v1/projects"),),
+        ("GET", "/projects/{project}/runs"): (
+            *(partial(client.get, f"{project}/runs") for project in projects),
+            *(partial(client.get, f"{project}/runs") for project in missing),  # 404
+            partial(client.get, f"{projects[0]}/runs", params={"limit": 0}),  # 422
             # The metadata filter, and its unpaired-parameter rejection branch.
-            lambda: client.get(
-                "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
+            partial(
+                client.get,
+                f"{projects[0]}/runs",
+                params={"metadata_key": "firmware_version", "metadata_value": "2.1"},
             ),
-            lambda: client.get(
-                "/api/v1/runs", params={"metadata_key": "firmware_version"}
-            ),  # 422 (InvalidMetadataFilterError)
+            # 422 (InvalidMetadataFilterError)
+            partial(client.get, f"{projects[0]}/runs", params={"metadata_key": "firmware_version"}),
         ),
         ("GET", "/runs/{run_id}"): (
             lambda: client.get(run),
+            lambda: client.get(other_run),
             lambda: client.get(unknown_run),  # 404 (UnknownRunError)
         ),
         ("GET", "/runs/{run_id}/metadata"): (
@@ -219,16 +257,23 @@ def _read_bindings(
             lambda: client.get(f"{run}/result", params={"node_id": "no-such-node"}),
             lambda: client.get(f"{run}/result"),  # 422 (InvalidIdentityError)
         ),
-        ("GET", "/tests/history"): (
-            lambda: client.get("/api/v1/tests/history", params={"node_id": _NODE_ID}),
-            lambda: client.get("/api/v1/tests/history"),  # 422 (InvalidIdentityError)
+        ("GET", "/projects/{project}/tests/history"): (
+            *(partial(client.get, f"{project}/tests/history", params=node) for project in projects),
+            # 404 (NoSuchProjectError)
+            *(partial(client.get, f"{project}/tests/history", params=node) for project in missing),
+            partial(client.get, f"{projects[0]}/tests/history"),  # 422 (InvalidIdentityError)
         ),
         ("GET", "/capabilities"): (lambda: client.get("/api/v1/capabilities"),),
         ("GET", "/openapi.yaml"): (lambda: client.get("/api/v1/openapi.yaml"),),
-        ("GET", "/config/sections"): (lambda: client.get("/api/v1/config/sections"),),
+        ("GET", "/projects/{project}/config/sections"): (
+            *(partial(client.get, f"{project}/config/sections") for project in projects),
+            # 404 (NoSuchProjectError)
+            *(partial(client.get, f"{project}/config/sections") for project in missing),
+        ),
         ("GET", "/runs/{run_id}/sections"): (
             lambda: client.get(f"{run}/sections"),
             lambda: client.get(f"{unknown_run}/sections"),  # 404 (UnknownRunError)
+            lambda: client.get(f"{other_run}/sections"),  # the other project's sections
         ),
         ("GET", "/users"): (
             lambda: client.get("/api/v1/users"),
@@ -306,8 +351,15 @@ def test_logical_content_digest_unchanged_after_every_read_path(
         # caller, so their read of the store is proven too, not only that.
         answered = [client.get(path).status_code for path in ("/api/v1/users", "/api/v1/tokens")]
         assert answered == [200, 200] if closed else [409, 409]
+        # Both projects' rows are in the digest, and nothing asked made one.
+        tables = set(_table_names(store._conn))  # noqa: SLF001
+        assert {"project", "project_setting"} <= tables
+        assert [project.name for project in store.list_projects()] == [
+            DEFAULT_PROJECT,
+            _OTHER_PROJECT,
+        ]
         assert proof.before[_LOGICAL] == proof.after[_LOGICAL]
-        assert proof.before[_EXECUTIONS] == proof.after[_EXECUTIONS] == 1
-        assert proof.before[_RESULTS] == proof.after[_RESULTS] == 1
+        assert proof.before[_EXECUTIONS] == proof.after[_EXECUTIONS] == 2
+        assert proof.before[_RESULTS] == proof.after[_RESULTS] == 2
     finally:
         store.close()

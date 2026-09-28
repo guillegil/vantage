@@ -6,13 +6,19 @@ from collections.abc import Iterator
 
 import pytest
 from memory_store import InMemoryExecutionStore
-from vantage_port_contract import ExecutionStoreContract, StoredMetadata
+from vantage_port_contract import ExecutionStoreContract, LocalDatabaseContract, StoredMetadata
 
 
-class TestInMemoryExecutionStore(ExecutionStoreContract):
+class TestInMemoryExecutionStore(ExecutionStoreContract, LocalDatabaseContract):
     @pytest.fixture
     def store(self) -> Iterator[InMemoryExecutionStore]:
         adapter = InMemoryExecutionStore()
+        yield adapter
+        adapter.close()
+
+    @pytest.fixture
+    def local_store(self) -> Iterator[InMemoryExecutionStore]:
+        adapter = InMemoryExecutionStore(local=True)
         yield adapter
         adapter.close()
 

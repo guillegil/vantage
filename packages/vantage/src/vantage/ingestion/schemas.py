@@ -37,6 +37,7 @@ from typing import Annotated, Literal
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 from vantage.core.domain.execution import IDENTITY_PATTERN
+from vantage.core.domain.projects import can_name_a_project
 
 # SQLite stores an integer as signed 64 bits and refuses a larger one at
 # parameter binding, after validation, as a 500 that loses the whole report.
@@ -263,6 +264,12 @@ class SessionReport(BaseModel):
     sends no such key. For ``results``, `None` (the
     section is absent) and `[]` (the session collected nothing) both mean
     zero result rows; the run is still stored.
+
+    ``project`` names the run's project; absent or `None`, the run's is
+    `default`. It sits in the envelope rather than in `run`, which refuses
+    an unknown field, so no server of any version refuses a report for
+    carrying it. A name no project can have is refused here, never looked
+    up, so it never reaches a store.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -271,6 +278,17 @@ class SessionReport(BaseModel):
     results: list[ResultReport] | None = None
     vcs: VcsReport | None = None
     metadata: MetadataReport | None = None
+    project: str | None = None
+
+    @field_validator("project")
+    @classmethod
+    def _require_a_project_name(cls, value: str | None) -> str | None:
+        """The domain's own rule, not a `pattern`: Pydantic's expression
+        engine refuses the `\\Z` the rule is written with. The message
+        never repeats the name."""
+        if value is not None and not can_name_a_project(value):
+            raise ValueError("not a project name")
+        return value
 
     @field_validator("results")
     @classmethod

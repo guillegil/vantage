@@ -24,8 +24,11 @@
 -- tests read them to check what a write stored.
 
 -- ---------------------------------------------------------------------------
--- meta -- `schema_version`, plus the best-effort `created_at`/`created_by`
--- rows connection.py writes.
+-- meta -- `schema_version` and `origin`, written with the tables, plus the
+-- best-effort `created_at`/`created_by` rows connection.py writes. `origin`
+-- is `local` when pytest-vantage's local store made the database and
+-- `server` otherwise, and never changes: a server gives only a `server`
+-- database its first admin.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -36,18 +39,23 @@ CREATE TABLE IF NOT EXISTS meta (
 -- account -- one row per user; `user` is a reserved word in PostgreSQL. A
 -- user is disabled, never deleted, so every `run.recorded_by` names one,
 -- and a database that has had a user always has one: the server requires
--- a token from then on. `name` is short and lower case
--- (`core/domain/access.py`).
+-- a token from then on. A `server` database has one from the server's
+-- first start. `name` is short and lower case (`core/domain/access.py`);
+-- `password_hash` is a scrypt PHC string (`core/domain/passwords.py`), or
+-- NULL for a user who cannot log in.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS account (
-    name        TEXT PRIMARY KEY,
-    admin       INTEGER NOT NULL CHECK (admin IN (0, 1)),
-    disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
-    created_at  TEXT NOT NULL
+    name           TEXT PRIMARY KEY,
+    admin          INTEGER NOT NULL CHECK (admin IN (0, 1)),
+    disabled       INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at     TEXT NOT NULL,
+    password_hash  TEXT NULL
 );
 
 -- ---------------------------------------------------------------------------
--- access_token -- one row per token ever made, revoked ones included.
+-- access_token -- one row per token ever made, revoked ones included,
+-- except for login tokens, the only ones with an `expires_at`: a login
+-- token's row is deleted once it has expired, at its user's next login.
 -- `digest` is the token's SHA-256 in hex; the token itself is never stored.
 -- Each `can_*` column is one scope the token holds, and it holds at least
 -- one.
@@ -62,15 +70,29 @@ CREATE TABLE IF NOT EXISTS access_token (
     can_admin   INTEGER NOT NULL CHECK (can_admin IN (0, 1)),
     created_at  TEXT NOT NULL,
     revoked_at  TEXT NULL,
+    expires_at  TEXT NULL,
     CHECK (can_read + can_record + can_admin > 0)
 );
 
 -- ---------------------------------------------------------------------------
--- run -- one row per recorded session. `recorded_by` is the user whose
+-- project -- one row per project, keyed by its short, lower-case name
+-- (`core/domain/projects.py`). `default` is written in the transaction that
+-- creates the database (connection.py). A project is never renamed or
+-- deleted, so every row naming one keeps naming one.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS project (
+    name        TEXT PRIMARY KEY,
+    created_at  TEXT NOT NULL
+);
+
+-- ---------------------------------------------------------------------------
+-- run -- one row per recorded session. `project` is the one the report that
+-- created the run named, and never changes. `recorded_by` is the user whose
 -- token created the run, NULL when it was recorded without one.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS run (
     id                            TEXT PRIMARY KEY,
+    project                       TEXT NOT NULL REFERENCES project (name),
     received_at                   TEXT NOT NULL,
     last_contact_at               TEXT NULL,
     started_at                    TEXT NOT NULL,
@@ -88,14 +110,17 @@ CREATE TABLE IF NOT EXISTS run (
 );
 
 -- ---------------------------------------------------------------------------
--- test_case -- the catalogue: one row per test ever seen, keyed by pytest
--- node id. `node_id`'s uniqueness comes from `idx_test_case_node_id` below,
--- the catalogue upsert's conflict target. Every result of a node id reads
--- its file, class, function and parameter from here, as the newest run
--- reported them; `last_seen_at` decides which run that is.
+-- test_case -- the catalogue: one row per test ever seen in a project,
+-- keyed by project and pytest node id. That pair's uniqueness comes from
+-- `idx_test_case_project_node_id` below, the catalogue upsert's conflict
+-- target, so two projects never share a row however alike their node ids.
+-- Every result of a node id reads its file, class, function and parameter
+-- from its project's row, as the project's newest run reported them;
+-- `last_seen_at` decides which run that is.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS test_case (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    project                  TEXT NOT NULL REFERENCES project (name),
     node_id                  TEXT NOT NULL,
     file_path                TEXT NOT NULL,
     class_name               TEXT NULL,
@@ -150,17 +175,19 @@ CREATE TABLE IF NOT EXISTS result (
 );
 
 -- ---------------------------------------------------------------------------
--- user_setting -- namespaced, server-persisted user preferences. Generic
--- storage, specific validation: `value` is JSON text this schema does not
--- describe and this adapter never parses; each namespace's shape is validated
--- by an ordinary Pydantic model in `vantage.service`.
+-- project_setting -- a project's namespaced, server-persisted settings, such
+-- as its section definitions. Generic storage, specific validation: `value`
+-- is JSON text this schema does not describe and this adapter never parses;
+-- each namespace's shape is validated by an ordinary Pydantic model in
+-- `vantage.service`.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS user_setting (
+CREATE TABLE IF NOT EXISTS project_setting (
+    project     TEXT NOT NULL REFERENCES project (name),
     namespace   TEXT NOT NULL,
     key         TEXT NOT NULL,
     value       TEXT NOT NULL,
     updated_at  TEXT NOT NULL,
-    PRIMARY KEY (namespace, key)
+    PRIMARY KEY (project, namespace, key)
 );
 
 -- ---------------------------------------------------------------------------
@@ -207,24 +234,26 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 
 -- ---------------------------------------------------------------------------
 -- Indexes -- each serves a statement in sqlite_store.py.
--- `run(started_at)`: run-list order and the metadata horizon count.
+-- `run(project, started_at, id)`: a project's run list in its order, the
+-- cursor's range, and the metadata horizon count. It leads with the
+-- project because every read of the run list is within one.
 -- `result(run_id)`: one run's results in insertion order, without the
 -- temporary sort the `(run_id, node_id)` unique index would need.
 -- `result(test_case_id)`: one test's history.
--- `test_case(node_id)`: the catalogue upsert's conflict target and every
--- lookup by node id.
+-- `test_case(project, node_id)`: the catalogue upsert's conflict target and
+-- every lookup by node id, which is always within one project.
 -- `run_metadata(key, value)`: filtering runs by metadata key/value pairs,
 -- a full scan without it.
 -- `access_token(digest)`, from its UNIQUE constraint: authenticating a
 -- request.
 -- ---------------------------------------------------------------------------
-CREATE INDEX IF NOT EXISTS idx_run_started_at
-    ON run (started_at);
+CREATE INDEX IF NOT EXISTS idx_run_project_started_at
+    ON run (project, started_at, id);
 CREATE INDEX IF NOT EXISTS idx_result_run_id
     ON result (run_id);
 CREATE INDEX IF NOT EXISTS idx_result_test_case_id
     ON result (test_case_id);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_test_case_node_id
-    ON test_case (node_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_test_case_project_node_id
+    ON test_case (project, node_id);
 CREATE INDEX IF NOT EXISTS idx_run_metadata_key_value
     ON run_metadata (key, value);

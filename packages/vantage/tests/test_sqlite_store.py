@@ -7,6 +7,7 @@ import functools
 import re
 import sqlite3
 from collections.abc import Iterator, Sequence
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +15,8 @@ from typing import Any, TypeVar
 
 import pytest
 from sqlite_rows import read_metadata
+from vantage.core.domain.access import LOGIN_TOKEN_LIFETIME, token_digest
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import (
     ExecutionStore,
     MetadataEntry,
@@ -21,13 +24,16 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.storage.sqlite_store import (
+    _COUNT_RUNS_PREDATING_KEY,
     _LIST_RUNS_AFTER,
     _LIST_SUBJECT_PREFIX_BYTES,
     SqliteExecutionStore,
     _list_runs_by_metadata,
 )
 from vantage_port_contract import (
+    _HASH,
     ExecutionStoreContract,
+    LocalDatabaseContract,
     StoredMetadata,
     _captured,
     _execution,
@@ -39,7 +45,7 @@ from vantage_port_contract import (
 _Row = TypeVar("_Row", MetadataFile, MetadataEntry)
 
 
-class TestSqliteExecutionStore(ExecutionStoreContract):
+class TestSqliteExecutionStore(ExecutionStoreContract, LocalDatabaseContract):
     @pytest.fixture
     def database(self, tmp_path: Path) -> Path:
         return tmp_path / "store" / "vantage.db"
@@ -47,6 +53,12 @@ class TestSqliteExecutionStore(ExecutionStoreContract):
     @pytest.fixture
     def store(self, database: Path) -> Iterator[ExecutionStore]:
         adapter = SqliteExecutionStore(database)
+        yield adapter
+        adapter.close()
+
+    @pytest.fixture
+    def local_store(self, database: Path) -> Iterator[ExecutionStore]:
+        adapter = SqliteExecutionStore(database, local=True)
         yield adapter
         adapter.close()
 
@@ -69,7 +81,7 @@ def test_finish_write_leaves_received_at_started_at_and_last_contact_at_untouche
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         received = datetime(2026, 8, 15, 9, 0, 1, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
-        store.record_session(start, results=(), received_at=received)
+        store.record_session(start, results=(), received_at=received, project=DEFAULT_PROJECT)
 
         select_run = "SELECT received_at, started_at, last_contact_at FROM run WHERE id = ?"
         before = store._conn.execute(select_run, (identity,)).fetchone()  # noqa: SLF001
@@ -79,7 +91,9 @@ def test_finish_write_leaves_received_at_started_at_and_last_contact_at_untouche
         disagreeing_start = started + timedelta(hours=3)
         finish = _execution(identity, finished=True, started=disagreeing_start)
         later_received = received + timedelta(hours=1)
-        store.record_session(finish, results=(), received_at=later_received)
+        store.record_session(
+            finish, results=(), received_at=later_received, project=DEFAULT_PROJECT
+        )
 
         after = store._conn.execute(select_run, (identity,)).fetchone()  # noqa: SLF001
 
@@ -106,7 +120,10 @@ def test_touch_last_contact_normalizes_a_non_utc_contact_before_storing_it(
         identity = "7" * 32
         started = datetime(2026, 8, 19, 9, 0, 0, tzinfo=timezone.utc)
         store.record_session(
-            _start_only_execution(identity, started=started), results=(), received_at=started
+            _start_only_execution(identity, started=started),
+            results=(),
+            received_at=started,
+            project=DEFAULT_PROJECT,
         )
 
         # 12:00+02:00 is 10:00 UTC -- one hour after the start, not three.
@@ -134,7 +151,9 @@ def test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository(
     try:
         identity = "8" * 32
         execution = _execution(identity, vcs=None)
-        store.record_session(execution, results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         row = store._conn.execute(  # noqa: SLF001
             "SELECT typeof(vcs_branch), typeof(vcs_commit), typeof(vcs_commit_subject),"
@@ -163,68 +182,121 @@ def test_vcs_branch_is_sql_null_not_empty_string_for_a_run_outside_a_repository(
         store.close()
 
 
+@pytest.mark.parametrize("after", [False, True], ids=["first-page", "after-a-key"])
 @pytest.mark.parametrize("pair_count", [1, 3])
-def test_list_runs_by_metadata_uses_the_key_value_index(tmp_path: Path, pair_count: int) -> None:
+def test_list_runs_by_metadata_uses_the_key_value_index(
+    tmp_path: Path, pair_count: int, after: bool
+) -> None:
     """`_list_runs_by_metadata` seeks `idx_run_metadata_key_value` once per
-    pair rather than scanning `run` with one correlated subquery per row.
+    pair, then looks each run it found up by primary key, rather than
+    scanning `run` with one probe per row.
 
     A correlated `EXISTS` form returns the same rows but makes SQLite prefer
     `run_metadata`'s primary-key autoindex, so cost grows with the total run
-    count. That regression is silent, which is why this asserts the plan;
-    `test_routes_read.py` covers the rows.
+    count; comparing the project in a form SQLite can use
+    `idx_run_project_started_at` for makes it walk every run of the project
+    and probe the pair list for each. Either regression is silent, which is
+    why this asserts the plan; `test_routes_read.py` covers the rows.
 
     No `ANALYZE` is run: production never runs it either, so the no-statistics
     plan asserted here is the plan production gets.
     """
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    run_key = ("2026-08-15T09:00:00.000000+00:00", "a" * 32) if after else ()
     try:
         plan_rows = store._conn.execute(  # noqa: SLF001
-            f"EXPLAIN QUERY PLAN {_list_runs_by_metadata(pair_count)}",
-            (_LIST_SUBJECT_PREFIX_BYTES, *["firmware_version", "2.1"] * pair_count, 21, 0),
+            f"EXPLAIN QUERY PLAN {_list_runs_by_metadata(pair_count, after=after)}",
+            (
+                _LIST_SUBJECT_PREFIX_BYTES,
+                *["firmware_version", "2.1"] * pair_count,
+                DEFAULT_PROJECT,
+                *run_key,
+                21,
+                0,
+            ),
         ).fetchall()
         plan_text = "\n".join(str(row[-1]) for row in plan_rows)
 
         assert plan_text.count("USING INDEX idx_run_metadata_key_value") == pair_count
+        assert "SEARCH run USING INDEX sqlite_autoindex_run_1 (id=?)" in plan_text
+        assert "idx_run_project_started_at" not in plan_text
+        assert "sqlite_autoindex_run_metadata_1" not in plan_text
+    finally:
+        store.close()
+
+
+def test_the_metadata_horizon_finds_a_keys_first_run_through_the_key_value_index(
+    tmp_path: Path,
+) -> None:
+    """`_COUNT_RUNS_PREDATING_KEY` finds the earliest run holding the key by
+    seeking `idx_run_metadata_key_value` on the key alone, then each run by
+    primary key. Driven from the project's own index instead, it reads
+    every run of the project and probes its metadata for the key, so each
+    filtered page costs as much as the project has runs."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        plan_rows = store._conn.execute(  # noqa: SLF001
+            f"EXPLAIN QUERY PLAN {_COUNT_RUNS_PREDATING_KEY}",
+            (DEFAULT_PROJECT, DEFAULT_PROJECT, "firmware_version", DEFAULT_PROJECT),
+        ).fetchall()
+        plan_text = "\n".join(str(row[-1]) for row in plan_rows)
+
+        assert "SEARCH rm USING INDEX idx_run_metadata_key_value (key=?)" in plan_text
+        assert "SEARCH run USING INDEX sqlite_autoindex_run_1 (id=?)" in plan_text
         assert "sqlite_autoindex_run_metadata_1" not in plan_text
     finally:
         store.close()
 
 
 def test_the_run_list_after_a_key_starts_its_index_scan_at_the_key(tmp_path: Path) -> None:
-    """`_LIST_RUNS_AFTER` bounds `idx_run_started_at` at the key, so a late
-    page costs what the first one does. A predicate SQLite could not bound
-    the index with would return the same rows, reading every run older than
-    the key to find them -- silently, which is why this asserts the plan."""
+    """`_LIST_RUNS_AFTER` bounds `idx_run_project_started_at` at the project
+    and the key, so a late page costs what the first one does. A predicate
+    SQLite could not bound the index with would return the same rows,
+    reading every run of the project older than the key to find them --
+    silently, which is why this asserts the plan."""
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     started_at = "2026-08-15T09:00:00.000000+00:00"
     try:
         plan_rows = store._conn.execute(  # noqa: SLF001
             f"EXPLAIN QUERY PLAN {_LIST_RUNS_AFTER}",
-            (_LIST_SUBJECT_PREFIX_BYTES, started_at, "a" * 32, 21, 0),
+            (_LIST_SUBJECT_PREFIX_BYTES, DEFAULT_PROJECT, started_at, "a" * 32, 21, 0),
         ).fetchall()
         plan_text = "\n".join(str(row[-1]) for row in plan_rows)
 
-        assert "SEARCH run USING INDEX idx_run_started_at (started_at<?)" in plan_text
+        assert (
+            "SEARCH run USING INDEX idx_run_project_started_at"
+            " (project=? AND (started_at,id)<(?,?))" in plan_text
+        )
     finally:
         store.close()
 
 
 def _write_run(store: SqliteExecutionStore, hex_id: str) -> bool:
     return store.record_session(
-        _execution(hex_id), results=(), received_at=datetime.now(timezone.utc)
+        _execution(hex_id),
+        results=(),
+        received_at=datetime.now(timezone.utc),
+        project=DEFAULT_PROJECT,
     )
 
 
 def _write_setting(store: SqliteExecutionStore, key: str) -> bool:
     return store.upsert_setting(
-        "test_sections", key, value="{}", updated_at=datetime.now(timezone.utc)
+        "test_sections",
+        key,
+        value="{}",
+        updated_at=datetime.now(timezone.utc),
+        project=DEFAULT_PROJECT,
     )
 
 
 def _was_written(store: SqliteExecutionStore, write: str, key: str) -> bool:
     if write == "record_session":
         return store.get_execution(key) is not None
-    return any(setting.key == key for setting in store.list_settings("test_sections"))
+    return any(
+        setting.key == key
+        for setting in store.list_settings("test_sections", project=DEFAULT_PROJECT)
+    )
 
 
 @pytest.mark.parametrize("write", ["record_session", "upsert_setting"])
@@ -243,7 +315,7 @@ def test_a_commit_refused_by_a_busy_reader_is_rolled_back_and_the_store_recovers
     store = SqliteExecutionStore(db_path)
     reader = sqlite3.connect(str(db_path), isolation_level=None)
     do_write = _write_run if write == "record_session" else _write_setting
-    table = "run" if write == "record_session" else "user_setting"
+    table = "run" if write == "record_session" else "project_setting"
     first, second = ("a" * 32, "b" * 32) if write == "record_session" else ("Billing", "Checkout")
     try:
         conn = store._conn  # noqa: SLF001
@@ -326,6 +398,7 @@ def test_the_filtered_page_and_its_horizon_are_read_from_one_snapshot(tmp_path: 
                 results=(),
                 received_at=base,
                 metadata=keyed,
+                project=DEFAULT_PROJECT,
             )
 
     try:
@@ -334,11 +407,12 @@ def test_the_filtered_page_and_its_horizon_are_read_from_one_snapshot(tmp_path: 
                 _execution(f"{i:032x}", started=base + timedelta(minutes=i)),
                 results=(),
                 received_at=base,
+                project=DEFAULT_PROJECT,
             )
         store._conn.set_trace_callback(_commit_a_keyed_run_during_the_horizon_read)  # noqa: SLF001
 
         page, predating = store.list_runs_with_metadata_horizon(
-            filters=[("fw", "2.1")], limit=10, offset=0
+            filters=[("fw", "2.1")], limit=10, offset=0, project=DEFAULT_PROJECT
         )
 
         assert fired, "the horizon statement never ran"
@@ -364,8 +438,21 @@ def test_every_stored_timestamp_is_fixed_width_utc_text(tmp_path: Path) -> None:
             _execution("a" * 32, started=whole_second),
             results=(_result("t.py::test_x"),),
             received_at=whole_second,
+            project=DEFAULT_PROJECT,
         )
-        store.upsert_setting("test_sections", "Billing", value="{}", updated_at=whole_second)
+        store.upsert_setting(
+            "test_sections", "Billing", value="{}", updated_at=whole_second, project=DEFAULT_PROJECT
+        )
+        store.create_project("firmware", created_at=whole_second)
+        store.create_first_admin("admin", password_hash=_HASH, created_at=whole_second)
+        store.create_login_token(
+            "admin",
+            password_hash=_HASH,
+            digest=token_digest("login"),
+            created_at=whole_second,
+            expires_at=whole_second + LOGIN_TOKEN_LIFETIME,
+        )
+        store.set_password("admin", password_hash=_HASH, changed_at=whole_second)
         conn = store._conn  # noqa: SLF001
         stored = [
             *conn.execute(
@@ -373,12 +460,20 @@ def test_every_stored_timestamp_is_fixed_width_utc_text(tmp_path: Path) -> None:
             ).fetchone(),
             *conn.execute("SELECT started_at, finished_at FROM result").fetchone(),
             *conn.execute("SELECT first_seen_at, last_seen_at FROM test_case").fetchone(),
-            *conn.execute("SELECT updated_at FROM user_setting").fetchone(),
+            *conn.execute("SELECT updated_at FROM project_setting").fetchone(),
+            *(value for (value,) in conn.execute("SELECT created_at FROM project")),
             *conn.execute("SELECT value FROM meta WHERE key = 'created_at'").fetchone(),
+            *conn.execute("SELECT created_at FROM account").fetchone(),
+            # A login token's expiry is compared as text with the moment a
+            # token is used and a login is made.
+            *conn.execute("SELECT created_at, revoked_at, expires_at FROM access_token").fetchone(),
         ]
     finally:
         store.close()
 
+    # Both projects' rows, `default`'s and the one made here, were read, and
+    # the admin's and its login token's.
+    assert len(stored) == 16
     assert [value for value in stored if not _FIXED_WIDTH_UTC.fullmatch(value)] == []
 
 
@@ -386,7 +481,12 @@ def test_a_timestamp_from_an_early_year_is_stored_zero_padded(tmp_path: Path) ->
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     started = datetime(100, 1, 1, 9, 0, 0, tzinfo=timezone.utc)
     try:
-        store.record_session(_execution("a" * 32, started=started), results=(), received_at=started)
+        store.record_session(
+            _execution("a" * 32, started=started),
+            results=(),
+            received_at=started,
+            project=DEFAULT_PROJECT,
+        )
         raw = store._conn.execute("SELECT started_at FROM run").fetchone()  # noqa: SLF001
         found = store.get_execution("a" * 32)
     finally:
@@ -395,6 +495,63 @@ def test_a_timestamp_from_an_early_year_is_stored_zero_padded(tmp_path: Path) ->
     assert raw == ("0100-01-01T09:00:00.000000+00:00",)
     assert found is not None
     assert found.started_at == started
+
+
+_ADMIN_AT = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("made_locally", "gets_an_admin"),
+    [(True, False), (False, True)],
+    ids=["local-store-made-it", "server-made-it"],
+)
+def test_the_maker_of_a_database_decides_its_first_admin_whoever_opens_it_now(
+    tmp_path: Path, made_locally: bool, gets_an_admin: bool
+) -> None:
+    """`vantage` serving the file a local session made gives it no admin,
+    while a local session opening the database `vantage` made first does
+    not keep it from getting one: what counts is what `meta.origin` says,
+    not how the file is opened now."""
+    database = tmp_path / "store" / "vantage.db"
+    SqliteExecutionStore(database, local=made_locally).close()
+
+    store = SqliteExecutionStore(database, local=not made_locally)
+    try:
+        created = store.create_first_admin("admin", password_hash=_HASH, created_at=_ADMIN_AT)
+        users = store.list_users()
+    finally:
+        store.close()
+
+    assert (created is not None) is gets_an_admin
+    assert [user.name for user in users] == (["admin"] if gets_an_admin else [])
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [None, "server", "Local", "local ", ""],
+    ids=["missing", "server", "capitalised", "trailing-space", "empty"],
+)
+def test_only_the_local_stores_own_origin_keeps_a_database_from_its_first_admin(
+    tmp_path: Path, origin: str | None
+) -> None:
+    """A database whose origin is missing or unknown -- a file edited by
+    hand -- is taken for a server's: it gets an admin rather than being
+    served open."""
+    database = tmp_path / "store" / "vantage.db"
+    SqliteExecutionStore(database, local=True).close()
+    with closing(sqlite3.connect(database)) as conn, conn:
+        if origin is None:
+            conn.execute("DELETE FROM meta WHERE key = 'origin'")
+        else:
+            conn.execute("UPDATE meta SET value = ? WHERE key = 'origin'", (origin,))
+
+    store = SqliteExecutionStore(database)
+    try:
+        created = store.create_first_admin("admin", password_hash=_HASH, created_at=_ADMIN_AT)
+    finally:
+        store.close()
+
+    assert created is not None
 
 
 def _forced(row: _Row, **fields: str | None) -> _Row:
@@ -448,6 +605,7 @@ def test_a_metadata_row_the_schema_refuses_rolls_back_the_whole_session(
                 results=(_result("t.py::test_x"),),
                 received_at=datetime.now(timezone.utc),
                 metadata=RunMetadata(files=files, entries=entries),
+                project=DEFAULT_PROJECT,
             )
 
         conn = store._conn  # noqa: SLF001
@@ -514,7 +672,10 @@ def test_finish_report_reaches_storage_in_one_commit(tmp_path: Path) -> None:
         ]
 
         created = adapter.record_session(
-            execution, results=results, received_at=datetime.now(timezone.utc)
+            execution,
+            results=results,
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         assert created is True
@@ -553,7 +714,9 @@ def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_comm
         identity = "f" + "1" * 31
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         start = _start_only_execution(identity, started=started)
-        adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+        adapter.record_session(
+            start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         counting = _CommitCountingConnection(adapter._conn)
         adapter._conn = counting  # type: ignore[assignment]
@@ -562,7 +725,7 @@ def test_finish_report_after_an_accepted_start_write_reaches_storage_in_one_comm
         results = [_result(f"packages/vantage/tests/test_bulk.py::test_{i}") for i in range(500)]
 
         created = adapter.record_session(
-            finish, results=results, received_at=datetime.now(timezone.utc)
+            finish, results=results, received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
         )
 
         assert created is False
@@ -589,7 +752,9 @@ def test_start_write_reaches_storage_in_one_commit(tmp_path: Path) -> None:
         identity = "f" + "2" * 31
         start = _start_only_execution(identity)
 
-        created = adapter.record_session(start, results=(), received_at=datetime.now(timezone.utc))
+        created = adapter.record_session(
+            start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         assert created is True
         assert counting.commit_count == 1
@@ -612,14 +777,16 @@ def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> 
         started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc)
         finish = _execution(identity, finished=True, started=started)
         results = [_result("packages/vantage/tests/test_bulk.py::test_reordered")]
-        adapter.record_session(finish, results=results, received_at=datetime.now(timezone.utc))
+        adapter.record_session(
+            finish, results=results, received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
 
         counting = _CommitCountingConnection(adapter._conn)
         adapter._conn = counting  # type: ignore[assignment]
 
         late_start = _start_only_execution(identity, started=started)
         created = adapter.record_session(
-            late_start, results=(), received_at=datetime.now(timezone.utc)
+            late_start, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
         )
 
         assert created is False

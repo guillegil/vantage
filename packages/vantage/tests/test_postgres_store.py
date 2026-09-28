@@ -21,11 +21,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 import pytest
 from vantage.core.domain.metadata import MAX_METADATA_KEY_CHARS
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import (
     ExecutionStore,
     MetadataEntry,
@@ -95,9 +97,41 @@ def test_a_fresh_database_gets_the_vantage_schema_stamped_with_the_current_versi
     assert datetime.fromisoformat(str(stamped["created_at"])).tzinfo is not None
 
 
+def test_a_new_database_is_stamped_9_and_holds_the_default_project_alone(
+    postgres_url: str,
+) -> None:
+    """Version 9 is the schema with passwords, login tokens and the origin.
+    A report naming no project is recorded in `default`, so a new database
+    has that project before anything is written to it -- and no other."""
+    PostgresExecutionStore(postgres_url).close()
+
+    assert _query(postgres_url, "SELECT value FROM vantage.meta WHERE key = 'schema_version'") == [
+        ("9",)
+    ]
+    assert _query(postgres_url, "SELECT name FROM vantage.project") == [(DEFAULT_PROJECT,)]
+
+
+def test_a_new_database_records_the_server_as_its_origin(postgres_url: str) -> None:
+    """Only a server opens PostgreSQL -- the local store refuses a URL for
+    its database -- so every database made here is a server's own, which
+    gets its first admin at the server's first start. Reopening it writes
+    nothing more."""
+    PostgresExecutionStore(postgres_url).close()
+    PostgresExecutionStore(postgres_url).close()
+
+    assert _query(postgres_url, "SELECT value FROM vantage.meta WHERE key = 'origin'") == [
+        ("server",)
+    ]
+
+
 def test_reopening_keeps_what_was_stored(postgres_url: str) -> None:
     first = PostgresExecutionStore(postgres_url)
-    first.record_session(_execution(_RUN), results=(), received_at=datetime.now(timezone.utc))
+    first.record_session(
+        _execution(_RUN),
+        results=(),
+        received_at=datetime.now(timezone.utc),
+        project=DEFAULT_PROJECT,
+    )
     first.close()
 
     second = PostgresExecutionStore(postgres_url)
@@ -163,7 +197,12 @@ def test_tables_outside_the_vantage_schema_are_neither_refused_nor_touched(
 
     store = PostgresExecutionStore(postgres_url)
     try:
-        store.record_session(_execution(_RUN), results=(), received_at=datetime.now(timezone.utc))
+        store.record_session(
+            _execution(_RUN),
+            results=(),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
     finally:
         store.close()
 
@@ -195,6 +234,84 @@ def test_the_tables_and_the_version_stamp_commit_together(
         PostgresExecutionStore(postgres_url)
 
     assert _query(postgres_url, "SELECT to_regnamespace('vantage')") == [(None,)]
+
+
+def test_the_default_project_is_written_in_the_transaction_that_creates_the_schema(
+    postgres_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure right after the `default` project was written takes the
+    project, the stamp and the schema with it. Written in a transaction of
+    its own, the project would outlive the failure, or the schema would be
+    committed without it and refuse every report that names no project."""
+    real_execute = psycopg.Connection.execute
+
+    def _failing_after_the_project(
+        self: PgConnection, query: Any, params: Any = None, **kwargs: Any
+    ) -> Any:
+        cursor = real_execute(self, query, params, **kwargs)
+        if isinstance(query, str) and query.startswith("INSERT INTO vantage.project"):
+            raise RuntimeError("provoked after the default project")
+        return cursor
+
+    monkeypatch.setattr(psycopg.Connection, "execute", _failing_after_the_project)
+
+    with pytest.raises(RuntimeError, match="provoked after the default project"):
+        PostgresExecutionStore(postgres_url)
+
+    monkeypatch.undo()
+    assert _query(postgres_url, "SELECT to_regnamespace('vantage')") == [(None,)]
+
+
+def test_a_version_7_schema_is_refused_and_left_as_it_was(postgres_url: str) -> None:
+    """A schema from the build before projects has runs and settings that
+    belong to no project. It is refused, not given a `project` table or a
+    `default` project: rows would have to be moved into one, which is a
+    migration, and there are none."""
+    _query(postgres_url, "CREATE SCHEMA vantage")
+    _query(postgres_url, "CREATE TABLE vantage.meta (key text PRIMARY KEY, value text NOT NULL)")
+    _query(postgres_url, "INSERT INTO vantage.meta VALUES ('schema_version', '7')")
+    _query(postgres_url, "CREATE TABLE vantage.run (id text PRIMARY KEY)")
+    _query(postgres_url, f"INSERT INTO vantage.run VALUES ('{_RUN}')")  # noqa: S608
+    before = _vantage_objects(postgres_url)
+
+    with pytest.raises(SchemaVersionError) as refused:
+        PostgresExecutionStore(postgres_url)
+
+    assert "schema_version is 7, but this build requires schema_version 9;" in str(refused.value)
+    assert _vantage_objects(postgres_url) == before
+    assert _query(postgres_url, "SELECT to_regclass('vantage.project')") == [(None,)]
+    assert _query(postgres_url, "SELECT id FROM vantage.run") == [(_RUN,)]
+    assert _query(postgres_url, "SELECT key, value FROM vantage.meta") == [("schema_version", "7")]
+
+
+def test_a_version_8_schema_is_refused_and_left_as_it_was(postgres_url: str) -> None:
+    """A schema from the build before passwords has users and tokens
+    without the password and expiry columns, and no origin. It is refused,
+    not given the columns or the row: that would be a migration, and there
+    are none."""
+    _query(postgres_url, "CREATE SCHEMA vantage")
+    _query(postgres_url, "CREATE TABLE vantage.meta (key text PRIMARY KEY, value text NOT NULL)")
+    _query(postgres_url, "INSERT INTO vantage.meta VALUES ('schema_version', '8')")
+    _query(
+        postgres_url,
+        "CREATE TABLE vantage.account (name text PRIMARY KEY, admin boolean NOT NULL,"
+        " disabled boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL)",
+    )
+    _query(postgres_url, "INSERT INTO vantage.account VALUES ('alice', true, false, now())")
+    before = _vantage_objects(postgres_url)
+
+    with pytest.raises(SchemaVersionError) as refused:
+        PostgresExecutionStore(postgres_url)
+
+    assert "schema_version is 8, but this build requires schema_version 9;" in str(refused.value)
+    assert _vantage_objects(postgres_url) == before
+    assert _query(
+        postgres_url,
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = 'vantage' AND table_name = 'account' ORDER BY ordinal_position",
+    ) == [("name",), ("admin",), ("disabled",), ("created_at",)]
+    assert _query(postgres_url, "SELECT name FROM vantage.account") == [("alice",)]
+    assert _query(postgres_url, "SELECT key, value FROM vantage.meta") == [("schema_version", "8")]
 
 
 def _sqlite_columns(path: Path) -> dict[str, list[tuple[str, bool]]]:
@@ -284,7 +401,10 @@ def test_text_any_client_encoding_lacks_is_stored_whatever_the_environment_asks_
     store = PostgresExecutionStore(postgres_url)
     try:
         store.record_session(
-            _execution(_RUN), results=(_result(node_id),), received_at=datetime.now(timezone.utc)
+            _execution(_RUN),
+            results=(_result(node_id),),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         stored = store.get_result(_RUN, node_id=node_id)
@@ -297,7 +417,7 @@ def test_text_any_client_encoding_lacks_is_stored_whatever_the_environment_asks_
 
 def test_close_returns_every_connection(postgres_url: str, postgres_admin_url: str) -> None:
     store = PostgresExecutionStore(postgres_url)
-    store.list_runs(limit=10, offset=0)
+    store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT)
     database = urlsplit(postgres_url).path.lstrip("/")
     connected = f"SELECT count(*) FROM pg_stat_activity WHERE datname = '{database}'"  # noqa: S608
 
@@ -609,8 +729,11 @@ def test_nul_is_stored_as_the_replacement_character(
                 ),
             ),
         ),
+        project=DEFAULT_PROJECT,
     )
-    postgres_store.upsert_setting("ns\x00", "Name\x00", value='{"x": "\x00"}', updated_at=now)
+    postgres_store.upsert_setting(
+        "ns\x00", "Name\x00", value='{"x": "\x00"}', updated_at=now, project=DEFAULT_PROJECT
+    )
 
     (result,) = postgres_store.get_results(_RUN)
     execution = postgres_store.get_execution(_RUN)
@@ -628,7 +751,7 @@ def test_nul_is_stored_as_the_replacement_character(
             ),
         ),
     )
-    (setting,) = postgres_store.list_settings("ns\ufffd")
+    (setting,) = postgres_store.list_settings("ns\ufffd", project=DEFAULT_PROJECT)
     assert (setting.key, setting.value) == ("Name\ufffd", '{"x": "\ufffd"}')
 
 
@@ -640,7 +763,10 @@ def test_a_lookup_by_a_value_holding_nul_matches_nothing(
     now = datetime.now(timezone.utc)
     node_id = "t.py::test_x"
     postgres_store.record_session(
-        _start_only_execution(_RUN), results=(_result(node_id),), received_at=now
+        _start_only_execution(_RUN),
+        results=(_result(node_id),),
+        received_at=now,
+        project=DEFAULT_PROJECT,
     )
     nul = "\x00"
 
@@ -649,15 +775,20 @@ def test_a_lookup_by_a_value_holding_nul_matches_nothing(
     assert postgres_store.get_run_metadata(_RUN + nul) is None
     assert postgres_store.get_results(_RUN + nul) == []
     assert postgres_store.get_result(_RUN, node_id=node_id + nul) is None
-    assert postgres_store.get_catalogue_entry(node_id + nul) is None
+    assert postgres_store.get_catalogue_entry(node_id + nul, project=DEFAULT_PROJECT) is None
     assert postgres_store.list_results(_RUN + nul, limit=10, offset=0).items == ()
-    assert postgres_store.list_history(node_id=node_id + nul, limit=10, offset=0).items == ()
+    assert (
+        postgres_store.list_history(
+            node_id=node_id + nul, limit=10, offset=0, project=DEFAULT_PROJECT
+        ).items
+        == ()
+    )
     assert postgres_store.get_run_case_outcomes(_RUN + nul) == ()
     assert postgres_store.touch_last_contact(_RUN + nul, now) is False
-    assert postgres_store.list_settings(nul) == ()
-    assert postgres_store.delete_setting("ns", nul) is False
+    assert postgres_store.list_settings(nul, project=DEFAULT_PROJECT) == ()
+    assert postgres_store.delete_setting("ns", nul, project=DEFAULT_PROJECT) is False
     page, predating = postgres_store.list_runs_with_metadata_horizon(
-        filters=[("k", nul), (nul, "v")], limit=10, offset=0
+        filters=[("k", nul), (nul, "v")], limit=10, offset=0, project=DEFAULT_PROJECT
     )
     assert page.items == ()
     assert predating == (1, 1)
@@ -685,18 +816,29 @@ def test_text_past_what_one_index_entry_holds_is_stored_and_found_by_value(
     now = datetime.now(timezone.utc)
     for _replay in range(2):
         postgres_store.record_session(
-            _execution(_RUN), results=(_result(node_id),), received_at=now, metadata=metadata
+            _execution(_RUN),
+            results=(_result(node_id),),
+            received_at=now,
+            metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
 
     found = postgres_store.get_result(_RUN, node_id=node_id)
     assert found is not None
     assert found.identity.node_id == node_id
     assert postgres_store.count_results() == 1
-    assert postgres_store.get_catalogue_entry(node_id) is not None
-    assert len(postgres_store.list_history(node_id=node_id, limit=10, offset=0).items) == 1
+    assert postgres_store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT) is not None
+    assert (
+        len(
+            postgres_store.list_history(
+                node_id=node_id, limit=10, offset=0, project=DEFAULT_PROJECT
+            ).items
+        )
+        == 1
+    )
     assert postgres_metadata(_RUN) == metadata
     page, _predating = postgres_store.list_runs_with_metadata_horizon(
-        filters=[(key, "1")], limit=10, offset=0
+        filters=[(key, "1")], limit=10, offset=0, project=DEFAULT_PROJECT
     )
     assert [entry.execution.identity.value for entry in page.items] == [_RUN]
 
@@ -708,9 +850,13 @@ def test_settings_are_ordered_by_code_point_whatever_the_databases_collation(
     `a` before `B`; the other adapters compare code points."""
     now = datetime.now(timezone.utc)
     for key in ("b", "é", "a", "B"):
-        postgres_store.upsert_setting("ns", key, value="{}", updated_at=now)
+        postgres_store.upsert_setting(
+            "ns", key, value="{}", updated_at=now, project=DEFAULT_PROJECT
+        )
 
-    assert [setting.key for setting in postgres_store.list_settings("ns")] == ["B", "a", "b", "é"]
+    assert [
+        setting.key for setting in postgres_store.list_settings("ns", project=DEFAULT_PROJECT)
+    ] == ["B", "a", "b", "é"]
 
 
 # -- time zones --
@@ -733,16 +879,23 @@ def test_every_timestamp_reads_back_in_utc_whatever_the_sessions_time_zone(
     started = datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone(timedelta(hours=2)))
     node_id = "t.py::test_x"
     store_in_kolkata.record_session(
-        _execution(_RUN, started=started), results=(_result(node_id),), received_at=started
+        _execution(_RUN, started=started),
+        results=(_result(node_id),),
+        received_at=started,
+        project=DEFAULT_PROJECT,
     )
-    store_in_kolkata.upsert_setting("ns", "k", value="{}", updated_at=started)
+    store_in_kolkata.upsert_setting(
+        "ns", "k", value="{}", updated_at=started, project=DEFAULT_PROJECT
+    )
 
     detail = store_in_kolkata.get_run_detail(_RUN)
-    (listed,) = store_in_kolkata.list_runs(limit=10, offset=0).items
-    (history,) = store_in_kolkata.list_history(node_id=node_id, limit=10, offset=0).items
+    (listed,) = store_in_kolkata.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items
+    (history,) = store_in_kolkata.list_history(
+        node_id=node_id, limit=10, offset=0, project=DEFAULT_PROJECT
+    ).items
     result = store_in_kolkata.get_result(_RUN, node_id=node_id)
-    entry = store_in_kolkata.get_catalogue_entry(node_id)
-    (setting,) = store_in_kolkata.list_settings("ns")
+    entry = store_in_kolkata.get_catalogue_entry(node_id, project=DEFAULT_PROJECT)
+    (setting,) = store_in_kolkata.list_settings("ns", project=DEFAULT_PROJECT)
 
     assert detail is not None
     assert result is not None
@@ -794,15 +947,18 @@ def test_timestamps_read_back_whatever_the_databases_date_style_and_time_zone(
             _start_only_execution(_RUN, started=moment),
             results=(replace(_result(node_id), started_at=moment, finished_at=moment),),
             received_at=moment,
+            project=DEFAULT_PROJECT,
         )
-        store.upsert_setting("ns", "k", value="{}", updated_at=moment)
+        store.upsert_setting("ns", "k", value="{}", updated_at=moment, project=DEFAULT_PROJECT)
 
         detail = store.get_run_detail(_RUN)
-        (listed,) = store.list_runs(limit=10, offset=0).items
-        (history,) = store.list_history(node_id=node_id, limit=10, offset=0).items
+        (listed,) = store.list_runs(limit=10, offset=0, project=DEFAULT_PROJECT).items
+        (history,) = store.list_history(
+            node_id=node_id, limit=10, offset=0, project=DEFAULT_PROJECT
+        ).items
         (result,) = store.get_results(_RUN)
-        entry = store.get_catalogue_entry(node_id)
-        (setting_row,) = store.list_settings("ns")
+        entry = store.get_catalogue_entry(node_id, project=DEFAULT_PROJECT)
+        (setting_row,) = store.list_settings("ns", project=DEFAULT_PROJECT)
     finally:
         store.close()
 
@@ -838,6 +994,7 @@ def test_durations_read_back_exactly_whatever_the_databases_float_output(
             _execution(_RUN),
             results=(_result("t.py::test_x", duration=duration, call_duration=duration),),
             received_at=datetime(2026, 8, 15, 9, 0, 0, tzinfo=timezone.utc),
+            project=DEFAULT_PROJECT,
         )
 
         (result,) = store.get_results(_RUN)

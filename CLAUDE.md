@@ -69,13 +69,15 @@ its `postgres` extra.
   (`pytest_vantage/outbox.py`, stdlib `sqlite3`, `<local database>-outbox`,
   0600). A queued run is sent only to the address it was queued for,
   compared exactly; senders claim an entry before sending it; bounds are
-  1,000 runs and 256 MiB. `vantage push` sends it with the plugin's own code
-  and never needs the `server` extra.
+  1,000 runs and 256 MiB. A run a server refused for its token (401/403)
+  or its project (`404 unknown_project`) is kept; the rest of a refused
+  project's runs are passed over within one send. `vantage push` sends it
+  with the plugin's own code and never needs the `server` extra.
 - **Opt-in only by typed flag.** `--vantage`, `--vantage-failure-text` and
   `--vantage-metadata` count only when present in `config.invocation_params.args`;
   from `addopts`, `PYTEST_ADDOPTS` or an `@file` they are ignored with a warning.
   Ini, env and config may set *where* (server, timeout, mode, local
-  database), never *whether*.
+  database, project), never *whether*.
   Without `--vantage` the plugin reads nothing and sends nothing.
 - **The suite's exit status is never changed by the plugin**, except that an
   invalid vantage setting raises `pytest.UsageError` (exit 4) in
@@ -106,26 +108,56 @@ its `postgres` extra.
   (`isoformat_utc`), so text order is time order, and as `timestamptz` in
   PostgreSQL, read back as UTC.
 - **Schema:** each adapter applies its whole schema at first use and stamps
-  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 7,
+  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 9,
   one version for both). Any other stamp is refused; there are no
   migrations. Changing either schema means bumping that literal. No table
   or column exists before code writes it.
-- **Access.** A database with no user is open; the first user closes it
-  for good, since users are disabled, never deleted. Every route but
-  `/capabilities` and `/openapi.yaml` declares its scope through
+- **Projects.** Every run belongs to one project, named by the report that
+  creates it (top-level `project`, absent meaning `default`) and never
+  changed (`ProjectMismatchError`, `409 project_mismatch`). `default` exists
+  from a database's creation; no project is renamed or deleted, so a
+  project found stays found. A server never makes a project from a report
+  (`404 unknown_project`); only `vantage project add`, `POST /projects` and
+  the local store do. The catalogue, a test's history, the sections and the
+  run list with its horizon are per project, and `project` is a required
+  keyword on every port call that reads or writes within one.
+- **Access.** Every database records its origin (`meta.origin`), written
+  in the transaction that creates it and never changed: `local` when
+  pytest-vantage's local store made it, `server` otherwise. `vantage`
+  gives every non-local database with no user the enabled admin `admin`
+  before serving it (`create_first_admin`, one conditional insert), so
+  only a local database is ever served open, until its first
+  `vantage user add`; the first user closes a database for good, since
+  users are disabled, never deleted. Every route but `/capabilities`,
+  `/openapi.yaml`, `/login` and `/password` declares its scope through
   `service/access.py` (`read`, `record`, `admin`), and
-  `test_interface_document.py` checks each against the document. A token is
-  stored only as its SHA-256, printed once by whatever made it, read by the
-  plugin from `VANTAGE_TOKEN` alone, and never written to the outbox, a
-  message or a `repr`. A run takes reports and heartbeats only from the
-  user whose token created it (`ForeignRunError`, `409 foreign_run`). The
-  users and tokens routes (`routes/users.py`) need an admin's token on
-  every server and answer `409 open_server` while the database has no
-  user: the first user is the CLI's alone.
+  `test_interface_document.py` checks each against the document; `/login`
+  and `/password` take a name and a password instead of a token
+  (`requires_closed_server`). A token is stored only as its SHA-256,
+  printed once by whatever made it, read by the plugin from
+  `VANTAGE_TOKEN` alone, and never written to the outbox, a message or a
+  `repr`. A password is stored only as a scrypt PHC string
+  (`core/domain/passwords.py`), which carries its own cost, and every
+  check costs one scrypt, two at a time per process and 32 waiting, then
+  `503 password_checks_busy` (`service/slots.py`). A login token holds `read` (and `admin`
+  for an admin), never `record`, expires after 12 hours, and is revoked by
+  any password set for its user; a made token never expires and survives
+  password changes. A run takes reports and heartbeats only from the user
+  whose token created it (`ForeignRunError`, `409 foreign_run`). The users
+  and tokens routes (`routes/users.py`) need an admin's token on every
+  server, and they, `/login` and `/password` answer `409 open_server`
+  while the database has no user: the first user is the CLI's, or the
+  first start's, alone. Per-project routes resolve `{project}` through
+  `requires_read_project`/`requires_admin_project`, after authorizing;
+  `POST /projects` needs what changing sections needs.
 - **Passwords never printed.** A PostgreSQL URL is shown only through
   `redacted`, and a driver message only through `redact_message`
   (`core/config/database.py`); the driver's loggers are silenced while the
-  store opens.
+  store opens. A user's password travels only in a request body, or on the
+  terminal or stdin of `vantage user password`, never in argv, the
+  environment, a URL, a rejection, a `repr` or a log record. The only one
+  ever printed is the generated admin password: once, on stderr, never
+  through `logging`, by the start that stored it.
 - **Python 3.10 floor:** no `StrEnum`, `datetime.UTC`, `tomllib`. Vocabularies
   are `frozenset`s of `str`, never enums.
 - No domain class name starts with `Test` (pytest would collect it).
@@ -144,8 +176,11 @@ VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/postgres
 vantage --database ./vantage.db              # server on 127.0.0.1:8765
 vantage --database postgresql://user@host/db # the same, storing in PostgreSQL
 vantage push                                 # send the runs the plugin queued
-vantage user add alice --admin               # the first user closes the database
+vantage user add alice --admin               # the first user closes a local store's database
+vantage user password alice                  # asks twice on the terminal; to log in with
 vantage token create alice                   # prints a token once; VANTAGE_TOKEN for the plugin
+vantage project add firmware                 # a project runs can name
+pytest --vantage --vantage-project firmware  # a run of that project
 pytest --vantage --vantage-mode local        # record into the local database
 ```
 
@@ -158,8 +193,8 @@ xdist, the suite against a `postgres:17` service (the only job that sets the
 variable), the suite with non-loopback networking blocked, the
 clean-environment installs (the plugin alone; `vantage` without its extra,
 serving refused, `vantage push` and a local-mode session there;
-`vantage[server]` serving), the Python 3.9 install refusal and both wheel
-builds.
+`vantage[server]` serving, its fresh database given `admin` in one line),
+the Python 3.9 install refusal and both wheel builds.
 
 ## Conventions
 

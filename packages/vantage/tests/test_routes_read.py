@@ -1,6 +1,10 @@
 """The read routes: run list, run detail, results, result detail and test
 history.
 
+The run list and a test's history are a project's, under
+`/api/v1/projects/{project}/...`; everything addressed by a run id is not,
+and its detail says which project the run belongs to.
+
 Runs the app factory (`vantage.service.app.create_app`) against **both**
 `ExecutionStore` implementations: the `store` fixture is parametrised, so
 every test below executes twice -- once against `InMemoryExecutionStore` and
@@ -28,6 +32,7 @@ from fastapi.testclient import TestClient
 from vantage.core.domain.access import READ_SCOPE, new_token, token_digest
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.projection import LIST_COMMIT_SUBJECT_CHARS, LIST_FAILURE_MESSAGE_CHARS
+from vantage.core.domain.projects import DEFAULT_PROJECT, Project
 from vantage.core.domain.result import CaseIdentity, Result
 from vantage.core.ports.storage import (
     MAX_IDENTITY_CHARS,
@@ -37,6 +42,7 @@ from vantage.core.ports.storage import (
     MetadataFile,
     Page,
     RunKey,
+    RunListEntry,
     RunMetadata,
 )
 from vantage.service.app import create_app
@@ -50,6 +56,12 @@ _OPENAPI_DOCUMENT_BYTES = (
 )
 
 _KNOWN_ROOT = "/home/example/very-unique-repo-root-xyz123"
+
+# The run list and a test's history are a project's; every database has
+# `default`, where the runs these tests record go unless they say otherwise.
+_RUNS = f"/api/v1/projects/{DEFAULT_PROJECT}/runs"
+_HISTORY = f"/api/v1/projects/{DEFAULT_PROJECT}/tests/history"
+_OTHER_PROJECT = "firmware"
 
 # Distinct, recognisable 40-hex commits, one per fixture that asserts VCS
 # values on the wire. Distinct so a swapped or nulled field fails loudly
@@ -163,21 +175,42 @@ def _reader(store: ExecutionStore, user: str) -> dict[str, str]:
 
 
 class _SpyExecutionStore:
-    """A spy exposing only `list_history`, and `access_required` for a store
-    without users, `cast` to `ExecutionStore` at its one call site -- the
-    history route calls no other method, and this test asserts nothing about
-    the rest of the port."""
+    """A spy exposing only what the history and run-list routes call --
+    `get_project`, `list_history`, `list_runs`, and `access_required` for a
+    store without users -- `cast` to `ExecutionStore` at its call sites.
+    It knows `default` alone, and records every call it answers, so a test
+    can assert which the route made and which it did not."""
 
     def __init__(self) -> None:
+        self.get_project_calls: list[str] = []
         self.list_history_calls: list[str] = []
+        self.list_runs_calls: list[str] = []
 
     def access_required(self) -> bool:
         return False
 
+    def get_project(self, name: str) -> Project | None:
+        self.get_project_calls.append(name)
+        if name != DEFAULT_PROJECT:
+            return None
+        return Project(name=DEFAULT_PROJECT, created_at=datetime.now(timezone.utc))
+
     def list_history(
-        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+        self,
+        *,
+        project: str,
+        node_id: str,
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> Page[HistoryEntry]:
         self.list_history_calls.append(node_id)
+        return Page(items=(), has_more=False)
+
+    def list_runs(
+        self, *, project: str, limit: int, offset: int, after: RunKey | None = None
+    ) -> Page[RunListEntry]:
+        self.list_runs_calls.append(project)
         return Page(items=(), has_more=False)
 
 
@@ -222,9 +255,10 @@ def test_run_list_returns_items_and_has_more_envelope(
         results=[],
         received_at=started_at,
         recorded_by="alice",
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get("/api/v1/runs", headers=authorization)
+    response = client.get(_RUNS, headers=authorization)
 
     assert response.status_code == 200
     body = response.json()
@@ -289,6 +323,7 @@ def test_run_list_presentation_and_interruption_are_per_run(
         ),
         results=[],
         received_at=now - timedelta(hours=3),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(
@@ -301,6 +336,7 @@ def test_run_list_presentation_and_interruption_are_per_run(
         ),
         results=[],
         received_at=now - timedelta(hours=2),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(
@@ -311,6 +347,7 @@ def test_run_list_presentation_and_interruption_are_per_run(
         ),
         results=[],
         received_at=now - timedelta(minutes=90),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(
@@ -321,10 +358,11 @@ def test_run_list_presentation_and_interruption_are_per_run(
         ),
         results=[],
         received_at=now - timedelta(seconds=5),
+        project=DEFAULT_PROJECT,
     )
     client = _client_with_grace(store, grace_period_seconds=60)
 
-    response = client.get("/api/v1/runs")
+    response = client.get(_RUNS)
 
     assert response.status_code == 200
     items = {item["id"]: item for item in response.json()["items"]}
@@ -357,17 +395,18 @@ def test_run_list_response_contains_no_vcs_root_anywhere(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=_vcs()),
         results=[],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get("/api/v1/runs")
+    response = client.get(_RUNS)
 
     assert _KNOWN_ROOT not in response.text
 
 
 def test_run_list_rejects_non_positive_limit(client: TestClient) -> None:
     """Zero and negative limits are not page sizes."""
-    zero = client.get("/api/v1/runs", params={"limit": 0})
-    negative = client.get("/api/v1/runs", params={"limit": -1})
+    zero = client.get(_RUNS, params={"limit": 0})
+    negative = client.get(_RUNS, params={"limit": -1})
 
     assert zero.status_code == 422
     assert negative.status_code == 422
@@ -386,9 +425,10 @@ def test_run_list_caps_at_200_at_the_route(client: TestClient, store: ExecutionS
             ),
             results=[],
             received_at=now,
+            project=DEFAULT_PROJECT,
         )
 
-    response = client.get("/api/v1/runs")
+    response = client.get(_RUNS)
 
     assert response.status_code == 200
     body = response.json()
@@ -418,9 +458,10 @@ def test_run_list_clamps_an_over_cap_limit_rather_than_rejecting_it(
             ),
             results=[],
             received_at=now,
+            project=DEFAULT_PROJECT,
         )
 
-    response = client.get("/api/v1/runs", params={"limit": 500})
+    response = client.get(_RUNS, params={"limit": 500})
 
     assert response.status_code == 200
     body = response.json()
@@ -431,10 +472,10 @@ def test_run_list_clamps_an_over_cap_limit_rather_than_rejecting_it(
 @pytest.mark.parametrize(
     ("path", "params"),
     [
-        ("/api/v1/runs", {}),
-        ("/api/v1/runs", {"metadata_key": "k", "metadata_value": "v"}),
+        (_RUNS, {}),
+        (_RUNS, {"metadata_key": "k", "metadata_value": "v"}),
         ("/api/v1/runs/{run_id}/results", {}),
-        ("/api/v1/tests/history", {"node_id": "t.py::test_x"}),
+        (_HISTORY, {"node_id": "t.py::test_x"}),
     ],
     ids=["runs", "runs-filtered", "results", "history"],
 )
@@ -451,6 +492,7 @@ def test_an_offset_beyond_int64_is_422_and_the_int64_maximum_is_an_empty_page(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[_result("t.py::test_x")],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
     url = path.format(run_id=run_id)
 
@@ -467,9 +509,9 @@ def test_an_offset_beyond_int64_is_422_and_the_int64_maximum_is_an_empty_page(
 _CURSOR_PATHS = pytest.mark.parametrize(
     ("path", "params", "id_field"),
     [
-        ("/api/v1/runs", {}, "id"),
-        ("/api/v1/runs", {"metadata_key": "k", "metadata_value": "v"}, "id"),
-        ("/api/v1/tests/history", {"node_id": "t.py::test_x"}, "run_id"),
+        (_RUNS, {}, "id"),
+        (_RUNS, {"metadata_key": "k", "metadata_value": "v"}, "id"),
+        (_HISTORY, {"node_id": "t.py::test_x"}, "run_id"),
     ],
     ids=["runs", "runs-filtered", "history"],
 )
@@ -483,6 +525,7 @@ def _record_listed_run(store: ExecutionStore, seed: int, started_at: datetime) -
         results=[_result("t.py::test_x")],
         received_at=started_at,
         metadata=_captured_metadata("k", "v"),
+        project=DEFAULT_PROJECT,
     )
 
 
@@ -585,6 +628,7 @@ def test_run_detail_returns_full_untruncated_subject(
         ),
         results=[],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}")
@@ -612,6 +656,7 @@ def test_run_detail_response_contains_no_vcs_root(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=_vcs()),
         results=[],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}")
@@ -659,6 +704,7 @@ def test_run_detail_carries_every_stored_field_by_value(
         results=[],
         received_at=orderly_started_at,
         recorded_by="alice",
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(
@@ -672,6 +718,7 @@ def test_run_detail_carries_every_stored_field_by_value(
         ),
         results=[],
         received_at=ctrl_c_started_at,
+        project=DEFAULT_PROJECT,
     )
 
     orderly = client.get(f"/api/v1/runs/{orderly_run}", headers=authorization).json()
@@ -687,9 +734,11 @@ def test_run_detail_carries_every_stored_field_by_value(
         "presentation",
         "vcs",
         "recorded_by",
+        "project",
     }
     assert orderly["recorded_by"] == "alice"
     assert ctrl_c["recorded_by"] is None
+    assert orderly["project"] == ctrl_c["project"] == DEFAULT_PROJECT
     assert orderly["id"] == orderly_run
     assert _instant(orderly["started_at"]) == orderly_started_at
     assert _instant(orderly["finished_at"]) == orderly_finished_at
@@ -779,12 +828,14 @@ def test_run_metadata_returns_every_key_and_file_in_order_with_every_field(
                 ),
             ),
         ),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(_run_id(151), started_at=now - timedelta(hours=2), finished_at=now),
         results=[],
         received_at=now - timedelta(hours=2),
         metadata=_captured_metadata("other_run_key", "x"),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}/metadata")
@@ -845,6 +896,7 @@ def test_run_metadata_of_a_run_that_reported_none_has_no_items_and_no_files(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}/metadata")
@@ -879,6 +931,7 @@ def test_abandoned_run_reads_back_as_abandoned(store: ExecutionStore) -> None:
         _execution(run_id, started_at=old_contact, finished_at=None, exit_status=None),
         results=[],
         received_at=old_contact,
+        project=DEFAULT_PROJECT,
     )
     client = _client_with_grace(store, grace_period_seconds=60)
 
@@ -897,6 +950,7 @@ def test_running_run_reads_back_as_running(store: ExecutionStore) -> None:
         _execution(run_id, started_at=recent_contact, finished_at=None, exit_status=None),
         results=[],
         received_at=recent_contact,
+        project=DEFAULT_PROJECT,
     )
     client = _client_with_grace(store, grace_period_seconds=3600)
 
@@ -925,6 +979,7 @@ def test_interrupted_run_reads_back_as_interrupted(store: ExecutionStore) -> Non
         ),
         results=[],
         received_at=old_contact,
+        project=DEFAULT_PROJECT,
     )
     client = _client_with_grace(store, grace_period_seconds=60)
 
@@ -945,6 +1000,7 @@ def test_abandonment_invents_no_stored_field(store: ExecutionStore) -> None:
         _execution(run_id, started_at=original_started_at, finished_at=None, exit_status=None),
         results=[],
         received_at=original_started_at,
+        project=DEFAULT_PROJECT,
     )
     client = _client_with_grace(store, grace_period_seconds=60)
 
@@ -966,6 +1022,7 @@ def test_results_route_returns_paginated_envelope(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[_result("tests/test_a.py::test_one")],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}/results")
@@ -999,6 +1056,7 @@ def test_results_route_response_excludes_traceback_and_captured_output_sentinel(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[_result("t.py::test_x", outcome="failed", failure=failure, captured=captured)],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}/results")
@@ -1021,6 +1079,7 @@ def test_results_route_includes_bounded_failure_message_and_disjunction_flag(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[_result("t.py::test_x", outcome="failed", failure=failure)],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}/results")
@@ -1042,6 +1101,7 @@ def test_result_detail_route_returns_full_record(client: TestClient, store: Exec
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[_result(node_id, outcome="failed", failure=failure, captured=captured)],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": node_id})
@@ -1071,6 +1131,7 @@ def test_result_detail_truncation_flag_travels_with_the_field(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[_result(node_id, outcome="failed", failure=failure)],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": node_id})
@@ -1099,6 +1160,7 @@ def test_result_detail_unknown_node_id_is_404_unknown_result_error(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(
@@ -1122,6 +1184,7 @@ def test_result_detail_unknown_identifier_leaves_stored_data_unchanged(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now),
         results=[_result(node_id)],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
     before_results = store.get_results(run_id)
     before_detail = store.get_run_detail(run_id)
@@ -1164,6 +1227,7 @@ def test_every_listed_node_id_is_readable_through_detail_and_history(
             ),
         ],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     listed = client.get(f"/api/v1/runs/{run_id}/results").json()["items"]
@@ -1172,7 +1236,7 @@ def test_every_listed_node_id_is_readable_through_detail_and_history(
     for item in listed:
         node_id = item["node_id"]
         detail = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": node_id})
-        history = client.get("/api/v1/tests/history", params={"node_id": node_id})
+        history = client.get(_HISTORY, params={"node_id": node_id})
         assert detail.status_code == 200
         assert detail.json()["node_id"] == node_id
         assert history.status_code == 200
@@ -1225,6 +1289,7 @@ def test_result_item_carries_every_stored_column_by_value(
             )
         ],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(f"/api/v1/runs/{run_id}/results")
@@ -1294,6 +1359,7 @@ def test_history_route_returns_newest_first_with_full_vcs(
         ),
         results=[_result(node_id, duration=1.5)],
         received_at=older_started_at,
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(
@@ -1310,9 +1376,10 @@ def test_history_route_returns_newest_first_with_full_vcs(
         ),
         results=[_result(node_id, outcome="failed", duration=0.125)],
         received_at=newer_started_at,
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get("/api/v1/tests/history", params={"node_id": node_id})
+    response = client.get(_HISTORY, params={"node_id": node_id})
 
     assert response.status_code == 200
     body = response.json()
@@ -1353,9 +1420,7 @@ def test_history_route_returns_newest_first_with_full_vcs(
 
 def test_history_route_unknown_node_id_is_empty_not_error(client: TestClient) -> None:
     """An unknown test yields empty history, not an error."""
-    response = client.get(
-        "/api/v1/tests/history", params={"node_id": "tests/test_never_ran.py::test_x"}
-    )
+    response = client.get(_HISTORY, params={"node_id": "tests/test_never_ran.py::test_x"})
 
     assert response.status_code == 200
     body = response.json()
@@ -1377,9 +1442,10 @@ def test_history_route_response_contains_no_vcs_root(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=_vcs()),
         results=[_result(node_id)],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get("/api/v1/tests/history", params={"node_id": node_id})
+    response = client.get(_HISTORY, params={"node_id": node_id})
 
     assert _KNOWN_ROOT not in response.text
 
@@ -1401,9 +1467,10 @@ def test_history_entry_for_a_non_repository_run_carries_a_null_vcs_key(
         _execution(run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=None),
         results=[_result(node_id)],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get("/api/v1/tests/history", params={"node_id": node_id})
+    response = client.get(_HISTORY, params={"node_id": node_id})
 
     assert response.status_code == 200
     entry = response.json()["items"][0]
@@ -1432,14 +1499,14 @@ def test_history_identity_survives_special_characters_intact() -> None:
     client = TestClient(create_app(cast(ExecutionStore, store)))
     node_id = "tests/test_a.py::TestSuite::test_x[case/1]"
 
-    response = client.get("/api/v1/tests/history", params={"node_id": node_id})
+    response = client.get(_HISTORY, params={"node_id": node_id})
 
     assert response.status_code == 200
     assert store.list_history_calls == [node_id]
 
 
 def test_history_route_missing_node_id_is_422(client: TestClient) -> None:
-    response = client.get("/api/v1/tests/history")
+    response = client.get(_HISTORY)
 
     assert response.status_code == 422
     body = response.json()
@@ -1465,14 +1532,16 @@ def test_absent_repository_run_appears_in_list_undistinguished(
         _execution(repo_run_id, started_at=now - timedelta(hours=2), finished_at=now, vcs=_vcs()),
         results=[],
         received_at=now - timedelta(hours=2),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(absent_run_id, started_at=now - timedelta(hours=1), finished_at=now, vcs=None),
         results=[],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get("/api/v1/runs")
+    response = client.get(_RUNS)
 
     assert response.status_code == 200
     items = response.json()["items"]
@@ -1510,6 +1579,7 @@ def test_list_response_carries_the_truncation_flag_beside_its_subject(
         ),
         results=[],
         received_at=now - timedelta(hours=2),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(
@@ -1520,9 +1590,10 @@ def test_list_response_carries_the_truncation_flag_beside_its_subject(
         ),
         results=[],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get("/api/v1/runs")
+    response = client.get(_RUNS)
 
     assert response.status_code == 200
     items = {item["id"]: item for item in response.json()["items"]}
@@ -1556,16 +1627,18 @@ def test_run_list_metadata_filter_returns_only_matching_runs(
         results=[],
         received_at=now - timedelta(hours=1),
         metadata=_captured_metadata("firmware_version", "2.1"),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(other_value_run, started_at=now - timedelta(minutes=30), finished_at=now),
         results=[],
         received_at=now - timedelta(minutes=30),
         metadata=_captured_metadata("firmware_version", "3.0"),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(
-        "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
+        _RUNS, params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
     )
 
     assert response.status_code == 200
@@ -1581,10 +1654,11 @@ def test_run_list_unknown_metadata_key_yields_empty_match_not_an_error(
         _execution(_run_id(102), started_at=now - timedelta(hours=1), finished_at=now),
         results=[],
         received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(
-        "/api/v1/runs", params={"metadata_key": "never_declared", "metadata_value": "anything"}
+        _RUNS, params={"metadata_key": "never_declared", "metadata_value": "anything"}
     )
 
     assert response.status_code == 200
@@ -1604,21 +1678,24 @@ def test_run_list_metadata_horizon_excludes_and_counts_predating_runs(
         _execution(predating_one, started_at=now - timedelta(hours=3), finished_at=now),
         results=[],
         received_at=now - timedelta(hours=3),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(predating_two, started_at=now - timedelta(hours=2), finished_at=now),
         results=[],
         received_at=now - timedelta(hours=2),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(declared_run, started_at=now - timedelta(hours=1), finished_at=now),
         results=[],
         received_at=now - timedelta(hours=1),
         metadata=_captured_metadata("firmware_version", "2.1"),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(
-        "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
+        _RUNS, params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
     )
 
     assert response.status_code == 200
@@ -1640,11 +1717,10 @@ def test_run_list_metadata_horizon_equals_total_when_key_never_declared(
             ),
             results=[],
             received_at=now - timedelta(hours=seed + 1),
+            project=DEFAULT_PROJECT,
         )
 
-    response = client.get(
-        "/api/v1/runs", params={"metadata_key": "never_declared", "metadata_value": "x"}
-    )
+    response = client.get(_RUNS, params={"metadata_key": "never_declared", "metadata_value": "x"})
 
     assert response.status_code == 200
     body = response.json()
@@ -1662,9 +1738,10 @@ def test_run_list_metadata_horizon_is_null_without_a_filter(
         results=[],
         received_at=now - timedelta(hours=1),
         metadata=_captured_metadata("firmware_version", "2.1"),
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get("/api/v1/runs")
+    response = client.get(_RUNS)
 
     assert response.status_code == 200
     assert response.json()["metadata_horizon"] is None
@@ -1684,6 +1761,7 @@ def test_run_list_metadata_horizon_counts_a_declared_but_dropped_key(
         _execution(predating_run, started_at=now - timedelta(hours=2), finished_at=now),
         results=[],
         received_at=now - timedelta(hours=2),
+        project=DEFAULT_PROJECT,
     )
     store.record_session(
         _execution(dropped_run, started_at=now - timedelta(hours=1), finished_at=now),
@@ -1704,10 +1782,11 @@ def test_run_list_metadata_horizon_counts_a_declared_but_dropped_key(
                 ),
             ),
         ),
+        project=DEFAULT_PROJECT,
     )
 
     response = client.get(
-        "/api/v1/runs", params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
+        _RUNS, params={"metadata_key": "firmware_version", "metadata_value": "2.1"}
     )
 
     assert response.status_code == 200
@@ -1749,10 +1828,11 @@ def test_run_list_metadata_pairs_match_only_runs_holding_every_pair(
             results=[],
             received_at=now - timedelta(hours=age + 1),
             metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
 
     response = client.get(
-        "/api/v1/runs",
+        _RUNS,
         params=[
             ("metadata_key", "fw"),
             ("metadata_key", "fmc"),
@@ -1787,7 +1867,7 @@ def test_run_list_metadata_keys_and_values_repeated_unequally_are_422(
 ) -> None:
     """A value without its key, or a key without its value, is not a pair.
     `fields` names the parameter given fewer times."""
-    response = client.get("/api/v1/runs", params=params)
+    response = client.get(_RUNS, params=params)
 
     assert response.status_code == 422
     assert response.json()["error"] == "invalid_parameter"
@@ -1802,7 +1882,7 @@ def test_run_list_takes_as_many_metadata_pairs_as_the_document_states_and_no_mor
     document = yaml.safe_load(_OPENAPI_DOCUMENT_BYTES)
     parameters = {
         parameter["name"]: parameter["schema"]
-        for parameter in document["paths"]["/runs"]["get"]["parameters"]
+        for parameter in document["paths"]["/projects/{project}/runs"]["get"]["parameters"]
         if "name" in parameter
     }
     bound = parameters["metadata_key"]["maxItems"]
@@ -1814,8 +1894,8 @@ def test_run_list_takes_as_many_metadata_pairs_as_the_document_states_and_no_mor
             "metadata_value": ["v"] * count,
         }
 
-    at_bound = client.get("/api/v1/runs", params=_pairs(bound))
-    past_bound = client.get("/api/v1/runs", params=_pairs(bound + 1))
+    at_bound = client.get(_RUNS, params=_pairs(bound))
+    past_bound = client.get(_RUNS, params=_pairs(bound + 1))
 
     assert at_bound.status_code == 200
     assert len(at_bound.json()["metadata_horizon"]) == bound
@@ -1841,6 +1921,7 @@ def _record_nul_node_id(store: ExecutionStore, run_id: str) -> None:
         _execution(run_id, started_at=now - timedelta(minutes=1), finished_at=now),
         results=[_result(_NUL_NODE_ID)],
         received_at=now,
+        project=DEFAULT_PROJECT,
     )
 
 
@@ -1857,7 +1938,7 @@ def test_a_node_id_holding_nul_names_no_result(client: TestClient, store: Execut
 def test_a_node_id_holding_nul_has_no_history(client: TestClient, store: ExecutionStore) -> None:
     _record_nul_node_id(store, _run_id(171))
 
-    response = client.get("/api/v1/tests/history", params={"node_id": _NUL_NODE_ID})
+    response = client.get(_HISTORY, params={"node_id": _NUL_NODE_ID})
 
     assert response.status_code == 200
     assert response.json() == {"items": [], "has_more": False, "next_cursor": None}
@@ -1872,11 +1953,10 @@ def test_a_metadata_value_holding_nul_matches_no_run(
         results=[],
         received_at=now,
         metadata=_session_metadata(fw="1.1\x00"),
+        project=DEFAULT_PROJECT,
     )
 
-    response = client.get(
-        "/api/v1/runs", params={"metadata_key": "fw", "metadata_value": "1.1\x00"}
-    )
+    response = client.get(_RUNS, params={"metadata_key": "fw", "metadata_value": "1.1\x00"})
 
     assert response.status_code == 200
     body = response.json()
@@ -1902,10 +1982,11 @@ def test_a_metadata_key_holding_nul_matches_no_run_and_counts_as_stored(
             results=[],
             received_at=now,
             metadata=metadata,
+            project=DEFAULT_PROJECT,
         )
 
     response = client.get(
-        "/api/v1/runs",
+        _RUNS,
         params=[
             ("metadata_key", "fw\x00"),
             ("metadata_value", "1.1\x00"),
@@ -1921,3 +2002,246 @@ def test_a_metadata_key_holding_nul_matches_no_run_and_counts_as_stored(
         {"key": "fw\x00", "predating": 1},
         {"key": "fw�", "predating": 1},
     ]
+
+
+# --- Projects -------------------------------------------------------------------
+#
+# The run list and a test's history are read within the project the path
+# names. Two projects may hold tests with the same node id, and a list or a
+# history that leaked across them would mix two suites' results.
+
+
+def _project_path(project: str, route: str) -> str:
+    """`route` (`runs` or `tests/history`) within `project`."""
+    return f"/api/v1/projects/{project}/{route}"
+
+
+def _add_project(store: ExecutionStore, name: str = _OTHER_PROJECT) -> None:
+    store.create_project(name, created_at=datetime.now(timezone.utc))
+
+
+def _record_in(
+    store: ExecutionStore,
+    seed: int,
+    *,
+    project: str,
+    started_at: datetime,
+    metadata: RunMetadata | None = None,
+) -> None:
+    """A finished run of `project` with one result, `t.py::test_x`: the same
+    node id in every project, so only the project can keep them apart."""
+    store.record_session(
+        _execution(_run_id(seed), started_at=started_at, finished_at=started_at),
+        results=[_result("t.py::test_x")],
+        received_at=started_at,
+        metadata=metadata if metadata is not None else RunMetadata(),
+        project=project,
+    )
+
+
+def test_run_list_and_history_see_only_their_project(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """Each project's run list and each project's history of one node id
+    hold that project's runs and no other's, whichever is newer."""
+    now = datetime.now(timezone.utc)
+    _add_project(store)
+    _record_in(store, 200, project=DEFAULT_PROJECT, started_at=now - timedelta(hours=3))
+    _record_in(store, 201, project=_OTHER_PROJECT, started_at=now - timedelta(hours=2))
+    _record_in(store, 202, project=DEFAULT_PROJECT, started_at=now - timedelta(hours=1))
+    node = {"node_id": "t.py::test_x"}
+
+    default_runs = client.get(_project_path(DEFAULT_PROJECT, "runs")).json()["items"]
+    other_runs = client.get(_project_path(_OTHER_PROJECT, "runs")).json()["items"]
+    default_history = client.get(_project_path(DEFAULT_PROJECT, "tests/history"), params=node)
+    other_history = client.get(_project_path(_OTHER_PROJECT, "tests/history"), params=node)
+
+    assert [item["id"] for item in default_runs] == [_run_id(202), _run_id(200)]
+    assert [item["id"] for item in other_runs] == [_run_id(201)]
+    assert [item["run_id"] for item in default_history.json()["items"]] == [
+        _run_id(202),
+        _run_id(200),
+    ]
+    assert [item["run_id"] for item in other_history.json()["items"]] == [_run_id(201)]
+
+
+def test_metadata_filter_and_horizon_are_per_project(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """A filter matches the project's runs alone, and a key's horizon counts
+    the project's runs before the project's first run holding it. The runs
+    are interleaved so that counting across projects, from either project's
+    first appearance of the key, gives another number."""
+    now = datetime.now(timezone.utc)
+    _add_project(store)
+    pair = _captured_metadata("firmware_version", "2.1")
+    _record_in(store, 210, project=_OTHER_PROJECT, started_at=now - timedelta(hours=6))
+    _record_in(store, 211, project=_OTHER_PROJECT, started_at=now - timedelta(hours=5))
+    _record_in(store, 212, project=DEFAULT_PROJECT, started_at=now - timedelta(hours=4))
+    _record_in(
+        store, 213, project=DEFAULT_PROJECT, started_at=now - timedelta(hours=3), metadata=pair
+    )
+    _record_in(
+        store, 214, project=_OTHER_PROJECT, started_at=now - timedelta(hours=2), metadata=pair
+    )
+    params = {"metadata_key": "firmware_version", "metadata_value": "2.1"}
+
+    default = client.get(_project_path(DEFAULT_PROJECT, "runs"), params=params).json()
+    other = client.get(_project_path(_OTHER_PROJECT, "runs"), params=params).json()
+
+    assert [item["id"] for item in default["items"]] == [_run_id(213)]
+    assert default["metadata_horizon"] == [{"key": "firmware_version", "predating": 1}]
+    assert [item["id"] for item in other["items"]] == [_run_id(214)]
+    assert other["metadata_horizon"] == [{"key": "firmware_version", "predating": 2}]
+
+
+@pytest.mark.parametrize(
+    ("route", "params", "id_field"),
+    [
+        ("runs", {}, "id"),
+        ("runs", {"metadata_key": "k", "metadata_value": "v"}, "id"),
+        ("tests/history", {"node_id": "t.py::test_x"}, "run_id"),
+    ],
+    ids=["runs", "runs-filtered", "history"],
+)
+def test_a_cursor_from_another_project_pages_harmlessly(
+    client: TestClient, store: ExecutionStore, route: str, params: dict[str, str], id_field: str
+) -> None:
+    """A cursor names a place in the order every list shares, not a run of
+    one project, so one another project's list handed out starts this
+    project's page just past that place and lists this project's runs
+    alone."""
+    now = datetime.now(timezone.utc)
+    _add_project(store)
+    pair = _captured_metadata("k", "v")
+    for seed, project, hours in (
+        (220, DEFAULT_PROJECT, 0.5),
+        (221, _OTHER_PROJECT, 1),
+        (222, DEFAULT_PROJECT, 2),
+        (223, _OTHER_PROJECT, 3),
+        (224, DEFAULT_PROJECT, 4),
+    ):
+        _record_in(
+            store, seed, project=project, started_at=now - timedelta(hours=hours), metadata=pair
+        )
+    other_page = client.get(
+        _project_path(_OTHER_PROJECT, route), params={**params, "limit": 1}
+    ).json()
+    assert [item[id_field] for item in other_page["items"]] == [_run_id(221)]
+
+    response = client.get(
+        _project_path(DEFAULT_PROJECT, route),
+        params={**params, "cursor": other_page["next_cursor"]},
+    )
+
+    assert response.status_code == 200
+    assert [item[id_field] for item in response.json()["items"]] == [_run_id(222), _run_id(224)]
+    assert response.json()["next_cursor"] is None
+
+
+_PROJECT_ROUTES = pytest.mark.parametrize(
+    ("route", "params"),
+    [("runs", {}), ("tests/history", {"node_id": "t.py::test_x"})],
+    ids=["runs", "history"],
+)
+
+
+@_PROJECT_ROUTES
+def test_a_project_nobody_made_is_404_unknown_project(
+    client: TestClient, store: ExecutionStore, route: str, params: dict[str, str]
+) -> None:
+    """A name a project could have but none does is `404 unknown_project`,
+    not an empty page: an empty page would read as a project that has not
+    recorded yet. The name is not repeated back."""
+    _add_project(store)
+
+    response = client.get(_project_path("never-made", route), params=params)
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_project"
+    assert "never-made" not in response.text
+
+
+@_PROJECT_ROUTES
+@pytest.mark.parametrize(
+    "name",
+    ["Firmware", "-firmware", ".firmware", "x" * 65, "fw%20bench", "fw%00"],
+    ids=["upper-case", "leading-dash", "leading-dot", "too-long", "space", "nul"],
+)
+def test_a_name_no_project_can_have_is_404_unknown_project_without_asking_the_store(
+    route: str, params: dict[str, str], name: str
+) -> None:
+    """A name the project rule refuses cannot name a project, so it is
+    answered as an unknown one without a store call -- which also keeps
+    U+0000 from every adapter. A name the rule accepts is looked up, so the
+    spy tells the two apart."""
+    store = _SpyExecutionStore()
+    client = TestClient(create_app(cast(ExecutionStore, store)))
+
+    impossible = client.get(_project_path(name, route), params=params)
+    unknown = client.get(_project_path("firmware", route), params=params)
+
+    assert impossible.status_code == 404
+    assert impossible.json()["error"] == "unknown_project"
+    assert unknown.status_code == 404
+    assert unknown.json()["error"] == "unknown_project"
+    assert store.get_project_calls == ["firmware"]
+    assert store.list_runs_calls == []
+    assert store.list_history_calls == []
+
+
+@_PROJECT_ROUTES
+@pytest.mark.parametrize("name", ["never-made", "Not-A-Name"], ids=["unknown", "impossible"])
+def test_on_a_closed_server_a_caller_without_a_token_learns_nothing_of_projects(
+    store: ExecutionStore, route: str, params: dict[str, str], name: str
+) -> None:
+    """The project is resolved after the caller is authorized, so a caller
+    who may not read gets `401` whether or not the project exists or could,
+    and only a reader learns that it does not."""
+    client = TestClient(create_app(store))
+    authorization = _reader(store, "alice")
+
+    anonymous = client.get(_project_path(name, route), params=params)
+    reader = client.get(_project_path(name, route), params=params, headers=authorization)
+
+    assert anonymous.status_code == 401
+    assert anonymous.json()["error"] == "unauthenticated"
+    assert reader.status_code == 404
+    assert reader.json()["error"] == "unknown_project"
+
+
+def test_the_run_list_and_history_are_no_longer_served_outside_a_project(
+    client: TestClient,
+) -> None:
+    """`/runs` still takes a report, so reading it is a method the path
+    does not take -- `405`, naming the one it does -- while
+    `/tests/history` is no path at all. Neither answers with some
+    project's runs, which a client written for the old paths would read as
+    the whole database."""
+    runs = client.get("/api/v1/runs")
+    history = client.get("/api/v1/tests/history", params={"node_id": "t.py::test_x"})
+
+    assert runs.status_code == 405
+    assert runs.headers["allow"] == "POST"
+    assert runs.json()["error"] == "method_not_allowed"
+    assert history.status_code == 404
+    assert history.json()["error"] == "not_found"
+
+
+def test_run_detail_names_the_project_the_run_was_recorded_in(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """A run id names one run across projects, so its detail says which
+    project to ask for the history of its tests. Two runs in two projects,
+    so a constant fails on one of them."""
+    now = datetime.now(timezone.utc)
+    _add_project(store)
+    _record_in(store, 230, project=DEFAULT_PROJECT, started_at=now - timedelta(hours=2))
+    _record_in(store, 231, project=_OTHER_PROJECT, started_at=now - timedelta(hours=1))
+
+    default = client.get(f"/api/v1/runs/{_run_id(230)}")
+    other = client.get(f"/api/v1/runs/{_run_id(231)}")
+
+    assert default.status_code == other.status_code == 200
+    assert default.json()["project"] == DEFAULT_PROJECT
+    assert other.json()["project"] == _OTHER_PROJECT

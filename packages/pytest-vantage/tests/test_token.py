@@ -1,6 +1,7 @@
 """Recording to a server that has users: the token comes from
 `VANTAGE_TOKEN` alone, goes with every report and heartbeat, never shows in
-what the plugin prints, and a server's refusal of it reads as what to fix.
+what the plugin prints, and a server's refusal of it reads as what to fix --
+a login token's too, which never records and expires.
 
 End to end against a real server (`vantage_server`) whose store holds a
 user, plus the transport against a server that answers only refusals, and
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -20,7 +22,14 @@ from pytest_vantage.config import ReportSettings, VantageConfigError, resolve_to
 from pytest_vantage.outbox import Outbox, outbox_path, send_queued, worth_retrying
 from pytest_vantage.transport import AccessRefusedError, send, send_heartbeat
 from starlette.types import Receive, Scope, Send
-from vantage.core.domain.access import READ_SCOPE, RECORD_SCOPE
+from vantage.core.domain.access import (
+    LOGIN_TOKEN_LIFETIME,
+    READ_SCOPE,
+    RECORD_SCOPE,
+    new_token,
+    token_digest,
+)
+from vantage.core.domain.passwords import hash_password
 from vantage_test_server import VantageTestServer
 
 pytestmark = pytest.mark.usefixtures("git_confined_to_basetemp")
@@ -97,6 +106,12 @@ def test_vantage_token_is_not_read_without_vantage(
 # --- A session against a server with users ----------------------------------------
 
 
+_NOT_ACCEPTED = (
+    "the server does not accept the token in VANTAGE_TOKEN: it is unknown, revoked or expired, "
+    "or its user is disabled"
+)
+
+
 def _session(pytester: pytest.Pytester, server: VantageTestServer, *extra: str) -> pytest.RunResult:
     pytester.makepyfile(test_sample=_PASSING_TEST)
     return pytester.runpytest_subprocess("--vantage", f"--vantage-server={server.address}", *extra)
@@ -148,11 +163,7 @@ def test_a_session_without_a_token_says_the_server_needs_one_and_its_tests_still
             [READ_SCOPE],
             "HTTP 403: the token in VANTAGE_TOKEN does not grant the record scope",
         ),
-        (
-            None,
-            "HTTP 401: the server does not accept the token in VANTAGE_TOKEN: it is unknown "
-            "or revoked, or its user is disabled",
-        ),
+        (None, f"HTTP 401: {_NOT_ACCEPTED}"),
     ],
     ids=["read-only", "unknown"],
 )
@@ -189,6 +200,57 @@ def test_a_token_sent_to_a_server_without_users_is_refused(
 
     result.assert_outcomes(passed=1, warnings=2)
     result.stdout.fnmatch_lines(["*does not accept the token in VANTAGE_TOKEN*"])
+
+
+def _login_token(server: VantageTestServer, *, expires_at: datetime) -> str:
+    """A login token of the admin alice, as `POST /api/v1/login` hands one
+    out, expiring at `expires_at`."""
+    logged_in_at = expires_at - LOGIN_TOKEN_LIFETIME
+    server.store.create_user("alice", admin=True, created_at=logged_in_at)
+    password_hash = hash_password("alice's own password")
+    server.store.set_password("alice", password_hash=password_hash, changed_at=logged_in_at)
+    token = new_token()
+    stored = server.store.create_login_token(
+        "alice",
+        password_hash=password_hash,
+        digest=token_digest(token),
+        created_at=logged_in_at,
+        expires_at=expires_at,
+    )
+    assert stored is not None
+    return token
+
+
+@pytest.mark.parametrize(
+    ("expires_in", "reason"),
+    [
+        (
+            timedelta(hours=1),
+            "HTTP 403: the token in VANTAGE_TOKEN does not grant the record scope",
+        ),
+        (-timedelta(seconds=1), f"HTTP 401: {_NOT_ACCEPTED}"),
+    ],
+    ids=["live", "expired"],
+)
+def test_a_login_token_never_records_and_says_so_until_it_expires(
+    pytester: pytest.Pytester,
+    vantage_server: VantageTestServer,
+    monkeypatch: pytest.MonkeyPatch,
+    expires_in: timedelta,
+    reason: str,
+) -> None:
+    """A login token is for a person reading, not for a test session: it
+    never holds the record scope, and once it has expired the server knows
+    it no more than a revoked one."""
+    token = _login_token(vantage_server, expires_at=datetime.now(timezone.utc) + expires_in)
+    monkeypatch.setenv("VANTAGE_TOKEN", token)
+
+    result = _session(pytester, vantage_server)
+
+    result.assert_outcomes(passed=1, warnings=2)
+    result.stdout.fnmatch_lines([f"*vantage: error while reporting: {reason}"])
+    assert token not in result.stdout.str() + result.stderr.str()
+    assert vantage_server.executions() == []
 
 
 # --- The transport -------------------------------------------------------------------
@@ -236,13 +298,7 @@ def _refusal(error: str) -> bytes:
             None,
             "the server requires a token: set VANTAGE_TOKEN to one with the record scope",
         ),
-        (
-            401,
-            "unauthenticated",
-            "vantage_t",
-            "the server does not accept the token in VANTAGE_TOKEN: it is unknown or revoked, "
-            "or its user is disabled",
-        ),
+        (401, "unauthenticated", "vantage_t", _NOT_ACCEPTED),
         (
             403,
             "insufficient_scope",

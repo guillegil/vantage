@@ -60,6 +60,7 @@ from pytest_vantage.capture import (
     isoformat_utc,
 )
 from pytest_vantage.config import (
+    DEFAULT_PROJECT,
     LOCAL_MODE,
     MODES,
     SERVER_AND_LOCAL_MODE,
@@ -268,6 +269,8 @@ class Recorder:
       warning about it until the one describing where the run went.
     - `_token` goes with every report and heartbeat, and with the queued
       runs this session sends; a server without users needs none.
+    - `_project` is the project the run belongs to, named in every report,
+      `default` included, so each says where it goes.
     """
 
     def __init__(
@@ -282,6 +285,7 @@ class Recorder:
         local_database: Path | None = None,
         server_reachable: bool = True,
         token: str | None = None,
+        project: str = DEFAULT_PROJECT,
     ) -> None:
         if mode not in MODES:
             raise ValueError(f"unknown mode {mode!r}")
@@ -295,6 +299,7 @@ class Recorder:
         self._mode = mode
         self._local_database = local_database
         self._token = token
+        self._project = project
         self._server_reachable = server_reachable and address is not None
         self._liveness_timeout = resolve_liveness_timeout(timeout)
         # The probe's `Capabilities` carries why the lifecycle is off; a plain
@@ -335,12 +340,12 @@ class Recorder:
         }
 
     def _sections(self, plan: ValuesPlan | None = None) -> dict[str, object]:
-        """The report sections: `vcs`, and `metadata` when it says anything.
-        Every report carries the same declared keys and files; only the
-        last carries `plan`'s values. The `metadata` key is omitted rather
-        than sent as `null`.
+        """The report sections: the `project`, `vcs`, and `metadata` when it
+        says anything. Every report carries the same project, and the same
+        declared keys and files; only the last carries `plan`'s values. The
+        `metadata` key is omitted rather than sent as `null`.
         """
-        sections: dict[str, object] = {"vcs": self._vcs_section()}
+        sections: dict[str, object] = {"project": self._project, "vcs": self._vcs_section()}
         metadata_section = metadata.wire_section(
             self._metadata,
             values=() if plan is None else plan.values,
@@ -414,7 +419,7 @@ class Recorder:
             where = f"{self._address} and {self._local_database}"
         else:
             where = str(self._address)
-        return f"vantage: recording run {self._run_id} to {where}"
+        return f"vantage: recording run {self._run_id} in project {self._project} to {where}"
 
     @accumulation_isolated
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
@@ -647,8 +652,9 @@ class Recorder:
         session could still deliver, and say what happened in one warning.
 
         Only a failure a retry can fix is queued: no answer, a 5xx, a 408
-        or 429 asking for the report again later, or a 401 or 403 refusing
-        the token, which `vantage push` with another one can deliver. Any
+        or 429 asking for the report again later, a 401 or 403 refusing the
+        token, which `vantage push` with another one can deliver, or a 404
+        `unknown_project`, which an admin fixes by adding the project. Any
         other 4xx, a redirect or an answer that does not acknowledge the run
         would fail the same way every time. Reports the server has
         acknowledged are not queued again.
@@ -786,6 +792,9 @@ class Recorder:
         line = (
             f"vantage: sent {summary.sent} queued {noun} to {address} ({summary.waiting} waiting)"
         )
+        if summary.missing_projects:
+            projects = ", ".join(summary.missing_projects)
+            line = f"{line}; kept runs of projects it does not have: {projects}"
         if summary.stopped is not None:
             line = f"{line}; stopped: {summary.stopped}"
         self._summary.append(line)

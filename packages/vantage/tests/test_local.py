@@ -14,13 +14,16 @@ import sqlite3
 import stat
 import threading
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from password_fixtures import cheap_hash
 from vantage.core.config.database import SqliteTarget
 from vantage.core.config.resolution import resolve_server_config
+from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.local import LocalStoreError, default_database_path, store_reports
 from vantage.service.app import create_app
 from vantage.storage.sqlite_store import SqliteExecutionStore
@@ -34,8 +37,9 @@ _needs_enforced_mode_bits = pytest.mark.skipif(
 _RUN_ID = "a" * 32
 
 # Columns that hold the time a report arrived, which differs between any two
-# stores however the report got there.
-_ARRIVAL_COLUMNS = frozenset({"received_at", "last_contact_at", "updated_at"})
+# stores however the report got there, and the time a project was made:
+# `default` with each database, any other when it was first named or added.
+_ARRIVAL_COLUMNS = frozenset({"received_at", "last_contact_at", "updated_at", "created_at"})
 
 
 def _run(finished: bool, run_id: str = _RUN_ID) -> dict[str, Any]:
@@ -141,11 +145,13 @@ def _rows(database: Path) -> dict[str, list[tuple[Any, ...]]]:
     return dump
 
 
-def _served(database: Path, reports: list[dict[str, Any]]) -> None:
+def _served(database: Path, reports: list[dict[str, Any]], *, projects: Sequence[str] = ()) -> None:
     """`reports` sent to a server storing in `database`, as the plugin sends
-    them."""
+    them, once its admin has added `projects`."""
     store = SqliteExecutionStore(database)
     try:
+        for project in projects:
+            store.create_project(project, created_at=datetime.now(timezone.utc))
         client = TestClient(create_app(store))
         for report in reports:
             response = client.post(
@@ -192,6 +198,140 @@ def test_the_stored_run_reads_back_through_the_store(tmp_path: Path) -> None:
         assert failure.traceback_truncated is True
     finally:
         store.close()
+
+
+def _in_project(project: str | None, run_id: str = _RUN_ID) -> list[dict[str, Any]]:
+    """`_session`, every report naming `project`, as the plugin sends it."""
+    return [{**report, "project": project} for report in _session(run_id)]
+
+
+def _projects(database: Path) -> list[str]:
+    store = SqliteExecutionStore(database)
+    try:
+        return [project.name for project in store.list_projects()]
+    finally:
+        store.close()
+
+
+def _project_of(database: Path, run_id: str) -> str | None:
+    store = SqliteExecutionStore(database)
+    try:
+        detail = store.get_run_detail(run_id)
+        return None if detail is None else detail.project
+    finally:
+        store.close()
+
+
+def test_a_report_naming_a_project_the_database_lacks_creates_it_and_stores_the_run_there(
+    tmp_path: Path,
+) -> None:
+    """Nobody but the database's owner could add the project, and the local
+    copy of a run a server refused for its project must still land."""
+    database = tmp_path / "vantage.db"
+
+    store_reports(database, _in_project("firmware"))
+
+    assert _projects(database) == [DEFAULT_PROJECT, "firmware"]
+    assert _project_of(database, _RUN_ID) == "firmware"
+    store = SqliteExecutionStore(database)
+    try:
+        assert store.get_catalogue_entry("tests/test_a.py::test_ok", project="firmware")
+        assert (
+            store.get_catalogue_entry("tests/test_a.py::test_ok", project=DEFAULT_PROJECT) is None
+        )
+    finally:
+        store.close()
+
+
+def test_a_run_in_a_named_project_is_stored_as_a_server_with_that_project_stores_it(
+    tmp_path: Path,
+) -> None:
+    local = tmp_path / "local" / "vantage.db"
+    served = tmp_path / "served" / "vantage.db"
+
+    store_reports(local, _in_project("firmware"))
+    _served(served, _in_project("firmware"), projects=["firmware"])
+
+    stored = _rows(local)
+    assert stored == _rows(served)
+    assert len(stored["project"]) == 2
+
+
+def test_a_report_refused_for_naming_another_project_leaves_no_project_behind(
+    tmp_path: Path,
+) -> None:
+    """A run never moves, so a later report of it naming another project is
+    refused -- and a refused report changes nothing, the projects included."""
+    database = tmp_path / "vantage.db"
+    store_reports(database, _in_project("firmware"))
+
+    with pytest.raises(LocalStoreError):
+        store_reports(database, _in_project("boards"))
+
+    assert _projects(database) == [DEFAULT_PROJECT, "firmware"]
+    assert _project_of(database, _RUN_ID) == "firmware"
+
+
+def test_a_later_session_in_a_project_already_made_goes_to_it(tmp_path: Path) -> None:
+    database = tmp_path / "vantage.db"
+
+    store_reports(database, _in_project("firmware"))
+    store_reports(database, _in_project("firmware", run_id="b" * 32))
+
+    assert _projects(database) == [DEFAULT_PROJECT, "firmware"]
+    assert _project_of(database, "b" * 32) == "firmware"
+
+
+@pytest.mark.parametrize("named", [False, True], ids=["absent", "null"])
+def test_a_report_naming_no_project_goes_to_default_and_makes_none(
+    tmp_path: Path, named: bool
+) -> None:
+    database = tmp_path / "vantage.db"
+    reports = _in_project(None) if named else _session()
+
+    store_reports(database, reports)
+
+    assert _projects(database) == [DEFAULT_PROJECT]
+    assert _project_of(database, _RUN_ID) == DEFAULT_PROJECT
+
+
+@pytest.mark.parametrize(
+    "project",
+    ["", "Firmware", "../x", "f" * 65, "fw\x00", 5],
+    ids=["empty", "upper-case", "path", "too-long", "nul", "not-a-string"],
+)
+def test_a_name_no_project_can_have_is_one_line_and_stores_nothing(
+    tmp_path: Path, project: object
+) -> None:
+    database = tmp_path / "vantage.db"
+    reports = [{**report, "project": project} for report in _session()]
+
+    message = _refusal(database, reports)
+
+    assert message == (
+        f"{database} refused the report of run {_RUN_ID}: "
+        "The submitted report does not match the expected shape. (project)"
+    )
+    assert _projects(database) == [DEFAULT_PROJECT]
+    store = SqliteExecutionStore(database)
+    try:
+        assert store.count_executions() == 0
+    finally:
+        store.close()
+
+
+def test_a_run_named_again_in_another_project_is_one_line_and_stays_where_it_was(
+    tmp_path: Path,
+) -> None:
+    """One session is one run in one project; a report of a stored run that
+    names another project is not a way to move it."""
+    database = tmp_path / "vantage.db"
+    store_reports(database, _in_project("firmware"))
+
+    message = _refusal(database, _in_project("boards"))
+
+    assert message.startswith(f"cannot store run {_RUN_ID} in the database at {database}: ")
+    assert _project_of(database, _RUN_ID) == "firmware"
 
 
 def test_storing_a_session_again_changes_nothing(tmp_path: Path) -> None:
@@ -401,6 +541,69 @@ def test_sessions_stored_at_once_are_all_kept(tmp_path: Path) -> None:
     store = SqliteExecutionStore(database)
     try:
         assert store.count_executions() == len(run_ids)
+    finally:
+        store.close()
+
+
+# --- Who made the database -----------------------------------------------------
+
+
+def _origin(database: Path) -> str | None:
+    """`meta.origin`, read with a plain connection of its own."""
+    with contextlib.closing(sqlite3.connect(database)) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'origin'").fetchone()
+    return None if row is None else str(row[0])
+
+
+def test_a_database_the_local_store_creates_records_that_it_made_it(tmp_path: Path) -> None:
+    database = tmp_path / "vantage.db"
+
+    store_reports(database, _session())
+
+    assert _origin(database) == "local"
+
+
+def test_storing_into_a_database_a_server_made_leaves_it_the_servers(tmp_path: Path) -> None:
+    """The default database is also the one `vantage` serves with no
+    options. Once `vantage` has made it, local sessions store into it as
+    before, and it stays the server's: an admin already guards it."""
+    database = tmp_path / "vantage.db"
+    SqliteExecutionStore(database).close()
+
+    store_reports(database, _session())
+
+    assert _origin(database) == "server"
+    store = SqliteExecutionStore(database)
+    try:
+        assert store.get_execution(_RUN_ID) is not None
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("server_made_it", "users"), [(False, []), (True, ["admin"])], ids=["local", "server"]
+)
+def test_only_a_database_the_local_store_made_is_given_no_first_admin(
+    tmp_path: Path, server_made_it: bool, users: list[str]
+) -> None:
+    """A test machine's own runs are its owner's: `vantage` serves the file
+    the local store made open, as every database was served before users,
+    until someone adds a user to it."""
+    database = tmp_path / "vantage.db"
+    if server_made_it:
+        SqliteExecutionStore(database).close()
+    store_reports(database, _session())
+
+    store = SqliteExecutionStore(database)
+    try:
+        created = store.create_first_admin(
+            "admin",
+            password_hash=cheap_hash("a password nobody will type"),
+            created_at=datetime.now(timezone.utc),
+        )
+        assert (created is not None) is server_made_it
+        assert [user.name for user in store.list_users()] == users
+        assert store.access_required() is server_made_it
     finally:
         store.close()
 

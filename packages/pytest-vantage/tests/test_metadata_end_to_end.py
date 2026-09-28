@@ -20,7 +20,7 @@ from vantage_test_server import VantageTestServer
 
 def _runs_matching(server: VantageTestServer, key: str, value: str) -> list[str]:
     query = urllib.parse.urlencode({"metadata_key": key, "metadata_value": value})
-    url = f"{server.address}/api/v1/runs?{query}"
+    url = f"{server.address}/api/v1/projects/default/runs?{query}"
     with urllib.request.urlopen(url, timeout=5) as response:  # noqa: S310 -- loopback test server
         body = json.load(response)
     return [item["id"] for item in body["items"]]

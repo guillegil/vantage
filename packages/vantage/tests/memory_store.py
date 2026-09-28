@@ -30,15 +30,24 @@ key bound is one step.
 from __future__ import annotations
 
 import functools
+import itertools
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Concatenate, ParamSpec, TypeVar
 
-from vantage.core.domain.access import Grant, Token, User
+from vantage.core.domain.access import (
+    ADMIN_SCOPE,
+    LOGIN_TOKEN_LABEL,
+    READ_SCOPE,
+    Grant,
+    Token,
+    User,
+)
 from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
+from vantage.core.domain.projects import DEFAULT_PROJECT, Project
 from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
@@ -49,14 +58,17 @@ from vantage.core.ports.storage import (
     MetadataFile,
     NamespaceFullError,
     Page,
+    ProjectExistsError,
+    ProjectMismatchError,
+    ProjectSetting,
     ResultListEntry,
     RunDetail,
     RunKey,
     RunListEntry,
     RunMetadata,
+    UnknownProjectError,
     UnknownUserError,
     UserExistsError,
-    UserSetting,
 )
 
 # Empty VCS context and empty failure evidence become `None` here, on write,
@@ -120,39 +132,58 @@ def _past(after: RunKey | None, started_at: datetime, run_id: str) -> bool:
 class InMemoryExecutionStore:
     """Implements `vantage.core.ports.storage.ExecutionStore` with dicts."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, local: bool = False) -> None:
+        # Whether pytest-vantage's local store made this "database", which
+        # `create_first_admin` reads as the adapters read `meta.origin`.
+        self._local = local
         # Not re-entrant: no locked method calls another.
         self._lock = threading.Lock()
         self._executions: dict[str, Execution] = {}
-        self._catalogue: dict[str, CatalogueEntry] = {}
+        # Keyed by project and node id, as the adapters' unique index is.
+        self._catalogue: dict[tuple[str, str], CatalogueEntry] = {}
         self._results: dict[tuple[str, str], Result] = {}
         self._last_contact: dict[str, datetime] = {}
-        self._settings: dict[tuple[str, str], UserSetting] = {}
+        self._settings: dict[tuple[str, str, str], ProjectSetting] = {}
+        # Every store has `default` from its creation, as a database does.
+        self._projects: dict[str, Project] = {
+            DEFAULT_PROJECT: Project(name=DEFAULT_PROJECT, created_at=datetime.now(timezone.utc))
+        }
+        self._project_of: dict[str, str] = {}
         self._metadata_files: dict[tuple[str, str], MetadataFile] = {}
         self._metadata_entries: dict[tuple[str, str], MetadataEntry] = {}
         self._recorded_by: dict[str, str | None] = {}
         self._users: dict[str, User] = {}
-        # Keyed by id, which counts from 1 like an identity column; revoked
-        # tokens stay.
+        self._password_hashes: dict[str, str] = {}
+        # Keyed by id, which counts from 1 like an identity column and never
+        # hands out an id twice, though expired login tokens are deleted;
+        # revoked tokens stay.
         self._tokens: dict[int, Token] = {}
         self._token_ids: dict[str, int] = {}
+        self._next_token_id = itertools.count(1)
 
     @_locked
     def record_session(
         self,
         execution: Execution,
         *,
+        project: str,
         results: Sequence[Result],
         received_at: datetime,
         metadata: RunMetadata = EMPTY_RUN_METADATA,
         recorded_by: str | None = None,
     ) -> bool:
         # `received_at` is the server's clock, not the client's: it seeds
-        # `_last_contact` for a new run and is not part of `Execution`.
+        # `_last_contact` for a new run and is not part of `Execution`. The
+        # refusals come in the adapters' order: the project, the recorder,
+        # the run's own project, then whether it is finished.
+        if project not in self._projects:
+            raise UnknownProjectError(f"there is no project named {project!r}")
         identity = execution.identity.value
         stored = self._executions.get(identity)
         if stored is not None and self._recorded_by[identity] != recorded_by:
             raise ForeignRunError(f"run {identity} was recorded by another user")
+        if stored is not None and self._project_of[identity] != project:
+            raise ProjectMismatchError(f"run {identity} was recorded in another project")
         if stored is not None and stored.exit_status is not None:
             # A finished run is final: a report reaching it later is a replay
             # and adds nothing, whatever results it carries.
@@ -162,6 +193,7 @@ class InMemoryExecutionStore:
             self._executions[identity] = replace(execution, vcs=_normalized_vcs(execution.vcs))
             self._last_contact[identity] = received_at
             self._recorded_by[identity] = recorded_by
+            self._project_of[identity] = project
         elif stored.exit_status is None and execution.exit_status is not None:
             # Mirrors the SQLite adapter's `DO UPDATE ... WHERE`: `exit_status`,
             # never `finished_at`, is the discriminator, and `started_at` is
@@ -182,7 +214,7 @@ class InMemoryExecutionStore:
             )
 
         for result in results:
-            self._upsert_catalogue_entry(execution, result.identity)
+            self._upsert_catalogue_entry(project, execution, result.identity)
             key = (identity, result.identity.node_id)
             if key not in self._results:
                 self._results[key] = _normalized_result(result)
@@ -202,10 +234,13 @@ class InMemoryExecutionStore:
 
         return created
 
-    def _upsert_catalogue_entry(self, execution: Execution, identity: CaseIdentity) -> None:
-        existing = self._catalogue.get(identity.node_id)
+    def _upsert_catalogue_entry(
+        self, project: str, execution: Execution, identity: CaseIdentity
+    ) -> None:
+        slot = (project, identity.node_id)
+        existing = self._catalogue.get(slot)
         if existing is None:
-            self._catalogue[identity.node_id] = CatalogueEntry(
+            self._catalogue[slot] = CatalogueEntry(
                 identity=identity,
                 first_seen_at=execution.started_at,
                 last_seen_at=execution.started_at,
@@ -217,23 +252,24 @@ class InMemoryExecutionStore:
         # earlier run, and the identity, `last_seen_at` and
         # `last_seen_run_id` advance only when the new run is strictly newer.
         advances = execution.started_at > existing.last_seen_at
-        self._catalogue[identity.node_id] = CatalogueEntry(
+        self._catalogue[slot] = CatalogueEntry(
             identity=identity if advances else existing.identity,
             first_seen_at=min(existing.first_seen_at, execution.started_at),
             last_seen_at=execution.started_at if advances else existing.last_seen_at,
             last_seen_run_id=execution.identity.value if advances else existing.last_seen_run_id,
         )
 
-    def _as_catalogued(self, result: Result) -> Result:
-        """`result` with the identity its node id's catalogue entry holds,
-        for a caller already holding the lock."""
-        return replace(result, identity=self._catalogue[result.identity.node_id].identity)
+    def _as_catalogued(self, run_id: str, result: Result) -> Result:
+        """`result` with the identity its node id's catalogue entry in its
+        run's project holds, for a caller already holding the lock."""
+        entry = self._catalogue[(self._project_of[run_id], result.identity.node_id)]
+        return replace(result, identity=entry.identity)
 
     def _run_results(self, execution_id: str) -> list[Result]:
         """`execution_id`'s results in insertion order, identities read
         through the catalogue, for a caller already holding the lock."""
         return [
-            self._as_catalogued(result)
+            self._as_catalogued(run_id, result)
             for (run_id, _node_id), result in self._results.items()
             if run_id == execution_id
         ]
@@ -265,8 +301,16 @@ class InMemoryExecutionStore:
         return len(self._results)
 
     @_locked
-    def get_catalogue_entry(self, node_id: str) -> CatalogueEntry | None:
-        return self._catalogue.get(node_id)
+    def get_catalogue_entry(self, node_id: str, *, project: str) -> CatalogueEntry | None:
+        return self._catalogue.get((project, node_id))
+
+    def _of_project(self, project: str) -> list[Execution]:
+        """The project's runs, for a caller already holding the lock."""
+        return [
+            execution
+            for run_id, execution in self._executions.items()
+            if self._project_of[run_id] == project
+        ]
 
     def _run_page(
         self,
@@ -305,9 +349,9 @@ class InMemoryExecutionStore:
 
     @_locked
     def list_runs(
-        self, *, limit: int, offset: int, after: RunKey | None = None
+        self, *, project: str, limit: int, offset: int, after: RunKey | None = None
     ) -> Page[RunListEntry]:
-        return self._run_page(self._executions.values(), limit=limit, offset=offset, after=after)
+        return self._run_page(self._of_project(project), limit=limit, offset=offset, after=after)
 
     def _holds(self, run_id: str, key: str, value: str) -> bool:
         """Mirrors `rm.key = ? AND rm.value = ?`: `entry.value` is `None`
@@ -317,27 +361,28 @@ class InMemoryExecutionStore:
         entry = self._metadata_entries.get((run_id, key))
         return entry is not None and entry.value == value
 
-    def _predating(self, key: str) -> int:
-        """How many runs started before `key` first appeared, for a caller
-        already holding the lock. A row for `key` of any status or source
-        counts towards `first_seen`, mirroring the SQLite adapter's
-        `run_metadata` join, which does not filter on either."""
+    def _predating(self, project: str, key: str) -> int:
+        """How many of the project's runs started before `key` first
+        appeared in it, for a caller already holding the lock. A row for
+        `key` of any status or source counts towards `first_seen`, mirroring
+        the SQLite adapter's `run_metadata` join, which does not filter on
+        either."""
+        runs = self._of_project(project)
         carried_at = [
             self._executions[run_id].started_at
             for (run_id, entry_key) in self._metadata_entries
-            if entry_key == key
+            if entry_key == key and self._project_of[run_id] == project
         ]
         if not carried_at:
-            return len(self._executions)
+            return len(runs)
         first_seen = min(carried_at)
-        return sum(
-            1 for execution in self._executions.values() if execution.started_at < first_seen
-        )
+        return sum(1 for execution in runs if execution.started_at < first_seen)
 
     @_locked
     def list_runs_with_metadata_horizon(
         self,
         *,
+        project: str,
         filters: Sequence[tuple[str, str]],
         limit: int,
         offset: int,
@@ -348,7 +393,7 @@ class InMemoryExecutionStore:
         page = self._run_page(
             (
                 execution
-                for execution in self._executions.values()
+                for execution in self._of_project(project)
                 if all(self._holds(execution.identity.value, key, value) for key, value in filters)
             ),
             limit=limit,
@@ -356,7 +401,7 @@ class InMemoryExecutionStore:
             after=after,
         )
         keys = dict.fromkeys(key for key, _value in filters)
-        return page, tuple(self._predating(key) for key in keys)
+        return page, tuple(self._predating(project, key) for key in keys)
 
     @_locked
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
@@ -367,6 +412,7 @@ class InMemoryExecutionStore:
             execution=execution,
             last_contact_at=self._last_contact.get(execution_id),
             recorded_by=self._recorded_by[execution_id],
+            project=self._project_of[execution_id],
         )
 
     @_locked
@@ -395,20 +441,28 @@ class InMemoryExecutionStore:
     @_locked
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
         result = self._results.get((execution_id, node_id))
-        return None if result is None else self._as_catalogued(result)
+        return None if result is None else self._as_catalogued(execution_id, result)
 
     @_locked
     def list_history(
-        self, *, node_id: str, limit: int, offset: int, after: RunKey | None = None
+        self,
+        *,
+        project: str,
+        node_id: str,
+        limit: int,
+        offset: int,
+        after: RunKey | None = None,
     ) -> Page[HistoryEntry]:
         # Mirrors `list_runs`' total order -- `(started_at, run_id)`
-        # descending -- over every execution that has a result for this
-        # `node_id`. An unknown `node_id` yields an empty page, never an error.
+        # descending -- over every execution of the project that has a
+        # result for this `node_id`. An unknown `node_id` yields an empty
+        # page, never an error.
         page_limit = min(limit, MAX_PAGE_ITEMS)
         matches = [
             (run_id, result)
             for (run_id, result_node_id), result in self._results.items()
             if result_node_id == node_id
+            and self._project_of[run_id] == project
             and _past(after, self._executions[run_id].started_at, run_id)
         ]
         ordered = sorted(
@@ -430,12 +484,12 @@ class InMemoryExecutionStore:
         return Page(items=items, has_more=has_more)
 
     @_locked
-    def list_settings(self, namespace: str) -> Sequence[UserSetting]:
+    def list_settings(self, namespace: str, *, project: str) -> Sequence[ProjectSetting]:
         # `sorted()` on `key` mirrors the SQLite adapter's `ORDER BY key`.
         matching = [
             setting
-            for (setting_namespace, _key), setting in self._settings.items()
-            if setting_namespace == namespace
+            for (setting_project, setting_namespace, _key), setting in self._settings.items()
+            if (setting_project, setting_namespace) == (project, namespace)
         ]
         return tuple(sorted(matching, key=lambda setting: setting.key))
 
@@ -445,26 +499,31 @@ class InMemoryExecutionStore:
         namespace: str,
         key: str,
         *,
+        project: str,
         value: str,
         updated_at: datetime,
         max_keys: int | None = None,
     ) -> bool:
-        identity = (namespace, key)
+        if project not in self._projects:
+            raise UnknownProjectError(f"there is no project named {project!r}")
+        identity = (project, namespace, key)
         created = identity not in self._settings
         if created and max_keys is not None:
             held = sum(
-                1 for setting_namespace, _key in self._settings if setting_namespace == namespace
+                1
+                for setting_project, setting_namespace, _key in self._settings
+                if (setting_project, setting_namespace) == (project, namespace)
             )
             if held >= max_keys:
                 raise NamespaceFullError(f"{namespace!r} already holds {held} keys")
-        self._settings[identity] = UserSetting(
-            namespace=namespace, key=key, value=value, updated_at=updated_at
+        self._settings[identity] = ProjectSetting(
+            project=project, namespace=namespace, key=key, value=value, updated_at=updated_at
         )
         return created
 
     @_locked
-    def delete_setting(self, namespace: str, key: str) -> bool:
-        identity = (namespace, key)
+    def delete_setting(self, namespace: str, key: str, *, project: str) -> bool:
+        identity = (project, namespace, key)
         if identity not in self._settings:
             return False
         del self._settings[identity]
@@ -478,8 +537,35 @@ class InMemoryExecutionStore:
         )
 
     @_locked
+    def create_project(self, name: str, *, created_at: datetime) -> Project:
+        if name in self._projects:
+            raise ProjectExistsError(f"there is already a project named {name!r}")
+        project = Project(name=name, created_at=created_at)
+        self._projects[name] = project
+        return project
+
+    @_locked
+    def get_project(self, name: str) -> Project | None:
+        return self._projects.get(name)
+
+    @_locked
+    def list_projects(self) -> Sequence[Project]:
+        return tuple(sorted(self._projects.values(), key=lambda project: project.name))
+
+    @_locked
     def access_required(self) -> bool:
         return bool(self._users)
+
+    @_locked
+    def create_first_admin(
+        self, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        if self._users or self._local:
+            return None
+        user = User(name=name, admin=True, disabled=False, created_at=created_at, has_password=True)
+        self._users[name] = user
+        self._password_hashes[name] = password_hash
+        return user
 
     @_locked
     def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
@@ -514,6 +600,76 @@ class InMemoryExecutionStore:
         return user
 
     @_locked
+    def get_password_hash(self, name: str) -> str | None:
+        user = self._users.get(name)
+        if user is None or user.disabled:
+            return None
+        return self._password_hashes.get(name)
+
+    @_locked
+    def set_password(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        changed_at: datetime,
+        replacing: str | None = None,
+    ) -> bool:
+        user = self._users.get(name)
+        if user is None:
+            return False
+        if replacing is not None and (
+            user.disabled or self._password_hashes.get(name) != replacing
+        ):
+            return False
+        self._password_hashes[name] = password_hash
+        self._users[name] = replace(user, has_password=True)
+        for token_id, token in self._tokens.items():
+            if token.user == name and token.expires_at is not None and token.revoked_at is None:
+                self._tokens[token_id] = replace(token, revoked_at=changed_at)
+        return True
+
+    @_locked
+    def create_login_token(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        digest: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> Token | None:
+        user = self._users.get(name)
+        if user is None or user.disabled or self._password_hashes.get(name) != password_hash:
+            return None
+        if digest in self._token_ids:
+            raise ValueError("a token with that digest is stored already")
+        token = Token(
+            id=next(self._next_token_id),
+            user=name,
+            label=LOGIN_TOKEN_LABEL,
+            scopes=frozenset({READ_SCOPE, ADMIN_SCOPE} if user.admin else {READ_SCOPE}),
+            created_at=created_at,
+            revoked_at=None,
+            expires_at=expires_at,
+        )
+        self._tokens[token.id] = token
+        self._token_ids[digest] = token.id
+        expired = {
+            token_id
+            for token_id, stored in self._tokens.items()
+            if stored.user == name
+            and stored.expires_at is not None
+            and stored.expires_at <= created_at
+            and token_id != token.id
+        }
+        for token_id in expired:
+            del self._tokens[token_id]
+        for stored_digest in [d for d, token_id in self._token_ids.items() if token_id in expired]:
+            del self._token_ids[stored_digest]
+        return token
+
+    @_locked
     def create_token(
         self,
         user: str,
@@ -528,7 +684,7 @@ class InMemoryExecutionStore:
         if digest in self._token_ids:
             raise ValueError("a token with that digest is stored already")
         token = Token(
-            id=len(self._tokens) + 1,
+            id=next(self._next_token_id),
             user=user,
             label=label,
             scopes=frozenset(scopes),
@@ -562,13 +718,15 @@ class InMemoryExecutionStore:
         return True
 
     @_locked
-    def authenticate(self, digest: str) -> Grant | None:
+    def authenticate(self, digest: str, *, now: datetime) -> Grant | None:
         token_id = self._token_ids.get(digest)
         if token_id is None:
             return None
         token = self._tokens[token_id]
         user = self._users[token.user]
         if token.revoked_at is not None or user.disabled:
+            return None
+        if token.expires_at is not None and token.expires_at <= now:
             return None
         return Grant(user=user.name, admin=user.admin, scopes=token.scopes)
 
@@ -603,6 +761,9 @@ class InMemoryExecutionStore:
         self._metadata_files.clear()
         self._metadata_entries.clear()
         self._recorded_by.clear()
+        self._project_of.clear()
+        self._projects.clear()
         self._users.clear()
+        self._password_hashes.clear()
         self._tokens.clear()
         self._token_ids.clear()
