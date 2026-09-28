@@ -18,10 +18,19 @@ at `GET /api/v1/openapi.yaml` (source:
 
 ## Authentication
 
-A server whose database has no user takes every request here without a
-token; only the users and tokens routes, which manage who may do so, answer
-`409 open_server`. Once a user exists (`vantage user add`), every route but
-`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml` needs one:
+A server needs a token once its database has a user, and a server's own
+database has one before anything is served: at its first start, `vantage`
+gives a database with no user the admin `admin`, unless pytest-vantage's
+local store made it. So a fresh server needs a token from its first report
+on. Only a database the local store made is served without one, and only
+until it has a user (`vantage user add`): such a server takes every
+request here without a token, and only the routes that manage who may do
+so (users, tokens, login and password) answer `409 open_server`.
+
+Every other server needs a token on every route but
+`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml`, and
+`POST /api/v1/login` and `POST /api/v1/password`, which take a name and a
+password instead:
 
 ```
 Authorization: Bearer vantage_...
@@ -29,15 +38,18 @@ Authorization: Bearer vantage_...
 
 A token belongs to one user and holds one or more scopes: `read`, `record`
 and `admin`. It comes from `vantage token create`, or from an admin's
-`POST /api/v1/tokens`. The two ingestion routes need `record`, which is all a token
-for a test runner needs. The server answers:
+`POST /api/v1/tokens`, and never expires. The two ingestion routes need
+`record`, which is all a token for a test runner needs, and which a login
+token (`POST /api/v1/login`, for people reading, expiring after 12 hours)
+never holds. The server answers:
 
 - No `Authorization` header, on a server with users: `401 unauthenticated`,
   with `WWW-Authenticate: Bearer realm="vantage"`.
-- A header that carries no bearer token, or a token that is unknown, revoked
-  or of a disabled user, on any server: `401 unauthenticated`, the challenge
-  adding `error="invalid_token"`. A token sent to a server without users is
-  refused the same way, not ignored.
+- A header that carries no bearer token, or a token that is unknown,
+  revoked, expired or of a disabled user, on any server:
+  `401 unauthenticated`, the challenge adding `error="invalid_token"`. A
+  token sent to a server without users is refused the same way, not
+  ignored.
 - A token that does not grant the route's scope: `403 insufficient_scope`,
   the challenge naming it, as in `scope="record"`.
 
@@ -406,7 +418,7 @@ its run `running`.
 | `201` | | The first report of a run. |
 | `400` | `invalid_json` | The body is not strict UTF-8, not JSON, or nested too deeply to parse. |
 | `400` | `incomplete_body` | The client disconnected before sending the whole body. It never sees this answer. |
-| `401` | `unauthenticated` | No token on a server that has users, or a token that is not valid on any server. |
+| `401` | `unauthenticated` | No token on a server that has users, or a token that is not valid (unknown, revoked, expired, or of a disabled user) on any server. |
 | `403` | `insufficient_scope` | The token does not grant the `record` scope. |
 | `404` | `unknown_run` | A heartbeat for a run never recorded. |
 | `404` | `unknown_project` | A report naming a project the server does not have. |

@@ -97,18 +97,31 @@ def test_a_fresh_database_gets_the_vantage_schema_stamped_with_the_current_versi
     assert datetime.fromisoformat(str(stamped["created_at"])).tzinfo is not None
 
 
-def test_a_new_database_is_stamped_8_and_holds_the_default_project_alone(
+def test_a_new_database_is_stamped_9_and_holds_the_default_project_alone(
     postgres_url: str,
 ) -> None:
-    """Version 8 is the schema with projects, and a report naming no project
-    is recorded in `default`, so a new database has that project before
-    anything is written to it -- and no other."""
+    """Version 9 is the schema with passwords, login tokens and the origin.
+    A report naming no project is recorded in `default`, so a new database
+    has that project before anything is written to it -- and no other."""
     PostgresExecutionStore(postgres_url).close()
 
     assert _query(postgres_url, "SELECT value FROM vantage.meta WHERE key = 'schema_version'") == [
-        ("8",)
+        ("9",)
     ]
     assert _query(postgres_url, "SELECT name FROM vantage.project") == [(DEFAULT_PROJECT,)]
+
+
+def test_a_new_database_records_the_server_as_its_origin(postgres_url: str) -> None:
+    """Only a server opens PostgreSQL -- the local store refuses a URL for
+    its database -- so every database made here is a server's own, which
+    gets its first admin at the server's first start. Reopening it writes
+    nothing more."""
+    PostgresExecutionStore(postgres_url).close()
+    PostgresExecutionStore(postgres_url).close()
+
+    assert _query(postgres_url, "SELECT value FROM vantage.meta WHERE key = 'origin'") == [
+        ("server",)
+    ]
 
 
 def test_reopening_keeps_what_was_stored(postgres_url: str) -> None:
@@ -264,11 +277,41 @@ def test_a_version_7_schema_is_refused_and_left_as_it_was(postgres_url: str) -> 
     with pytest.raises(SchemaVersionError) as refused:
         PostgresExecutionStore(postgres_url)
 
-    assert "schema_version is 7, but this build requires schema_version 8;" in str(refused.value)
+    assert "schema_version is 7, but this build requires schema_version 9;" in str(refused.value)
     assert _vantage_objects(postgres_url) == before
     assert _query(postgres_url, "SELECT to_regclass('vantage.project')") == [(None,)]
     assert _query(postgres_url, "SELECT id FROM vantage.run") == [(_RUN,)]
     assert _query(postgres_url, "SELECT key, value FROM vantage.meta") == [("schema_version", "7")]
+
+
+def test_a_version_8_schema_is_refused_and_left_as_it_was(postgres_url: str) -> None:
+    """A schema from the build before passwords has users and tokens
+    without the password and expiry columns, and no origin. It is refused,
+    not given the columns or the row: that would be a migration, and there
+    are none."""
+    _query(postgres_url, "CREATE SCHEMA vantage")
+    _query(postgres_url, "CREATE TABLE vantage.meta (key text PRIMARY KEY, value text NOT NULL)")
+    _query(postgres_url, "INSERT INTO vantage.meta VALUES ('schema_version', '8')")
+    _query(
+        postgres_url,
+        "CREATE TABLE vantage.account (name text PRIMARY KEY, admin boolean NOT NULL,"
+        " disabled boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL)",
+    )
+    _query(postgres_url, "INSERT INTO vantage.account VALUES ('alice', true, false, now())")
+    before = _vantage_objects(postgres_url)
+
+    with pytest.raises(SchemaVersionError) as refused:
+        PostgresExecutionStore(postgres_url)
+
+    assert "schema_version is 8, but this build requires schema_version 9;" in str(refused.value)
+    assert _vantage_objects(postgres_url) == before
+    assert _query(
+        postgres_url,
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = 'vantage' AND table_name = 'account' ORDER BY ordinal_position",
+    ) == [("name",), ("admin",), ("disabled",), ("created_at",)]
+    assert _query(postgres_url, "SELECT name FROM vantage.account") == [("alice",)]
+    assert _query(postgres_url, "SELECT key, value FROM vantage.meta") == [("schema_version", "8")]
 
 
 def _sqlite_columns(path: Path) -> dict[str, list[tuple[str, bool]]]:

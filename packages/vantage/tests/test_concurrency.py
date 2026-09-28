@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from vantage.core.domain.access import READ_SCOPE, SCOPES, new_token, token_digest
 from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.passwords import hash_password
 from vantage.core.domain.projects import DEFAULT_PROJECT, Project
 from vantage.core.domain.result import Result
 from vantage.core.domain.sections import MAX_SECTIONS
@@ -43,7 +44,7 @@ from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_port_contract import _result, _start_only_execution
 
 # `any_store`, for each adapter in turn.
-pytest_plugins = ["store_fixtures"]
+pytest_plugins = ["store_fixtures", "password_fixtures"]
 
 _JOIN_TIMEOUT_SECONDS = 10
 
@@ -550,6 +551,8 @@ _HELD_NODE = "tests/test_held.py::test_x"
 # metadata filter is one more way to call `list_runs`). Every request is an
 # admin's, holding every scope, on a store with a user `bob` and a token of
 # his, id 2.
+_BOB_PASSWORD = "bob's password, long enough"  # noqa: S105
+
 _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "create_run": ("POST", "/api/v1/runs", {"json": _report("d" * 32)}, "record_session"),
     "heartbeat": ("POST", f"/api/v1/runs/{_HELD_RUN}/heartbeat", {}, "get_run_detail"),
@@ -597,6 +600,30 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "list_tokens": ("GET", "/api/v1/tokens", {}, "list_tokens"),
     "create_token": ("POST", "/api/v1/tokens", {"json": {"user": "bob"}}, "get_user"),
     "revoke_token": ("POST", "/api/v1/tokens/2/revoke", {}, "revoke_token"),
+    "set_password": (
+        "PUT",
+        "/api/v1/users/bob/password",
+        {"json": {"password": "a new password for bob"}},
+        "set_password",
+    ),
+    "log_in": (
+        "POST",
+        "/api/v1/login",
+        {"json": {"name": "bob", "password": _BOB_PASSWORD}},
+        "get_password_hash",
+    ),
+    "change_password": (
+        "POST",
+        "/api/v1/password",
+        {
+            "json": {
+                "name": "bob",
+                "password": _BOB_PASSWORD,
+                "new_password": "a new password for bob",
+            }
+        },
+        "get_password_hash",
+    ),
 }
 
 
@@ -650,7 +677,7 @@ def _hold(store: InMemoryExecutionStore, method: str) -> tuple[threading.Event, 
     ids=[*_STORE_ROUTES, *_PROJECT_LOOKUPS],
 )
 def test_a_held_store_call_holds_up_no_other_request(
-    method: str, path: str, request_kwargs: dict[str, Any], held: str
+    method: str, path: str, request_kwargs: dict[str, Any], held: str, cheap_passwords: None
 ) -> None:
     """A route that called the store on the event loop would stall every
     other request until the call returned -- heartbeats included, and a
@@ -671,6 +698,7 @@ def test_a_held_store_call_holds_up_no_other_request(
         scopes=frozenset({READ_SCOPE}),
         created_at=now,
     )
+    store.set_password("bob", password_hash=hash_password(_BOB_PASSWORD), changed_at=now)
     store.record_session(
         _start_only_execution(_HELD_RUN),
         results=[_result(_HELD_NODE)],

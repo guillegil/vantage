@@ -24,8 +24,11 @@ from urllib.parse import quote
 
 import pytest
 from pytest_vantage.outbox import Outbox, outbox_path
+from vantage.core.config.database import SqliteTarget
 from vantage.core.domain.execution import Execution
 from vantage.ingestion.errors import RejectionError
+from vantage.service.cli import create_first_admin
+from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage_test_server import ServerGate, VantageTestServer
 
 pytestmark = pytest.mark.usefixtures("git_confined_to_basetemp")
@@ -690,3 +693,28 @@ def test_local_mode_files_the_run_in_its_project_as_a_vantage_app_serves_it(
         item["run_id"] for item in _get(local, f"/api/v1/projects/firmware/{history}")["items"]
     ] == [run_id]
     assert _get(local, f"/api/v1/projects/default/{history}")["items"] == []
+
+
+def test_vantage_starting_on_a_database_local_mode_made_serves_it_open(
+    pytester: pytest.Pytester, serve_local: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`vantage` gives a database it finds with no user its first admin,
+    after which reading needs a token, unless pytest-vantage's local store
+    made the database: started on the test machine, it serves the runs a
+    local-mode session stored there to anyone, as before users existed."""
+    database = pytester.path / "local" / "vantage.db"
+    pytester.makepyfile(test_it="def test_it():\n    assert True\n")
+
+    result = pytester.runpytest_subprocess(
+        "--vantage", "--vantage-mode=local", f"--vantage-local-database={database}"
+    )
+
+    result.assert_outcomes(passed=1)
+    store = SqliteExecutionStore(database)
+    try:
+        create_first_admin(store, SqliteTarget(database))
+        assert [user.name for user in store.list_users()] == []
+    finally:
+        store.close()
+    assert capsys.readouterr().err == ""
+    assert _run_ids(serve_local(database).address) == [_recorded_run(result)]

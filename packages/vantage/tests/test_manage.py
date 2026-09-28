@@ -6,26 +6,49 @@ The commands run in process through `cli.main`, as the `vantage` entry
 point runs them, and every result is read back through a store of its own,
 as a server on the same database would read it. One test runs the command
 where the web framework cannot be imported.
+
+A password is typed at a stand-in for `getpass.getpass`, with stdin a
+stand-in terminal, or piped in through a stand-in stdin. Every password is
+hashed at a tiny cost (`password_fixtures`), a command's and those a test
+stores itself alike.
 """
 
 from __future__ import annotations
 
+import getpass
+import io
 import os
 import subprocess
 import sys
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TextIO
 
 import pytest
-from vantage.core.domain.access import ADMIN_SCOPE, READ_SCOPE, RECORD_SCOPE, token_digest
+from vantage.core.domain.access import (
+    ADMIN_SCOPE,
+    DEFAULT_SCOPES,
+    LOGIN_TOKEN_LIFETIME,
+    READ_SCOPE,
+    RECORD_SCOPE,
+    new_token,
+    token_digest,
+)
+from vantage.core.domain.passwords import hash_password, verify_password
 from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service import cli
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
-# `postgres_url`, for the command against the real PostgreSQL adapter.
-pytest_plugins = ["postgres_fixtures"]
+# `postgres_url`, for the command against the real PostgreSQL adapter;
+# `cheap_passwords`, for every password hashed here.
+pytest_plugins = ["postgres_fixtures", "password_fixtures"]
+
+pytestmark = pytest.mark.usefixtures("cheap_passwords")
+
+
+_PASSWORD = "correct horse battery staple"
 
 
 @pytest.fixture(autouse=True)
@@ -69,7 +92,7 @@ def test_adding_the_first_user_creates_the_database_and_says_it_is_closed(
     assert err == (
         "vantage: added admin user alice\n"
         "vantage: this database has a user now, so every server on it requires a token: "
-        "vantage token create alice\n"
+        "vantage token create alice, or vantage user password alice to log in\n"
     )
     store = SqliteExecutionStore(database)
     try:
@@ -90,16 +113,24 @@ def test_adding_a_later_user_says_only_that(
     assert carol is not None and carol.admin is False
 
 
-@pytest.mark.parametrize("command", ["user", "project"])
+@pytest.mark.parametrize(
+    ("argv", "kind"),
+    [
+        (["user", "add"], "user"),
+        (["user", "password", "--password-stdin"], "user"),
+        (["project", "add"], "project"),
+    ],
+    ids=["user-add", "user-password", "project-add"],
+)
 def test_a_refused_name_creates_no_database(
-    capsys: pytest.CaptureFixture[str], database: Path, command: str
+    capsys: pytest.CaptureFixture[str], database: Path, argv: list[str], kind: str
 ) -> None:
     """The name is checked before the database is opened, so a refusal
     leaves nothing behind, not even an empty database."""
-    status, out, err = _run(capsys, command, "add", "Bad", "--database", str(database))
+    status, out, err = _run(capsys, *argv, "Bad", "--database", str(database))
 
     assert (status, out) == (1, "")
-    assert err.startswith(f"vantage: a {command} name is 1 to 64 characters")
+    assert err.startswith(f"vantage: a {kind} name is 1 to 64 characters")
     assert not database.parent.exists()
 
 
@@ -132,18 +163,21 @@ def test_a_name_that_cannot_be_added_is_one_line(
     assert [user.name for user in stored.list_users()] == ["alice", "bob"]
 
 
-def test_users_list_in_name_order(
+def test_users_list_in_name_order_saying_who_has_a_password(
     capsys: pytest.CaptureFixture[str], database: Path, stored: ExecutionStore
 ) -> None:
     stored.update_user("bob", disabled=True)
+    stored.set_password(
+        "alice", password_hash=hash_password(_PASSWORD), changed_at=datetime.now(timezone.utc)
+    )
 
     status, out, _err = _run(capsys, "user", "list", "--database", str(database))
 
     assert status == 0
     header, alice, bob = out.splitlines()
-    assert header.split() == ["NAME", "ADMIN", "STATE", "CREATED"]
-    assert alice.split()[:3] == ["alice", "yes", "enabled"]
-    assert bob.split()[:3] == ["bob", "no", "disabled"]
+    assert header.split() == ["NAME", "ADMIN", "STATE", "PASSWORD", "CREATED"]
+    assert alice.split()[:4] == ["alice", "yes", "enabled", "yes"]
+    assert bob.split()[:4] == ["bob", "no", "disabled", "no"]
 
 
 def test_listing_users_of_a_database_with_none_prints_nothing(
@@ -159,6 +193,7 @@ def test_listing_users_of_a_database_with_none_prints_nothing(
     [
         ["user", "list"],
         ["user", "update", "alice", "--disable"],
+        ["user", "password", "alice", "--password-stdin"],
         ["token", "create", "alice"],
         ["token", "list"],
         ["token", "revoke", "1"],
@@ -197,7 +232,9 @@ def test_updating_a_user_changes_what_it_is_told_and_shows_the_user(
     bob = stored.get_user("bob")
 
     assert status == 0
-    assert out.splitlines()[1].split()[:3] == ["bob", "yes", "disabled"]
+    header, row = out.splitlines()
+    assert header.split() == ["NAME", "ADMIN", "STATE", "PASSWORD", "CREATED"]
+    assert row.split()[:4] == ["bob", "yes", "disabled", "no"]
     assert bob is not None and (bob.admin, bob.disabled) == (True, True)
 
     _run(capsys, "user", "update", "bob", "--no-admin", "--enable", "--database", str(database))
@@ -258,7 +295,7 @@ def test_a_created_token_is_printed_alone_once_and_grants_its_scopes(
     assert err == f"vantage: created token {created.id} of bob with record; it is shown this once\n"
     assert (created.user, created.label) == ("bob", "ci nightly")
     assert created.scopes == frozenset({RECORD_SCOPE})
-    grant = stored.authenticate(token_digest(token))
+    grant = stored.authenticate(token_digest(token), now=datetime.now(timezone.utc))
     assert grant is not None and grant.scopes == {RECORD_SCOPE}
     assert token not in err
 
@@ -269,7 +306,7 @@ def test_a_token_holds_read_and_record_unless_told_otherwise(
     status, out, _err = _run(capsys, "token", "create", "alice", "--database", str(database))
 
     assert status == 0
-    grant = stored.authenticate(token_digest(out.strip()))
+    grant = stored.authenticate(token_digest(out.strip()), now=datetime.now(timezone.utc))
     assert grant is not None and grant.scopes == {READ_SCOPE, RECORD_SCOPE}
 
 
@@ -280,7 +317,7 @@ def test_an_admin_token_for_an_admin(
         capsys, "token", "create", "alice", "--scope", "admin", "--database", str(database)
     )
 
-    grant = stored.authenticate(token_digest(out.strip()))
+    grant = stored.authenticate(token_digest(out.strip()), now=datetime.now(timezone.utc))
     assert status == 0
     assert grant is not None and grant.allows(ADMIN_SCOPE)
 
@@ -337,12 +374,47 @@ def test_tokens_list_oldest_first_for_everyone_or_one_user(
     _status, alices, _err = _run(capsys, "token", "list", "alice", "--database", str(database))
 
     header, *rows = everyone.splitlines()
-    assert header.split() == ["ID", "USER", "SCOPES", "CREATED", "REVOKED", "LABEL"]
+    assert header.split() == ["ID", "USER", "SCOPES", "CREATED", "EXPIRES", "REVOKED", "LABEL"]
     assert [row.split()[1] for row in rows] == ["alice", "bob", "alice"]
     assert rows[0].split()[2] == "read,record"
     assert rows[0].split()[-1] == "laptop"
     assert len(rows[0].split()) == 6 and len(rows[1].split()) == 4
     assert [row.split()[0] for row in alices.splitlines()[1:]] == [str(first.id), str(third.id)]
+
+
+def _column(table: str, name: str) -> list[str]:
+    """The cells under the heading `name` of a table a command printed, one
+    per row, blank ones included."""
+    header, *rows = table.splitlines()
+    start = header.index(name)
+    stop = start + len(name)
+    while stop < len(header) and header[stop] == " ":
+        stop += 1
+    return [row[start : stop if stop < len(header) else None].strip() for row in rows]
+
+
+def test_a_login_token_is_listed_with_when_it_expires(
+    capsys: pytest.CaptureFixture[str], database: Path, stored: ExecutionStore
+) -> None:
+    """A made token never expires, and says nothing there."""
+    created_at = datetime(2026, 9, 28, 8, 30, tzinfo=timezone.utc)
+    _run(capsys, "token", "create", "alice", "--label", "laptop", "--database", str(database))
+    alices = hash_password(_PASSWORD)
+    stored.set_password("alice", password_hash=alices, changed_at=created_at)
+    stored.create_login_token(
+        "alice",
+        password_hash=alices,
+        digest=token_digest(new_token()),
+        created_at=created_at,
+        expires_at=created_at + LOGIN_TOKEN_LIFETIME,
+    )
+
+    status, out, _err = _run(capsys, "token", "list", "--database", str(database))
+
+    assert status == 0
+    assert _column(out, "EXPIRES") == ["", "2026-09-28T20:30:00Z"]
+    assert _column(out, "LABEL") == ["laptop", "login"]
+    assert _column(out, "SCOPES")[1] == "admin,read"
 
 
 def test_revoking_a_token_stops_it_authenticating(
@@ -360,7 +432,7 @@ def test_revoking_a_token_stops_it_authenticating(
         "",
         f"vantage: there is no token {created.id} to revoke, or it is revoked already\n",
     )
-    assert stored.authenticate(token_digest(out.strip())) is None
+    assert stored.authenticate(token_digest(out.strip()), now=datetime.now(timezone.utc)) is None
 
 
 @pytest.mark.parametrize("token_id", ["0", "-1", str(2**64)])
@@ -371,6 +443,371 @@ def test_revoking_an_id_no_token_can_have_is_one_line(
 
     assert status == 1
     assert err == f"vantage: there is no token {token_id} to revoke, or it is revoked already\n"
+
+
+# --- Passwords ------------------------------------------------------------------------
+
+_PASSWORD_RULE = "vantage: a password is 15 to 256 characters, with no control characters\n"
+_SET_FOR_BOB = "vantage: set the password of bob; their login tokens are revoked\n"
+_NOTHING_CHANGED = "vantage: nothing was changed\n"
+
+
+class _Terminal(io.StringIO):
+    """A stdin that is a terminal, for `getpass` to prompt on."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _at_the_terminal(monkeypatch: pytest.MonkeyPatch, *typed: str | BaseException) -> list[str]:
+    """Make stdin a terminal at whose prompts `typed` is entered in turn, or
+    raised -- `KeyboardInterrupt` for Ctrl-C, `EOFError` for the end of
+    input -- and return the prompts it showed."""
+    prompts: list[str] = []
+    entries = iter(typed)
+
+    def _getpass(prompt: str = "Password: ", stream: TextIO | None = None) -> str:
+        prompts.append(prompt)
+        entry = next(entries, None)
+        if entry is None:
+            raise AssertionError(f"prompted with {prompt!r} and nothing left to type")
+        if isinstance(entry, BaseException):
+            raise entry
+        return entry
+
+    monkeypatch.setattr(sys, "stdin", _Terminal())
+    monkeypatch.setattr(getpass, "getpass", _getpass)
+    return prompts
+
+
+def _piped(monkeypatch: pytest.MonkeyPatch, text: str) -> None:
+    """Make stdin a pipe holding `text`; `getpass` must not be reached."""
+
+    def _getpass(prompt: str = "Password: ", stream: TextIO | None = None) -> str:
+        raise AssertionError(f"prompted with {prompt!r} on a pipe")
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(text))
+    monkeypatch.setattr(getpass, "getpass", _getpass)
+
+
+def _set_password(
+    capsys: pytest.CaptureFixture[str], database: Path, *argv: str
+) -> tuple[int, str, str]:
+    """`vantage user password *argv` on `database`: its exit status, stdout
+    and stderr."""
+    return _run(capsys, "user", "password", *argv, "--database", str(database))
+
+
+@pytest.mark.parametrize("ending", ["", "\n", "\r\n"], ids=["none", "lf", "crlf"])
+def test_a_password_piped_in_is_set_less_one_trailing_newline(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """`echo` and a file end it with a newline, one written on Windows with
+    CR LF; neither is part of the password. It is printed nowhere."""
+    _piped(monkeypatch, f"{_PASSWORD}{ending}")
+
+    status, out, err = _set_password(capsys, database, "bob", "--password-stdin")
+
+    assert (status, out, err) == (0, "", _SET_FOR_BOB)
+    assert verify_password(_PASSWORD, stored.get_password_hash("bob"))
+    bob = stored.get_user("bob")
+    assert bob is not None and bob.has_password
+
+
+@pytest.mark.parametrize("ending", ["\n\n", "\r\n\n", "\r"], ids=["two-lf", "crlf-lf", "cr"])
+def test_only_one_trailing_newline_is_taken_off_and_the_rule_refuses_the_rest(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """Whatever else is left is a control character, which the rule refuses
+    rather than the command trimming it: a password is never other than
+    what was given."""
+    _piped(monkeypatch, f"{_PASSWORD}{ending}")
+
+    status, out, err = _set_password(capsys, database, "bob", "--password-stdin")
+
+    assert (status, out, err) == (1, "", _PASSWORD_RULE)
+    assert stored.get_password_hash("bob") is None
+
+
+def test_a_piped_password_that_is_not_text_is_one_line(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b"\xff" * 20), encoding="utf-8"))
+
+    status, out, err = _set_password(capsys, database, "bob", "--password-stdin")
+
+    assert (status, out) == (1, "")
+    assert err == "vantage: the password on stdin is not text in this locale's encoding\n"
+    assert stored.get_password_hash("bob") is None
+
+
+def test_a_password_is_asked_for_twice_on_the_terminal(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts = _at_the_terminal(monkeypatch, _PASSWORD, _PASSWORD)
+
+    status, out, err = _set_password(capsys, database, "bob")
+
+    assert (status, out, err) == (0, "", _SET_FOR_BOB)
+    assert prompts == ["New password for bob: ", "Again: "]
+    assert verify_password(_PASSWORD, stored.get_password_hash("bob"))
+
+
+def test_two_different_passwords_at_the_prompts_change_nothing(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _at_the_terminal(monkeypatch, _PASSWORD, f"{_PASSWORD}!")
+
+    status, out, err = _set_password(capsys, database, "bob")
+
+    assert (status, out) == (1, "")
+    assert err == "vantage: the passwords do not match; nothing was changed\n"
+    assert stored.get_password_hash("bob") is None
+
+
+@pytest.mark.parametrize("typed", [(), (_PASSWORD,)], ids=["first-prompt", "second-prompt"])
+def test_ctrl_c_at_a_prompt_changes_nothing_and_exits_as_a_shell_reports_it(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+    typed: tuple[str, ...],
+) -> None:
+    """On a line of its own, since the prompt's was never ended."""
+    _at_the_terminal(monkeypatch, *typed, KeyboardInterrupt())
+
+    status, out, err = _set_password(capsys, database, "bob")
+
+    assert (status, out, err) == (130, "", f"\n{_NOTHING_CHANGED}")
+    assert stored.get_password_hash("bob") is None
+
+
+def test_a_password_piped_into_no_stdin_at_all_is_one_line(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With file descriptor 0 closed there is no `sys.stdin` to read."""
+    _piped(monkeypatch, "")
+    monkeypatch.setattr(sys, "stdin", None)
+
+    status, out, err = _set_password(capsys, database, "bob", "--password-stdin")
+
+    assert (status, out, err) == (1, "", "vantage: there is no stdin to read the password from\n")
+    assert stored.get_password_hash("bob") is None
+
+
+def test_the_end_of_input_at_a_prompt_changes_nothing(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _at_the_terminal(monkeypatch, _PASSWORD, EOFError())
+
+    status, out, err = _set_password(capsys, database, "bob")
+
+    assert (status, out, err) == (1, "", f"\n{_NOTHING_CHANGED}")
+    assert stored.get_password_hash("bob") is None
+
+
+@pytest.mark.parametrize("stdin", [io.StringIO(_PASSWORD), None], ids=["pipe", "none"])
+def test_without_a_terminal_a_password_must_be_piped_in(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+    stdin: TextIO | None,
+) -> None:
+    """With stdin a pipe, `getpass` would read the terminal behind it, or,
+    with none, echo the password as it is typed."""
+    _piped(monkeypatch, "")
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    status, out, err = _set_password(capsys, database, "bob")
+
+    assert (status, out) == (1, "")
+    assert err == (
+        "vantage: there is no terminal to ask for the password on: "
+        "pipe it in with --password-stdin\n"
+    )
+    assert stored.get_password_hash("bob") is None
+
+
+@pytest.mark.parametrize(
+    "password",
+    ["fourteen chars", "x" * 257, f"{_PASSWORD}\t", f"{_PASSWORD}\x7f", f"{_PASSWORD}\x85"],
+    ids=["too-short", "too-long", "tab", "delete", "c1-control"],
+)
+def test_a_password_the_rule_refuses_is_one_line_saying_the_rule(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+    password: str,
+) -> None:
+    """The line states the rule, never the password."""
+    _at_the_terminal(monkeypatch, password, password)
+
+    status, out, err = _set_password(capsys, database, "bob")
+
+    assert (status, out, err) == (1, "", _PASSWORD_RULE)
+    assert stored.get_password_hash("bob") is None
+
+
+def test_the_password_of_a_user_nobody_has_is_never_asked_for(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts = _at_the_terminal(monkeypatch)
+
+    status, out, err = _set_password(capsys, database, "carol")
+
+    assert (status, out, err) == (1, "", "vantage: there is no user named carol\n")
+    assert prompts == []
+
+
+def test_a_name_nobody_can_have_is_refused_by_the_rule_before_any_prompt(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts = _at_the_terminal(monkeypatch)
+
+    status, out, err = _set_password(capsys, database, "Alice")
+
+    assert (status, out) == (1, "")
+    assert err.startswith("vantage: a user name is 1 to 64 characters")
+    assert prompts == []
+
+
+def test_setting_a_password_revokes_that_users_login_tokens_and_no_other_token(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A login token was opened with the password being replaced; a made
+    token, for CI say, has nothing to do with it."""
+    now = datetime.now(timezone.utc)
+    tokens: dict[str, str] = {}
+    for name in ("alice", "bob"):
+        before = hash_password(f"{name}'s password before this one")
+        stored.set_password(name, password_hash=before, changed_at=now)
+        tokens[f"{name} login"] = new_token()
+        stored.create_login_token(
+            name,
+            password_hash=before,
+            digest=token_digest(tokens[f"{name} login"]),
+            created_at=now,
+            expires_at=now + LOGIN_TOKEN_LIFETIME,
+        )
+    tokens["bob made"] = new_token()
+    stored.create_token(
+        "bob",
+        digest=token_digest(tokens["bob made"]),
+        label="ci",
+        scopes=DEFAULT_SCOPES,
+        created_at=now,
+    )
+    _piped(monkeypatch, _PASSWORD)
+
+    status, _out, err = _set_password(capsys, database, "bob", "--password-stdin")
+
+    assert (status, err) == (0, _SET_FOR_BOB)
+    authenticating = {
+        held
+        for held, secret in tokens.items()
+        if stored.authenticate(token_digest(secret), now=now) is not None
+    }
+    assert authenticating == {"alice login", "bob made"}
+
+
+def test_a_disabled_users_password_is_set_saying_they_cannot_log_in_yet(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored.update_user("bob", disabled=True)
+    _piped(monkeypatch, _PASSWORD)
+
+    status, out, err = _set_password(capsys, database, "bob", "--password-stdin")
+
+    assert (status, out) == (0, "")
+    assert err == (
+        f"{_SET_FOR_BOB}"
+        "vantage: bob is disabled, so they cannot log in until enabled: "
+        "vantage user update bob --enable\n"
+    )
+    stored.update_user("bob", disabled=False)
+    assert verify_password(_PASSWORD, stored.get_password_hash("bob"))
+
+
+@pytest.mark.parametrize(
+    "option",
+    [["--password", _PASSWORD], [f"--password={_PASSWORD}"], ["--password"], ["--password-std"]],
+    ids=["apart", "joined", "alone", "abbreviated"],
+)
+def test_a_password_is_never_taken_from_the_command_line(
+    capsys: pytest.CaptureFixture[str],
+    database: Path,
+    stored: ExecutionStore,
+    monkeypatch: pytest.MonkeyPatch,
+    option: list[str],
+) -> None:
+    """The command line shows in `ps` and in shell history: there is no
+    option to give a password with, so argparse refuses one -- nor is one
+    that looks like it taken for an abbreviated `--password-stdin`, which
+    would read a password where none was meant to be given."""
+    _piped(monkeypatch, f"{_PASSWORD}\n")
+
+    status, out, _err = _set_password(capsys, database, "bob", *option)
+
+    assert (status, out) == (2, "")
+    assert stored.get_password_hash("bob") is None
+
+
+def test_a_postgresql_users_password_is_set_the_same_way(
+    capsys: pytest.CaptureFixture[str], postgres_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _run(capsys, "user", "add", "alice", "--database", postgres_url)
+    _piped(monkeypatch, f"{_PASSWORD}\n")
+
+    status, out, err = _run(
+        capsys, "user", "password", "alice", "--password-stdin", "--database", postgres_url
+    )
+
+    assert (status, out) == (0, "")
+    assert err == "vantage: set the password of alice; their login tokens are revoked\n"
+    from vantage.storage.postgres import PostgresExecutionStore
+
+    store = PostgresExecutionStore(postgres_url)
+    try:
+        assert verify_password(_PASSWORD, store.get_password_hash("alice"))
+    finally:
+        store.close()
 
 
 # --- Projects -------------------------------------------------------------------------
@@ -462,7 +899,7 @@ def test_a_postgresql_database_is_managed_the_same_way(
 
     store = PostgresExecutionStore(postgres_url)
     try:
-        grant = store.authenticate(token_digest(out.strip()))
+        grant = store.authenticate(token_digest(out.strip()), now=datetime.now(timezone.utc))
     finally:
         store.close()
     assert grant is not None and grant.user == "alice"
@@ -496,9 +933,10 @@ def test_managing_users_needs_no_server_extra(tmp_path: Path) -> None:
     database = tmp_path / "vantage.db"
     environment = {name: value for name, value in os.environ.items() if name != "VANTAGE_DATABASE"}
 
-    def vantage(*argv: str) -> subprocess.CompletedProcess[str]:
+    def vantage(*argv: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
         return subprocess.run(  # noqa: S603 -- the interpreter running this test
             [sys.executable, "-c", program, *argv, "--database", str(database)],
+            input=stdin,
             capture_output=True,
             text=True,
             timeout=60,
@@ -508,10 +946,12 @@ def test_managing_users_needs_no_server_extra(tmp_path: Path) -> None:
 
     added = vantage("user", "add", "alice")
     created = vantage("token", "create", "alice")
+    password = vantage("user", "password", "alice", "--password-stdin", stdin=f"{_PASSWORD}\n")
     project = vantage("project", "add", "firmware")
     listed = vantage("project", "list")
 
     assert (added.returncode, created.returncode) == (0, 0), added.stderr + created.stderr
     assert created.stdout.startswith("vantage_")
+    assert password.returncode == 0, password.stderr
     assert (project.returncode, listed.returncode) == (0, 0), project.stderr + listed.stderr
     assert "firmware" in listed.stdout

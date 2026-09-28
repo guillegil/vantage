@@ -358,12 +358,13 @@ class TokenCreateRequest(BaseModel):
 
 
 class UserResponse(BaseModel):
-    """One user."""
+    """One user. `has_password` says whether they can log in."""
 
     name: str
     admin: bool
     disabled: bool
     created_at: datetime
+    has_password: bool
 
 
 class UserListResponse(BaseModel):
@@ -374,7 +375,7 @@ class UserListResponse(BaseModel):
 
 class TokenResponse(BaseModel):
     """One token, without the token itself, which is never stored.
-    `scopes` is sorted."""
+    `scopes` is sorted; `expires_at` is set for a login token alone."""
 
     id: int
     user: str
@@ -382,6 +383,7 @@ class TokenResponse(BaseModel):
     scopes: list[str]
     created_at: datetime
     revoked_at: datetime | None
+    expires_at: datetime | None
 
 
 class TokenListResponse(BaseModel):
@@ -392,8 +394,9 @@ class TokenListResponse(BaseModel):
 
 
 class CreatedTokenResponse(BaseModel):
-    """The response body for `POST /api/v1/tokens`: the token, shown this
-    once and kept out of the `repr`, and what `TokenResponse` says of it."""
+    """The response body for `POST /api/v1/tokens` and `POST /api/v1/login`:
+    the token, shown this once and kept out of the `repr`, and what
+    `TokenResponse` says of it."""
 
     token: str = Field(repr=False)
     id: int
@@ -402,6 +405,40 @@ class CreatedTokenResponse(BaseModel):
     scopes: list[str]
     created_at: datetime
     revoked_at: datetime | None
+    expires_at: datetime | None
+
+
+# The password request bodies. `hide_input_in_errors` keeps a password out
+# of a validation error's text, which otherwise repeats the whole input of
+# a body missing a field, and `repr=False` keeps it out of the model's own.
+
+
+class LoginRequest(BaseModel):
+    """The request body for `POST /api/v1/login`."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    name: str
+    password: str = Field(repr=False)
+
+
+class PasswordChangeRequest(BaseModel):
+    """The request body for `POST /api/v1/password`: whose password, the
+    current one, and the new one."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    name: str
+    password: str = Field(repr=False)
+    new_password: str = Field(repr=False)
+
+
+class PasswordSetRequest(BaseModel):
+    """The request body for `PUT /api/v1/users/{name}/password`."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    password: str = Field(repr=False)
 
 
 # --- Projects ---------------------------------------------------------------

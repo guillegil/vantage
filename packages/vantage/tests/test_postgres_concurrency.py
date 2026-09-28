@@ -8,7 +8,9 @@ one creates the schema, and every one of them works. Projects, too: one
 name created at once through several stores is created once, a run keeps
 the project its first report gave it, and each project keeps its own
 catalogue rows and its own section bound, however its writers interleave
-with another project's.
+with another project's. And the first admin and logins: servers starting
+at once on one new database create one admin, and a login overlapping a
+password change never leaves a live token made with the old password.
 
 Every thread is a daemon and is joined with a timeout, as in
 `test_concurrency.py`: a deadlock must fail the test, not hang the suite.
@@ -17,13 +19,16 @@ Every thread is a daemon and is joined with a timeout, as in
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from functools import partial
 
 import psycopg
 import pytest
 from psycopg import sql
+from vantage.core.domain.access import LOGIN_TOKEN_LIFETIME, Token, User, token_digest
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projects import DEFAULT_PROJECT
@@ -40,7 +45,14 @@ from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
 from vantage.storage.postgres import PostgresExecutionStore
 from vantage.storage.postgres import connection as postgres_connection
 from vantage.storage.postgres import store as store_module
-from vantage_port_contract import StoredMetadata, _execution, _result, _start_only_execution
+from vantage_port_contract import (
+    _HASH,
+    _OTHER_HASH,
+    StoredMetadata,
+    _execution,
+    _result,
+    _start_only_execution,
+)
 
 pytest_plugins = ["postgres_fixtures"]
 pytestmark = pytest.mark.postgres
@@ -72,6 +84,22 @@ def _run_concurrently(targets: list[Callable[[], object]]) -> list[BaseException
         thread.join(timeout=_JOIN_TIMEOUT_SECONDS)
     assert not any(thread.is_alive() for thread in threads), "a thread never finished"
     return errors
+
+
+def _await_lock_waiters(url: str, count: int) -> None:
+    """Return once `count` sessions on the database `url` names are waiting
+    for a lock. Fails if they never are, within the timeout."""
+    deadline = time.monotonic() + _JOIN_TIMEOUT_SECONDS
+    with psycopg.connect(url, autocommit=True) as conn:
+        while True:
+            row = conn.execute(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            ).fetchone()
+            if row is not None and row[0] >= count:
+                return
+            assert time.monotonic() < deadline, f"{count} sessions never waited for a lock"
+            time.sleep(0.01)
 
 
 def _default_isolation(url: str, isolation: str | None) -> None:
@@ -548,3 +576,121 @@ def test_section_posts_racing_for_the_last_slot_across_stores_fill_each_project_
         assert (
             len(stores[1].list_settings(TEST_SECTIONS_NAMESPACE, project=project)) == MAX_SECTIONS
         )
+
+
+@_DEFAULT_ISOLATIONS
+def test_servers_starting_at_once_on_one_new_database_create_one_admin(
+    stores: list[PostgresExecutionStore], postgres_url: str, default_isolation: str | None
+) -> None:
+    """Every server creates the same `admin`, so of several that find the
+    database without a user, one inserts it and every other one, waiting on
+    that row, inserts nothing -- rather than fail on it. A transaction
+    holding the name without committing keeps every racer past its check
+    for a user and waiting at the insert, so they all overlap; it then rolls
+    back, as a start that failed would."""
+    racers = 6
+    created: list[User | None] = []
+
+    def _start(store: PostgresExecutionStore) -> None:
+        created.append(store.create_first_admin("admin", password_hash=_HASH, created_at=_BASE))
+
+    with psycopg.connect(postgres_url) as holder:
+        holder.execute(
+            "INSERT INTO vantage.account (name, admin, disabled, created_at)"
+            " VALUES ('admin', true, false, now())"
+        )
+
+        def _fail_the_holder() -> None:
+            _await_lock_waiters(postgres_url, racers)
+            holder.rollback()
+
+        errors = _run_concurrently(
+            [partial(_start, stores[seat % 3]) for seat in range(racers)] + [_fail_the_holder]
+        )
+
+    assert errors == []
+    assert [user.name for user in created if user is not None] == ["admin"]
+    assert created.count(None) == racers - 1
+    assert [user.name for user in stores[0].list_users()] == ["admin"]
+    assert stores[1].get_password_hash("admin") == _HASH
+
+
+@_DEFAULT_ISOLATIONS
+@pytest.mark.parametrize("checked", [False, True], ids=["set", "replaced"])
+def test_logins_overlapping_a_password_change_leave_no_live_token_of_the_old_password(
+    stores: list[PostgresExecutionStore],
+    monkeypatch: pytest.MonkeyPatch,
+    default_isolation: str | None,
+    checked: bool,
+) -> None:
+    """Logins checked against the old password have inserted their tokens,
+    and not yet committed, when another server sets a new one. Once both
+    are done, every token those logins returned is revoked: the change waits
+    for the logins it overlaps and then revokes their tokens, rather than
+    revoke only what it can see and leave the rest live -- also where the
+    database defaults to REPEATABLE READ, under which the revocation would
+    read the snapshot the change took before it waited. A login with the
+    old password after the change is refused."""
+    stores[0].create_user("alice", admin=False, created_at=_BASE)
+    stores[0].set_password("alice", password_hash=_HASH, changed_at=_BASE)
+    logins = 4
+    inserted = threading.Semaphore(0)
+    holding = threading.Event()
+    holding.set()
+    to_token = store_module._row_to_token
+
+    def _held_after_the_insert(row: tuple[object, ...]) -> Token:
+        # Runs inside the login's transaction, between its insert and its
+        # commit; holding it there stands in for a server slowed down
+        # between the two.
+        if holding.is_set():
+            inserted.release()
+            time.sleep(0.3)
+        return to_token(row)
+
+    monkeypatch.setattr(store_module, "_row_to_token", _held_after_the_insert)
+    tokens: list[Token | None] = []
+    changed_at = _BASE + timedelta(hours=1)
+
+    def _login(store: PostgresExecutionStore, seat: int) -> None:
+        tokens.append(
+            store.create_login_token(
+                "alice",
+                password_hash=_HASH,
+                digest=token_digest(f"login-{seat}"),
+                created_at=_BASE,
+                expires_at=_BASE + LOGIN_TOKEN_LIFETIME,
+            )
+        )
+
+    def _change() -> None:
+        for _ in range(logins):
+            assert inserted.acquire(timeout=_JOIN_TIMEOUT_SECONDS), "a login never inserted"
+        changed = stores[2].set_password(
+            "alice",
+            password_hash=_OTHER_HASH,
+            changed_at=changed_at,
+            replacing=_HASH if checked else None,
+        )
+        assert changed is True
+
+    errors = _run_concurrently(
+        [partial(_login, stores[seat % 2], seat) for seat in range(logins)] + [_change]
+    )
+    holding.clear()
+
+    assert errors == []
+    returned = [token for token in tokens if token is not None]
+    assert len(returned) == logins
+    for token in returned:
+        assert stores[0].get_token(token.id) == replace(token, revoked_at=changed_at)
+    for seat in range(logins):
+        assert stores[1].authenticate(token_digest(f"login-{seat}"), now=_BASE) is None
+    late = stores[0].create_login_token(
+        "alice",
+        password_hash=_HASH,
+        digest=token_digest("late"),
+        created_at=changed_at,
+        expires_at=changed_at + LOGIN_TOKEN_LIFETIME,
+    )
+    assert late is None

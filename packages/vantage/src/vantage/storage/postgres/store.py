@@ -52,6 +52,7 @@ from psycopg import errors
 
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
+    LOGIN_TOKEN_LABEL,
     READ_SCOPE,
     RECORD_SCOPE,
     Grant,
@@ -501,7 +502,38 @@ _INSERT_USER = """
     ON CONFLICT (name) DO NOTHING
 """
 
-_USER_COLUMNS = "name, admin, disabled, created_at"
+_USER_COLUMNS = "name, admin, disabled, created_at, password_hash IS NOT NULL"
+
+# One statement, so of two servers starting on one new database, one
+# inserts: the other waits on the first's row and then finds a user.
+_INSERT_FIRST_ADMIN = f"""
+    INSERT INTO vantage.account (name, admin, disabled, created_at, password_hash)
+    SELECT %s, true, false, %s, %s
+    WHERE NOT EXISTS (SELECT 1 FROM vantage.account)
+      AND NOT EXISTS (SELECT 1 FROM vantage.meta WHERE key = 'origin' AND value = 'local')
+    ON CONFLICT (name) DO NOTHING
+    RETURNING {_USER_COLUMNS}
+"""  # noqa: S608
+
+_SELECT_PASSWORD_HASH = """
+    SELECT password_hash FROM vantage.account WHERE name = %s AND NOT disabled
+"""  # noqa: S105
+
+_SET_PASSWORD = "UPDATE vantage.account SET password_hash = %s WHERE name = %s RETURNING name"  # noqa: S105
+
+# The compare-and-set a password change checked against the current
+# password makes: it loses to any change made while it was checked.
+_REPLACE_PASSWORD = """
+    UPDATE vantage.account SET password_hash = %s
+    WHERE name = %s AND password_hash = %s AND NOT disabled
+    RETURNING name
+"""  # noqa: S105
+
+# Login tokens are the only ones with an expiry.
+_REVOKE_LOGIN_TOKENS = """
+    UPDATE vantage.access_token SET revoked_at = %s
+    WHERE account = %s AND expires_at IS NOT NULL AND revoked_at IS NULL
+"""  # noqa: S105
 
 _SELECT_USER = f"SELECT {_USER_COLUMNS} FROM vantage.account WHERE name = %s"  # noqa: S608
 
@@ -515,7 +547,9 @@ _UPDATE_USER = f"""
     RETURNING {_USER_COLUMNS}
 """  # noqa: S608
 
-_TOKEN_COLUMNS = "id, account, label, can_read, can_record, can_admin, created_at, revoked_at"  # noqa: S105
+_TOKEN_COLUMNS = (
+    "id, account, label, can_read, can_record, can_admin, created_at, revoked_at, expires_at"  # noqa: S105
+)
 
 # Inserts nothing, and returns no row, when there is no such user.
 _INSERT_TOKEN = f"""
@@ -525,6 +559,28 @@ _INSERT_TOKEN = f"""
     SELECT name, %s, %s, %s, %s, %s, %s FROM vantage.account WHERE name = %s
     RETURNING {_TOKEN_COLUMNS}
 """  # noqa: S608
+
+# Inserts nothing unless the user is enabled and still has the hash the
+# password was checked against. `FOR SHARE` conflicts with the row lock a
+# password change or a disable takes, so a login either commits first --
+# and the change then revokes its token -- or waits for the change and,
+# reading the row again, inserts nothing: under READ COMMITTED a plain
+# read would have gone on with the old hash.
+_INSERT_LOGIN_TOKEN = f"""
+    INSERT INTO vantage.access_token (
+        account, digest, label, can_read, can_record, can_admin, created_at, expires_at
+    )
+    SELECT a.name, %s, %s, true, false, a.admin, %s, %s
+      FROM vantage.account a
+     WHERE a.name = %s AND a.password_hash = %s AND NOT a.disabled
+       FOR SHARE OF a
+    RETURNING {_TOKEN_COLUMNS}
+"""  # noqa: S608
+
+# Never the token just made, whatever its expiry.
+_DELETE_EXPIRED_LOGIN_TOKENS = """
+    DELETE FROM vantage.access_token WHERE account = %s AND expires_at <= %s AND id <> %s
+"""  # noqa: S105
 
 _SELECT_TOKEN = f"SELECT {_TOKEN_COLUMNS} FROM vantage.access_token WHERE id = %s"  # noqa: S608
 
@@ -545,6 +601,7 @@ _AUTHENTICATE = """
     FROM vantage.access_token t
     JOIN vantage.account a ON a.name = t.account
     WHERE t.digest = %s AND t.revoked_at IS NULL AND NOT a.disabled
+      AND (t.expires_at IS NULL OR t.expires_at > %s)
 """
 
 # The ids a `bigint` identity column can hold; a lookup by any other
@@ -558,17 +615,28 @@ def _decode_scopes(can_read: object, can_record: object, can_admin: object) -> f
 
 
 def _row_to_user(row: Row) -> User:
-    name, admin, disabled, created_at = row
+    name, admin, disabled, created_at, has_password = row
     return User(
         name=cast(str, name),
         admin=bool(admin),
         disabled=bool(disabled),
         created_at=_utc(created_at),
+        has_password=bool(has_password),
     )
 
 
 def _row_to_token(row: Row) -> Token:
-    token_id, account, label, can_read, can_record, can_admin, created_at, revoked_at = row
+    (
+        token_id,
+        account,
+        label,
+        can_read,
+        can_record,
+        can_admin,
+        created_at,
+        revoked_at,
+        expires_at,
+    ) = row
     return Token(
         id=cast(int, token_id),
         user=cast(str, account),
@@ -576,6 +644,7 @@ def _row_to_token(row: Row) -> Token:
         scopes=_decode_scopes(can_read, can_record, can_admin),
         created_at=_utc(created_at),
         revoked_at=_opt_utc(revoked_at),
+        expires_at=_opt_utc(expires_at),
     )
 
 
@@ -1288,6 +1357,12 @@ class PostgresExecutionStore:
         row = self._fetchone(_PROBE_ANY_USER)
         return row is not None and bool(row[0])
 
+    def create_first_admin(
+        self, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        row = self._fetchone(_INSERT_FIRST_ADMIN, _params(name, created_at, password_hash))
+        return None if row is None else _row_to_user(row)
+
     def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
         with live_connection(self._pool) as conn:
             inserted = conn.execute(_INSERT_USER, _params(name, admin, created_at)).rowcount
@@ -1311,6 +1386,68 @@ class PostgresExecutionStore:
             return None
         row = self._fetchone(_UPDATE_USER, (admin, disabled, name))
         return None if row is None else _row_to_user(row)
+
+    def get_password_hash(self, name: str) -> str | None:
+        if _unmatchable(name):
+            return None
+        row = self._fetchone(_SELECT_PASSWORD_HASH, (name,))
+        return None if row is None else cast("str | None", row[0])
+
+    def set_password(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        changed_at: datetime,
+        replacing: str | None = None,
+    ) -> bool:
+        if _unmatchable(name):
+            return False
+
+        def work(conn: PgConnection) -> bool:
+            # The UPDATE locks the account row first, as a login's
+            # `FOR SHARE` does, so the two never deadlock; the revocation,
+            # a statement of its own, sees any login that committed before
+            # the lock was granted.
+            if replacing is None:
+                changed = conn.execute(_SET_PASSWORD, (password_hash, name)).fetchone()
+            else:
+                changed = conn.execute(
+                    _REPLACE_PASSWORD, (password_hash, name, replacing)
+                ).fetchone()
+            if changed is None:
+                return False
+            conn.execute(_REVOKE_LOGIN_TOKENS, (changed_at, name))
+            return True
+
+        return self._transaction(work)
+
+    def create_login_token(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        digest: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> Token | None:
+        if _unmatchable(name):
+            return None
+
+        def work(conn: PgConnection) -> Token | None:
+            row = conn.execute(
+                _INSERT_LOGIN_TOKEN,
+                (digest, LOGIN_TOKEN_LABEL, created_at, expires_at, name, password_hash),
+            ).fetchone()
+            if row is None:
+                return None
+            token = _row_to_token(row)
+            conn.execute(_DELETE_EXPIRED_LOGIN_TOKENS, (name, created_at, token.id))
+            return token
+
+        # Two logins of one user deleting the same expired rows can
+        # deadlock; `_transaction` runs the loser again.
+        return self._transaction(work)
 
     def create_token(
         self,
@@ -1361,10 +1498,10 @@ class PostgresExecutionStore:
             cursor = conn.execute(_REVOKE_TOKEN, (revoked_at, token_id, user))
             return cursor.rowcount == 1
 
-    def authenticate(self, digest: str) -> Grant | None:
+    def authenticate(self, digest: str, *, now: datetime) -> Grant | None:
         if _unmatchable(digest):
             return None
-        row = self._fetchone(_AUTHENTICATE, (digest,))
+        row = self._fetchone(_AUTHENTICATE, (digest, now))
         if row is None:
             return None
         name, admin, can_read, can_record, can_admin = row

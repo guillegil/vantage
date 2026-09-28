@@ -1,7 +1,7 @@
 """`open_database` applies `schema.sql` once, inside one transaction, never
-re-issues DDL against an existing database, and refuses -- leaving it as it
-was -- a database stamped with a different schema version or holding some
-other schema.
+re-issues DDL against an existing database, records whether pytest-vantage's
+local store made it, and refuses -- leaving it as it was -- a database
+stamped with a different schema version or holding some other schema.
 """
 
 from __future__ import annotations
@@ -9,12 +9,15 @@ from __future__ import annotations
 import contextlib
 import re
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from vantage.core.domain.projects import DEFAULT_PROJECT
+from vantage.storage import connection
 from vantage.storage.connection import open_database
+from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -76,12 +79,12 @@ def test_a_fresh_database_is_stamped_with_the_current_schema_version(tmp_path: P
     assert row == (str(_SCHEMA_VERSION),)
 
 
-def test_a_new_database_is_stamped_8_and_holds_the_default_project_alone(
+def test_a_new_database_is_stamped_9_and_holds_the_default_project_alone(
     tmp_path: Path,
 ) -> None:
-    """Version 8 is the schema with projects, and a report naming no project
-    is recorded in `default`, so a new database has that project before
-    anything is written to it -- and no other."""
+    """Version 9 is the schema with passwords, login tokens and the origin.
+    A report naming no project is recorded in `default`, so a new database
+    has that project before anything is written to it -- and no other."""
     conn = open_database(tmp_path / "store" / "vantage.db")
     try:
         stamp = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
@@ -89,24 +92,110 @@ def test_a_new_database_is_stamped_8_and_holds_the_default_project_alone(
     finally:
         conn.close()
 
-    assert stamp == ("8",)
+    assert stamp == ("9",)
     assert [name for name, _created_at in projects] == [DEFAULT_PROJECT]
     ((_name, created_at),) = projects
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00", created_at)
 
 
+def _meta(db_path: Path) -> dict[str, str]:
+    """Every `meta` row, read with a plain connection of its own."""
+    with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
+        return dict(conn.execute("SELECT key, value FROM meta").fetchall())
+
+
+def _created_by_open_database(db_path: Path, **flag: bool) -> None:
+    open_database(db_path, **flag).close()
+
+
+def _created_by_the_store(db_path: Path, **flag: bool) -> None:
+    SqliteExecutionStore(db_path, **flag).close()
+
+
+@pytest.mark.parametrize(
+    "create", [_created_by_open_database, _created_by_the_store], ids=["open_database", "store"]
+)
+@pytest.mark.parametrize(
+    ("flag", "origin"),
+    [({}, "server"), ({"local": False}, "server"), ({"local": True}, "local")],
+    ids=["no-flag", "server", "local"],
+)
+def test_a_new_database_records_whether_the_local_store_made_it(
+    tmp_path: Path, create: Callable[..., None], flag: dict[str, bool], origin: str
+) -> None:
+    """A server gives a database it finds with no user its first admin
+    unless the local store made it, and it reads that from `meta.origin`:
+    `server` is written, never left to a missing row."""
+    db_path = tmp_path / "store" / "vantage.db"
+
+    create(db_path, **flag)
+
+    assert _meta(db_path)["origin"] == origin
+
+
+@pytest.mark.parametrize("made_locally", [False, True], ids=["server", "local"])
+def test_opening_a_database_with_the_other_flag_keeps_its_origin(
+    tmp_path: Path, made_locally: bool
+) -> None:
+    """A local session storing into the database `vantage` serves, or
+    `vantage` serving the one a local session made: the origin is the
+    creator's, however the file is opened afterwards."""
+    db_path = tmp_path / "store" / "vantage.db"
+    open_database(db_path, local=made_locally).close()
+    before = _meta(db_path)
+
+    open_database(db_path, local=not made_locally).close()
+    SqliteExecutionStore(db_path, local=not made_locally).close()
+
+    assert _meta(db_path) == before
+    assert before["origin"] == ("local" if made_locally else "server")
+
+
+@pytest.mark.parametrize("first_local", [False, True], ids=["server-first", "local-first"])
+def test_of_two_creators_racing_on_a_new_file_the_first_ones_origin_stays(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first_local: bool
+) -> None:
+    """Two processes opening one new file can both find it empty and both
+    apply the schema: the second waits for the first's write lock, then
+    applies it again over the first's. The second must leave the origin as
+    the first wrote it, not fail on it or overwrite it."""
+    db_path = tmp_path / "store" / "vantage.db"
+    look = connection._schema_objects
+    second_found: list[set[str]] = []
+
+    def _found_empty_then_overtaken(conn: sqlite3.Connection) -> set[str]:
+        found = look(conn)
+        if not second_found:
+            second_found.append(found)
+            # Having found the file empty, this opener loses the race: the
+            # other one creates the database before it writes anything.
+            open_database(db_path, local=first_local).close()
+        return found
+
+    monkeypatch.setattr(connection, "_schema_objects", _found_empty_then_overtaken)
+
+    open_database(db_path, local=not first_local).close()
+
+    assert second_found == [set()]
+    stored = _meta(db_path)
+    assert stored["origin"] == ("local" if first_local else "server")
+    assert stored["schema_version"] == str(_SCHEMA_VERSION)
+
+
 @pytest.mark.parametrize(
     "statement",
-    ["_STAMP_SCHEMA_VERSION", "_CREATE_DEFAULT_PROJECT"],
-    ids=["stamp", "default-project"],
+    ["_STAMP_SCHEMA_VERSION", "_STAMP_ORIGIN", "_CREATE_DEFAULT_PROJECT"],
+    ids=["stamp", "origin", "default-project"],
 )
 def test_the_tables_and_the_version_stamp_commit_together(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, statement: str
 ) -> None:
-    """A stamp or a `default` project that fails after every table was
-    created leaves no table behind: a database with a schema but no stamp
-    would be refused as 'absent' on every later open, and one without its
-    `default` project would refuse every report that names none."""
+    """A stamp, an origin or a `default` project that fails after every
+    table was created leaves no table behind: a database with a schema but
+    no stamp would be refused as 'absent' on every later open, one without
+    its origin would be taken for a server's and given an admin although
+    the local store made it, and one without its `default` project would
+    refuse every report that names none."""
     db_path = tmp_path / "store" / "vantage.db"
     monkeypatch.setattr(
         f"vantage.storage.connection.{statement}",
@@ -324,9 +413,42 @@ def test_a_version_7_database_is_refused_and_left_as_it_was(tmp_path: Path) -> N
     with pytest.raises(SchemaVersionError) as refused:
         open_database(db_path)
 
-    assert "schema_version is 7, but this build requires schema_version 8;" in str(refused.value)
+    assert "schema_version is 7, but this build requires schema_version 9;" in str(refused.value)
     assert db_path.read_bytes() == before
     assert sorted(path.name for path in db_path.parent.iterdir()) == ["vantage.db"]
+
+
+def test_a_version_8_database_is_refused_and_left_as_it_was(tmp_path: Path) -> None:
+    """A database from the build before passwords has no origin, so nothing
+    says whether the local store made it: taken for a server's, a test
+    machine's own file would get an admin at `vantage`'s next start. Its
+    users and tokens also lack the password and expiry columns. It is
+    refused, not given an origin or the columns: that would be a migration,
+    and there are none."""
+    db_path = tmp_path / "store" / "vantage.db"
+    db_path.parent.mkdir(parents=True)
+    with contextlib.closing(sqlite3.connect(str(db_path))) as old, old:
+        old.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        old.execute("INSERT INTO meta (key, value) VALUES ('schema_version', '8')")
+        old.execute("CREATE TABLE project (name TEXT PRIMARY KEY, created_at TEXT NOT NULL)")
+        old.execute("INSERT INTO project VALUES ('default', '2026-09-01T10:00:00.000000+00:00')")
+        old.execute(
+            "CREATE TABLE account (name TEXT PRIMARY KEY, admin INTEGER NOT NULL,"
+            " disabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"
+        )
+        old.execute(
+            "CREATE TABLE access_token (id INTEGER PRIMARY KEY, account TEXT NOT NULL,"
+            " digest TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT NULL)"
+        )
+    before = db_path.read_bytes()
+
+    with pytest.raises(SchemaVersionError) as refused:
+        open_database(db_path)
+
+    assert "schema_version is 8, but this build requires schema_version 9;" in str(refused.value)
+    assert db_path.read_bytes() == before
+    assert sorted(path.name for path in db_path.parent.iterdir()) == ["vantage.db"]
+    assert "origin" not in _meta(db_path)
 
 
 def test_a_schema_that_fails_partway_is_rolled_back_and_its_lock_released_at_once(

@@ -1,5 +1,6 @@
 """`vantage` startup: every refusal is one `vantage: ...` line and exit
-status 1, a bad setting is refused before anything is created, and the
+status 1, a bad setting is refused before anything is created, a database
+of the server's own gets its first admin before anything is served, and the
 store is closed once the server stops. Also the pieces `main` composes: the
 writable-directory check, the wide-bind warning, and the grace period
 `create_app` builds.
@@ -12,6 +13,10 @@ Both are patched by dotted path, `uvicorn.Server.run` on uvicorn itself,
 since `cli.py` imports uvicorn only once it serves. Some tests run the real
 command in a subprocess: to stop it the way a service manager does, and to
 run it where the `server` extra's modules cannot be imported.
+
+A start in process hashes the first admin's password at a tiny cost
+(`password_fixtures`); a subprocess serves a database given a user
+beforehand, so it never hashes one.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -43,8 +49,14 @@ from typing import Any
 import psycopg
 import pytest
 import uvicorn
+from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from vantage.core.config.database import redacted
+from vantage.core.domain import passwords
+from vantage.core.domain.access import DEFAULT_SCOPES, User, new_token, token_digest
+from vantage.core.domain.passwords import verify_password
+from vantage.core.ports.storage import ExecutionStore
+from vantage.local import store_reports
 from vantage.service import cli
 from vantage.service.app import create_app
 from vantage.service.cli import (
@@ -57,8 +69,10 @@ from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage.storage.version import _SCHEMA_VERSION, SchemaVersionError
 
 # `postgres_url` and `create_postgres_database`, for the tests of the real
-# PostgreSQL adapter.
-pytest_plugins = ["postgres_fixtures"]
+# PostgreSQL adapter; `cheap_passwords`, for every start in process.
+pytest_plugins = ["postgres_fixtures", "password_fixtures"]
+
+pytestmark = pytest.mark.usefixtures("cheap_passwords")
 
 # Root ignores directory mode bits; Windows ACLs need a different check.
 _needs_enforced_mode_bits = pytest.mark.skipif(
@@ -113,6 +127,70 @@ def never_served(
     monkeypatch: pytest.MonkeyPatch, listened: list[tuple[str, int, socket.socket]]
 ) -> None:
     _refuse_to_serve(monkeypatch)
+
+
+def _said(err: str) -> list[str]:
+    """The lines `vantage` itself printed on stderr, without uvicorn's."""
+    return [line for line in err.splitlines() if line.startswith("vantage: ")]
+
+
+@dataclass
+class _Serving:
+    """What `main` had printed and what it served, as seen at the moment it
+    began to serve, while its store was still open: the lines it had said,
+    its store's users and the first admin's password hash, and the status
+    its app answered a report sent without a token with."""
+
+    said: list[str] = field(default_factory=list)
+    users: tuple[User, ...] = ()
+    admin_hash: str | None = None
+    anonymous_report: int | None = None
+
+
+@pytest.fixture
+def serving(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    listened: list[tuple[str, int, socket.socket]],
+) -> _Serving:
+    """Stands in for `uvicorn.Server.run` and records, in a `_Serving`, what
+    `main` handed it, at each start."""
+    seen = _Serving()
+
+    def _run(server: uvicorn.Server, sockets: list[socket.socket] | None = None) -> None:
+        app: Any = server.config.app
+        store: ExecutionStore = app.state.store
+        seen.said = _said(capsys.readouterr().err)
+        seen.users = tuple(store.list_users())
+        seen.admin_hash = store.get_password_hash(cli.FIRST_ADMIN)
+        # Without `with`, so the app is not shut down, and its store stays open.
+        answer = TestClient(app).post("/api/v1/runs", json=_start_report("d" * 32))
+        seen.anonymous_report = answer.status_code
+
+    monkeypatch.setattr("uvicorn.Server.run", _run)
+    return seen
+
+
+@pytest.fixture
+def log_records(caplog: pytest.LogCaptureFixture) -> Iterator[list[logging.LogRecord]]:
+    """Every log record any logger makes while the test runs, with the root
+    logger at DEBUG. Taken as each is made, so a logger that hands nothing
+    on to the root, as uvicorn's do once it has configured them, hides
+    none."""
+    made: list[logging.LogRecord] = []
+    make = logging.getLogRecordFactory()
+
+    def _make(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = make(*args, **kwargs)
+        made.append(record)
+        return record
+
+    logging.setLogRecordFactory(_make)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            yield made
+    finally:
+        logging.setLogRecordFactory(make)
 
 
 def _refusal(capsys: pytest.CaptureFixture[str], argv: list[str]) -> str:
@@ -231,10 +309,14 @@ def test_main_listens_where_it_was_told_hands_uvicorn_that_socket_and_warns(
 ) -> None:
     """The seam between a resolved config and a running server, and the
     positive control for the refused start that must not warn: a start on a
-    wide address warns that nothing authenticates the requests, and serves
+    wide address, of a database pytest-vantage's local store made and so
+    serves open, warns that nothing authenticates the requests, and serves
     on the socket bound for the address asked for."""
+    database = tmp_path / "v.db"
+    store_reports(database, [_start_report("e" * 32)])
+
     with caplog.at_level(logging.WARNING, logger=cli.__name__):
-        cli.main(["--database", str(tmp_path / "v.db"), "--host", "0.0.0.0", "--port", "9000"])  # noqa: S104
+        cli.main(["--database", str(database), "--host", "0.0.0.0", "--port", "9000"])  # noqa: S104
 
     ((host, port, bound),) = listened
     assert (host, port) == ("0.0.0.0", 9000)  # noqa: S104
@@ -372,11 +454,38 @@ def _wait_until_serving(proc: subprocess.Popen[bytes], base: str) -> None:
     raise AssertionError("the server never answered")
 
 
+def _recording_token(database: Path | str) -> str:
+    """A token that reads and records, of the user `ci`, which `database` --
+    a SQLite path or a PostgreSQL URL -- is given first. A server's own
+    database is served closed from its first start, so a report needs one;
+    and with a user already there the start makes no admin, and hashes no
+    password."""
+    store: ExecutionStore
+    if str(database).startswith("postgresql://"):
+        store = PostgresExecutionStore(str(database))
+    else:
+        store = SqliteExecutionStore(Path(database))
+    secret = new_token()
+    try:
+        now = datetime.now(timezone.utc)
+        store.create_user("ci", admin=False, created_at=now)
+        store.create_token(
+            "ci", digest=token_digest(secret), label="ci", scopes=DEFAULT_SCOPES, created_at=now
+        )
+    finally:
+        store.close()
+    return secret
+
+
 @contextlib.contextmanager
-def _running_vantage(database: Path | str) -> Iterator[tuple[subprocess.Popen[bytes], str]]:
+def _running_vantage(
+    database: Path | str,
+) -> Iterator[tuple[subprocess.Popen[bytes], str, str]]:
     """The real `vantage` command, serving `database` -- a SQLite path or a
-    PostgreSQL URL -- on a free loopback port, and the base URL of its API.
-    Killed on the way out if it is still running."""
+    PostgreSQL URL -- on a free loopback port, the base URL of its API, and
+    a token that reads and records there (`_recording_token`). Killed on the
+    way out if it is still running."""
+    token = _recording_token(database)
     port = _free_loopback_port()
     base = f"http://127.0.0.1:{port}/api/v1"
     command = "from vantage.service.cli import main; main()"
@@ -387,7 +496,7 @@ def _running_vantage(database: Path | str) -> Iterator[tuple[subprocess.Popen[by
     )
     try:
         _wait_until_serving(proc, base)
-        yield proc, base
+        yield proc, base, token
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -396,14 +505,20 @@ def _running_vantage(database: Path | str) -> Iterator[tuple[subprocess.Popen[by
         proc.stderr.close()
 
 
-def _post_json(url: str, body: object) -> int:
+def _post_json(url: str, body: object, *, token: str) -> int:
     request = urllib.request.Request(  # noqa: S310
         url,
         data=json.dumps(body, ensure_ascii=False).encode(),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
         return int(response.status)
+
+
+def _get_json(url: str, *, token: str) -> Any:
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})  # noqa: S310
+    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
+        return json.loads(response.read())
 
 
 def _start_report(run_id: str) -> dict[str, Any]:
@@ -429,8 +544,8 @@ def test_a_server_stopped_with_sigterm_leaves_everything_in_the_database_file(
     stays in the `-wal` file beside the database: a backup that copies the
     database file alone after the stop gets no tables at all."""
     database = tmp_path / "db" / "v.db"
-    with _running_vantage(database) as (proc, base):
-        assert _post_json(f"{base}/runs", _start_report("a" * 32)) == 201
+    with _running_vantage(database) as (proc, base, token):
+        assert _post_json(f"{base}/runs", _start_report("a" * 32), token=token) == 201
 
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=20)
@@ -474,16 +589,16 @@ def test_a_result_with_a_long_node_id_can_be_read_back_by_it(
     }
     run_id = "b" * 32
     target = tmp_path / "v.db" if database == "sqlite" else request.getfixturevalue("postgres_url")
-    with _running_vantage(target) as (_proc, base):
-        assert _post_json(f"{base}/runs", {**_start_report(run_id), "results": [result]}) == 201
+    with _running_vantage(target) as (_proc, base, token):
+        report = {**_start_report(run_id), "results": [result]}
+        assert _post_json(f"{base}/runs", report, token=token) == 201
         query = urllib.parse.urlencode({"node_id": node_id})
         assert len(query) > 500_000
 
-        with urllib.request.urlopen(f"{base}/runs/{run_id}/result?{query}", timeout=10) as got:  # noqa: S310
-            assert json.loads(got.read())["node_id"] == node_id
-        history = f"{base}/projects/default/tests/history?{query}"
-        with urllib.request.urlopen(history, timeout=10) as got:  # noqa: S310
-            assert [item["run_id"] for item in json.loads(got.read())["items"]] == [run_id]
+        got = _get_json(f"{base}/runs/{run_id}/result?{query}", token=token)
+        assert got["node_id"] == node_id
+        history = _get_json(f"{base}/projects/default/tests/history?{query}", token=token)
+        assert [item["run_id"] for item in history["items"]] == [run_id]
 
 
 @_needs_enforced_mode_bits
@@ -516,7 +631,8 @@ def test_non_loopback_host_warns_naming_missing_authentication(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Binding wider than loopback, with no user to require a token of,
-    warns and names what is missing and how to add it."""
+    warns and names what is missing, how to add it, and why the database
+    has none: only one pytest-vantage's local store made is served so."""
     with caplog.at_level(logging.WARNING):
         warn_if_bound_wide("0.0.0.0", access_required=False)  # noqa: S104
 
@@ -524,6 +640,7 @@ def test_non_loopback_host_warns_naming_missing_authentication(
     assert any("authenticates" in message for message in messages)
     assert any("vantage user add" in message for message in messages)
     assert any("0.0.0.0" in message for message in messages)  # noqa: S104
+    assert any("pytest-vantage's local store made" in message for message in messages)
 
 
 def test_non_loopback_host_with_users_emits_no_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -551,6 +668,188 @@ def test_a_wide_start_on_a_database_with_users_does_not_warn(
 
     assert served["sockets"]
     assert [r.getMessage() for r in caplog.records if r.name == cli.__name__] == []
+
+
+def test_a_wide_start_on_a_new_database_does_not_warn(
+    tmp_path: Path, serving: _Serving, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The server gives its own database a user before the bind is looked
+    at, so it is never served open, wide or not."""
+    with caplog.at_level(logging.WARNING, logger=cli.__name__):
+        cli.main(["--database", str(tmp_path / "v.db"), "--host", "0.0.0.0"])  # noqa: S104
+
+    assert [user.name for user in serving.users] == [cli.FIRST_ADMIN]
+    assert [r.getMessage() for r in caplog.records if r.name == cli.__name__] == []
+
+
+# --- The first admin --------------------------------------------------------------
+#
+# A database of the server's own gets the admin `admin` before it is served,
+# with a random password printed once on stderr; one pytest-vantage's local
+# store made is served open until it has a user.
+
+_CREATED_ADMIN = re.compile(
+    r"vantage: created the user admin; change its password at once "
+    r"\(vantage user password admin, or POST /api/v1/password\)\. Shown this once: (\S+)"
+)
+
+
+def _printed_password(said: list[str]) -> str:
+    """The password on the one line that says the admin was created, which
+    must be all `said`."""
+    (line,) = said
+    created = _CREATED_ADMIN.fullmatch(line)
+    assert created is not None, line
+    return created[1]
+
+
+def test_a_new_database_gets_the_admin_admin_and_its_password_once_on_stderr(
+    tmp_path: Path, serving: _Serving, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One line, said before anything is served, ending in the password --
+    so copying it picks up nothing else -- which is the one stored."""
+    cli.main(["--database", str(tmp_path / "v.db")])
+
+    password = _printed_password(serving.said)
+    assert _said(capsys.readouterr().err) == []
+    (admin,) = serving.users
+    assert (admin.name, admin.admin, admin.disabled, admin.has_password) == (
+        "admin",
+        True,
+        False,
+        True,
+    )
+    assert verify_password(password, serving.admin_hash)
+
+
+def test_the_first_admins_password_is_in_no_log_record(
+    tmp_path: Path, serving: _Serving, log_records: list[logging.LogRecord]
+) -> None:
+    """Printed, never logged: a log handler -- uvicorn's configuration, an
+    embedding's -- could copy it anywhere."""
+    cli.main(["--database", str(tmp_path / "v.db")])
+
+    password = _printed_password(serving.said)
+    assert log_records, "nothing was logged, so nothing was looked at"
+    assert [record.getMessage() for record in log_records if password in record.getMessage()] == []
+
+
+def test_a_new_database_is_served_closed_from_the_first_request(
+    tmp_path: Path, serving: _Serving
+) -> None:
+    cli.main(["--database", str(tmp_path / "v.db")])
+
+    assert serving.anonymous_report == 401
+
+
+def test_a_later_start_neither_prints_a_password_nor_makes_one(
+    tmp_path: Path, serving: _Serving, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The admin is made once, and a start that finds a user skips the
+    hash, which is what takes the time."""
+    database = tmp_path / "v.db"
+    cli.main(["--database", str(database)])
+    first = serving.admin_hash
+    hashed: list[str] = []
+
+    def _hash(password: str) -> str:
+        hashed.append(password)
+        return passwords.hash_password(password)
+
+    monkeypatch.setattr("vantage.service.cli.hash_password", _hash)
+
+    cli.main(["--database", str(database)])
+
+    assert serving.said == []
+    assert hashed == []
+    assert [user.name for user in serving.users] == [cli.FIRST_ADMIN]
+    assert serving.admin_hash == first
+
+
+def test_a_database_the_local_store_made_is_served_open_with_no_user(
+    tmp_path: Path, serving: _Serving, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It holds one person's runs, and `vantage` with no options on that
+    machine serves it as it is, until its first `vantage user add`."""
+    database = tmp_path / "v.db"
+    store_reports(database, [_start_report("e" * 32)])
+
+    cli.main(["--database", str(database)])
+
+    assert serving.said == []
+    assert _said(capsys.readouterr().err) == []
+    assert serving.users == ()
+    assert serving.anonymous_report == 201
+
+
+def test_a_server_database_left_without_a_user_gets_the_admin_at_its_next_start(
+    tmp_path: Path, serving: _Serving, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`vantage project add` makes a database of the server's own with no
+    user, as does a start that stopped between creating the schema and the
+    admin. Nothing has served either yet, and the next start gives it the
+    admin."""
+    database = tmp_path / "v.db"
+    with pytest.raises(SystemExit) as added:
+        cli.main(["project", "add", "firmware", "--database", str(database)])
+    assert added.value.code == 0
+    capsys.readouterr()
+
+    cli.main(["--database", str(database)])
+
+    _printed_password(serving.said)
+    assert [user.name for user in serving.users] == [cli.FIRST_ADMIN]
+    assert serving.anonymous_report == 401
+
+
+def test_a_user_added_before_the_first_start_keeps_every_password_out_of_its_output(
+    tmp_path: Path, serving: _Serving, capsys: pytest.CaptureFixture[str]
+) -> None:
+    database = tmp_path / "v.db"
+    with pytest.raises(SystemExit) as added:
+        cli.main(["user", "add", "alice", "--admin", "--database", str(database)])
+    assert added.value.code == 0
+    capsys.readouterr()
+
+    cli.main(["--database", str(database)])
+
+    assert serving.said == []
+    assert [user.name for user in serving.users] == ["alice"]
+    assert serving.anonymous_report == 401
+
+
+@pytest.mark.usefixtures("never_served")
+def test_a_database_that_cannot_take_its_first_admin_is_one_line_and_is_let_go(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    listened: list[tuple[str, int, socket.socket]],
+) -> None:
+    """Refused like a database that cannot be opened: one line, with the
+    store and the listening socket closed, and no password printed, since
+    none was stored."""
+    database = tmp_path / "v.db"
+    stores: list[ExecutionStore] = []
+
+    def _fail(
+        store: ExecutionStore, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        stores.append(store)
+        raise sqlite3.OperationalError("disk I/O error\nwhile writing")
+
+    monkeypatch.setattr(SqliteExecutionStore, "create_first_admin", _fail)
+
+    err = _refusal(capsys, ["--database", str(database)])
+
+    assert (
+        err
+        == f"vantage: cannot create the user admin in {database}: disk I/O error while writing\n"
+    )
+    (store,) = stores
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        store.count_executions()
+    ((_host, _port, listener),) = listened
+    assert listener.fileno() == -1
 
 
 def test_create_app_defaults_grace_period_to_900_seconds() -> None:
@@ -810,6 +1109,35 @@ def test_a_postgresql_start_creates_nothing_on_disk(
     cli.main(["--database", _URL])
 
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.usefixtures("postgres_adapter")
+def test_a_postgresql_database_gets_the_first_admin_as_well(serving: _Serving) -> None:
+    """The local store never makes a PostgreSQL database, so every one is
+    the server's own."""
+    cli.main(["--database", _URL])
+
+    password = _printed_password(serving.said)
+    assert [user.name for user in serving.users] == [cli.FIRST_ADMIN]
+    assert verify_password(password, serving.admin_hash)
+    assert serving.anonymous_report == 401
+
+
+@pytest.mark.usefixtures("never_served", "postgres_adapter")
+def test_a_postgresql_database_that_cannot_take_its_first_admin_is_one_line_without_the_password(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _fail(
+        store: ExecutionStore, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        raise RuntimeError(f"connection to {_URL} lost:\n\tpassword {_DECODED_PASSWORD!r} refused")
+
+    monkeypatch.setattr(InMemoryExecutionStore, "create_first_admin", _fail)
+
+    assert _refusal(capsys, ["--database", _URL]) == (
+        f"vantage: cannot create the user admin in {_SHOWN}: connection to {_SHOWN} lost: "
+        "password '***' refused\n"
+    )
 
 
 class _FailingImport(importlib.abc.MetaPathFinder, importlib.abc.Loader):
@@ -1080,10 +1408,9 @@ def test_a_server_on_postgresql_keeps_what_it_stored_and_hangs_up_when_stopped(
     postgres_url: str, postgres_admin_url: str
 ) -> None:
     run_id = "c" * 32
-    with _running_vantage(postgres_url) as (proc, base):
-        assert _post_json(f"{base}/runs", _start_report(run_id)) == 201
-        with urllib.request.urlopen(f"{base}/runs/{run_id}", timeout=10) as got:  # noqa: S310
-            assert json.loads(got.read())["id"] == run_id
+    with _running_vantage(postgres_url) as (proc, base, token):
+        assert _post_json(f"{base}/runs", _start_report(run_id), token=token) == 201
+        assert _get_json(f"{base}/runs/{run_id}", token=token)["id"] == run_id
 
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=20)

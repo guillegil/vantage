@@ -3,9 +3,12 @@ database has, and making one, as `vantage project add` does.
 
 **Who may make one is who may change sections**: an admin's token once the
 database has a user, anyone while it has none -- an open server already
-lets anyone record runs and change what they share. A server never makes a
-project from a report, so a report naming one that does not exist yet waits
-for an admin, or for this route.
+lets anyone record runs and change what they share. Only a database
+pytest-vantage's local store made is ever served with no user, since
+`vantage` gives any other one an admin before serving it, so anyone may
+make a project only there. A server never makes a project from a report,
+so a report naming one that does not exist yet waits for an admin, or for
+this route.
 
 **Nothing about a project changes afterwards**: no rename, no delete. Every
 row that names a project keeps naming one, and a check that one exists stays

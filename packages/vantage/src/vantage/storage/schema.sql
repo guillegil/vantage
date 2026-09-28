@@ -24,8 +24,11 @@
 -- tests read them to check what a write stored.
 
 -- ---------------------------------------------------------------------------
--- meta -- `schema_version`, plus the best-effort `created_at`/`created_by`
--- rows connection.py writes.
+-- meta -- `schema_version` and `origin`, written with the tables, plus the
+-- best-effort `created_at`/`created_by` rows connection.py writes. `origin`
+-- is `local` when pytest-vantage's local store made the database and
+-- `server` otherwise, and never changes: a server gives only a `server`
+-- database its first admin.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -36,18 +39,23 @@ CREATE TABLE IF NOT EXISTS meta (
 -- account -- one row per user; `user` is a reserved word in PostgreSQL. A
 -- user is disabled, never deleted, so every `run.recorded_by` names one,
 -- and a database that has had a user always has one: the server requires
--- a token from then on. `name` is short and lower case
--- (`core/domain/access.py`).
+-- a token from then on. A `server` database has one from the server's
+-- first start. `name` is short and lower case (`core/domain/access.py`);
+-- `password_hash` is a scrypt PHC string (`core/domain/passwords.py`), or
+-- NULL for a user who cannot log in.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS account (
-    name        TEXT PRIMARY KEY,
-    admin       INTEGER NOT NULL CHECK (admin IN (0, 1)),
-    disabled    INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
-    created_at  TEXT NOT NULL
+    name           TEXT PRIMARY KEY,
+    admin          INTEGER NOT NULL CHECK (admin IN (0, 1)),
+    disabled       INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at     TEXT NOT NULL,
+    password_hash  TEXT NULL
 );
 
 -- ---------------------------------------------------------------------------
--- access_token -- one row per token ever made, revoked ones included.
+-- access_token -- one row per token ever made, revoked ones included,
+-- except for login tokens, the only ones with an `expires_at`: a login
+-- token's row is deleted once it has expired, at its user's next login.
 -- `digest` is the token's SHA-256 in hex; the token itself is never stored.
 -- Each `can_*` column is one scope the token holds, and it holds at least
 -- one.
@@ -62,6 +70,7 @@ CREATE TABLE IF NOT EXISTS access_token (
     can_admin   INTEGER NOT NULL CHECK (can_admin IN (0, 1)),
     created_at  TEXT NOT NULL,
     revoked_at  TEXT NULL,
+    expires_at  TEXT NULL,
     CHECK (can_read + can_record + can_admin > 0)
 );
 

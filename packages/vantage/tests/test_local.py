@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from password_fixtures import cheap_hash
 from vantage.core.config.database import SqliteTarget
 from vantage.core.config.resolution import resolve_server_config
 from vantage.core.domain.projects import DEFAULT_PROJECT
@@ -540,6 +541,69 @@ def test_sessions_stored_at_once_are_all_kept(tmp_path: Path) -> None:
     store = SqliteExecutionStore(database)
     try:
         assert store.count_executions() == len(run_ids)
+    finally:
+        store.close()
+
+
+# --- Who made the database -----------------------------------------------------
+
+
+def _origin(database: Path) -> str | None:
+    """`meta.origin`, read with a plain connection of its own."""
+    with contextlib.closing(sqlite3.connect(database)) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = 'origin'").fetchone()
+    return None if row is None else str(row[0])
+
+
+def test_a_database_the_local_store_creates_records_that_it_made_it(tmp_path: Path) -> None:
+    database = tmp_path / "vantage.db"
+
+    store_reports(database, _session())
+
+    assert _origin(database) == "local"
+
+
+def test_storing_into_a_database_a_server_made_leaves_it_the_servers(tmp_path: Path) -> None:
+    """The default database is also the one `vantage` serves with no
+    options. Once `vantage` has made it, local sessions store into it as
+    before, and it stays the server's: an admin already guards it."""
+    database = tmp_path / "vantage.db"
+    SqliteExecutionStore(database).close()
+
+    store_reports(database, _session())
+
+    assert _origin(database) == "server"
+    store = SqliteExecutionStore(database)
+    try:
+        assert store.get_execution(_RUN_ID) is not None
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("server_made_it", "users"), [(False, []), (True, ["admin"])], ids=["local", "server"]
+)
+def test_only_a_database_the_local_store_made_is_given_no_first_admin(
+    tmp_path: Path, server_made_it: bool, users: list[str]
+) -> None:
+    """A test machine's own runs are its owner's: `vantage` serves the file
+    the local store made open, as every database was served before users,
+    until someone adds a user to it."""
+    database = tmp_path / "vantage.db"
+    if server_made_it:
+        SqliteExecutionStore(database).close()
+    store_reports(database, _session())
+
+    store = SqliteExecutionStore(database)
+    try:
+        created = store.create_first_admin(
+            "admin",
+            password_hash=cheap_hash("a password nobody will type"),
+            created_at=datetime.now(timezone.utc),
+        )
+        assert (created is not None) is server_made_it
+        assert [user.name for user in store.list_users()] == users
+        assert store.access_required() is server_made_it
     finally:
         store.close()
 

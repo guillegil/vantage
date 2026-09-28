@@ -68,8 +68,9 @@ The checks catch different failures:
   must bring pytest-vantage, pytest, Pydantic and PyYAML and no web
   framework; there `vantage` must refuse to serve in one line, `vantage push`
   must run, and a session in local mode must store its run where `vantage`
-  serves by default. `vantage[server]` must serve. It is the only check that
-  sees what reaches a user.
+  serves by default. `vantage[server]` must serve, having given its fresh
+  database the admin `admin` in exactly one line on stderr. It is the only
+  check that sees what reaches a user.
 
 Values both sides must agree on (the 1 MiB body cap, the 64 KiB text-field
 cap, the metadata bounds and statuses, the outcome vocabulary, the timestamp
@@ -511,12 +512,129 @@ the envelope because `run` refuses an unknown field.
 
 ## Users, tokens and who may do what
 
-A database with no user is open: every route but the users and tokens ones
-answers anyone, as the server did before it had users, and `vantage` serving a local database on a test
-machine needs nothing more. The first user closes it. Users are disabled,
-never deleted, so "a user exists" is a latch: once true it stays true, and
-every `run.recorded_by` keeps naming an existing user.
+A database with no user is open: every route but the users, tokens, login
+and password ones answers anyone, as the server did before it had users.
+Only a database pytest-vantage's local store made is ever served that way,
+and only until its first `vantage user add`: `vantage` gives any other
+database a user before serving it. The first user closes a database. Users
+are disabled, never deleted, so "a user exists" is a latch: once true it
+stays true, and every `run.recorded_by` keeps naming an existing user.
 
+- **Who made the database.** `meta.origin` is `local` when `vantage.local`
+  created the database, and `server` when anything else did: `vantage`,
+  `vantage user add`, `vantage project add`, and every PostgreSQL database,
+  which the local store never opens. `vantage.local` alone opens with
+  `SqliteExecutionStore(path, local=True)`, which hands the flag to
+  `open_database`; it is the adapter's constructor argument, not part of the
+  port, and `InMemoryExecutionStore` mirrors it. The row is written with
+  `INSERT OR IGNORE` in the transaction that creates the tables, after the
+  version stamp, so opening an existing database with either flag never
+  changes it, and of two processes creating one file the first one's value
+  stays. Both kinds of creator write it, so `server` is a row, not a
+  missing one. Only `create_first_admin` reads it, in SQL, and anything
+  but `local`, no row included, counts as the server's: an odd or
+  hand-edited database gets an admin rather than staying open. Nothing
+  else could decide it: the server's default path is the local store's,
+  and a copied file keeps its row but not its path; a fresh server
+  database has no user either; and a row the local store wrote after
+  opening would let a server starting in between give a test machine's
+  file an admin.
+- **The first admin.** `cli.main`, once the port and the store are held and
+  before it warns about the bind or builds the app, calls
+  `create_first_admin` (`service/cli.py`). When `access_required()` is
+  false, it hashes a fresh `new_password()` and asks the store to
+  `create_first_admin("admin", ...)`: one conditional insert, creating the
+  enabled admin only while the database has no user and is not `local`.
+  Of two servers starting on one empty PostgreSQL database, the second
+  waits on the first one's row and inserts nothing, so one admin is made
+  and one line printed. The line goes to stderr, flushed, before uvicorn's
+  first, and only once the insert has committed, so a printed password is
+  always the stored one; never through `logging`, whose handlers, uvicorn's
+  configuration or an embedding could copy it anywhere. A store error is
+  refused in one line, `cannot create the user admin in <database>:
+  <detail>`, the URL redacted and the driver's message through
+  `_driver_detail`. `create_app` never makes a user, so an app built on a
+  userless store -- the tests', an embedding's -- is as open as ever; its
+  one production caller, `cli.py`, never serves a database of the server's
+  own without a user. A local database with no user pays one discarded
+  hash per start, about 0.2 s. A crash leaves one of three states:
+  - before the schema commits, nothing, and the next open creates it;
+  - after the schema and before the admin, a `server` database with no
+    user that nothing has served, since only `main` serves, and only after
+    this step: the next start creates `admin` and prints its line;
+  - after the admin commits and before the line is out (or with stderr
+    broken), `admin` with a password nobody saw, which no later start
+    prints, since a user exists: `vantage user password admin` recovers it.
+
+  A user made before the first start means no `admin` and no line, which is
+  how to keep a password out of the log. `vantage user add` during the very
+  first start on PostgreSQL can leave both users, and a valid printed
+  password; that is accepted rather than an advisory lock on `create_user`.
+  An `admin` demoted or disabled later is never made again.
+- **Passwords** (`core/domain/passwords.py`) are stored only as a scrypt
+  hash in PHC string form, `$scrypt$ln=15,r=8,p=3$<salt>$<key>` (a 16-byte
+  salt and a 32-byte key in unpadded base64), of the password
+  NFKC-normalised and encoded in UTF-8, so the same password typed on
+  another keyboard or input method matches. Unlike a token, a password may
+  be guessed, so a check is expensive on purpose: n = 2^15 and r = 8 take
+  32 MiB, and p = 3 triples the work without taking more memory, so each
+  check costs a guesser what n = 2^17 would at a quarter of the memory,
+  about 0.19 s. OpenSSL's default memory bound refuses these parameters by
+  a hair, so `maxmem` is set to what they need. The parameters travel in
+  the string: a later cost change needs no schema bump, old hashes keep
+  verifying with no rehash at login, and tests store cheaper ones
+  (`password_fixtures`). `verify_password` never raises and runs exactly
+  one scrypt whatever it is given: with no hash, a malformed one, one
+  asking for more than 128 MiB or a parallelism above 16, or a password
+  UTF-8 cannot encode, it checks against `_UNUSABLE`, a well-formed hash at
+  the current cost whose random key no password matches, made at import
+  without running scrypt, so how long an answer takes tells nobody which
+  names exist. `check_password` (15 to 256 characters once normalised, no
+  control character or lone surrogate, the test `plain_character` shares
+  with token labels) applies when a password is set, never at login, so a
+  rule change locks nobody out. `User` says `has_password`, never the
+  hash, which only `get_password_hash` hands out, and only for an enabled
+  user. There is no per-attempt write, lockout, counter or delay: a write
+  per failed attempt would let anyone grow the database, a lockout would
+  let anyone lock `admin` out, and a delay is absorbed by attempts sent in
+  parallel. The cost is the bound instead: two checks at a time per
+  process, about ten guesses a second, and uvicorn's access log records
+  each `401` with its address.
+- **Login tokens.** `POST /login` (`service/routes/login.py`) checks the
+  password and hands the hash it verified to `create_login_token`: one
+  write that inserts a token labelled `login`, holding `read` and the
+  account's `admin`, never `record`, and expiring `LOGIN_TOKEN_LIFETIME`
+  (12 hours) later -- only while the user is enabled and the stored hash is
+  still that one, so a login never outlives a password change made while
+  it was checked. The same write deletes that user's login tokens expired
+  by then, which keeps the unpaged token lists short; a made token's row is
+  never deleted. A login token is simply a token with an `expires_at`,
+  which nothing else sets, and `authenticate(digest, *, now)` refuses one
+  from that moment; `now` is required, since a default could skip the
+  check unnoticed. `set_password` sets the hash and revokes every login
+  token of the user not yet revoked, in one write, leaving made tokens
+  alone; with `replacing` it is a compare-and-set against the hash the
+  current password was checked against, so a `POST /password` that lost
+  to a change made meanwhile changes nothing and answers `401`. `POST
+  /password` takes the current password rather than a token, so a stolen
+  login token cannot take the account over. `PUT /users/{name}/password`
+  and `vantage user password` set a password with no `replacing`: an admin
+  can already make admin tokens, and whoever can open the database is
+  trusted with it.
+- **Two password slots, 32 waiting.** Every scrypt the server runs -- a
+  login's check, a password change's check and hash, an admin's hash -- is
+  one `run_in_threadpool` call made while holding one of
+  `app.state.password_slots` (`service/slots.py`), two slots awaited on
+  the event loop. A waiting login holds no worker thread, at most two of
+  the forty threads and 64 MiB hash at once, and reports and heartbeats
+  never wait behind a flood of logins. At most 32 more requests wait; one
+  past that is refused at once, `503 password_checks_busy` with
+  `Retry-After: 1`, since a client that sends a body and leaves costs the
+  server a queued body and a future hash while holding no connection. A
+  request that gets a slot first asks whether its client is still there,
+  and hashes nothing if not. The count changes only on the event loop, so
+  it needs no lock; the semaphore binds to the loop the first time a
+  request waits on it, and uvicorn runs one.
 - **Tokens.** `new_token` is `vantage_` and 32 random bytes; the store keeps
   its SHA-256 (`token_digest`) and finds it by that digest, through the
   column's unique index. A token has nothing to guess, so a fast hash is
@@ -525,23 +643,28 @@ every `run.recorded_by` keeps naming an existing user.
 - **Scopes.** A token holds one or more of `read`, `record` and `admin`
   (the `can_*` columns). `Grant.allows` needs the admin scope and an admin
   user: `authenticate` reads the user's standing each time, so demoting a
-  user takes their admin tokens' power at once. A revoked token, and any
-  token of a disabled user, authenticates nothing.
+  user takes their admin tokens' power at once. A revoked token, an
+  expired one, and any token of a disabled user authenticate nothing.
 - **`service/access.py`** is the dependency every route declares but
   `/capabilities` and `/openapi.yaml`, which a client asks before it can
-  know it needs a token: `requires_read` on the `read`-tagged routes but
+  know it needs a token, and `/login` and `/password`, which take a name
+  and a password instead: `requires_read` on the `read`-tagged routes but
   the users and tokens ones,
   `requires_record` on a report and a heartbeat, `requires_admin` on
   changing sections, and `requires_admin_token` on the users and tokens
-  routes. It is a plain `def`, since it reads the store, so on
-  `POST /runs` it runs in the threadpool before the body is read. While the
+  routes, `PUT /users/{name}/password` included. It is a plain `def`, since
+  it reads the store, so on `POST /runs` it runs in the threadpool before
+  the body is read. While the
   server is open it asks the store whether a user exists on every request,
   because `vantage user add` may run against the database meanwhile; once
   one does, `app.state.access_required` keeps the answer, and the store is
   not asked again. A token sent to an open server is refused, not ignored.
   A 401 or 403 carries RFC 6750's `WWW-Authenticate` challenge
   (`ChallengeError`), naming the scope that was missing and never the
-  token.
+  token. `/login` and `/password` declare `requires_closed_server`
+  instead, a plain `def` too, which answers `409 open_server` on an open
+  server before the body is read and ignores an `Authorization` header:
+  nobody has a password there.
 - **Who recorded a run.** `record_session` takes `recorded_by`, the
   caller's user or `None`. The report that creates a run stores it, and
   every later report must come from the same caller, or the store raises
@@ -553,7 +676,12 @@ every `run.recorded_by` keeps naming an existing user.
 - **Managing them.** `vantage user` and `vantage token`
   (`service/manage.py`) resolve and open the database as the server does,
   never import the web framework, and create a database only for `user
-  add`. `token create` prints the token alone on stdout.
+  add`. `token create` prints the token alone on stdout. `user password`
+  never takes a password from an argument or the environment, which `ps`
+  and shell history would show: it asks twice through `getpass`, and only
+  on a terminal, since with stdin a pipe `getpass` would read the terminal
+  behind it or echo where there is none; or it reads stdin, less one
+  trailing newline, with `--password-stdin`.
 - **Managing them over HTTP.** `service/routes/users.py` gives an admin
   what the two commands give, with the same domain checks in the same
   order. `requires_admin_token` is `requires_admin` that also refuses the
@@ -568,11 +696,17 @@ every `run.recorded_by` keeps naming an existing user.
   who asks and so racing nothing; the command line, unguarded, is how to
   recover when no admin is left. Revoking is idempotent: the conditional
   `UPDATE` keeps the first revocation time, and `get_token` reads the row
-  back, which races nothing since tokens are never deleted and a revocation
-  is never undone. The one answer carrying a token, the `201` of `POST
-  /tokens`, is `Cache-Control: no-store`, and `CreatedTokenResponse` keeps
-  the token out of its `repr`. A value that cannot be a name matches no
-  user without asking the store, which keeps U+0000 from every adapter.
+  back, since a revocation is never undone. The one row that read can miss
+  is an expired login token's, deleted by its user's next login, before
+  the revocation or after it: the token is then unknown, `404
+  unknown_token`, as it would be to anyone. The two answers carrying a
+  token, the `201` of `POST /tokens` and of `POST /login`, are
+  `Cache-Control: no-store`, and `CreatedTokenResponse` keeps the token out
+  of its `repr`. The password request models keep passwords out of their
+  `repr` and hide their input in validation errors, whose text otherwise
+  repeats the whole body of one missing a field, and the routes raise
+  their `422` `from None`. A value that cannot be a name matches no user
+  without asking the store, which keeps U+0000 from every adapter.
 - **The plugin** reads its token from `VANTAGE_TOKEN` alone, only once
   `--vantage` is typed; a committed ini file or a command line would show it
   to others. It goes in `Authorization` on every report and heartbeat, never
@@ -591,8 +725,8 @@ every `run.recorded_by` keeps naming an existing user.
 ## Request handling and concurrency
 
 `create_app(store, grace_period_seconds=900)` builds the app, mounts the
-`runs`, `read`, `capabilities`, `sections`, `users` and `projects` routers
-under `/api/v1`, and
+`runs`, `read`, `capabilities`, `sections`, `users`, `projects` and `login`
+routers under `/api/v1`, and
 registers the error handlers. The `vantage` command runs it under Uvicorn, in
 one process.
 
@@ -606,16 +740,19 @@ would stall every other request, heartbeats included.
   (`ingestion/decode.py`) and `vantage.ingestion.ingest` -- validation,
   conversion (YAML parsing of metadata included) and the store write -- then
   run in the threadpool through `run_in_threadpool`. `POST /projects`, a
-  project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`
-  and `POST /tokens` read their bodies the same way, under caps of their
-  own.
+  project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`,
+  `PUT /users/{name}/password`, `POST /tokens`, `POST /login` and
+  `POST /password` read their bodies the same way, under caps of their
+  own. The three password routes then run their scrypt and store calls in
+  one threadpool call each, once a password slot is free (see
+  [Users, tokens and who may do what](#users-tokens-and-who-may-do-what)).
 - **Every other route that reaches the store is a plain `def`**, which
   FastAPI runs on AnyIO's worker threads (40 by default).
 - **`GET /capabilities` and `GET /openapi.yaml` are `async`** and never block,
   so they answer even while every worker thread waits on the store. The
   dependencies that only read `app.state` are `async` for the same reason:
-  an attribute read is not worth a thread. The one that authorizes a
-  request reads the store, and is a plain `def`.
+  an attribute read is not worth a thread. Those that authorize a request,
+  or refuse one on an open server, read the store, and are plain `def`s.
 
 **The store's lock.** `SqliteExecutionStore` keeps one `sqlite3` connection,
 shared by every thread, and a `threading.Lock` held across every statement
@@ -624,7 +761,9 @@ run one at a time within the process; the threadpool keeps the event loop
 free, it does not make the store parallel. The lock also stops a read from
 running inside another thread's open transaction on the shared connection,
 where it would see rows not yet committed. Multi-statement writes open with
-`BEGIN IMMEDIATE`. WAL mode and a five-second busy timeout cover a second
+`BEGIN IMMEDIATE`, and so do the first admin's insert, a password set and a
+login's token, so those serialise with each other in one process and
+across processes on one file. WAL mode and a five-second busy timeout cover a second
 process on the same file, which no in-process lock can reach: the pytest
 sessions storing into a local database, and a `vantage` serving it. Opening
 switches a new file to WAL, which needs the file to itself for an instant;
@@ -685,6 +824,24 @@ another process by construction, never by a check first:
   row lock never blocks the key-share locks ingestion's foreign keys take,
   and `revoke_token` one conditional `UPDATE` that keeps the first
   revocation. Two servers revoking one token both read back the same time.
+- `create_first_admin` is one `INSERT ... SELECT ... WHERE NOT EXISTS` a
+  user or a `local` origin, `ON CONFLICT (name) DO NOTHING`: of two servers
+  starting on one empty database, the second waits on the first one's row
+  and inserts nothing.
+- `set_password` is one transaction: the `UPDATE` of the hash, a
+  compare-and-set when it replaces a checked one, then the revocation of
+  the user's login tokens, a statement of its own, so under
+  `READ COMMITTED` it sees every login that committed before the row lock
+  was granted.
+- `create_login_token` is one transaction whose `INSERT ... SELECT` reads
+  the account `FOR SHARE OF a`. That lock conflicts with the row lock the
+  `UPDATE` of `set_password` or `update_user` takes, so a login either
+  commits first, and the change then revokes its token, or waits for the
+  change, reads the row again and inserts nothing. A plain read would go on
+  with the hash it saw before the change committed, and leave a live token
+  minted with the old password. Both calls lock the account row first, so
+  they never deadlock each other; two logins of one user deleting the same
+  expired tokens can, and are retried.
 - A transaction that fails with a serialization failure or a deadlock is
   retried a bounded number of times; any other error propagates.
 
@@ -725,8 +882,9 @@ the repository root the plugin sends.
 
 **`schema.sql` is applied whole, once.** On first open, when the `meta` table
 does not exist, the whole file runs in one `BEGIN IMMEDIATE` transaction that
-also stamps `meta.schema_version` (currently 8) and writes the `default`
-project. Reopening issues no DDL. A
+also stamps `meta.schema_version` (currently 9) and `meta.origin` (see
+[Users, tokens and who may do what](#users-tokens-and-who-may-do-what)) and
+writes the `default` project. Reopening issues no DDL. A
 database carrying any other stamp, older, newer, missing or not a number, is
 refused with `SchemaVersionError` before anything in it changes, and the
 `vantage` command turns that into a one-line refusal. There are no
@@ -744,8 +902,8 @@ logical schema, and change together.
 | `result` | one row per test per run, unique on `(run_id, node_id)` |
 | `run_metadata_file`, `run_metadata` | each declared file's status; each key's status and value, whether a file or the session gave it, its display name, and whether the declaration named it |
 | `project_setting` | a project's namespaced JSON values; its section definitions live here |
-| `account`, `access_token` | one row per user, never deleted; one per token ever made, by its digest, with its scopes and when it was revoked |
-| `meta` | the schema version, and when and by whom the database was created |
+| `account`, `access_token` | one row per user, never deleted, with their password's scrypt hash or null; one per token made, by its digest, with its scopes, when it was revoked and, for a login token alone, when it expires. A made token's row is kept for good, a login token's deleted once it has expired, at its user's next login |
+| `meta` | the schema version, who made the database (`origin`: `local` or `server`), and when and by whom it was created |
 
 **Timestamps are fixed-width UTC text**, `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`,
 written only through `isoformat_utc`. The service converts every incoming
@@ -818,7 +976,8 @@ and speaks UTF-8 on the wire whatever `PGCLIENTENCODING` says.
   so two servers starting on an empty database at once cannot both create
   it. If `vantage` has no `meta` table, everything is created and stamped in
   one transaction, which PostgreSQL's transactional DDL makes all or
-  nothing. A different stamp, or tables with no stamp, is refused with
+  nothing; the origin is always `server`, since the local store never
+  opens PostgreSQL. A different stamp, or tables with no stamp, is refused with
   `SchemaVersionError` and nothing is changed.
 - **Parity with SQLite is the contract.** The port contract runs against
   this adapter too, so what differs underneath must not show: text is
@@ -886,9 +1045,19 @@ database directory is writable. For PostgreSQL it imports
 its driver, and a driver that is not installed (psycopg or psycopg-pool
 absent, or psycopg without a libpq) is refused with one line naming the
 `postgres` extra. It then opens the store, refuses any failure with one
-`vantage: ...` line and exit status 1, warns about a bind other than
-`127.0.0.1` once the database is open, unless the database has a user and
-so the server requires a token, and closes the store on shutdown. A
+`vantage: ...` line and exit status 1, gives a database of the server's own
+its first admin (see
+[Users, tokens and who may do what](#users-tokens-and-who-may-do-what)),
+and warns about a bind other than `127.0.0.1` unless the database has a
+user and so the server requires a token. By then only a database
+pytest-vantage's local store made can lack one, and the warning says so:
+`Binding to HOST with no user in the database, which pytest-vantage's local
+store made: nothing authenticates requests, so anyone who can route to this
+host can read and write everything. Add one with vantage user add NAME
+--admin, and the server requires a token.` A server's own database never
+warns, and neither does the loopback default: a warning on every normal
+start trains people to ignore the one that matters. It closes the store on
+shutdown. A
 PostgreSQL refusal names the redacted URL, and quotes the driver's message
 on one line with the URL's password taken out by `redact_message`, as
 written and percent-decoded: libpq quotes a percent-escape it cannot
@@ -919,7 +1088,8 @@ every test, and removes `VANTAGE_TOKEN` and `VANTAGE_PROJECT` from each
 test's environment, which inner sessions and `vantage push` inherit: a token
 or a project exported for a real server would be refused by every test
 server without users or with only `default`; a test module that needs `store_fixtures` loads it with its own
-`pytest_plugins = ["store_fixtures"]`.
+`pytest_plugins = ["store_fixtures"]`, and one that needs `cheap_passwords`
+loads `password_fixtures` the same way.
 
 `pythonpath` puts both `tests/` directories on the import path, so the support
 modules import by bare name. None lives under a `src/` tree, so none ships in
@@ -934,6 +1104,7 @@ plugins, need none.
 | `packages/vantage/tests/vantage_port_contract.py` | `ExecutionStoreContract`, the behaviour every store must have; `test_sqlite_store.py`, `test_postgres_store.py` and `test_memory_store.py` subclass it |
 | `packages/vantage/tests/postgres_fixtures.py` | `postgres_url`, `create_postgres_database`, `postgres_store` and `postgres_metadata`: a fresh database per test on the server `VANTAGE_TEST_POSTGRES_URL` names, dropped afterwards, skipping the test when it names none. Each database sorts text with ICU's `en-US` by default, so a text key missing `COLLATE "C"` shows even on a server whose C library sorts every locale by code point; the server needs ICU, as the official images have |
 | `packages/vantage/tests/store_fixtures.py` | `any_store` and `any_stored_metadata`: each `ExecutionStore` implementation in turn (test ids `[memory]`, `[sqlite]` and `[postgres]`, the last skipped without `VANTAGE_TEST_POSTGRES_URL`), with a reader of the metadata rows it holds, for tests whose behaviour must not depend on the adapter |
+| `packages/vantage/tests/password_fixtures.py` | `cheap_passwords`, which makes every new password hash, and the hash a check with nothing to match is made against, cost scrypt `ln=4` instead of about 0.2 s, and `cheap_hash`, one such hash: for tests that set, check or log in with many passwords. A stored hash carries its own cost, so either verifies with or without the fixture; `test_passwords.py` checks the real cost |
 | `packages/vantage/tests/sqlite_rows.py` | reads a run's metadata rows, whose file rows no port method returns, with plain SQL on a separate connection |
 | `packages/vantage/tests/loopback_server.py` | `LoopbackServer`: a real Uvicorn server on a thread, on a `127.0.0.1` port the OS assigns, with bounded start and stop |
 | `packages/pytest-vantage/tests/vantage_test_server.py` | `VantageTestServer` and the `vantage_server` fixture: a real server backed by `SqliteExecutionStore` in a directory, recording each request's method and path, for the plugin's end-to-end tests, and able to serve a local database the plugin wrote, and to make a user and a token of theirs, which closes it; `ServerGate` and the `server_gate` fixture: one address that refuses connections, then forwards them to a server, then resets them after a given number, for a server that is down, back, or gone by a session's finish |

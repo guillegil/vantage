@@ -39,12 +39,17 @@ CREATE TABLE vantage.meta (
     value text NOT NULL
 );
 
+-- `meta` holds `schema_version` and `origin`, written with the tables, and
+-- `created_at`/`created_by`. `origin` is always `server` here: the local
+-- store never opens PostgreSQL.
+--
 -- A user name is at most 64 characters, so it is indexed as it is.
 CREATE TABLE vantage.account (
-    name        text COLLATE "C" PRIMARY KEY,
-    admin       boolean NOT NULL,
-    disabled    boolean NOT NULL DEFAULT false,
-    created_at  timestamptz NOT NULL
+    name           text COLLATE "C" PRIMARY KEY,
+    admin          boolean NOT NULL,
+    disabled       boolean NOT NULL DEFAULT false,
+    created_at     timestamptz NOT NULL,
+    password_hash  text NULL
 );
 
 CREATE TABLE vantage.access_token (
@@ -57,6 +62,7 @@ CREATE TABLE vantage.access_token (
     can_admin   boolean NOT NULL,
     created_at  timestamptz NOT NULL,
     revoked_at  timestamptz NULL,
+    expires_at  timestamptz NULL,
     CHECK (can_read OR can_record OR can_admin)
 );
 

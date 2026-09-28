@@ -395,27 +395,78 @@ def test_the_push_step_passes_only_when_push_runs_and_creates_nothing(
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
 
 
-# `curl` answers $FAKE_ANSWER with exit status $FAKE_CURL_EXIT.
+# `curl` answers $FAKE_ANSWER with exit status $FAKE_CURL_EXIT once the
+# server has created $FAKE_READY, and until then fails as for a refused
+# connection: the real server answers only after its start's own lines.
 _FAKE_CURL = """\
+if [ ! -e "$FAKE_READY" ]; then exit 7; fi
 printf '%s' "$FAKE_ANSWER"; exit "$FAKE_CURL_EXIT"
 """
+_PASSWORD = "Hv3kQ9mNpR7sT2wXyZ4aBc6d"  # noqa: S105
+_ADMIN_CREATED = (
+    "vantage: created the user admin; change its password at once "
+    f"(vantage user password admin, or POST /api/v1/password). Shown this once: {_PASSWORD}"
+)
+_LISTENING = "INFO:     Listening on http://127.0.0.1:8765 (Press CTRL+C to quit)"
+
+
+def _serving(*stderr: str) -> str:
+    """A `vantage` that writes the lines `stderr` at its start, then
+    serves until it is killed."""
+    lines = "".join(f"echo '{line}' >&2\n" for line in stderr)
+    return f'{lines}touch "$FAKE_READY"\nexec sleep 30'
 
 
 @needs_bash
 @pytest.mark.parametrize(
     ("vantage", "answer", "curl_exit", "passes"),
     [
-        pytest.param("exec sleep 30", '{"session_lifecycle":true}', 0, True, id="serves"),
         pytest.param(
-            "exec sleep 30", '{"session_lifecycle": true}', 0, True, id="serves-spaced-json"
+            _serving(_ADMIN_CREATED, _LISTENING),
+            '{"session_lifecycle":true}',
+            0,
+            True,
+            id="serves",
         ),
-        pytest.param("exec sleep 30", '{"session_lifecycle":false}', 0, False, id="no-lifecycle"),
+        pytest.param(
+            _serving(_ADMIN_CREATED, _LISTENING),
+            '{"session_lifecycle": true}',
+            0,
+            True,
+            id="serves-spaced-json",
+        ),
+        pytest.param(
+            _serving(_ADMIN_CREATED, _LISTENING),
+            '{"session_lifecycle":false}',
+            0,
+            False,
+            id="no-lifecycle",
+        ),
         pytest.param("exit 1", "", 7, False, id="exits"),
+        pytest.param(
+            _serving(_LISTENING), '{"session_lifecycle":true}', 0, False, id="no-admin-created"
+        ),
+        pytest.param(
+            _serving(_ADMIN_CREATED, _ADMIN_CREATED, _LISTENING),
+            '{"session_lifecycle":true}',
+            0,
+            False,
+            id="admin-created-twice",
+        ),
+        pytest.param(
+            _serving(_ADMIN_CREATED.removesuffix(_PASSWORD), _LISTENING),
+            '{"session_lifecycle":true}',
+            0,
+            False,
+            id="no-password-shown",
+        ),
     ],
 )
-def test_the_server_install_step_passes_only_when_it_answers(
+def test_the_server_install_step_passes_only_when_it_answers_having_created_the_admin(
     tmp_path: Path, vantage: str, answer: str, curl_exit: int, passes: bool
 ) -> None:
+    """A fresh database of the server's own gets the admin `admin` at the
+    first start, in exactly one line that ends with its password."""
     _dist(tmp_path, _BOTH_WHEELS)
     _fake_vantage(tmp_path / "server", vantage)
     script = _step_script(_INSTALLS, "Assert vantage[server] serves")
@@ -426,12 +477,44 @@ def test_the_server_install_step_passes_only_when_it_answers(
         {"uv": "exit 0", "curl": _FAKE_CURL},
         {
             "SERVER_VENV": str(tmp_path / "server"),
+            "FAKE_READY": str(tmp_path / "ready"),
             "FAKE_ANSWER": answer,
             "FAKE_CURL_EXIT": str(curl_exit),
         },
     )
 
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    "answer", ['{"session_lifecycle":true}', '{"session_lifecycle":false}'], ids=["passes", "fails"]
+)
+def test_the_server_install_step_shows_the_servers_stderr_without_the_password(
+    tmp_path: Path, answer: str
+) -> None:
+    """What the server printed is what tells a failed step apart, so it is
+    shown either way; the password it printed never is."""
+    _dist(tmp_path, _BOTH_WHEELS)
+    _fake_vantage(tmp_path / "server", _serving(_ADMIN_CREATED, _LISTENING))
+    script = _step_script(_INSTALLS, "Assert vantage[server] serves")
+
+    result = _run_step(
+        script,
+        tmp_path,
+        {"uv": "exit 0", "curl": _FAKE_CURL},
+        {
+            "SERVER_VENV": str(tmp_path / "server"),
+            "FAKE_READY": str(tmp_path / "ready"),
+            "FAKE_ANSWER": answer,
+            "FAKE_CURL_EXIT": "0",
+        },
+    )
+
+    shown = result.stdout + result.stderr
+    assert _ADMIN_CREATED.removesuffix(_PASSWORD) + "<masked>" in shown
+    assert _LISTENING in shown
+    assert _PASSWORD not in shown
 
 
 # The base install's `python`: `-m pytest` runs $FAKE_SESSION; `-c` prints
