@@ -46,7 +46,9 @@ router, for a path nothing serves or a method a path does not take.
 **The store can be closed by the app's own shutdown.** uvicorn stops on
 SIGTERM -- how a service manager or container runtime stops a server -- by
 shutting the app down and then raising the signal again with its default
-action, which ends the process before any code after the server returns.
+action, which ends the process before any code after the server returns
+(anywhere but as a container's PID 1, which the kernel does not let a
+default action end).
 So `cli.py` asks for `close_store_on_shutdown`, and the store is closed,
 and its write-ahead log folded back into the database file, on every
 graceful stop. Tests leave it off and keep inspecting the store they pass.

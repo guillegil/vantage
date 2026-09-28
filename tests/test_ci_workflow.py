@@ -566,3 +566,401 @@ def test_the_local_recording_step_passes_only_when_the_run_is_stored_where_vanta
     )
 
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+# --- The server image ------------------------------------------------------------
+
+_IMAGE = "image"
+
+# `docker` as the image job calls it. `inspect` answers the template it is
+# given from $FAKE_HEALTH, $FAKE_RUNNING and $FAKE_EXIT; `logs` prints
+# $FAKE_LOGS on stderr, where the server writes its own lines; `exec` prints
+# $FAKE_TOKEN for `vantage token create`, with exit status $FAKE_TOKEN_EXIT,
+# and runs $FAKE_SESSION for the pytest session; `run` lists $FAKE_FILES for
+# `--entrypoint ls` and runs $FAKE_START for a start. Everything else
+# succeeds.
+_FAKE_DOCKER = """\
+case "$1" in
+  inspect)
+    case "$3" in
+      *Health.Status*) echo "$FAKE_HEALTH" ;;
+      *Running*) echo "$FAKE_RUNNING" ;;
+      *ExitCode*) echo "$FAKE_EXIT" ;;
+    esac ;;
+  logs) printf '%s\\n' "$FAKE_LOGS" >&2 ;;
+  exec)
+    case "$*" in
+      *"token create"*) echo "$FAKE_TOKEN"; exit "$FAKE_TOKEN_EXIT" ;;
+      *pytest*) eval "$FAKE_SESSION" ;;
+    esac ;;
+  run)
+    case "$*" in
+      *"--entrypoint ls"*) printf '%s\\n' $FAKE_FILES ;;
+      *) eval "$FAKE_START" ;;
+    esac ;;
+esac
+"""
+# `curl` as the image job calls it: the report without a token gets the
+# status $FAKE_REPORT_STATUS, the capabilities $FAKE_CAPABILITIES with exit
+# status $FAKE_CURL_EXIT, and the run list $FAKE_RUNS, only when it carries
+# the token `vantage token create` printed.
+_FAKE_IMAGE_CURL = """\
+case "$*" in
+  *"-X POST"*) printf '%s' "$FAKE_REPORT_STATUS" ;;
+  */capabilities*) printf '%s' "$FAKE_CAPABILITIES"; exit "$FAKE_CURL_EXIT" ;;
+  */runs*)
+    if [[ "$*" != *"Authorization: Bearer $FAKE_TOKEN"* ]]; then exit 22; fi
+    printf '%s' "$FAKE_RUNS" ;;
+esac
+"""
+_IMAGE_FAKES = {"docker": _FAKE_DOCKER, "curl": _FAKE_IMAGE_CURL, "sleep": "exit 0"}
+_SERVING = {
+    "FAKE_HEALTH": "healthy",
+    "FAKE_RUNNING": "true",
+    "FAKE_EXIT": "0",
+    "FAKE_LOGS": f"{_ADMIN_CREATED}\n{_LISTENING}",
+    "FAKE_TOKEN": "vt_0123456789abcdef",
+    "FAKE_TOKEN_EXIT": "0",
+    "FAKE_SESSION": "echo '1 passed'",
+    "FAKE_FILES": "vantage.db",
+    "FAKE_START": "",
+    "FAKE_REPORT_STATUS": "401",
+    "FAKE_CAPABILITIES": '{"session_lifecycle":true}',
+    "FAKE_CURL_EXIT": "0",
+    "FAKE_RUNS": '{"items":[{"run_id":"r1","recorded_by":"admin"}],"has_more":false}',
+}
+_ONE_RUN = _SERVING["FAKE_RUNS"]
+
+
+def _image_step(tmp_path: Path, step: str, **fake: str) -> subprocess.CompletedProcess[str]:
+    """Replay the image job's `step` against a server that does everything
+    right, but for what `fake` says."""
+    env = {
+        **_SERVING,
+        **fake,
+        "IMAGE": "vantage:ci",
+        "CONTAINER": "vantage-ci",
+        "VOLUME": "vantage-ci-data",
+        "PORT": "8765",
+    }
+    return _run_step(_step_script(_IMAGE, step), tmp_path, _IMAGE_FAKES, env)
+
+
+_STARTED = "Start the image on a fresh volume"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("fake", "passes"),
+    [
+        pytest.param({}, True, id="healthy"),
+        pytest.param(
+            {"FAKE_CAPABILITIES": '{"session_lifecycle": true}'}, True, id="healthy-spaced-json"
+        ),
+        pytest.param({"FAKE_HEALTH": "starting"}, False, id="never-healthy"),
+        pytest.param({"FAKE_HEALTH": "unhealthy", "FAKE_RUNNING": "false"}, False, id="stopped"),
+        pytest.param({"FAKE_CURL_EXIT": "56"}, False, id="port-unreachable"),
+        pytest.param(
+            {"FAKE_CAPABILITIES": '{"session_lifecycle":false}'}, False, id="no-lifecycle"
+        ),
+    ],
+)
+def test_the_image_start_passes_only_once_it_is_healthy_and_answers_on_the_port(
+    tmp_path: Path, fake: dict[str, str], passes: bool
+) -> None:
+    result = _image_step(tmp_path, _STARTED, **fake)
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+_BINDING_WARNING = "Binding to 0.0.0.0 with no user in the database, which ..."
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("logs", "passes"),
+    [
+        pytest.param([_ADMIN_CREATED, _LISTENING], True, id="once"),
+        pytest.param([_LISTENING], False, id="no-admin-created"),
+        pytest.param([_ADMIN_CREATED, _ADMIN_CREATED, _LISTENING], False, id="twice"),
+        pytest.param(
+            [_ADMIN_CREATED.removesuffix(_PASSWORD), _LISTENING], False, id="no-password-shown"
+        ),
+        pytest.param([_ADMIN_CREATED, _BINDING_WARNING, _LISTENING], False, id="wide-bind-warned"),
+        pytest.param(
+            ["Traceback (most recent call last):", _ADMIN_CREATED, _LISTENING],
+            False,
+            id="traceback",
+        ),
+    ],
+)
+def test_the_image_admin_step_passes_only_on_one_password_and_no_warning(
+    tmp_path: Path, logs: list[str], passes: bool
+) -> None:
+    step = "Assert the first start showed the admin's password once"
+
+    result = _image_step(tmp_path, step, FAKE_LOGS="\n".join(logs))
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("status", "passes"),
+    [
+        pytest.param("401", True, id="unauthenticated"),
+        pytest.param("201", False, id="recorded"),
+        pytest.param("422", False, id="validated-first"),
+        pytest.param("000", False, id="no-answer"),
+    ],
+)
+def test_the_image_token_step_passes_only_when_a_report_without_one_is_refused(
+    tmp_path: Path, status: str, passes: bool
+) -> None:
+    result = _image_step(tmp_path, "Assert a report needs a token", FAKE_REPORT_STATUS=status)
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("fake", "passes"),
+    [
+        pytest.param({}, True, id="one-run"),
+        pytest.param({"FAKE_RUNS": '{"items":[],"has_more":false}'}, False, id="none"),
+        pytest.param(
+            {"FAKE_RUNS": _ONE_RUN.replace("]", ',{"run_id":"r2","recorded_by":"admin"}]')},
+            False,
+            id="two",
+        ),
+        pytest.param(
+            {"FAKE_RUNS": _ONE_RUN.replace('"admin"', "null")}, False, id="recorded-by-nobody"
+        ),
+        pytest.param({"FAKE_SESSION": "echo '1 failed'; exit 1"}, False, id="session-fails"),
+        pytest.param({"FAKE_TOKEN": "", "FAKE_TOKEN_EXIT": "1"}, False, id="no-token-made"),
+    ],
+)
+def test_the_image_recording_step_passes_only_on_one_run_the_token_recorded(
+    tmp_path: Path, fake: dict[str, str], passes: bool
+) -> None:
+    result = _image_step(tmp_path, "Assert a token made with docker exec records a run", **fake)
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("fake", "passes"),
+    [
+        pytest.param({}, True, id="no-second-password"),
+        pytest.param(
+            {"FAKE_LOGS": "\n".join([_ADMIN_CREATED, _LISTENING, _ADMIN_CREATED, _LISTENING])},
+            False,
+            id="second-password",
+        ),
+        pytest.param({"FAKE_HEALTH": "starting"}, False, id="never-healthy"),
+        pytest.param({"FAKE_HEALTH": "unhealthy", "FAKE_RUNNING": "false"}, False, id="stopped"),
+    ],
+)
+def test_the_image_restart_step_passes_only_when_no_password_is_shown_again(
+    tmp_path: Path, fake: dict[str, str], passes: bool
+) -> None:
+    result = _image_step(tmp_path, "Assert a restart shows no password", **fake)
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("status", "files", "passes"),
+    [
+        pytest.param("0", "vantage.db", True, id="closed"),
+        pytest.param("143", "vantage.db", False, id="killed-by-its-own-signal"),
+        pytest.param("137", "vantage.db", False, id="killed-after-the-grace-period"),
+        pytest.param(
+            "0", "vantage.db vantage.db-shm vantage.db-wal", False, id="write-ahead-log-left"
+        ),
+        pytest.param("0", "", False, id="nothing-stored"),
+    ],
+)
+def test_the_image_stop_step_passes_only_on_status_0_and_a_closed_store(
+    tmp_path: Path, status: str, files: str, passes: bool
+) -> None:
+    result = _image_step(
+        tmp_path,
+        "Assert docker stop ends it cleanly, with the store closed",
+        FAKE_EXIT=status,
+        FAKE_FILES=files,
+    )
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+_POSTGRES_URL = "postgresql://vantage@127.0.0.1:1/vantage"
+_CONNECTION_REFUSED = (
+    f"vantage: cannot open the database at {_POSTGRES_URL}: connection failed: connection to "
+    'server at "127.0.0.1", port 1 failed: Connection refused'
+)
+_DRIVER_MISSING = "vantage: PostgreSQL needs the postgres extra: pip install 'vantage[postgres]'"
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("start", "passes"),
+    [
+        pytest.param(f"echo '{_CONNECTION_REFUSED}' >&2; exit 1", True, id="refused-to-connect"),
+        pytest.param(f'echo "{_DRIVER_MISSING}" >&2; exit 1', False, id="driver-missing"),
+        pytest.param(
+            "echo 'vantage: /data exists but is not writable by this process' >&2; exit 1",
+            False,
+            id="took-the-volume",
+        ),
+        pytest.param(
+            f"echo 'Traceback (most recent call last):' >&2; echo '{_CONNECTION_REFUSED}' >&2;"
+            " exit 1",
+            False,
+            id="traceback",
+        ),
+        pytest.param("exit 0", False, id="served"),
+    ],
+)
+def test_the_image_postgres_step_passes_only_on_the_refusal_to_connect(
+    tmp_path: Path, start: str, passes: bool
+) -> None:
+    result = _image_step(
+        tmp_path, "Assert VANTAGE_DATABASE points the image at PostgreSQL", FAKE_START=start
+    )
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@needs_bash
+def test_the_image_log_is_shown_without_the_password(tmp_path: Path) -> None:
+    """Shown whether the job passed or not, since it is what tells a failed
+    step apart; the password in it never is."""
+    steps = _jobs(WORKFLOWS / "ci.yml")[_IMAGE]["steps"]
+    (step,) = [s for s in steps if s.get("name", "").startswith("Show")]
+    assert step.get("if") == "always()"
+
+    result = _image_step(tmp_path, step["name"])
+
+    shown = result.stdout + result.stderr
+    assert _ADMIN_CREATED.removesuffix(_PASSWORD) + "<masked>" in shown
+    assert _LISTENING in shown
+    assert _PASSWORD not in shown
+
+
+# What publishes from a step: a registry login or push by any docker
+# command, a buildx push or manifest, a package upload, or an action that
+# does either.
+_PUBLISHING_COMMAND = re.compile(
+    r"\bdocker\b[^\n|;&]*\b(push|login)\b|--push\b|\bimagetools\s+create\b"
+    r"|\buv\s+publish\b|\btwine\s+upload\b|\bpoetry\s+publish\b"
+)
+_PUBLISHING_ACTIONS = (
+    "docker/login-action",
+    "docker/build-push-action",
+    "pypa/gh-action-pypi-publish",
+)
+
+
+def _publishing(name: str, document: dict[str, Any]) -> list[str]:
+    """Every way the workflow `document` could publish: a scope that
+    writes packages (or everything), and each step that logs in, pushes or
+    uploads, or asks an action to push, however the flag is spelt."""
+    offenders = []
+    scopes = [document.get("permissions")] + [
+        job.get("permissions") for job in document["jobs"].values()
+    ]
+    for scope in scopes:
+        if scope == "write-all" or (isinstance(scope, dict) and scope.get("packages") == "write"):
+            offenders.append(f"{name}: writes packages")
+    for job_name, job in document["jobs"].items():
+        for step in job.get("steps", []):
+            label = f"{name}: {job_name}: {step.get('name', step.get('uses', 'a step'))}"
+            if _PUBLISHING_COMMAND.search(str(step.get("run", ""))):
+                offenders.append(label)
+            if str(step.get("uses", "")).startswith(_PUBLISHING_ACTIONS):
+                offenders.append(label)
+            if step.get("with", {}).get("push") not in (None, False, "false"):
+                offenders.append(f"{label}: push")
+    return offenders
+
+
+def test_no_workflow_publishes_anything() -> None:
+    """Nothing is published yet: no step logs in to a registry, pushes an
+    image or uploads a package, and no workflow may write packages."""
+    workflows = sorted(WORKFLOWS.glob("*.yml"))
+    assert workflows, f"no workflows found in {WORKFLOWS}"
+    offenders = [
+        offender
+        for workflow in workflows
+        for offender in _publishing(
+            workflow.name, yaml.safe_load(workflow.read_text(encoding="utf-8"))
+        )
+    ]
+    assert not offenders, "steps that publish:\n" + "\n".join(offenders)
+
+
+def _workflow(step: dict[str, Any], permissions: object = None) -> dict[str, Any]:
+    document: dict[str, Any] = {"jobs": {"image": {"steps": [step]}}}
+    if permissions is not None:
+        document["permissions"] = permissions
+    return document
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        _workflow({"run": "docker push ghcr.io/guillegil/vantage:1"}),
+        _workflow({"run": "docker image push ghcr.io/guillegil/vantage:1"}),
+        _workflow({"run": "docker compose push"}),
+        _workflow({"run": "docker --config /tmp/cfg login ghcr.io -u x --password-stdin"}),
+        _workflow({"run": "docker buildx build --push --tag ghcr.io/guillegil/vantage ."}),
+        _workflow({"run": "docker buildx imagetools create -t ghcr.io/x:1 ghcr.io/x:a"}),
+        _workflow({"run": "uv publish"}),
+        _workflow({"run": "twine upload dist/*"}),
+        _workflow({"uses": "docker/login-action@v3"}),
+        _workflow({"uses": "docker/build-push-action@v6", "with": {"push": True}}),
+        _workflow({"uses": "docker/build-push-action@v6"}),
+        _workflow(
+            {"uses": "some/action@v1", "with": {"push": "${{ github.ref == 'refs/heads/main' }}"}}
+        ),
+        _workflow({"uses": "pypa/gh-action-pypi-publish@release/v1"}),
+        _workflow({"run": "true"}, permissions={"packages": "write"}),
+        _workflow({"run": "true"}, permissions="write-all"),
+    ],
+    ids=[
+        "push",
+        "image-push",
+        "compose-push",
+        "login-after-options",
+        "buildx-push",
+        "imagetools",
+        "uv-publish",
+        "twine",
+        "login-action",
+        "build-push-action",
+        "build-push-action-bare",
+        "push-expression",
+        "pypi-action",
+        "packages-write",
+        "write-all",
+    ],
+)
+def test_the_publishing_guard_catches_every_way_to_publish(document: dict[str, Any]) -> None:
+    assert _publishing("ci.yml", document)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        'docker build --tag "$IMAGE" .',
+        'docker run --rm --volume "$VOLUME:/data" "$IMAGE" user list',
+        'docker logs "$CONTAINER" 2>&1 | grep -c pushed || true',
+        "git push --dry-run origin HEAD",
+    ],
+    ids=["build", "run", "logs-then-grep", "git"],
+)
+def test_the_publishing_guard_passes_what_publishes_nothing(run: str) -> None:
+    assert _publishing("ci.yml", _workflow({"run": run})) == []

@@ -438,6 +438,166 @@ jobs:
             exit 1
           fi
 
+  # The server image, built from this checkout and run as the README runs
+  # it: on a fresh volume, whose first start makes the admin; managed with
+  # `docker exec`; stopped with `docker stop`. Nothing is pushed anywhere.
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      IMAGE: vantage:ci
+      CONTAINER: vantage-ci
+      VOLUME: vantage-ci-data
+      # The runner's end of the published port.
+      PORT: "8765"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build --tag "$IMAGE" .
+
+      - name: Start the image on a fresh volume
+        run: |
+          docker volume create "$VOLUME"
+          docker run --detach --name "$CONTAINER" \
+            --publish "127.0.0.1:$PORT:8765" --volume "$VOLUME:/data" "$IMAGE"
+          # Healthy once the image's own health check has reached the server.
+          health=""
+          for _ in $(seq 150); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER")"
+            if [ "$health" = healthy ]; then
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER")" != true ]; then
+              echo "the container stopped instead of serving" >&2
+              exit 1
+            fi
+            sleep 0.2
+          done
+          if [ "$health" != healthy ]; then
+            echo "the container never became healthy (${health:-no health status})" >&2
+            exit 1
+          fi
+          answer="$(curl -fsS "http://127.0.0.1:$PORT/api/v1/capabilities")"
+          echo "$answer"
+          if ! grep -Eq '"session_lifecycle": ?true' <<<"$answer"; then
+            echo "expected the published port to answer the capabilities" >&2
+            exit 1
+          fi
+
+      - name: Assert the first start showed the admin's password once
+        run: |
+          logs="$(docker logs "$CONTAINER" 2>&1)"
+          created="$(grep -Ec '^vantage: created the user admin; .* Shown this once: [^ ]+$' <<<"$logs" || true)"
+          if [ "$created" != 1 ]; then
+            echo "expected one line saying the first start created the user admin, found $created" >&2
+            exit 1
+          fi
+          # The admin exists before the bind is checked, so serving every
+          # interface of the container warns about nothing.
+          if grep -q 'Binding to' <<<"$logs"; then
+            echo "the server warned that nothing authenticates its requests" >&2
+            exit 1
+          fi
+          if grep -q Traceback <<<"$logs"; then
+            echo "the server printed a traceback" >&2
+            exit 1
+          fi
+
+      - name: Assert a report needs a token
+        run: |
+          status="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            -H 'Content-Type: application/json' --data '{}' \
+            "http://127.0.0.1:$PORT/api/v1/runs")"
+          if [ "$status" != 401 ]; then
+            echo "expected a report without a token to be refused with 401, got $status" >&2
+            exit 1
+          fi
+
+      - name: Assert a token made with docker exec records a run
+        run: |
+          # No -t: a terminal would end the token with a carriage return and
+          # mix in what the command says on stderr.
+          VANTAGE_TOKEN="$(docker exec "$CONTAINER" vantage token create admin --label ci)"
+          export VANTAGE_TOKEN
+          # The image's own pytest and plugin, reporting to the server beside
+          # them; the token is passed by name, never on a command line.
+          docker exec --env VANTAGE_TOKEN --workdir /tmp "$CONTAINER" sh -c '
+            printf "def test_it():\n    assert True\n" > test_it.py &&
+            pytest -p no:cacheprovider --vantage --vantage-server http://127.0.0.1:8765 test_it.py'
+          runs="$(curl -fsS -H "Authorization: Bearer $VANTAGE_TOKEN" \
+            "http://127.0.0.1:$PORT/api/v1/projects/default/runs")"
+          recorded="$(grep -Eo '"recorded_by": ?"admin"' <<<"$runs" | wc -l)"
+          if [ "$recorded" -ne 1 ]; then
+            echo "expected one run recorded by admin, found $recorded" >&2
+            exit 1
+          fi
+
+      - name: Assert a restart shows no password
+        run: |
+          docker restart "$CONTAINER"
+          health=""
+          for _ in $(seq 150); do
+            health="$(docker inspect --format '{{.State.Health.Status}}' "$CONTAINER")"
+            if [ "$health" = healthy ]; then
+              break
+            fi
+            if [ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER")" != true ]; then
+              echo "the container stopped instead of serving" >&2
+              exit 1
+            fi
+            sleep 0.2
+          done
+          if [ "$health" != healthy ]; then
+            echo "the restarted container never became healthy (${health:-no health status})" >&2
+            exit 1
+          fi
+          created="$(docker logs "$CONTAINER" 2>&1 | grep -Ec '^vantage: created the user admin' || true)"
+          if [ "$created" != 1 ]; then
+            echo "expected the restart to add no admin line, found $created in all" >&2
+            exit 1
+          fi
+
+      - name: Assert docker stop ends it cleanly, with the store closed
+        run: |
+          docker stop "$CONTAINER"
+          status="$(docker inspect --format '{{.State.ExitCode}}' "$CONTAINER")"
+          # 137: docker stop gave up waiting for SIGTERM to end it.
+          if [ "$status" != 0 ]; then
+            echo "expected exit status 0 after SIGTERM, got $status" >&2
+            exit 1
+          fi
+          # A closed store has folded its write-ahead log back into the file.
+          left="$(docker run --rm --volume "$VOLUME:/data" --entrypoint ls "$IMAGE" -A /data)"
+          if [ "$left" != vantage.db ]; then
+            echo "expected vantage.db alone on the volume, found:" $left >&2
+            exit 1
+          fi
+
+      # The driver is in the image and the URL comes from the environment:
+      # nothing listens there, so the start ends in the one-line refusal
+      # to connect, never in the one naming the missing postgres extra.
+      - name: Assert VANTAGE_DATABASE points the image at PostgreSQL
+        run: |
+          url=postgresql://vantage@127.0.0.1:1/vantage
+          if out="$(docker run --rm --env "VANTAGE_DATABASE=$url" "$IMAGE" 2>&1)"; then
+            status=0
+          else
+            status=$?
+          fi
+          printf '%s\n' "$out"
+          lines="$(printf '%s\n' "$out" | grep -c . || true)"
+          if [ "$status" -ne 1 ] || [ "$lines" -ne 1 ] \
+            || [[ "$out" != "vantage: cannot open the database at $url: connection failed: "* ]]; then
+            echo "expected exit status 1 and one line refusing to connect to $url" >&2
+            exit 1
+          fi
+
+      - name: Show the server's log without the password
+        if: always()
+        run: |
+          docker logs "$CONTAINER" 2>&1 | sed -E 's/(Shown this once: ).*/\1<masked>/' || true
+
   quality:
     runs-on: ubuntu-latest
     timeout-minutes: 15
