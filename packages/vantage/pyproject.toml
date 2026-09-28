@@ -28,5 +28,13 @@ postgres = ["psycopg[binary]>=3.2", "psycopg-pool>=3.2"]
 [project.scripts]
 vantage = "vantage.service.cli:main"
 
+# The web client's build, written into the package and ignored by git:
+# named here so a wheel or an sdist built with it in place carries it,
+# however the ignore file spells it. A build without it succeeds, and its
+# server answers with a page saying the client is missing.
 [tool.hatch.build.targets.wheel]
 packages = ["src/vantage"]
+artifacts = ["src/vantage/service/client/"]
+
+[tool.hatch.build.targets.sdist]
+artifacts = ["src/vantage/service/client/"]

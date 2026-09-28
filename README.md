@@ -829,6 +829,14 @@ The run list also filters by metadata values; see
 says in `recorded_by` which user's token recorded it, or `null` when none
 did.
 
+Every path outside `/api` belongs to the web client. When the client was
+built into the package, `http://127.0.0.1:8765/`, and any other address
+outside `/api`, answers its page; otherwise each answers `404` with a page
+saying the client is missing and how to build it. The API is served either
+way. Every answer, the API's included, tells browsers not to cache it
+(`Cache-Control: no-store`), not to frame it and not to let another site
+read it, unless it sets its own caching, as the client's files do.
+
 ### Projects
 
 Every run belongs to a project: the one its session names with

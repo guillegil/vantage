@@ -4,8 +4,14 @@
 resolves a `SqliteExecutionStore` and passes it in; tests pass whichever
 store they inspect. This module never imports `vantage.storage.sqlite_store`.
 
-**Mounts `/api/v1` and nothing else.** There is no unversioned route and no
-redirect from one, so an unversioned path answers 404.
+**Mounts `/api/v1`, and the web client's files at every other `GET` and
+`HEAD` path when given one** (`service/web.py`). There is no unversioned
+route and no redirect from one, so an unversioned path under `/api` still
+answers 404, and so does every other path of an app given no client. The
+client is served by middleware, not routes, so the route table the
+interface document is checked against holds the API alone. Every answer
+carries the security headers `SecurityHeaders` adds, outermost of the
+middlewares the app adds.
 
 **No store call runs on the event loop.** A store call blocks -- on the
 disk, on the store's own lock, on another process's write -- and one made on
@@ -64,6 +70,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
@@ -80,6 +87,7 @@ from vantage.service.routes.runs import router as runs_router
 from vantage.service.routes.sections import router as sections_router
 from vantage.service.routes.users import router as users_router
 from vantage.service.slots import PasswordSlots
+from vantage.service.web import SecurityHeaders, WebClient, load_client
 
 # How many password hashes the app computes at once -- two of the
 # threadpool's forty threads and 64 MiB at most -- and how many requests may
@@ -93,6 +101,7 @@ def create_app(
     *,
     grace_period_seconds: float = DEFAULT_GRACE_PERIOD_SECONDS,
     close_store_on_shutdown: bool = False,
+    client: Path | None = None,
 ) -> FastAPI:
     """Build the ASGI app, wired to `store` for every write.
 
@@ -106,6 +115,11 @@ def create_app(
 
     With `close_store_on_shutdown`, the app's shutdown closes `store`,
     off the event loop like every other store call.
+
+    `client` is the directory a build of the web client is in, read once
+    here; one that holds no build serves a page saying so. Without it the
+    app serves no client at all, as every test that builds an app for the
+    API expects, whether or not the client has been built in the checkout.
     """
     grace_period = timedelta(seconds=grace_period_seconds)
     if grace_period <= timedelta(0):
@@ -133,4 +147,8 @@ def create_app(
     app.include_router(members_router, prefix="/api/v1")
     app.include_router(login_router, prefix="/api/v1")
     register_error_handlers(app)
+    if client is not None:
+        app.add_middleware(WebClient, files=load_client(client))
+    # Added last, so it is outermost and sees every answer the others make.
+    app.add_middleware(SecurityHeaders)
     return app

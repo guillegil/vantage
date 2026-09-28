@@ -1283,7 +1283,8 @@ def test_every_created_token_is_declared_and_sent_as_not_to_be_stored(
 ) -> None:
     """The two answers that carry a token, a made one's and a login's, say
     no cache may keep it, in the document and on the wire, and they are the
-    only ones that do."""
+    only ones whose document does. On the wire every other answer says so
+    too, by the default `service/web.py`'s `SecurityHeaders` adds, once."""
     document = _parsed_document()
     store = InMemoryExecutionStore()
     client = TestClient(create_app(store), headers=_admin(store))
@@ -1301,7 +1302,7 @@ def test_every_created_token_is_declared_and_sent_as_not_to_be_stored(
         assert set(created["headers"]) == {"Cache-Control"}, path
         assert response.status_code == 201, path
         assert response.headers["Cache-Control"] == "no-store", path
-    assert "Cache-Control" not in client.get("/api/v1/tokens").headers
+    assert client.get("/api/v1/tokens").headers.get_list("Cache-Control") == ["no-store"]
     headed = {
         (method, path, status)
         for path, operations in document["paths"].items()

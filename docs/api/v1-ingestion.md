@@ -14,7 +14,9 @@ It covers three routes:
 The server serves an OpenAPI document for every route, the read API included,
 at `GET /api/v1/openapi.yaml` (source:
 `packages/vantage/src/vantage/service/openapi/v1.yaml`). Every route is under
-`/api/v1`; nothing answers an unversioned path.
+`/api/v1`. No route answers an unversioned path: under `/api`, and for
+any method but `GET` and `HEAD`, it answers `404`; any other `GET` belongs
+to the server's web client, which answers with its page.
 
 ## Authentication
 
@@ -463,7 +465,7 @@ its run `running`.
 | `403` | `insufficient_role` | The token's user is only a viewer of that project; recording needs the editor role. |
 | `404` | `unknown_run` | A heartbeat for a run never recorded. |
 | `404` | `unknown_project` | A report naming a project the server does not have. |
-| `404` | `not_found` | No route matches the path, unversioned paths included. |
+| `404` | `not_found` | No route matches the path, unversioned `POST`s and paths under `/api` included. |
 | `405` | `method_not_allowed` | The path exists but does not take this method. The `Allow` header lists the ones it takes. |
 | `409` | `foreign_run` | A report or heartbeat of a run another user recorded. |
 | `409` | `project_mismatch` | A report of a run created in another project. |

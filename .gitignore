@@ -8,6 +8,13 @@ __pycache__/
 build/
 dist/
 
+# The web client's dependencies, test output and build, which is written
+# into the vantage package and reaches a wheel through hatch's `artifacts`
+node_modules/
+/web/test-results/
+/web/playwright-report/
+/packages/vantage/src/vantage/service/client/
+
 # Virtual environments
 .venv/
 venv/

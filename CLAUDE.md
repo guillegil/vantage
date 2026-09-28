@@ -106,6 +106,19 @@ its `postgres` extra.
   whatever the database defaults to, and a connection the server closed is
   replaced at once (`live_connection`), not through the pool's own
   backing-off check.
+- **The web client is middleware, not routes** (`service/web.py`).
+  `WebClient` answers `GET` and `HEAD` outside `/api` from a build read
+  into memory when the app is made -- the page, `index.html` verbatim,
+  under `PAGE_POLICY` -- and passes everything else to the router, so it
+  never shadows the API nor joins the interface document's route table.
+  `create_app` serves no client unless given `client=`; only `cli.py`
+  passes it (`CLIENT_DIRECTORY`, imported once it is to serve), so the
+  suite's apps route the API alone whether or not a build exists.
+  `SecurityHeaders`, outermost, adds `Cache-Control: no-store`, a
+  `default-src 'none'; frame-ancestors 'none'` policy, `nosniff` and the
+  framing, referrer and cross-origin headers to every answer that does not
+  set its own; it wraps `send` and never touches a body
+  (no `BaseHTTPMiddleware`).
 - **No U+0000 reaches a store.** The body decoder replaces it (and a lone
   surrogate in reports) with U+FFFD; a lookup value holding it matches
   nothing without asking the store.

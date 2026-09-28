@@ -17,7 +17,7 @@ packages/
     │   ├── storage/               the SQLite adapter, the PostgreSQL one in postgres/
     │   ├── ingestion/             a report validated, converted and stored: the one way in
     │   ├── local/                 runs stored on the test machine, through ingestion
-    │   └── service/               FastAPI app, `vantage` and `vantage push`, OpenAPI document
+    │   └── service/               FastAPI app, `vantage` and `vantage push`, OpenAPI document, web client serving
     └── tests/
 ```
 
@@ -877,11 +877,14 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
 
 ## Request handling and concurrency
 
-`create_app(store, grace_period_seconds=900)` builds the app, mounts the
-`runs`, `read`, `capabilities`, `sections`, `users`, `projects`, `members`
-and `login` routers under `/api/v1`, and
-registers the error handlers. The `vantage` command runs it under Uvicorn, in
-one process.
+`create_app(store, grace_period_seconds=900, client=None)` builds the app,
+mounts the `runs`, `read`, `capabilities`, `sections`, `users`, `projects`,
+`members` and `login` routers under `/api/v1`,
+registers the error handlers, and adds two middlewares, neither of which
+calls the store: `WebClient`, only when given a client directory, and
+`SecurityHeaders`, always (see [The web client](#the-web-client)). The
+`vantage` command runs it under Uvicorn, in one process, with the client
+built into the package.
 
 **No store call runs on the event loop.** A store call blocks, on the disk,
 on the store's lock or on another process's write; made on the loop, it
@@ -1037,12 +1040,100 @@ never forwarded, and a client-chosen key name is echoed only if it looks
 like an identifier. The router's own `404` and
 `405` are reshaped the same way; the `405` keeps its `Allow` header. An
 unexpected exception is not a rejection and becomes Starlette's plain-text
-`500`.
+`500`, answered by Starlette's outermost middleware and so without the
+security headers; its body is a fixed sentence.
 
 **Responses are built field by field**, never mapped from an object. List
 responses come from lean projections with no field that could carry a
 traceback, a `repr` or captured output, and no response model has a field for
 the repository root the plugin sends.
+
+## The web client
+
+`service/web.py` serves the web client's files and adds the headers every
+answer carries. Both are pure-ASGI middlewares, typed with
+`starlette.types`, rather than routes: a `GET`-only catch-all route would
+turn an unversioned `POST /runs` from the router's `404` into a `405`, and
+would join the route table the interface document is checked against,
+which stays the API's alone. Starlette's `BaseHTTPMiddleware` is not used,
+since it reads every answer through a stream of its own; `SecurityHeaders`
+wraps `send` and changes only the `http.response.start` message, so
+`POST /runs` still streams its body under its cap.
+
+**`WebClient` answers `GET` and `HEAD` for every path but `/api` and those
+under it**, and passes every other request to the router, so the API's
+`404` and `405` keep the rejection shape. `load_client` reads the whole
+build into memory once, when the app is made, from `CLIENT_DIRECTORY`
+(`service/client/`, inside the package, where a wheel carries it through
+hatch's `artifacts`, as git ignores it); a request never reads the disk.
+Media types come from a fixed map by suffix (`.js`, `.css`, `.woff2`,
+`.svg`, `.txt`), since `mimetypes` varies by platform; any other file is
+`application/octet-stream`, which `nosniff` keeps a browser from running.
+Every file has a strong ETag, its SHA-256.
+
+| Path | Answer | `Cache-Control` |
+| --- | --- | --- |
+| a file under `/assets/` | its bytes | `public, max-age=31536000, immutable` |
+| any other name under `/assets/` | `404`, plain text, never the page | the default below |
+| another built file (`/fonts/OFL.txt`) | its bytes | `no-cache` |
+| any other path | `index.html`, verbatim, under `PAGE_POLICY` | `no-cache` |
+
+Build names under `/assets/` are hashed and never change, so they are kept
+for a year; a page kept from an older build that asks for a name this one
+lacks fails on it visibly instead of loading the page as a script. The
+page is never templated, so nothing a request carries reaches it; every
+address of the client answers it, so the client routes in the browser and
+a reload works. A matching `If-None-Match` answers `304` with the page's
+own policy and caching, since a cache replaces its copy's headers with a
+`304`'s, and the defaults would leave the kept page unable to run. `HEAD`
+answers the headers and the length without the body.
+
+**The page policy** allows the page's own files and nothing else:
+
+```
+default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types 'none'
+```
+
+No inline script or style, no `unsafe-eval`, no `data:` URL and no other
+host. Style set through the CSSOM, as React's `style` props are, is not
+inline style and is allowed. `require-trusted-types-for 'script'`, with
+`trusted-types 'none'` allowing no policy, makes every string handed to a
+script-injection sink (`innerHTML`, `insertAdjacentHTML`, a script's
+`src`) throw. `form-action
+'none'` holds because forms are submitted by script, so a page whose script
+failed to load can never post a password natively. The app sets no HSTS,
+which the TLS proxy in front of it sets; no `upgrade-insecure-requests`,
+which would break `http://localhost`; and no compression, which would put
+answers carrying tokens within reach of BREACH.
+
+**Without a build** -- `CLIENT_DIRECTORY` missing, or holding no
+`index.html`, as in a checkout where the client was never built --
+every `GET` and `HEAD` outside `/api` answers `404 text/html` with a static
+page, with no script and no style, naming the API, its document, and how
+to build the client. The API is served either way. **`create_app` given no
+`client` adds no `WebClient` at all**: the suite's apps route exactly as
+before, whether or not the checkout holds a build; only `cli.py` passes
+`client=CLIENT_DIRECTORY`, importing it with `create_app`, once it is to
+serve.
+
+**`SecurityHeaders`**, added last and so outermost of the app's own
+middlewares, adds each of these to every answer that has not set it:
+
+| Header | Value |
+| --- | --- |
+| `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'` |
+| `Cache-Control` | `no-store` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `no-referrer` |
+| `X-Frame-Options` | `DENY` |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
+| `Cross-Origin-Resource-Policy` | `same-origin` |
+
+So no API answer, a token's or a run's failure text included, is kept by a
+browser's cache, framed, or read by a page of another origin; the page and
+the built files keep their own `Cache-Control`, and the page its own
+policy. The one answer without them is Starlette's plain-text `500` for an
+unexpected exception, made outside every middleware the app adds.
 
 ## Storage
 
