@@ -59,9 +59,23 @@ class RunVcsResponse(BaseModel):
     dirty: bool | None
 
 
+class OutcomeCountsResponse(BaseModel):
+    """How many of a run's results hold each outcome, every outcome present
+    and zeros included, so a run with no results reads as one. Built field
+    by field in `routes/read.py`."""
+
+    passed: int
+    failed: int
+    error: int
+    skipped: int
+    xfailed: int
+    xpassed: int
+
+
 class RunListItemResponse(BaseModel):
     """One entry of `RunListResponse`. `recorded_by` is the user whose token
-    created the run, `None` for one recorded without a token."""
+    created the run, `None` for one recorded without a token. `counts` may
+    include results a running run stored after the page was read."""
 
     id: str
     started_at: datetime
@@ -71,6 +85,7 @@ class RunListItemResponse(BaseModel):
     presentation: str
     vcs: RunVcsResponse | None
     recorded_by: str | None
+    counts: OutcomeCountsResponse
 
 
 class MetadataHorizonResponse(BaseModel):
@@ -98,7 +113,7 @@ class RunListResponse(BaseModel):
 class RunDetailResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}`. Carries
     `interrupt_reason`, which the lean list entry omits -- the detail path
-    keeps the full record reachable. `recorded_by` is as on
+    keeps the full record reachable. `recorded_by` and `counts` are as on
     `RunListItemResponse`; `project` is the one the run was created in,
     whose history and sections the run is read against."""
 
@@ -112,6 +127,17 @@ class RunDetailResponse(BaseModel):
     vcs: RunVcsResponse | None
     recorded_by: str | None
     project: str
+    counts: OutcomeCountsResponse
+
+
+class RunOutcomesResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/outcomes`: one of
+    pytest's own characters per result -- `.` passed, `F` failed, `E`
+    error, `s` skipped, `x` xfailed, `X` xpassed -- in stored order, the
+    order the plugin reported them. Not paged: about a byte a result, the
+    whole run's shape at once."""
+
+    outcomes: str
 
 
 class MetadataItemResponse(BaseModel):

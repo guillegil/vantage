@@ -32,7 +32,7 @@ from __future__ import annotations
 import functools
 import itertools
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Concatenate, ParamSpec, TypeVar
@@ -436,12 +436,25 @@ class InMemoryExecutionStore:
         )
 
     @_locked
-    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
+    def list_results(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+        offset: int,
+        outcomes: Collection[str] | None = None,
+    ) -> Page[ResultListEntry]:
         # The paginated, lean sibling of `get_results`, with the same
         # clamp/`has_more` mechanism as `list_runs`. Dict insertion order
-        # mirrors the SQLite adapter's `ORDER BY r.id`.
+        # mirrors the SQLite adapter's `ORDER BY r.id`, and the outcomes
+        # narrow the set before it is paged, as its `IN` does.
         page_limit = min(limit, MAX_PAGE_ITEMS)
-        window = self._run_results(execution_id)[offset : offset + page_limit + 1]
+        results = [
+            result
+            for result in self._run_results(execution_id)
+            if outcomes is None or result.outcome in outcomes
+        ]
+        window = results[offset : offset + page_limit + 1]
         has_more = len(window) > page_limit
         items = tuple(ResultListEntry.from_result(result) for result in window[:page_limit])
         return Page(items=items, has_more=has_more)
@@ -543,6 +556,15 @@ class InMemoryExecutionStore:
             (result.identity.file_path, result.outcome)
             for result in self._run_results(execution_id)
         )
+
+    @_locked
+    def count_outcomes(self, execution_ids: Sequence[str]) -> Mapping[str, Mapping[str, int]]:
+        counts: dict[str, dict[str, int]] = {}
+        for run_id in dict.fromkeys(execution_ids):
+            for result in self._run_results(run_id):
+                outcomes = counts.setdefault(run_id, {})
+                outcomes[result.outcome] = outcomes.get(result.outcome, 0) + 1
+        return counts
 
     @_locked
     def create_project(self, name: str, *, created_at: datetime) -> Project:

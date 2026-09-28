@@ -40,7 +40,17 @@ report can carry (`cli.py`). A missing value is shaped by
 
 `list_results` returns a lean `ResultListEntry` per result, never the full
 failure evidence or captured output; `get_result` returns every field of one
-stored `Result`, unbounded.
+stored `Result`, unbounded. `list_results` narrows to the outcomes named by
+a repeated `outcome` parameter, so a client pages through what did not pass
+without reading what did.
+
+A run in the list and on its own carries `counts`, how many of its results
+hold each outcome, read in one store call for the whole page once the page
+is read. Results only grow, and a finished run takes no more, so a run
+finished when the page was read has its final counts; a running one's may
+include results stored since. `/runs/{run_id}/outcomes` gives the run's
+outcomes in stored order, one of pytest's characters each, the input a
+client draws the whole run from.
 
 A project's run list filters by pairs of `metadata_key` and `metadata_value`: two
 parameters rather than one `key=value` string because a value may itself
@@ -66,6 +76,7 @@ cursor for the next one as `next_cursor`.
 from __future__ import annotations
 
 import importlib.resources
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query, Response
@@ -74,7 +85,7 @@ from vantage.core.domain.execution import VcsContext
 from vantage.core.domain.liveness import derive_presentation
 from vantage.core.domain.projection import FailureProjection, VcsProjection
 from vantage.core.domain.projects import Project
-from vantage.core.domain.result import Result
+from vantage.core.domain.result import OUTCOMES, Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
     ExecutionStore,
@@ -94,6 +105,7 @@ from vantage.service.dependencies import get_grace_period, get_store
 from vantage.service.errors import (
     InvalidCursorError,
     InvalidMetadataFilterError,
+    InvalidOutcomeFilterError,
     UnknownResultError,
     UnknownRunError,
 )
@@ -104,6 +116,7 @@ from vantage.service.schemas import (
     MetadataFileResponse,
     MetadataHorizonResponse,
     MetadataItemResponse,
+    OutcomeCountsResponse,
     ResultDetailResponse,
     ResultListItemResponse,
     ResultsResponse,
@@ -111,6 +124,7 @@ from vantage.service.schemas import (
     RunListItemResponse,
     RunListResponse,
     RunMetadataResponse,
+    RunOutcomesResponse,
     RunVcsResponse,
 )
 
@@ -123,6 +137,16 @@ _MAX_OFFSET = 2**63 - 1
 # Each metadata pair is one more index seek in the store's query, so the
 # number a caller may ask for is bounded like any other parameter.
 MAX_METADATA_FILTERS = 16
+
+# pytest's own character for each outcome, as its progress line prints it.
+_OUTCOME_CHARACTERS = {
+    "passed": ".",
+    "failed": "F",
+    "error": "E",
+    "skipped": "s",
+    "xfailed": "x",
+    "xpassed": "X",
+}
 
 # Read once at import time -- the bytes never change while the process runs.
 # Loaded from inside the installed distribution through the
@@ -146,7 +170,22 @@ def _vcs_response(vcs: VcsProjection | VcsContext | None) -> RunVcsResponse | No
     )
 
 
-def _run_list_item(entry: RunListEntry, *, now: datetime, grace: timedelta) -> RunListItemResponse:
+def _outcome_counts(counts: Mapping[str, int]) -> OutcomeCountsResponse:
+    """Field by field, every outcome present: one a run has none of is
+    left out of what the store returns, and is zero here."""
+    return OutcomeCountsResponse(
+        passed=counts.get("passed", 0),
+        failed=counts.get("failed", 0),
+        error=counts.get("error", 0),
+        skipped=counts.get("skipped", 0),
+        xfailed=counts.get("xfailed", 0),
+        xpassed=counts.get("xpassed", 0),
+    )
+
+
+def _run_list_item(
+    entry: RunListEntry, *, counts: Mapping[str, int], now: datetime, grace: timedelta
+) -> RunListItemResponse:
     execution = entry.execution
     return RunListItemResponse(
         id=execution.identity.value,
@@ -159,11 +198,12 @@ def _run_list_item(entry: RunListEntry, *, now: datetime, grace: timedelta) -> R
         ),
         vcs=_vcs_response(entry.vcs),
         recorded_by=entry.recorded_by,
+        counts=_outcome_counts(counts),
     )
 
 
 def _run_detail_response(
-    detail: RunDetail, *, now: datetime, grace: timedelta
+    detail: RunDetail, *, counts: Mapping[str, int], now: datetime, grace: timedelta
 ) -> RunDetailResponse:
     execution = detail.execution
     return RunDetailResponse(
@@ -179,6 +219,7 @@ def _run_detail_response(
         vcs=_vcs_response(execution.vcs),
         recorded_by=detail.recorded_by,
         project=detail.project,
+        counts=_outcome_counts(counts),
     )
 
 
@@ -344,7 +385,8 @@ def list_runs(
     A pair holding U+0000 matches no run. Its key's horizon is that of the
     key with U+0000 replaced by U+FFFD, the text a report carrying the key
     stores, so the store is still asked once, for one snapshot, and never
-    with U+0000."""
+    with U+0000. Each run's `counts` are read after the page, in one more
+    call for all of them."""
     after = _run_key(cursor, offset)
     keys = metadata_key or []
     values = metadata_value or []
@@ -374,8 +416,17 @@ def list_runs(
             page = Page(items=(), has_more=False)
     else:
         page = store.list_runs(project=project.name, limit=limit, offset=offset, after=after)
+    outcome_counts = store.count_outcomes([entry.execution.identity.value for entry in page.items])
     now = datetime.now(timezone.utc)
-    items = [_run_list_item(entry, now=now, grace=grace) for entry in page.items]
+    items = [
+        _run_list_item(
+            entry,
+            counts=outcome_counts.get(entry.execution.identity.value, {}),
+            now=now,
+            grace=grace,
+        )
+        for entry in page.items
+    ]
     next_cursor = None
     if page.has_more:
         last = page.items[-1].execution
@@ -388,12 +439,32 @@ def list_runs(
 @router.get("/runs/{run_id}")
 def get_run_detail(
     detail: RunDetail = Depends(requires_read_run),
+    store: ExecutionStore = Depends(get_store),
     grace: timedelta = Depends(get_grace_period),
 ) -> RunDetailResponse:
     """`GET /api/v1/runs/{run_id}`. An unknown run is the same
     `UnknownRunError` the heartbeat route raises: one rejection shape per
-    kind, not one per route."""
-    return _run_detail_response(detail, now=datetime.now(timezone.utc), grace=grace)
+    kind, not one per route. `counts` is read after the run, as the list
+    reads it after its page."""
+    run_id = detail.execution.identity.value
+    counts = store.count_outcomes([run_id]).get(run_id, {})
+    return _run_detail_response(detail, counts=counts, now=datetime.now(timezone.utc), grace=grace)
+
+
+@router.get("/runs/{run_id}/outcomes")
+def get_run_outcomes(
+    detail: RunDetail = Depends(requires_read_run),
+    store: ExecutionStore = Depends(get_store),
+) -> RunOutcomesResponse:
+    """`GET /api/v1/runs/{run_id}/outcomes`: one character per result, in
+    stored order. Not paged, like the section summary, which reads the same
+    store call: at a byte a result, a run of a hundred thousand tests is
+    100 KB. An unknown run is `UnknownRunError`, from
+    `requires_read_run`."""
+    case_outcomes = store.get_run_case_outcomes(detail.execution.identity.value)
+    return RunOutcomesResponse(
+        outcomes="".join(_OUTCOME_CHARACTERS[outcome] for _file_path, outcome in case_outcomes)
+    )
 
 
 @router.get("/runs/{run_id}/metadata")
@@ -421,12 +492,26 @@ def list_results(
     detail: RunDetail = Depends(requires_read_run),
     limit: int = Query(default=MAX_PAGE_ITEMS, gt=0),
     offset: int = Query(default=0, ge=0, le=_MAX_OFFSET),
+    outcome: list[str] | None = Query(default=None),
     store: ExecutionStore = Depends(get_store),
 ) -> ResultsResponse:
     """`GET /api/v1/runs/{run_id}/results`. An unknown `run_id` is `404`,
     consistent with `get_run_detail`, decided by `requires_read_run`
-    before the page is asked for."""
-    page = store.list_results(detail.execution.identity.value, limit=limit, offset=offset)
+    before the page is asked for.
+
+    Each `outcome` given keeps the results holding it, and `limit`,
+    `offset` and `has_more` then page over those alone. A word that is not
+    an outcome is refused rather than matching nothing, so a misspelt
+    filter never reads as a run where everything passed. It is checked
+    here rather than by the parameter's type, so `fields` names
+    `query.outcome` whichever repetition is at fault, and the sentence
+    never repeats the word."""
+    wanted = None if outcome is None else frozenset(outcome)
+    if wanted is not None and not wanted <= OUTCOMES:
+        raise InvalidOutcomeFilterError()
+    page = store.list_results(
+        detail.execution.identity.value, limit=limit, offset=offset, outcomes=wanted
+    )
     items = [_result_item(entry) for entry in page.items]
     return ResultsResponse(items=items, has_more=page.has_more)
 

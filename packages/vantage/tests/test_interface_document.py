@@ -96,6 +96,7 @@ from vantage.service.schemas import (
     MetadataFileResponse,
     MetadataHorizonResponse,
     MetadataItemResponse,
+    OutcomeCountsResponse,
     PasswordChangeRequest,
     PasswordSetRequest,
     ProjectCreateRequest,
@@ -109,6 +110,7 @@ from vantage.service.schemas import (
     RunListItemResponse,
     RunListResponse,
     RunMetadataResponse,
+    RunOutcomesResponse,
     RunSectionSummaryResponse,
     RunVcsResponse,
     SectionListResponse,
@@ -362,6 +364,7 @@ def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None
         (("GET", "/runs/{run_id}"), lambda: client.get(run)),
         (("GET", "/runs/{run_id}/metadata"), lambda: client.get(f"{run}/metadata")),
         (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{run}/results")),
+        (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{run}/outcomes")),
         (
             ("GET", "/runs/{run_id}/result"),
             lambda: client.get(f"{run}/result", params={"node_id": node_id}),
@@ -577,6 +580,8 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
             ("GET", "/runs/{run_id}/results"),
             lambda: client.get(f"{known_shape}/results", params={"limit": 0}),
         ),
+        (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{known_shape}/outcomes")),
+        (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{malformed}/outcomes")),
         (
             ("GET", "/runs/{run_id}/result"),
             lambda: client.get(f"{known_shape}/result", params=node),
@@ -1031,6 +1036,7 @@ def _access_requests(
         ("GET", "/runs/{run_id}"): lambda: client.get(run, headers=headers),
         ("GET", "/runs/{run_id}/metadata"): lambda: client.get(f"{run}/metadata", headers=headers),
         ("GET", "/runs/{run_id}/results"): lambda: client.get(f"{run}/results", headers=headers),
+        ("GET", "/runs/{run_id}/outcomes"): lambda: client.get(f"{run}/outcomes", headers=headers),
         ("GET", "/runs/{run_id}/result"): lambda: client.get(
             f"{run}/result", params=node, headers=headers
         ),
@@ -1550,10 +1556,12 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "Acknowledgement": Acknowledgement,
     "HeartbeatAcknowledgement": HeartbeatAcknowledgement,
     "RunVcs": RunVcsResponse,
+    "OutcomeCounts": OutcomeCountsResponse,
     "RunListItem": RunListItemResponse,
     "RunListResponse": RunListResponse,
     "MetadataHorizon": MetadataHorizonResponse,
     "RunDetailResponse": RunDetailResponse,
+    "RunOutcomesResponse": RunOutcomesResponse,
     "MetadataItem": MetadataItemResponse,
     "MetadataFile": MetadataFileResponse,
     "RunMetadataResponse": RunMetadataResponse,

@@ -82,16 +82,32 @@ paths:
       operationId: list_results
       tags: [read]
       summary: Page through one run's results.
+      description: "Results come in stored order, the order the plugin reported them. outcome, repeated once per outcome wanted -- ?outcome=failed&outcome=error&outcome=xpassed -- keeps only the results holding one of them, and limit, offset and has_more page over those alone."
       parameters:
         - $ref: '#/components/parameters/run_id'
         - $ref: '#/components/parameters/limit'
         - $ref: '#/components/parameters/offset'
+        - {name: outcome, in: query, required: false, description: "Only results with one of these outcomes; absent, every result.", schema: {type: array, items: {type: string, enum: [passed, failed, error, skipped, xfailed, xpassed]}}}
       responses:
         "200": {description: A page of results., content: {application/json: {schema: {$ref: '#/components/schemas/ResultsResponse'}}}}
         "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
         "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
         "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
-        "422": {description: "run_id is not 32 lowercase hex characters; or, once the run is found and the caller may read it, limit below 1 or offset out of range -- not a page (invalid_parameter).", content: *rejection}
+        "422": {description: "run_id is not 32 lowercase hex characters; or, once the run is found and the caller may read it, limit below 1 or offset out of range -- not a page -- or an outcome that is not one of the six, whose fields is [query.outcome] (invalid_parameter).", content: *rejection}
+  /runs/{run_id}/outcomes:
+    get:
+      operationId: get_run_outcomes
+      tags: [read]
+      summary: Every outcome of one run, in the order the plugin reported them.
+      description: "One of pytest's own characters per result, in stored order: . passed, F failed, E error, s skipped, x xfailed, X xpassed. Stored order is the order the plugin reported results, which is the order they ran in; under pytest-xdist the workers' results interleave. Not paged: a byte a result. A run still running has none until its results are reported."
+      parameters:
+        - $ref: '#/components/parameters/run_id'
+      responses:
+        "200": {description: The run's outcomes., content: {application/json: {schema: {$ref: '#/components/schemas/RunOutcomesResponse'}}}}
+        "401": {description: "No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated).", content: *rejection}
+        "403": {description: "The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request).", content: *rejection}
+        "404": {description: No run with that id has been recorded (unknown_run)., content: *rejection}
+        "422": {description: run_id is not 32 lowercase hex characters (invalid_parameter)., content: *rejection}
   /runs/{run_id}/result:
     get:
       operationId: get_result
@@ -626,10 +642,17 @@ components:
       type: object
       required: [commit, branch, commit_subject, commit_subject_truncated, dirty]
       properties: {commit: {type: [string, "null"]}, branch: {type: [string, "null"]}, commit_subject: {type: [string, "null"]}, commit_subject_truncated: {type: boolean}, dirty: {type: [boolean, "null"]}}
+    # Every outcome is present, zeros included. A running run's counts may
+    # include results stored after its page was read; a finished run's are
+    # final.
+    OutcomeCounts:
+      type: object
+      required: [passed, failed, error, skipped, xfailed, xpassed]
+      properties: {passed: {type: integer}, failed: {type: integer}, error: {type: integer}, skipped: {type: integer}, xfailed: {type: integer}, xpassed: {type: integer}}
     RunListItem:
       type: object
-      required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs, recorded_by]
-      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}}
+      required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs, recorded_by, counts]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}, counts: {$ref: '#/components/schemas/OutcomeCounts'}}
     # One per distinct filtered key, in the order first given. `predating`
     # equals the total run count when no run ever carried `key`.
     MetadataHorizon:
@@ -645,8 +668,14 @@ components:
     # reachable.
     RunDetailResponse:
       type: object
-      required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs, recorded_by, project]
-      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}, project: {type: string, description: "The project the run was created in."}}
+      required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs, recorded_by, project, counts]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}, project: {type: string, description: "The project the run was created in."}, counts: {$ref: '#/components/schemas/OutcomeCounts'}}
+    # One character per result, in stored order: . F E s x X for passed,
+    # failed, error, skipped, xfailed and xpassed.
+    RunOutcomesResponse:
+      type: object
+      required: [outcomes]
+      properties: {outcomes: {type: string, pattern: '^[.FEsxX]*$'}}
     # `source_file` names the declared file of a `file` key and is null for a
     # `session` one; `value` is null unless `status` is `captured`; `name`
     # is the display name the run's declaration gave the key.

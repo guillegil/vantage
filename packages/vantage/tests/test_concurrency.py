@@ -290,6 +290,8 @@ def test_every_read_returns_rather_than_waiting_on_the_stores_own_lock(tmp_path:
         ),
         partial(store.list_settings, "test_sections", project=DEFAULT_PROJECT),
         partial(store.get_run_case_outcomes, run_id),
+        partial(store.count_outcomes, [run_id]),
+        partial(store.list_results, run_id, limit=10, offset=0, outcomes=["passed"]),
         partial(store.get_project, DEFAULT_PROJECT),
         store.list_projects,
     ]
@@ -581,6 +583,7 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "get_run_detail": ("GET", f"/api/v1/runs/{_HELD_RUN}", {}, "get_run_detail"),
     "get_run_metadata": ("GET", f"/api/v1/runs/{_HELD_RUN}/metadata", {}, "get_run_metadata"),
     "list_results": ("GET", f"/api/v1/runs/{_HELD_RUN}/results", {}, "get_run_detail"),
+    "get_run_outcomes": ("GET", f"/api/v1/runs/{_HELD_RUN}/outcomes", {}, "get_run_detail"),
     "get_result": (
         "GET",
         f"/api/v1/runs/{_HELD_RUN}/result",
@@ -700,6 +703,19 @@ _ROLE_LOOKUPS: dict[str, tuple[str, str, dict[str, Any], str]] = {
     ),
 }
 
+# A run's counts and its outcomes are read by the route itself, after the
+# page or the run is found, so that later call is held too.
+_ROUTE_READS: dict[str, tuple[str, str, dict[str, Any], str]] = {
+    "list_runs-counts": ("GET", "/api/v1/projects/default/runs", {}, "count_outcomes"),
+    "get_run_detail-counts": ("GET", f"/api/v1/runs/{_HELD_RUN}", {}, "count_outcomes"),
+    "get_run_outcomes-outcomes": (
+        "GET",
+        f"/api/v1/runs/{_HELD_RUN}/outcomes",
+        {},
+        "get_run_case_outcomes",
+    ),
+}
+
 
 def test_every_operation_that_reads_the_store_is_held_below() -> None:
     """The table is checked against the document, so a route added later
@@ -738,8 +754,13 @@ def _hold(store: InMemoryExecutionStore, method: str) -> tuple[threading.Event, 
 
 @pytest.mark.parametrize(
     ("method", "path", "request_kwargs", "held"),
-    [*_STORE_ROUTES.values(), *_PROJECT_LOOKUPS.values(), *_ROLE_LOOKUPS.values()],
-    ids=[*_STORE_ROUTES, *_PROJECT_LOOKUPS, *_ROLE_LOOKUPS],
+    [
+        *_STORE_ROUTES.values(),
+        *_PROJECT_LOOKUPS.values(),
+        *_ROLE_LOOKUPS.values(),
+        *_ROUTE_READS.values(),
+    ],
+    ids=[*_STORE_ROUTES, *_PROJECT_LOOKUPS, *_ROLE_LOOKUPS, *_ROUTE_READS],
 )
 def test_a_held_store_call_holds_up_no_other_request(
     method: str, path: str, request_kwargs: dict[str, Any], held: str, cheap_passwords: None

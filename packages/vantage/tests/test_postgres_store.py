@@ -976,6 +976,11 @@ def test_a_lookup_by_a_value_holding_nul_matches_nothing(
         == ()
     )
     assert postgres_store.get_run_case_outcomes(_RUN + nul) == ()
+    assert postgres_store.count_outcomes([_RUN + nul]) == {}
+    assert postgres_store.count_outcomes([_RUN + nul, _RUN]) == {_RUN: {"passed": 1}}
+    assert (
+        postgres_store.list_results(_RUN, limit=10, offset=0, outcomes=["passed" + nul]).items == ()
+    )
     assert postgres_store.touch_last_contact(_RUN + nul, now) is False
     assert postgres_store.list_settings(nul, project=DEFAULT_PROJECT) == ()
     assert postgres_store.delete_setting("ns", nul, project=DEFAULT_PROJECT) is False

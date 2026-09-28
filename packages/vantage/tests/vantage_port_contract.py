@@ -1534,6 +1534,59 @@ class ExecutionStoreContract:
         assert len(next_page.items) == 2
         assert next_page.has_more is False
 
+    def test_list_results_narrowed_to_outcomes_keeps_order_and_pages_over_them(
+        self, store: ExecutionStore
+    ) -> None:
+        """The outcomes narrow the set before it is paged: `has_more` and
+        `offset` count the matching results alone, which keep their stored
+        order."""
+        execution = _execution("a" * 32)
+        outcomes = ("failed", "passed", "error", "passed", "xpassed", "skipped", "failed")
+        store.record_session(
+            execution,
+            results=tuple(
+                _result(f"t.py::test_{letter}", outcome=outcome)
+                for letter, outcome in zip("gfedcba", outcomes)
+            ),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
+        run_id = execution.identity.value
+        not_passing = {"failed", "error", "xpassed"}
+
+        first = store.list_results(run_id, limit=3, offset=0, outcomes=not_passing)
+        rest = store.list_results(run_id, limit=3, offset=3, outcomes=not_passing)
+
+        assert [entry.identity.node_id for entry in first.items] == [
+            "t.py::test_g",
+            "t.py::test_e",
+            "t.py::test_c",
+        ]
+        assert first.has_more is True
+        assert [(entry.identity.node_id, entry.outcome) for entry in rest.items] == [
+            ("t.py::test_a", "failed")
+        ]
+        assert rest.has_more is False
+
+    def test_list_results_narrowed_to_no_outcome_it_holds_is_empty(
+        self, store: ExecutionStore
+    ) -> None:
+        """An empty collection keeps nothing, as does a word no result can
+        hold; only `None` leaves the page unfiltered."""
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution,
+            results=(_result("t.py::test_a"), _result("t.py::test_b", outcome="failed")),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
+        run_id = execution.identity.value
+
+        for outcomes in ((), ("xfailed",), ("flaky",)):
+            page = store.list_results(run_id, limit=10, offset=0, outcomes=outcomes)
+            assert (page.items, page.has_more) == ((), False), outcomes
+        assert len(store.list_results(run_id, limit=10, offset=0, outcomes=None).items) == 2
+
     def test_list_results_empty_for_a_run_with_no_results(self, store: ExecutionStore) -> None:
         execution = _execution("a" * 32)
         store.record_session(
@@ -1950,6 +2003,114 @@ class ExecutionStoreContract:
         outcomes = store.get_run_case_outcomes(execution.identity.value)
 
         assert sorted(outcomes) == sorted([("t.py", "passed"), ("t.py", "failed")])
+
+    def test_get_run_case_outcomes_come_in_the_order_the_results_were_stored(
+        self, store: ExecutionStore
+    ) -> None:
+        """Stored order is the order the plugin reported them, which a
+        client draws the run in -- neither node-id nor file order, which an
+        index on the run's results could otherwise hand back."""
+        execution = _execution("c" * 32)
+        results = (
+            _result("z.py::test_z", outcome="failed"),
+            _result("a.py::test_b", outcome="passed"),
+            _result("m.py::test_a", outcome="skipped"),
+            _result("a.py::test_a", outcome="error"),
+        )
+        store.record_session(
+            execution,
+            results=results,
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
+
+        assert store.get_run_case_outcomes(execution.identity.value) == (
+            ("z.py", "failed"),
+            ("a.py", "passed"),
+            ("m.py", "skipped"),
+            ("a.py", "error"),
+        )
+
+    # -- count_outcomes --
+
+    def test_count_outcomes_of_no_ids_is_empty(self, store: ExecutionStore) -> None:
+        assert store.count_outcomes([]) == {}
+
+    def test_count_outcomes_leaves_out_an_unknown_id_and_a_run_without_results(
+        self, store: ExecutionStore
+    ) -> None:
+        execution = _execution("a" * 32)
+        store.record_session(
+            execution, results=(), received_at=datetime.now(timezone.utc), project=DEFAULT_PROJECT
+        )
+
+        assert store.count_outcomes([execution.identity.value, "f" * 32]) == {}
+
+    def test_count_outcomes_counts_each_outcome_of_one_run(self, store: ExecutionStore) -> None:
+        execution = _execution("a" * 32)
+        outcomes = ("passed", "failed", "passed", "xfailed", "passed", "error")
+        store.record_session(
+            execution,
+            results=tuple(
+                _result(f"t.py::test_{i}", outcome=outcome) for i, outcome in enumerate(outcomes)
+            ),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
+
+        assert store.count_outcomes([execution.identity.value]) == {
+            execution.identity.value: {"passed": 3, "failed": 1, "xfailed": 1, "error": 1}
+        }
+
+    def test_count_outcomes_takes_more_ids_than_one_statement_binds(
+        self, store: ExecutionStore
+    ) -> None:
+        """A thousand unknown ids between two runs, the first and the last
+        asked for: both are counted, wherever the ids are split."""
+        first, last = _execution("a" * 32), _execution("b" * 32)
+        for execution in (first, last):
+            store.record_session(
+                execution,
+                results=(_result("t.py::test_a"),),
+                received_at=datetime.now(timezone.utc),
+                project=DEFAULT_PROJECT,
+            )
+        unknown = [f"{i:032x}" for i in range(1, 1001)]
+
+        counts = store.count_outcomes([first.identity.value, *unknown, last.identity.value])
+
+        assert counts == {
+            first.identity.value: {"passed": 1},
+            last.identity.value: {"passed": 1},
+        }
+
+    def test_count_outcomes_keeps_two_runs_apart(self, store: ExecutionStore) -> None:
+        """Two runs of the same tests, in two projects, sharing an outcome,
+        asked for together and with one id repeated: each has only its own
+        results."""
+        store.create_project("firmware", created_at=datetime.now(timezone.utc))
+        first, second = _execution("a" * 32), _execution("b" * 32)
+        store.record_session(
+            first,
+            results=(_result("t.py::test_a"), _result("t.py::test_b", outcome="failed")),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
+        store.record_session(
+            second,
+            results=(_result("t.py::test_a", outcome="skipped"), _result("t.py::test_b")),
+            received_at=datetime.now(timezone.utc),
+            project="firmware",
+        )
+
+        counts = store.count_outcomes(
+            [second.identity.value, first.identity.value, second.identity.value]
+        )
+
+        assert counts == {
+            first.identity.value: {"passed": 1, "failed": 1},
+            second.identity.value: {"skipped": 1, "passed": 1},
+        }
 
     def test_recording_metadata_persists_both_tables(
         self, store: ExecutionStore, stored_metadata: StoredMetadata

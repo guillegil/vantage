@@ -187,6 +187,18 @@ class InvalidCursorError(InvalidParameterError):
         )
 
 
+class InvalidOutcomeFilterError(InvalidParameterError):
+    """An `outcome` of `GET /api/v1/runs/{run_id}/results` is not one of
+    the six outcomes a result can have. The sentence names the six, never
+    the word sent."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "outcome must be one of passed, failed, error, skipped, xfailed and xpassed.",
+            ["query.outcome"],
+        )
+
+
 class UnknownRunError(RejectionError):
     """No run matches the `run_id` in a heartbeat or read path.
 
@@ -824,6 +836,7 @@ __all__ = [
     "InvalidLoginRequestError",
     "InvalidMemberRequestError",
     "InvalidMetadataFilterError",
+    "InvalidOutcomeFilterError",
     "InvalidParameterError",
     "InvalidPasswordRequestError",
     "InvalidProjectRequestError",

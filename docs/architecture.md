@@ -724,7 +724,7 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
     the `Project`.
   - `_run_access(authorizes, role)` builds the dependency of every route
     with `{run_id}` in its path: `requires_read_run` (viewer: a run's
-    detail, metadata, results, one result and section summary) and
+    detail, metadata, results, outcomes, one result and section summary) and
     `requires_record_run` (editor: the heartbeat). It takes the caller as
     a sub-dependency and the run id as its own path parameter: FastAPI
     resolves sub-dependencies before a dependant's own parameters, so a
@@ -1296,6 +1296,23 @@ which keeps SQLite, with no statistics since nothing runs `ANALYZE`, from
 choosing that index for them: it would scan every run of the project and
 probe the metadata for each, where the key/value index finds the few runs
 that hold a pair. `test_sqlite_store.py` pins the plans.
+
+**A run's results are read in stored order**, by `result.id`: the order
+they were recorded in, which is the order the plugin reported them, and so
+the order they ran in, interleaved across workers under xdist.
+`list_results`, with or without its outcome filter, and
+`get_run_case_outcomes`, which the section summary and
+`/runs/{run_id}/outcomes` read, both order by it; SQLite's
+`UNIQUE (run_id, node_id)` index would otherwise hand back node-id order
+whenever the planner chose it. The filter binds only words in `OUTCOMES`,
+since no stored row holds any other. `count_outcomes` counts a whole page of
+runs in one `GROUP BY run_id, outcome` along `idx_result_run_id`
+(`run_id = ANY(...)` along `result_run_id` in PostgreSQL), and leaves out a
+run with no result, which the route answers with zeros. It is read after
+the page, not in the page's snapshot, which costs nothing: results only
+grow and a finished run takes no more, so a run finished when the page was
+read has its final counts, and a running one's may include results stored
+since.
 
 ### PostgreSQL
 

@@ -801,7 +801,8 @@ side:
 | `GET /api/v1/projects/{project}/runs` | The project's runs, newest first, each `running`, `finished`, `interrupted` or `abandoned` |
 | `GET /api/v1/runs/{run_id}` | One run, and the project it belongs to |
 | `GET /api/v1/runs/{run_id}/metadata` | One run's metadata, from declared files and from the session, and each declared file's status |
-| `GET /api/v1/runs/{run_id}/results` | One run's results, with a short failure summary |
+| `GET /api/v1/runs/{run_id}/results` | One run's results in the order reported, with a short failure summary; `?outcome=failed&outcome=error` keeps only those |
+| `GET /api/v1/runs/{run_id}/outcomes` | Every outcome of one run in the order reported, one of pytest's characters each (`.` `F` `E` `s` `x` `X`), unpaged |
 | `GET /api/v1/runs/{run_id}/result?node_id=...` | One result in full, failure text included |
 | `GET /api/v1/projects/{project}/tests/history?node_id=...` | One test across the project's runs, newest first |
 | `GET`, `POST`, `DELETE /api/v1/projects/{project}/config/sections` | The project's named file-path prefixes that group results |
@@ -827,7 +828,10 @@ GET /api/v1/projects/default/runs?limit=50&cursor=MjAyNi0wOS0yN1QwODowMDowMC4...
 The run list also filters by metadata values; see
 [Reading it back](#reading-it-back). Each run, in the list and on its own,
 says in `recorded_by` which user's token recorded it, or `null` when none
-did.
+did, and in `counts` how many of its results passed, failed, errored,
+were skipped, xfailed and xpassed, every one present, zeros included.
+The plugin reports results as the session finishes, so a running run
+counts none, or only some, until then; a finished run's counts are final.
 
 Every path outside `/api` belongs to the web client. When the client was
 built into the package, `http://127.0.0.1:8765/`, and any other address
