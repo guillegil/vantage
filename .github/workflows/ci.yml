@@ -250,7 +250,8 @@ jobs:
   # dependency and never drags the server in. `vantage` brings the plugin,
   # Pydantic and PyYAML to store runs locally, and no web framework: without
   # the server extra, serving is refused in one line naming it while
-  # `vantage push` still runs. `vantage[server]` serves.
+  # `vantage push` still runs. `vantage[server]` serves, having given its
+  # fresh database the admin `admin` in one line on stderr.
   clean-environment-install:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -403,9 +404,17 @@ jobs:
           plugin_wheel="$(ls dist/pytest_vantage-*.whl)"
           uv pip install --python "$SERVER_VENV/bin/python" \
             "vantage[server] @ file://$PWD/$vantage_wheel" "$plugin_wheel"
-          "$SERVER_VENV/bin/vantage" --database "$(mktemp -d)/vantage.db" --port 8765 &
+          # A fresh database of the server's own: its first start gives it
+          # the admin `admin` and prints the password once on stderr, before
+          # it answers anything.
+          log="$(mktemp)"
+          "$SERVER_VENV/bin/vantage" --database "$(mktemp -d)/vantage.db" --port 8765 2>"$log" &
           server=$!
-          trap 'kill "$server" 2>/dev/null || true' EXIT
+          # The server's stderr is shown however the step ends, with the
+          # password masked: a throwaway server's, but a log is no place for
+          # one.
+          trap 'kill "$server" 2>/dev/null || true
+            sed -E "s/(Shown this once: ).*/\1<masked>/" "$log" || true' EXIT
           answer=""
           for _ in $(seq 150); do
             if answer="$(curl -fs http://127.0.0.1:8765/api/v1/capabilities)"; then
@@ -421,6 +430,11 @@ jobs:
           echo "$answer"
           if ! grep -Eq '"session_lifecycle": ?true' <<<"$answer"; then
             echo "expected vantage[server] to answer its capabilities" >&2
+            exit 1
+          fi
+          created="$(grep -Ec '^vantage: created the user admin; .* Shown this once: [^ ]+$' "$log" || true)"
+          if [ "$created" != 1 ]; then
+            echo "expected one line saying the first start created the user admin, found $created" >&2
             exit 1
           fi
 

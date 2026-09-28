@@ -128,8 +128,8 @@ def _refusal_reason(code: int, error: object, *, token: str | None) -> str | Non
         if token is None:
             return "the server requires a token: set VANTAGE_TOKEN to one with the record scope"
         return (
-            "the server does not accept the token in VANTAGE_TOKEN: it is unknown or revoked, "
-            "or its user is disabled"
+            "the server does not accept the token in VANTAGE_TOKEN: it is unknown, revoked or "
+            "expired, or its user is disabled"
         )
     if error == _INSUFFICIENT_SCOPE:
         return "the token in VANTAGE_TOKEN does not grant the record scope"

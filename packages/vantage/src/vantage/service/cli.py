@@ -39,11 +39,25 @@ first, and the driver's own logging is silenced while the store opens.
 raises the signal again with its default action, which ends the process
 inside `Server.run`, so a `finally` here never runs on that path.
 
+**A database of the server's own starts with an admin.** Before serving,
+a database with no user gets the admin `admin`, with a random password
+printed once, on one stderr line, by the start whose write created it
+(`create_first_admin`): so a server never serves its own database open. A
+database pytest-vantage's local store made (`meta.origin`) is the
+exception, served open, as it holds one person's runs, until its first
+`vantage user add`. The line is printed only once the user is stored, so a
+printed password is always the stored one, and never through `logging`,
+whose handlers could copy it anywhere. A crash between the two leaves an
+admin nobody knows the password of, which `vantage user password admin`
+recovers; a user made before the first start keeps any password out of
+the log.
+
 **Network exposure.** Binding wider than the loopback default, to a
 database with no user, warns that nothing authenticates the requests. The
 default warns about nothing, and neither does a database with users, whose
 server requires a token: a warning on every normal start trains people to
-ignore the one that matters.
+ignore the one that matters. Since the server gives its own databases a
+user, only a database the local store made can warn.
 """
 
 from __future__ import annotations
@@ -55,6 +69,7 @@ import os
 import socket
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, NoReturn
 
@@ -69,6 +84,7 @@ from vantage.core.config.resolution import (
     ServerConfigError,
     resolve_server_config,
 )
+from vantage.core.domain.passwords import hash_password, new_password
 from vantage.core.ports.storage import ExecutionStore
 from vantage.storage.sqlite_store import SqliteExecutionStore
 from vantage.storage.version import SchemaVersionError
@@ -125,10 +141,47 @@ def warn_if_bound_wide(host: str, *, access_required: bool) -> None:
     requires a token."""
     if host != _LOOPBACK and not access_required:
         _LOGGER.warning(
-            "Binding to %s with no user in the database: nothing authenticates requests, so "
-            "anyone who can route to this host can read and write everything. Add one with "
-            "vantage user add NAME --admin, and the server requires a token.",
+            "Binding to %s with no user in the database, which pytest-vantage's local store "
+            "made: nothing authenticates requests, so anyone who can route to this host can "
+            "read and write everything. Add one with vantage user add NAME --admin, and the "
+            "server requires a token.",
             host,
+        )
+
+
+FIRST_ADMIN = "admin"
+"""The user `create_first_admin` makes."""
+
+
+def create_first_admin(store: ExecutionStore, database: DatabaseTarget) -> None:
+    """Give the database the admin `FIRST_ADMIN`, with a fresh random
+    password printed once on stderr, if it has no user and the local store
+    did not make it; or refuse in one line. The store decides, in one
+    write, so of two servers starting on one new database one creates the
+    user and prints its password; a database with a user skips the hash."""
+    try:
+        if store.access_required():
+            return
+        password = new_password()
+        created = store.create_first_admin(
+            FIRST_ADMIN,
+            password_hash=hash_password(password),
+            created_at=datetime.now(timezone.utc),
+        )
+    except Exception as exc:
+        if isinstance(database, PostgresTarget):
+            shown, detail = redacted(database.url), _driver_detail(exc, database.url)
+        else:
+            shown, detail = str(database.path), " ".join(str(exc).split()) or type(exc).__name__
+        _refuse(f"cannot create the user {FIRST_ADMIN} in {shown}: {detail}")
+    if created is not None:
+        # Password last, so copying it picks up nothing else.
+        print(
+            f"vantage: created the user {FIRST_ADMIN}; change its password at once "
+            f"(vantage user password {FIRST_ADMIN}, or POST /api/v1/password). "
+            f"Shown this once: {password}",
+            file=sys.stderr,
+            flush=True,
         )
 
 
@@ -321,9 +374,9 @@ def _serve(app: FastAPI, listener: socket.socket, config: ServerConfig) -> None:
 def main(argv: list[str] | None = None) -> None:
     """`vantage user ...`, `vantage token ...` and `vantage project ...`
     manage users, tokens and projects, and `vantage push ...` sends the
-    queued runs. Anything else serves:
-    resolve configuration, refuse anything unusable, warn on a wide bind,
-    serve, then close."""
+    queued runs. Anything else serves: resolve configuration, refuse
+    anything unusable, give a database of the server's own its first admin,
+    warn on a wide bind, serve, then close."""
     arguments = sys.argv[1:] if argv is None else argv
     if arguments[:1] in (["user"], ["token"], ["project"]):
         from vantage.service import manage
@@ -370,6 +423,7 @@ def main(argv: list[str] | None = None) -> None:
         raise
 
     try:
+        create_first_admin(store, config.database)
         # Warn only once the port and the database are both held: a refused
         # start makes no bind to warn about.
         warn_if_bound_wide(config.host, access_required=store.access_required())
@@ -385,7 +439,9 @@ def main(argv: list[str] | None = None) -> None:
 
 
 __all__ = [
+    "FIRST_ADMIN",
     "DatabaseDirectoryNotWritableError",
+    "create_first_admin",
     "ensure_database_directory_writable",
     "home_directory",
     "main",

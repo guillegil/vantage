@@ -53,6 +53,7 @@ from typing import TypeVar, cast
 
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
+    LOGIN_TOKEN_LABEL,
     READ_SCOPE,
     RECORD_SCOPE,
     Grant,
@@ -521,7 +522,49 @@ _INSERT_USER = """
     ON CONFLICT (name) DO NOTHING
 """
 
-_USER_COLUMNS = "name, admin, disabled, created_at"
+_USER_COLUMNS = "name, admin, disabled, created_at, password_hash IS NOT NULL"
+
+# Only on a database the local store did not make, and only while it has no
+# user: one statement, so it cannot race another first start.
+_INSERT_FIRST_ADMIN = """
+    INSERT INTO account (name, admin, disabled, created_at, password_hash)
+    SELECT ?, 1, 0, ?, ?
+    WHERE NOT EXISTS (SELECT 1 FROM account)
+      AND NOT EXISTS (SELECT 1 FROM meta WHERE key = 'origin' AND value = 'local')
+"""
+
+_SELECT_PASSWORD_HASH = "SELECT password_hash FROM account WHERE name = ? AND disabled = 0"  # noqa: S105
+
+_SET_PASSWORD = "UPDATE account SET password_hash = ? WHERE name = ?"  # noqa: S105
+
+# The compare-and-set a password change checked against the current
+# password makes: it loses to any change made while it was checked.
+_REPLACE_PASSWORD = """
+    UPDATE account SET password_hash = ?
+    WHERE name = ? AND password_hash = ? AND disabled = 0
+"""  # noqa: S105
+
+# Login tokens are the only ones with an expiry.
+_REVOKE_LOGIN_TOKENS = """
+    UPDATE access_token SET revoked_at = ?
+    WHERE account = ? AND expires_at IS NOT NULL AND revoked_at IS NULL
+"""  # noqa: S105
+
+# Inserts nothing unless the user is enabled and still has the hash the
+# password was checked against.
+_INSERT_LOGIN_TOKEN = """
+    INSERT INTO access_token (
+        account, digest, label, can_read, can_record, can_admin, created_at, expires_at
+    )
+    SELECT name, ?, ?, 1, 0, admin, ?, ? FROM account
+    WHERE name = ? AND password_hash = ? AND disabled = 0
+"""  # noqa: S105
+
+# Never the token just made, whatever its expiry.
+_DELETE_EXPIRED_LOGIN_TOKENS = """
+    DELETE FROM access_token
+    WHERE account = ? AND expires_at IS NOT NULL AND expires_at <= ? AND id <> ?
+"""  # noqa: S105
 
 _SELECT_USER = f"SELECT {_USER_COLUMNS} FROM account WHERE name = ?"  # noqa: S608
 
@@ -539,7 +582,9 @@ _INSERT_TOKEN = """
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
 """  # noqa: S105
 
-_TOKEN_COLUMNS = "id, account, label, can_read, can_record, can_admin, created_at, revoked_at"  # noqa: S105
+_TOKEN_COLUMNS = (
+    "id, account, label, can_read, can_record, can_admin, created_at, revoked_at, expires_at"  # noqa: S105
+)
 
 _SELECT_TOKEN = f"SELECT {_TOKEN_COLUMNS} FROM access_token WHERE id = ?"  # noqa: S608
 
@@ -560,6 +605,7 @@ _AUTHENTICATE = """
     FROM access_token t
     JOIN account a ON a.name = t.account
     WHERE t.digest = ? AND t.revoked_at IS NULL AND a.disabled = 0
+      AND (t.expires_at IS NULL OR t.expires_at > ?)
 """
 
 
@@ -583,17 +629,28 @@ def _decode_scopes(can_read: object, can_record: object, can_admin: object) -> f
 
 
 def _row_to_user(row: tuple[object, ...]) -> User:
-    name, admin, disabled, created_at = row
+    name, admin, disabled, created_at, has_password = row
     return User(
         name=cast(str, name),
         admin=bool(admin),
         disabled=bool(disabled),
         created_at=_datetime(created_at),
+        has_password=bool(has_password),
     )
 
 
 def _row_to_token(row: tuple[object, ...]) -> Token:
-    token_id, account, label, can_read, can_record, can_admin, created_at, revoked_at = row
+    (
+        token_id,
+        account,
+        label,
+        can_read,
+        can_record,
+        can_admin,
+        created_at,
+        revoked_at,
+        expires_at,
+    ) = row
     return Token(
         id=cast(int, token_id),
         user=cast(str, account),
@@ -601,6 +658,7 @@ def _row_to_token(row: tuple[object, ...]) -> Token:
         scopes=_decode_scopes(can_read, can_record, can_admin),
         created_at=_datetime(created_at),
         revoked_at=_opt_datetime(revoked_at),
+        expires_at=_opt_datetime(expires_at),
     )
 
 
@@ -1009,8 +1067,10 @@ class SqliteExecutionStore:
     same file. Neither substitutes for the other.
     """
 
-    def __init__(self, path: Path) -> None:
-        self._conn = open_database(path)
+    def __init__(self, path: Path, *, local: bool = False) -> None:
+        """Open the database at `path`; `local` says pytest-vantage's local
+        store is opening it (`open_database`)."""
+        self._conn = open_database(path, local=local)
         self._lock = threading.Lock()
 
     @contextmanager
@@ -1313,6 +1373,17 @@ class SqliteExecutionStore:
     def access_required(self) -> bool:
         return bool(self._count(_PROBE_ANY_USER))
 
+    def create_first_admin(
+        self, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        with self._write_transaction() as conn:
+            cursor = conn.execute(
+                _INSERT_FIRST_ADMIN, (name, isoformat_utc(created_at), password_hash)
+            )
+        if cursor.rowcount != 1:
+            return None
+        return User(name=name, admin=True, disabled=False, created_at=created_at, has_password=True)
+
     def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
         with self._lock:
             cursor = self._conn.execute(
@@ -1343,6 +1414,57 @@ class SqliteExecutionStore:
             )
             row = conn.execute(_SELECT_USER, (name,)).fetchone()
         return None if row is None else _row_to_user(row)
+
+    def get_password_hash(self, name: str) -> str | None:
+        row = self._fetchone(_SELECT_PASSWORD_HASH, (name,))
+        return None if row is None else cast("str | None", row[0])
+
+    def set_password(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        changed_at: datetime,
+        replacing: str | None = None,
+    ) -> bool:
+        with self._write_transaction() as conn:
+            if replacing is None:
+                cursor = conn.execute(_SET_PASSWORD, (password_hash, name))
+            else:
+                cursor = conn.execute(_REPLACE_PASSWORD, (password_hash, name, replacing))
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(_REVOKE_LOGIN_TOKENS, (isoformat_utc(changed_at), name))
+        return True
+
+    def create_login_token(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        digest: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> Token | None:
+        created = isoformat_utc(created_at)
+        with self._write_transaction() as conn:
+            cursor = conn.execute(
+                _INSERT_LOGIN_TOKEN,
+                (
+                    digest,
+                    LOGIN_TOKEN_LABEL,
+                    created,
+                    isoformat_utc(expires_at),
+                    name,
+                    password_hash,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            token_id = cursor.lastrowid
+            conn.execute(_DELETE_EXPIRED_LOGIN_TOKENS, (name, created, token_id))
+            row = conn.execute(_SELECT_TOKEN, (token_id,)).fetchone()
+        return _row_to_token(row)
 
     def create_token(
         self,
@@ -1387,8 +1509,8 @@ class SqliteExecutionStore:
             cursor = self._conn.execute(_REVOKE_TOKEN, (isoformat_utc(revoked_at), token_id, user))
             return cursor.rowcount == 1
 
-    def authenticate(self, digest: str) -> Grant | None:
-        row = self._fetchone(_AUTHENTICATE, (digest,))
+    def authenticate(self, digest: str, *, now: datetime) -> Grant | None:
+        row = self._fetchone(_AUTHENTICATE, (digest, isoformat_utc(now)))
         if row is None:
             return None
         name, admin, can_read, can_record, can_admin = row

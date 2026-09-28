@@ -7,6 +7,7 @@ import functools
 import re
 import sqlite3
 from collections.abc import Iterator, Sequence
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any, TypeVar
 
 import pytest
 from sqlite_rows import read_metadata
+from vantage.core.domain.access import LOGIN_TOKEN_LIFETIME, token_digest
 from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import (
     ExecutionStore,
@@ -29,7 +31,9 @@ from vantage.storage.sqlite_store import (
     _list_runs_by_metadata,
 )
 from vantage_port_contract import (
+    _HASH,
     ExecutionStoreContract,
+    LocalDatabaseContract,
     StoredMetadata,
     _captured,
     _execution,
@@ -41,7 +45,7 @@ from vantage_port_contract import (
 _Row = TypeVar("_Row", MetadataFile, MetadataEntry)
 
 
-class TestSqliteExecutionStore(ExecutionStoreContract):
+class TestSqliteExecutionStore(ExecutionStoreContract, LocalDatabaseContract):
     @pytest.fixture
     def database(self, tmp_path: Path) -> Path:
         return tmp_path / "store" / "vantage.db"
@@ -49,6 +53,12 @@ class TestSqliteExecutionStore(ExecutionStoreContract):
     @pytest.fixture
     def store(self, database: Path) -> Iterator[ExecutionStore]:
         adapter = SqliteExecutionStore(database)
+        yield adapter
+        adapter.close()
+
+    @pytest.fixture
+    def local_store(self, database: Path) -> Iterator[ExecutionStore]:
+        adapter = SqliteExecutionStore(database, local=True)
         yield adapter
         adapter.close()
 
@@ -434,6 +444,15 @@ def test_every_stored_timestamp_is_fixed_width_utc_text(tmp_path: Path) -> None:
             "test_sections", "Billing", value="{}", updated_at=whole_second, project=DEFAULT_PROJECT
         )
         store.create_project("firmware", created_at=whole_second)
+        store.create_first_admin("admin", password_hash=_HASH, created_at=whole_second)
+        store.create_login_token(
+            "admin",
+            password_hash=_HASH,
+            digest=token_digest("login"),
+            created_at=whole_second,
+            expires_at=whole_second + LOGIN_TOKEN_LIFETIME,
+        )
+        store.set_password("admin", password_hash=_HASH, changed_at=whole_second)
         conn = store._conn  # noqa: SLF001
         stored = [
             *conn.execute(
@@ -444,12 +463,17 @@ def test_every_stored_timestamp_is_fixed_width_utc_text(tmp_path: Path) -> None:
             *conn.execute("SELECT updated_at FROM project_setting").fetchone(),
             *(value for (value,) in conn.execute("SELECT created_at FROM project")),
             *conn.execute("SELECT value FROM meta WHERE key = 'created_at'").fetchone(),
+            *conn.execute("SELECT created_at FROM account").fetchone(),
+            # A login token's expiry is compared as text with the moment a
+            # token is used and a login is made.
+            *conn.execute("SELECT created_at, revoked_at, expires_at FROM access_token").fetchone(),
         ]
     finally:
         store.close()
 
-    # Both projects' rows, `default`'s and the one made here, were read.
-    assert len(stored) == 12
+    # Both projects' rows, `default`'s and the one made here, were read, and
+    # the admin's and its login token's.
+    assert len(stored) == 16
     assert [value for value in stored if not _FIXED_WIDTH_UTC.fullmatch(value)] == []
 
 
@@ -471,6 +495,63 @@ def test_a_timestamp_from_an_early_year_is_stored_zero_padded(tmp_path: Path) ->
     assert raw == ("0100-01-01T09:00:00.000000+00:00",)
     assert found is not None
     assert found.started_at == started
+
+
+_ADMIN_AT = datetime(2026, 9, 28, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(
+    ("made_locally", "gets_an_admin"),
+    [(True, False), (False, True)],
+    ids=["local-store-made-it", "server-made-it"],
+)
+def test_the_maker_of_a_database_decides_its_first_admin_whoever_opens_it_now(
+    tmp_path: Path, made_locally: bool, gets_an_admin: bool
+) -> None:
+    """`vantage` serving the file a local session made gives it no admin,
+    while a local session opening the database `vantage` made first does
+    not keep it from getting one: what counts is what `meta.origin` says,
+    not how the file is opened now."""
+    database = tmp_path / "store" / "vantage.db"
+    SqliteExecutionStore(database, local=made_locally).close()
+
+    store = SqliteExecutionStore(database, local=not made_locally)
+    try:
+        created = store.create_first_admin("admin", password_hash=_HASH, created_at=_ADMIN_AT)
+        users = store.list_users()
+    finally:
+        store.close()
+
+    assert (created is not None) is gets_an_admin
+    assert [user.name for user in users] == (["admin"] if gets_an_admin else [])
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [None, "server", "Local", "local ", ""],
+    ids=["missing", "server", "capitalised", "trailing-space", "empty"],
+)
+def test_only_the_local_stores_own_origin_keeps_a_database_from_its_first_admin(
+    tmp_path: Path, origin: str | None
+) -> None:
+    """A database whose origin is missing or unknown -- a file edited by
+    hand -- is taken for a server's: it gets an admin rather than being
+    served open."""
+    database = tmp_path / "store" / "vantage.db"
+    SqliteExecutionStore(database, local=True).close()
+    with closing(sqlite3.connect(database)) as conn, conn:
+        if origin is None:
+            conn.execute("DELETE FROM meta WHERE key = 'origin'")
+        else:
+            conn.execute("UPDATE meta SET value = ? WHERE key = 'origin'", (origin,))
+
+    store = SqliteExecutionStore(database)
+    try:
+        created = store.create_first_admin("admin", password_hash=_HASH, created_at=_ADMIN_AT)
+    finally:
+        store.close()
+
+    assert created is not None
 
 
 def _forced(row: _Row, **fields: str | None) -> _Row:

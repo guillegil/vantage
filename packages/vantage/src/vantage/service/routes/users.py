@@ -1,11 +1,13 @@
 """The users and tokens routes: `GET`/`POST /api/v1/users`,
 `PATCH /api/v1/users/{name}`, `GET`/`POST /api/v1/tokens` and
 `POST /api/v1/tokens/{token_id}/revoke` -- over HTTP, what `vantage user`
-and `vantage token` do on the database.
+and `vantage token` do on the database. Passwords are set in
+`routes/login.py`.
 
 **Every one needs an admin's token, on every server** (`requires_admin_token`):
 an open server answers `409 open_server` to an anonymous caller here, so the
-first user is always made by the `vantage` command. The dependency runs
+first user is always made by the `vantage` command, or by `vantage` itself
+at its first start on a database of its own. The dependency runs
 before the path is validated or the body read, so a caller who may not
 manage users learns nothing of which names or ids exist.
 
@@ -91,17 +93,22 @@ from vantage.service.schemas import (
 
 router = APIRouter()
 
-# A body's cap. The largest a valid body can need is a 64-character name
-# with every character spelt as a 6-byte escape, and a 200-character label
-# with every character spelt as a 12-byte escaped surrogate pair: under
-# 3 KiB. The rest leaves room for whitespace and a repeated scope list.
+# A body's cap, here and in `routes/login.py`. The largest a valid body can
+# need is a 64-character name with every character spelt as a 6-byte escape
+# and two passwords of 256 characters as `check_password` counts them, once
+# normalised: each may arrive as up to four code points that compose into
+# one, or two that make an escaped surrogate pair, 24 bytes either way. That
+# is under 13 KiB; the rest leaves room for whitespace and a repeated scope
+# list.
 MAX_USERS_BODY_BYTES = 16 * 1024
 
 # The ids a signed 64-bit key holds; SQLite cannot bind a larger one.
 _MAX_TOKEN_ID = 2**63 - 1
 
 
-def _can_be_a_name(name: str) -> bool:
+def can_be_a_name(name: str) -> bool:
+    """Whether some user could be named `name`; a lookup by any other value
+    matches nobody, and is never handed to the store."""
     try:
         check_user_name(name)
     except InvalidUserNameError:
@@ -111,7 +118,11 @@ def _can_be_a_name(name: str) -> bool:
 
 def _user_response(user: User) -> UserResponse:
     return UserResponse(
-        name=user.name, admin=user.admin, disabled=user.disabled, created_at=user.created_at
+        name=user.name,
+        admin=user.admin,
+        disabled=user.disabled,
+        created_at=user.created_at,
+        has_password=user.has_password,
     )
 
 
@@ -123,6 +134,7 @@ def _token_response(token: Token) -> TokenResponse:
         scopes=sorted(token.scopes),
         created_at=token.created_at,
         revoked_at=token.revoked_at,
+        expires_at=token.expires_at,
     )
 
 
@@ -145,7 +157,7 @@ def _create_user(store: ExecutionStore, body: bytes) -> UserResponse:
         payload = UserCreateRequest.model_validate(decode_json(body))
     except ValidationError as exc:
         raise InvalidUserRequestError.from_errors(exc.errors()) from exc
-    if not _can_be_a_name(payload.name):
+    if not can_be_a_name(payload.name):
         raise UserNameRefusedError()
     try:
         user = store.create_user(
@@ -192,7 +204,7 @@ async def update_user(
     """Set `admin`, `disabled` or both, and answer the user as it now
     stands. A name nobody can have is answered before the body is read."""
     require_json_media_type(request)
-    if not _can_be_a_name(name):
+    if not can_be_a_name(name):
         raise NoSuchUserError()
     body = await read_bounded_body(request, MAX_USERS_BODY_BYTES)
     return _json(await run_in_threadpool(_update_user, store, name, caller, body))
@@ -207,7 +219,7 @@ def list_tokens(
     """Every token, or `user`'s, revoked ones included, oldest first, whole
     -- as `vantage token list [USER]` prints them. A user nobody can be has
     none, and the store is not asked."""
-    if user is not None and not _can_be_a_name(user):
+    if user is not None and not can_be_a_name(user):
         return TokenListResponse(items=[])
     return TokenListResponse(
         items=[_token_response(token) for token in store.list_tokens(user=user)]
@@ -227,7 +239,7 @@ def _create_token(store: ExecutionStore, body: bytes) -> CreatedTokenResponse:
         label = check_token_label(payload.label)
     except InvalidTokenLabelError:
         raise TokenLabelRefusedError() from None
-    owner = store.get_user(payload.user) if _can_be_a_name(payload.user) else None
+    owner = store.get_user(payload.user) if can_be_a_name(payload.user) else None
     if owner is None:
         raise NoSuchUserError(["user"])
     if ADMIN_SCOPE in scopes and not owner.admin:
@@ -251,6 +263,7 @@ def _create_token(store: ExecutionStore, body: bytes) -> CreatedTokenResponse:
         scopes=sorted(token.scopes),
         created_at=token.created_at,
         revoked_at=token.revoked_at,
+        expires_at=token.expires_at,
     )
 
 
@@ -279,8 +292,10 @@ def revoke_token(
 ) -> TokenResponse:
     """Revoke the token, and answer it with the time it was revoked: the
     first time, however often it is asked. Revocation only moves forward --
-    one conditional write that keeps the first time, on a row never deleted
-    -- so reading the row afterwards races nothing. The body is not read."""
+    one conditional write that keeps the first time -- so reading the row
+    afterwards races nothing, but for a login token that expired: its row
+    is deleted at its user's next login, and the token is then unknown.
+    The body is not read."""
     store.revoke_token(token_id, revoked_at=datetime.now(timezone.utc))
     token = store.get_token(token_id)
     if token is None:
@@ -288,4 +303,4 @@ def revoke_token(
     return _token_response(token)
 
 
-__all__ = ["MAX_USERS_BODY_BYTES", "router"]
+__all__ = ["MAX_USERS_BODY_BYTES", "can_be_a_name", "router"]

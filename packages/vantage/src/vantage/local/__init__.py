@@ -9,6 +9,11 @@ server, and `vantage` run with no options on that machine serves it. The
 one difference: a project a report names is made here when the database
 lacks it, since nobody administers a file on a test machine but its owner.
 
+A database made here records that it was (`meta.origin`), and `vantage`
+serves such a database with no user as it is, open, rather than giving it
+an admin: it holds only its owner's runs. One made by anything else gets
+an admin at the server's first start.
+
 Everything here raises `LocalStoreError`, whose message is one line, for
 any failure: the plugin turns it into its single warning and the session
 goes on, so no other exception may escape.
@@ -101,7 +106,7 @@ def _home_directory() -> Path | None:
 
 def _open(database: Path) -> SqliteExecutionStore:
     try:
-        return SqliteExecutionStore(database)
+        return SqliteExecutionStore(database, local=True)
     except SchemaVersionError as exc:
         # Already names the database and what to do about it.
         raise LocalStoreError(_line(str(exc))) from exc

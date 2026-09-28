@@ -1,11 +1,13 @@
 """Who is asking, and whether they may: the dependency every route declares
 but the capability advertisement and the interface document.
 
-**A server with no user is open.** A database nobody has made a user in
-serves anyone, as the server did before it had users, so `vantage` serving
-a local database on a test machine needs no token. Once a user exists every
-route here needs `Authorization: Bearer <token>`, of a live token of an
-enabled user whose grant covers the route's scope (`Grant.allows`).
+**A server with no user is open.** `vantage` gives every database it
+serves an admin before serving it (`cli.py`), except one pytest-vantage's
+local store made, which holds one person's runs on a test machine: served
+with no user, it serves anyone, so browsing it needs no token. Once a user
+exists every route here needs `Authorization: Bearer <token>`, of a live,
+unexpired token of an enabled user whose grant covers the route's scope
+(`Grant.allows`).
 
 **The first user closes a running server.** A user is made with `vantage
 user add`, often against a database a server is already serving, so while
@@ -19,6 +21,11 @@ the one thing it could do here is make the first user, which only the
 `vantage` command does. It is refused for who it is, never for what the
 store says, so a request racing the first `vantage user add` cannot slip
 through between the two, reads included.
+
+**Logging in and changing a password take a name and a password, not a
+token** (`requires_closed_server`), so they declare no scope: the password
+is the credential, and a stolen login token cannot take it over. On an
+open server nobody has a password, and both answer `409 open_server`.
 
 **A project in a path is resolved after the caller is authorized**
 (`requires_read_project`, `requires_admin_project`), so a caller who may not
@@ -43,6 +50,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, Path, Request
 
@@ -94,7 +102,7 @@ def authorize(request: Request, scope: str) -> Caller:
     # A token that could never be one is refused without asking the store.
     if scheme.lower() != "bearer" or not well_formed_token(token):
         raise UnauthenticatedError.invalid()
-    grant = store.authenticate(token_digest(token))
+    grant = store.authenticate(token_digest(token), now=datetime.now(timezone.utc))
     if grant is None:
         raise UnauthenticatedError.invalid()
     if not grant.allows(scope):
@@ -153,12 +161,23 @@ def requires_admin_token(request: Request) -> Caller:
     return caller
 
 
+def requires_closed_server(request: Request) -> None:
+    """Logging in or changing a password: refused with `OpenServerError`
+    while the database has no user, before the body is read. Any
+    `Authorization` header is ignored, since the body carries the
+    credentials."""
+    store: ExecutionStore = request.app.state.store
+    if _server_open(request.app, store):
+        raise OpenServerError()
+
+
 __all__ = [
     "Caller",
     "authorize",
     "requires_admin",
     "requires_admin_project",
     "requires_admin_token",
+    "requires_closed_server",
     "requires_read",
     "requires_read_project",
     "requires_record",

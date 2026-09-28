@@ -91,6 +91,21 @@ At the start of a recorded session pytest prints
 local database, or to both; see [Where runs go](#where-runs-go)). Recording works under
 pytest-xdist; a session is one run however many workers it uses.
 
+A database the server made has a user from its first start, so recording
+to it needs a token from the first run (see
+[Users and tokens](#users-and-tokens)). On one machine, once `vantage` is
+running:
+
+```bash
+export VANTAGE_TOKEN=$(vantage token create admin --scope record --label laptop)
+pytest --vantage
+```
+
+Or, while the default database does not exist yet, record with
+`--vantage-mode local` first: the database that session creates is the
+local store's, and `vantage` then serves it without a token (see
+[Browsing the local database](#browsing-the-local-database)).
+
 ### Options
 
 | Command line | ini option | Environment | Default | Purpose |
@@ -103,7 +118,7 @@ pytest-xdist; a session is one run however many workers it uses.
 | `--vantage-project NAME` | `vantage_project` | `VANTAGE_PROJECT` | `default` | The project the run belongs to (see [Projects](#projects)). |
 | `--vantage-failure-text` | none | none | off | Adds failure text and captured output. |
 | `--vantage-metadata` | none | none | off | Adds values from declared files. |
-| none | none | `VANTAGE_TOKEN` | none | The token a server with users requires (see [Users and tokens](#users-and-tokens)). |
+| none | none | `VANTAGE_TOKEN` | none | The token a server requires once its database has a user (see [Users and tokens](#users-and-tokens)). |
 
 - The server address is resolved as `--vantage-server`, then
   `VANTAGE_SERVER`, then the `vantage_server` ini value, then the default. The
@@ -319,6 +334,14 @@ vantage --database ./runs/vantage.db     # one named with --vantage-local-databa
 ```
 
 Sessions can keep storing into the file while it serves.
+
+A database a local-mode session made has no user, so `vantage` serves it
+to anyone who reaches the port, with no token and no login; there is no
+password to log in with, and `POST /api/v1/login` answers
+`409 open_server`. It stays open until `vantage user add` makes its first
+user. A default database that `vantage` made itself, before any session
+stored there, is a server's and has the user `admin`; see
+[Running the server](#running-the-server).
 
 ## What each switch uploads
 
@@ -623,10 +646,11 @@ still run and the suite's exit status is never changed.
 - **The server refuses the token:** the warning says what to fix instead of
   the bare status: `the server requires a token: set VANTAGE_TOKEN to one
   with the record scope` (none sent to a server with users), `the server
-  does not accept the token in VANTAGE_TOKEN` (unknown, revoked, its user
-  disabled, or sent to a server without users), `the token in VANTAGE_TOKEN
-  does not grant the record scope`, or `the run was recorded by another
-  user`. The start report and the final report each warn once.
+  does not accept the token in VANTAGE_TOKEN` (unknown, revoked or expired,
+  its user disabled, or sent to a server without users), `the token in
+  VANTAGE_TOKEN does not grant the record scope` (a login token never
+  does), or `the run was recorded by another user`. The start report and
+  the final report each warn once.
 - **The final report fails** (HTTP error, rejected report): if the start
   report got through, the run stays unfinished on the server and later reads
   as `abandoned`; otherwise nothing is recorded on the server. The backup
@@ -702,13 +726,39 @@ with exit status 1 and nothing created; `vantage push`, `vantage project`,
 - A missing SQLite database directory is created with mode 0700 and a new
   database file with mode 0600. An existing database file open to its group
   or to others is used as it is, with a warning.
-- **Until the database has a user, there is no authentication.** Anyone
-  who can reach the port can record runs, change the section definitions
-  and read everything recorded, failure text included. Only the users and
-  tokens routes refuse, with `409 open_server`, so the first user is always
-  made with `vantage user add`. Any `--host` other
-  than `127.0.0.1` logs a warning saying so at startup, as long as the
-  database has no user. See [Users and tokens](#users-and-tokens).
+- **A database of the server's own starts with an admin.** Before it serves
+  anything, a start that finds a database with no user gives it the
+  enabled admin user `admin`, with a random password, and prints that
+  password once, on one line of stderr:
+
+  ```
+  vantage: created the user admin; change its password at once (vantage user password admin, or POST /api/v1/password). Shown this once: 7kPq...
+  ```
+
+  **Change it at once.** Whatever keeps the server's stderr (journald,
+  `docker logs`) keeps that line; a new password makes it useless. Since
+  the database has a user, the server requires a token from the start,
+  and recording needs one from the first run (see
+  [Users and tokens](#users-and-tokens)). No later start prints anything,
+  and a database that already has a user gets no `admin`. This holds for
+  every database but one pytest-vantage's local store made: one `vantage`
+  created, one `vantage user add` or `vantage project add` created, and
+  every PostgreSQL database.
+- **A database pytest-vantage's local store made, until it has a user, has
+  no authentication.** Anyone who can reach the port can record runs, add
+  projects, change the section definitions and read everything recorded,
+  failure text included. Only the users, tokens, login and password routes
+  refuse, with `409 open_server`, so its first user is always made with
+  `vantage user add`. Any `--host` other than `127.0.0.1` logs a warning
+  saying so at startup, as long as the database has no user; a database of
+  the server's own has one by then, and never warns.
+- **Whichever creates the default database first decides what it is.** On
+  a test machine `vantage` and the local modes share the default database
+  (see [Where runs go](#where-runs-go)). Started first, `vantage` creates
+  a database of its own, with `admin`: sessions still store into it, but
+  browsing it needs a token. Stored into first, the database is the local
+  store's, and `vantage` serves it open. To start over, stop the server
+  and move the file aside.
 - The server refuses to start, with one `vantage: ...` line on stderr and
   exit status 1, when a setting is unusable (an empty host, a port outside 1
   to 65535, a grace period that is not positive or exceeds 365 days), the
@@ -783,25 +833,33 @@ vantage project list
   a database on a test machine has nobody else to.
 - `vantage project add` finds the database as the server does, like
   `vantage user`, and creates a SQLite database that is not there yet.
-  `POST /api/v1/projects` does the same over HTTP with an admin's token, or
-  for anyone while the database has no user.
+  `POST /api/v1/projects` does the same over HTTP with an admin's token;
+  only on a database pytest-vantage's local store made, while it has no
+  user, may anyone.
 - The run list, a test's history and the sections live under
   `/api/v1/projects/{project}/`; a project nobody has answers `404`. Every
   route that names a run id reads the run whatever its project.
 
 ### Users and tokens
 
-A database with no user needs no token: that is how `vantage` serves a
-local database on a test machine. The first user closes it, and from then
-on every route but `GET /api/v1/capabilities` and
-`GET /api/v1/openapi.yaml` needs `Authorization: Bearer <token>`, a token of
-an enabled user that has not been revoked. Users are disabled, never
-deleted, so a database that has had one stays closed. A server already
-serving the database needs no restart: its next request needs a token.
+A database the server made has a user from its first start: `admin`,
+unless one was made before (see [Running the server](#running-the-server)).
+A database pytest-vantage's local store made has no user until
+`vantage user add` makes one, and until then needs no token: that is how
+`vantage` serves the local database on a test machine. Once a database has
+a user, every route but
+`GET /api/v1/capabilities`, `GET /api/v1/openapi.yaml`,
+`POST /api/v1/login` and `POST /api/v1/password` needs
+`Authorization: Bearer <token>`, a token of an enabled user that has not
+been revoked or expired. Users are disabled, never deleted, so a database
+that has had one stays closed. A server already serving the database needs
+no restart: its next request needs a token.
 
 ```bash
-vantage user add alice --admin                 # the first user closes the database
+vantage user password admin                    # first of all, on a server's own database
+vantage user add alice --admin                 # the first user closes a local store's database
 vantage token create alice                     # prints a token, once
+vantage user password alice                    # asks for a password, to log in with
 vantage user add ci
 vantage token create ci --scope record --label nightly
 vantage user list
@@ -825,49 +883,128 @@ vantage user update bob --disable              # or --enable, --admin, --no-admi
   `VANTAGE_TOKEN=$(vantage token create ci --scope record)` captures it and
   nothing else. It is shown once: the database keeps only its SHA-256.
 - A user name is 1 to 64 characters of `a-z`, `0-9`, `.`, `_` and `-`.
-- A disabled user's tokens, and a revoked token, are refused like a token
-  that never existed. So is any token sent to a server without users.
+- A disabled user's tokens, a revoked token and an expired one are refused
+  like a token that never existed. So is any token sent to a server without
+  users.
 - The report that creates a run records its token's user, and only that
   user's token may send the run's later reports and heartbeats. Another
   user's gets `409 foreign_run`, whether the run is finished or not.
-- A token travels in the clear over plain `http`. Put the server behind
-  HTTPS wherever the network between it and the test machines is not
-  yours.
+- A token, like a password, travels in the clear over plain `http`. Put the
+  server behind HTTPS wherever the network between it and its clients is
+  not yours.
+
+#### Passwords and logging in
+
+A user may have a password, to log in with over HTTP and get a token for a
+while, as a person at a keyboard does. `vantage user add` makes a user
+without one, which is what an account for CI wants: it needs a token, never
+a password.
+
+- `vantage user password NAME` sets one, asking for it twice on the
+  terminal. `--password-stdin` reads it from stdin instead, less one
+  trailing newline, for a script:
+  `vantage user password alice --password-stdin < password.txt`. No option
+  or environment variable ever takes a password, since the process list
+  and shell history would show it, and the command never prints it.
+  Without a terminal and without `--password-stdin` it refuses to ask.
+- A password is 15 to 256 characters, counted once Unicode-normalised
+  (NFKC), with no control characters. Spaces and every other character
+  count, and nothing is trimmed. The rule applies when a password is set,
+  never when one is checked. The database keeps only its scrypt hash.
+  `vantage user list` says in `PASSWORD` who has one.
+- `POST /api/v1/login` trades a name and a password for a **login token**.
+  It holds `read`, and `admin` for an admin, but never `record`: recording
+  needs a token made for it, so a login token that leaks cannot record
+  runs. It expires 12 hours after the login, with no refresh: log in again.
+  It is for people, not for CI, whose token comes from
+  `vantage token create` or `POST /api/v1/tokens` and never expires.
+- Setting a user's password, whichever way, revokes every login token of
+  theirs; tokens made otherwise are left alone. `vantage token list` shows
+  login tokens, labelled `login`, with their expiry under `EXPIRES`, and
+  any of them can be revoked by id. An expired login token is deleted at
+  its user's next login, so the lists stay short.
+- **A lost admin password** is set again with `vantage user password admin`
+  on the server's database (`--database` as the server was started),
+  whether or not the server is running: whoever can open the database is
+  trusted with it.
+- **To keep a password out of the log**, make your own admin before the
+  server's first start: `vantage user add alice --admin` and
+  `vantage user password alice` on the database the server will use. A
+  database with a user gets no `admin`, and nothing is printed.
+- **Guessing is bounded by cost.** Each check of a password costs the
+  server about 0.2 seconds of work and 32 MiB, and it checks at most two
+  at a time, so one server process takes about ten guesses a second (and
+  several processes sharing a PostgreSQL database that many times more).
+  At most 32 more requests wait for a check; any beyond them are answered
+  `503 password_checks_busy` at once, with `Retry-After: 1`, so a flood of
+  logins slows the real ones rather than queueing minutes of work ahead of
+  them. There is no lockout, which would let anyone lock `admin` out. Put a
+  server reachable from networks you do not trust behind a proxy that
+  limits the rate of `POST /api/v1/login` and `POST /api/v1/password`, and
+  behind HTTPS.
 
 #### Over HTTP
 
-Once the first admin exists, admins can manage users and tokens through the
-API as the commands do, from anywhere that reaches the server. Every route
-here needs an admin's token holding the `admin` scope, which the default
-token does not hold, so the first one is made on the command line:
-
-```bash
-vantage user add alice --admin
-vantage token create alice --scope admin --label admin-api
-```
+Admins can manage users and tokens through the API as the commands do, from
+anywhere that reaches the server. Every route here but the first two needs
+an admin's token holding the `admin` scope: an admin's login token holds
+it, as does one made with `vantage token create NAME --scope admin`; the
+default made token does not.
 
 | Route | Does |
 | --- | --- |
+| `POST /api/v1/login` | Answers a login token for a name and its password: `{"name": "alice", "password": "..."}` |
+| `POST /api/v1/password` | Changes one's own password, given the current one: `{"name": "alice", "password": "...", "new_password": "..."}` |
 | `GET /api/v1/users` | Every user, disabled ones included, by name |
-| `POST /api/v1/users` | Adds an enabled user: `{"name": "bob", "admin": false}` |
+| `POST /api/v1/users` | Adds an enabled user, without a password: `{"name": "bob", "admin": false}` |
 | `PATCH /api/v1/users/{name}` | Sets `admin`, `disabled` or both: `{"disabled": true}` |
+| `PUT /api/v1/users/{name}/password` | Sets a user's password: `{"password": "..."}` |
 | `GET /api/v1/tokens[?user=NAME]` | Every token, or one user's, revoked ones included, oldest first |
 | `POST /api/v1/tokens` | Makes a token: `{"user": "ci", "scopes": ["record"], "label": "nightly"}` |
 | `POST /api/v1/tokens/{id}/revoke` | Revokes a token |
 
+Logging in as an admin, then making a token for CI with the login token:
+
 ```bash
+# Asks for alice's password, which never reaches a command line.
+ADMIN_TOKEN=$(python3 -c 'import getpass, json; print(json.dumps({"name": "alice", "password": getpass.getpass()}))' \
+  | curl -sf -X POST http://vantage.example:8765/api/v1/login \
+      -H 'Content-Type: application/json' --data-binary @- \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+
+curl -s -X POST http://vantage.example:8765/api/v1/users \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name": "ci", "admin": false}'
 curl -s -X POST http://vantage.example:8765/api/v1/tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"user": "ci", "scopes": ["record"], "label": "nightly"}'
 ```
 
-- A server with no user answers a request to any of these without a token
-  `409 open_server`, even though it serves everything else to anyone: a
+- `POST /login` and `POST /password` take no token: the name and the
+  password are the credentials, and an `Authorization` header is ignored.
+  Every failure of them -- an unknown name, a user without a password or a
+  disabled one, a wrong password -- answers the same
+  `401 invalid_credentials`, after the same work. A new password that
+  breaks the rule is `422 invalid_password`, before the current one is
+  checked.
+  `POST /password` answers `204` and revokes every login token of the
+  user, who logs in again. It asks for the current password rather than a
+  token, so a login token that leaks cannot take the account over, and the
+  password the first start printed is changed in one request.
+- `PUT /users/{name}/password` asks for no current password, even for the
+  admin's own account: an admin's token already makes admin tokens. It
+  answers `204`, or `404 unknown_user`, and revokes the user's login
+  tokens. It enables and promotes nobody: a disabled user given a password
+  still cannot log in.
+- A database pytest-vantage's local store made, while it has no user,
+  answers every one of these routes `409 open_server`, even though it
+  serves everything else to anyone: nobody there has a password, and a
   first user made over HTTP would belong to whoever asked first. A token
-  sent there is refused with `401`, as everywhere.
-- The new token is in the `201` answer alone, marked `Cache-Control:
-  no-store`, and never again: lists show its id, user, scopes, label and
-  times, never the token.
+  sent to the ones that take one is refused with `401`, as everywhere.
+- A new token is in the `201` answer of `POST /tokens` or `POST /login`
+  alone, marked `Cache-Control: no-store`, and never again: lists show its
+  id, user, scopes, label and times (`expires_at` null but for a login
+  token), never the token.
 - An admin cannot demote or disable their own user over HTTP
   (`409 own_account`); another admin can, or `vantage user update` on the
   database. If no admin is left, `vantage user update NAME --admin --enable`
@@ -875,11 +1012,13 @@ curl -s -X POST http://vantage.example:8765/api/v1/tokens \
 - Revoking is idempotent: a token revoked already answers `200` with the
   time it was first revoked. (`vantage token revoke` says it was revoked
   already.) An admin may revoke the token they are using; their next
-  request is refused.
+  request is refused. A login token deleted since it expired is unknown:
+  `404 unknown_token`.
 - An admin can make other admins, and tokens for any user. A token made for
   another user records runs as that user.
 - The lists come whole, not paged. The commands' checks apply with the same
-  wording, and a rejection never repeats a name, a label or a token.
+  wording, and a rejection never repeats a name, a label, a password or a
+  token.
 
 ### Storing in PostgreSQL
 
@@ -907,8 +1046,10 @@ VANTAGE_DATABASE=postgresql://vantage@db.example/vantage vantage
   tables never collide with anything else in the database. The first server
   to start on a database creates the schema and all its tables in one
   transaction; the user it connects as needs the right to do so then, and to
-  read and write them afterwards. The database must be encoded in UTF-8,
-  PostgreSQL's usual default; any other is refused with one line.
+  read and write them afterwards. It then creates the user `admin`, as on
+  any database of its own; of several servers starting on one new database
+  at once, one does, and prints the password. The database must be encoded
+  in UTF-8, PostgreSQL's usual default; any other is refused with one line.
 - Several servers can share one database, each with its own pool of at most
   10 connections. Each write is one transaction that locks what a
   concurrent write to the same run or setting would change, so every run,

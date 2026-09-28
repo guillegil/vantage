@@ -4,8 +4,9 @@ Never collected directly by pytest -- it is not named ``test_*`` -- and kept
 beside the tests rather than in the package, because ``vantage.core`` must not
 import pytest. Each adapter's ``test_*_store.py`` subclasses
 ``ExecutionStoreContract``, provides ``store`` and ``stored_metadata``
-fixtures, and inherits every test unchanged, so both adapters are held to the
-same behaviour.
+fixtures, and inherits every test unchanged, so every adapter is held to the
+same behaviour. An adapter whose databases the local store can make also
+subclasses ``LocalDatabaseContract`` and provides ``local_store``.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
+    LOGIN_TOKEN_LABEL,
+    LOGIN_TOKEN_LIFETIME,
     READ_SCOPE,
     RECORD_SCOPE,
     Grant,
@@ -2668,16 +2671,16 @@ class ExecutionStoreContract:
             )
 
         assert store.list_tokens() == ()
-        assert store.authenticate(token_digest("t")) is None
+        assert store.authenticate(token_digest("t"), now=_ACCESS_AT) is None
 
     def test_a_live_token_grants_its_scopes_as_its_user(self, store: ExecutionStore) -> None:
         store.create_user("alice", admin=False, created_at=_ACCESS_AT)
         _token(store, "alice", "secret", scopes={READ_SCOPE, RECORD_SCOPE})
 
-        assert store.authenticate(token_digest("secret")) == Grant(
+        assert store.authenticate(token_digest("secret"), now=_ACCESS_AT) == Grant(
             user="alice", admin=False, scopes=frozenset({READ_SCOPE, RECORD_SCOPE})
         )
-        assert store.authenticate(token_digest("other")) is None
+        assert store.authenticate(token_digest("other"), now=_ACCESS_AT) is None
 
     def test_a_grant_carries_its_users_standing_now(self, store: ExecutionStore) -> None:
         """An admin token of a user who is no longer an admin still
@@ -2687,7 +2690,7 @@ class ExecutionStoreContract:
         _token(store, "alice", "secret", scopes={ADMIN_SCOPE})
         store.update_user("alice", admin=False)
 
-        grant = store.authenticate(token_digest("secret"))
+        grant = store.authenticate(token_digest("secret"), now=_ACCESS_AT)
 
         assert grant is not None
         assert grant.admin is False
@@ -2700,11 +2703,11 @@ class ExecutionStoreContract:
         _token(store, "alice", "secret")
 
         store.update_user("alice", disabled=True)
-        while_disabled = store.authenticate(token_digest("secret"))
+        while_disabled = store.authenticate(token_digest("secret"), now=_ACCESS_AT)
         store.update_user("alice", disabled=False)
 
         assert while_disabled is None
-        assert store.authenticate(token_digest("secret")) is not None
+        assert store.authenticate(token_digest("secret"), now=_ACCESS_AT) is not None
 
     def test_a_revoked_token_authenticates_nothing_and_keeps_its_first_revocation(
         self, store: ExecutionStore
@@ -2717,7 +2720,7 @@ class ExecutionStoreContract:
         again = store.revoke_token(token.id, revoked_at=revoked_at + timedelta(hours=1))
 
         assert (revoked, again) == (True, False)
-        assert store.authenticate(token_digest("secret")) is None
+        assert store.authenticate(token_digest("secret"), now=_ACCESS_AT) is None
         assert store.list_tokens() == (replace(token, revoked_at=revoked_at),)
 
     def test_revoking_as_a_user_reaches_only_that_users_tokens(self, store: ExecutionStore) -> None:
@@ -2760,7 +2763,7 @@ class ExecutionStoreContract:
         _token(store, "alice", "secret")
 
         assert store.revoke_token(token_id, revoked_at=_ACCESS_AT) is False
-        assert store.authenticate(token_digest("secret")) is not None
+        assert store.authenticate(token_digest("secret"), now=_ACCESS_AT) is not None
 
     def test_a_run_names_the_user_whose_report_created_it(self, store: ExecutionStore) -> None:
         store.create_user("alice", admin=False, created_at=_ACCESS_AT)
@@ -3292,6 +3295,361 @@ class ExecutionStoreContract:
         assert tuple(store.list_settings("test_sections", project=DEFAULT_PROJECT)) == ()
         assert [p.name for p in store.list_projects()] == [DEFAULT_PROJECT]
 
+    # --- The first admin, passwords and login tokens ------------------------
+
+    def test_the_first_admin_is_created_once_and_never_again(self, store: ExecutionStore) -> None:
+        """Of two servers starting on one new database, one creates it; the
+        other, like every later start, finds a user and creates nothing --
+        whatever name it asks for."""
+        first = store.create_first_admin("admin", password_hash=_HASH, created_at=_ACCESS_AT)
+        again = store.create_first_admin(
+            "root", password_hash=_OTHER_HASH, created_at=_ACCESS_AT + timedelta(hours=1)
+        )
+
+        assert first == User(
+            name="admin", admin=True, disabled=False, created_at=_ACCESS_AT, has_password=True
+        )
+        assert again is None
+        assert store.list_users() == (first,)
+        assert store.get_user("admin") == first
+        assert store.get_password_hash("admin") == _HASH
+        assert store.access_required() is True
+
+    @pytest.mark.parametrize("disabled", [False, True], ids=["enabled", "disabled"])
+    def test_no_first_admin_is_created_once_the_database_has_a_user(
+        self, store: ExecutionStore, disabled: bool
+    ) -> None:
+        """Not even when every user is disabled: a restart never hands out a
+        fresh admin, so a closed database stays closed."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        store.update_user("alice", disabled=disabled)
+
+        created = store.create_first_admin("admin", password_hash=_HASH, created_at=_ACCESS_AT)
+
+        assert created is None
+        assert [user.name for user in store.list_users()] == ["alice"]
+        assert store.get_password_hash("admin") is None
+
+    def test_a_password_hash_is_handed_out_only_for_an_enabled_user_who_has_one(
+        self, store: ExecutionStore
+    ) -> None:
+        """A disabled user cannot log in, so there is nothing to check their
+        password against. No stored name holds U+0000, so one that does
+        matches nobody, without the lookup failing."""
+        _user(store, "alice")
+        _user(store, "bob")
+        store.update_user("bob", disabled=True)
+        store.create_user("carol", admin=False, created_at=_ACCESS_AT)
+
+        assert store.get_password_hash("alice") == _HASH
+        assert store.get_password_hash("bob") is None
+        assert store.get_password_hash("carol") is None
+        assert store.get_password_hash("nobody") is None
+        assert store.get_password_hash("alice\x00") is None
+
+    def test_a_password_set_is_the_users_until_the_next_one(self, store: ExecutionStore) -> None:
+        created = store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+
+        first = store.set_password("alice", password_hash=_HASH, changed_at=_ACCESS_AT)
+        with_one = store.get_user("alice")
+        promoted = store.update_user("alice", admin=True)
+        second = store.set_password(
+            "alice", password_hash=_OTHER_HASH, changed_at=_ACCESS_AT + timedelta(hours=1)
+        )
+
+        assert created.has_password is False
+        assert (first, second) == (True, True)
+        assert with_one == replace(created, has_password=True)
+        assert promoted == replace(created, admin=True, has_password=True)
+        assert store.list_users() == (promoted,)
+        assert store.get_password_hash("alice") == _OTHER_HASH
+
+    def test_a_password_is_replaced_only_while_it_is_still_the_one_checked(
+        self, store: ExecutionStore
+    ) -> None:
+        """A change checked against the current password loses to any change
+        made while it was checked, and then changes nothing: neither the
+        hash nor the login tokens opened with the password that won."""
+        _user(store, "alice")
+        replaced = store.set_password(
+            "alice", password_hash=_OTHER_HASH, changed_at=_ACCESS_AT, replacing=_HASH
+        )
+        login = _logged_in(store, "alice", "login", password_hash=_OTHER_HASH)
+
+        stale = store.set_password(
+            "alice",
+            password_hash=_THIRD_HASH,
+            changed_at=_ACCESS_AT + timedelta(hours=1),
+            replacing=_HASH,
+        )
+
+        assert (replaced, stale) == (True, False)
+        assert store.get_password_hash("alice") == _OTHER_HASH
+        assert store.list_tokens() == (login,)
+
+    def test_a_user_without_a_password_has_none_to_replace(self, store: ExecutionStore) -> None:
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+
+        replaced = store.set_password(
+            "alice", password_hash=_HASH, changed_at=_ACCESS_AT, replacing=_OTHER_HASH
+        )
+
+        assert replaced is False
+        assert store.get_password_hash("alice") is None
+        user = store.get_user("alice")
+        assert user is not None and user.has_password is False
+
+    def test_a_disabled_users_password_is_set_but_never_replaced(
+        self, store: ExecutionStore
+    ) -> None:
+        """A disabled user cannot change their own password, any more than
+        they can log in; an admin still sets it, ready for when the user is
+        enabled again."""
+        _user(store, "alice")
+        store.update_user("alice", disabled=True)
+
+        replaced = store.set_password(
+            "alice", password_hash=_OTHER_HASH, changed_at=_ACCESS_AT, replacing=_HASH
+        )
+        store.update_user("alice", disabled=False)
+        kept = store.get_password_hash("alice")
+        store.update_user("alice", disabled=True)
+        set_while_disabled = store.set_password(
+            "alice", password_hash=_THIRD_HASH, changed_at=_ACCESS_AT
+        )
+        store.update_user("alice", disabled=False)
+
+        assert (replaced, kept) == (False, _HASH)
+        assert set_while_disabled is True
+        assert store.get_password_hash("alice") == _THIRD_HASH
+
+    @pytest.mark.parametrize("checked", [False, True], ids=["set", "replaced"])
+    def test_setting_a_password_revokes_that_users_login_tokens_alone(
+        self, store: ExecutionStore, checked: bool
+    ) -> None:
+        """Whoever logged in with the old password must log in again; made
+        tokens -- the plugin's, CI's -- carry on, as do other users' login
+        tokens. One revoked before keeps its first revocation."""
+        _user(store, "alice")
+        _user(store, "bob")
+        made = _token(store, "alice", "made")
+        login = _logged_in(store, "alice", "login")
+        revoked_before = _logged_in(store, "alice", "revoked")
+        store.revoke_token(revoked_before.id, revoked_at=_ACCESS_AT)
+        bobs = _logged_in(store, "bob", "bobs")
+        changed_at = _ACCESS_AT + timedelta(hours=1)
+
+        changed = store.set_password(
+            "alice",
+            password_hash=_OTHER_HASH,
+            changed_at=changed_at,
+            replacing=_HASH if checked else None,
+        )
+
+        assert changed is True
+        assert store.list_tokens() == (
+            made,
+            replace(login, revoked_at=changed_at),
+            replace(revoked_before, revoked_at=_ACCESS_AT),
+            bobs,
+        )
+        assert store.authenticate(token_digest("login"), now=changed_at) is None
+        assert store.authenticate(token_digest("made"), now=changed_at) is not None
+        assert store.authenticate(token_digest("bobs"), now=changed_at) is not None
+
+    @pytest.mark.parametrize("name", ["nobody", "alice\x00"], ids=["unknown", "nul"])
+    def test_the_password_of_nobody_is_not_set(self, store: ExecutionStore, name: str) -> None:
+        _user(store, "alice")
+
+        set_ = store.set_password(name, password_hash=_OTHER_HASH, changed_at=_ACCESS_AT)
+        replaced = store.set_password(
+            name, password_hash=_OTHER_HASH, changed_at=_ACCESS_AT, replacing=_HASH
+        )
+
+        assert (set_, replaced) == (False, False)
+        assert [user.name for user in store.list_users()] == ["alice"]
+        assert store.get_password_hash("alice") == _HASH
+
+    @pytest.mark.parametrize("admin", [False, True], ids=["user", "admin"])
+    def test_a_login_token_reads_and_administers_as_its_user_may_but_never_records(
+        self, store: ExecutionStore, admin: bool
+    ) -> None:
+        """Recording takes a made token, so a leaked login cannot inject
+        runs. The expiry reads back to the microsecond, which is what
+        `authenticate` compares."""
+        _user(store, "alice", admin=admin)
+        expires_at = _ACCESS_AT + LOGIN_TOKEN_LIFETIME + timedelta(microseconds=1)
+
+        login = store.create_login_token(
+            "alice",
+            password_hash=_HASH,
+            digest=token_digest("login"),
+            created_at=_ACCESS_AT,
+            expires_at=expires_at,
+        )
+
+        scopes = frozenset({READ_SCOPE, ADMIN_SCOPE} if admin else {READ_SCOPE})
+        assert login is not None
+        assert login == Token(
+            id=login.id,
+            user="alice",
+            label=LOGIN_TOKEN_LABEL,
+            scopes=scopes,
+            created_at=_ACCESS_AT,
+            revoked_at=None,
+            expires_at=expires_at,
+        )
+        assert store.get_token(login.id) == login
+        assert store.list_tokens(user="alice") == (login,)
+        assert store.authenticate(token_digest("login"), now=_ACCESS_AT) == Grant(
+            user="alice", admin=admin, scopes=scopes
+        )
+
+    def test_a_login_stores_nothing_unless_the_hash_it_checked_is_still_an_enabled_users(
+        self, store: ExecutionStore
+    ) -> None:
+        """A login checks the password against the hash it read, then makes
+        its token only while that hash is still the user's: a password set
+        or a user disabled meanwhile wins, and the login stores nothing."""
+        _user(store, "alice")
+        store.set_password("alice", password_hash=_OTHER_HASH, changed_at=_ACCESS_AT)
+        _user(store, "bob")
+        store.update_user("bob", disabled=True)
+        store.create_user("carol", admin=False, created_at=_ACCESS_AT)
+
+        refused = {
+            "changed since": _login(store, "alice", "1", password_hash=_HASH),
+            "disabled": _login(store, "bob", "2", password_hash=_HASH),
+            "no password": _login(store, "carol", "3", password_hash=_HASH),
+            "unknown": _login(store, "nobody", "4", password_hash=_HASH),
+            "nul": _login(store, "alice\x00", "5", password_hash=_OTHER_HASH),
+        }
+
+        assert refused == dict.fromkeys(refused)
+        assert store.list_tokens() == ()
+
+    def test_a_login_deletes_that_users_expired_login_tokens_alone(
+        self, store: ExecutionStore
+    ) -> None:
+        """So the lists of tokens stay short. A login token expired by the
+        moment of the new login goes, revoked or not; one still live stays,
+        as do made tokens, which never expire, and every other user's."""
+        _user(store, "alice")
+        _user(store, "bob")
+        now = _ACCESS_AT + timedelta(days=1)
+        made = _token(store, "alice", "made")
+        long_expired = _logged_in(store, "alice", "long", expires_at=now - timedelta(hours=1))
+        just_expired = _logged_in(store, "alice", "just", expires_at=now)
+        revoked = _logged_in(store, "alice", "revoked", expires_at=now - timedelta(hours=1))
+        store.revoke_token(revoked.id, revoked_at=_ACCESS_AT)
+        live = _logged_in(store, "alice", "live", expires_at=now + timedelta(microseconds=1))
+        bobs = _logged_in(store, "bob", "bobs", expires_at=now - timedelta(hours=1))
+
+        new = _logged_in(store, "alice", "new", created_at=now)
+
+        assert store.list_tokens() == (made, live, bobs, new)
+        for gone in (long_expired, just_expired, revoked):
+            assert store.get_token(gone.id) is None
+        # Asked before it expired: its row is gone, not merely expired.
+        assert store.authenticate(token_digest("long"), now=_ACCESS_AT) is None
+
+    def test_a_login_never_deletes_the_token_it_makes(self, store: ExecutionStore) -> None:
+        """Whatever expiry it is given: a login token expiring the moment it
+        is made is stored, and authenticates nothing."""
+        _user(store, "alice")
+
+        instant = _logged_in(store, "alice", "instant", expires_at=_ACCESS_AT)
+
+        assert store.get_token(instant.id) == instant
+        assert store.list_tokens() == (instant,)
+        assert store.authenticate(token_digest("instant"), now=_ACCESS_AT) is None
+
+    def test_a_refused_login_deletes_nothing(self, store: ExecutionStore) -> None:
+        _user(store, "alice")
+        expired = _logged_in(store, "alice", "expired", expires_at=_ACCESS_AT + timedelta(hours=1))
+
+        refused = _login(
+            store,
+            "alice",
+            "refused",
+            password_hash=_OTHER_HASH,
+            created_at=_ACCESS_AT + timedelta(days=1),
+        )
+
+        assert refused is None
+        assert store.list_tokens() == (expired,)
+
+    def test_a_token_id_is_never_handed_out_again_once_its_row_is_deleted(
+        self, store: ExecutionStore
+    ) -> None:
+        """A token is revoked by its id, so an id handed out again would let
+        a revocation meant for one token reach another."""
+        _user(store, "alice")
+        expired = _logged_in(store, "alice", "expired", expires_at=_ACCESS_AT + timedelta(hours=1))
+        made = _token(store, "alice", "made")
+        pruning = _logged_in(store, "alice", "pruning", created_at=_ACCESS_AT + timedelta(days=1))
+        after = _token(store, "alice", "after")
+
+        assert expired.id < made.id < pruning.id < after.id
+        assert store.list_tokens() == (made, pruning, after)
+
+    @pytest.mark.parametrize("offset_hours", [0, 2, -5], ids=["utc", "east", "west"])
+    def test_a_login_token_authenticates_until_the_moment_it_expires(
+        self, store: ExecutionStore, offset_hours: int
+    ) -> None:
+        """Up to the microsecond before `expires_at` and never from then on,
+        whatever offset the moment asking is given in: what is compared is
+        the instant."""
+        _user(store, "alice")
+        expires_at = _ACCESS_AT + LOGIN_TOKEN_LIFETIME
+        _logged_in(store, "alice", "login", expires_at=expires_at)
+        zone = timezone(timedelta(hours=offset_hours))
+
+        def _grant(now: datetime) -> Grant | None:
+            return store.authenticate(token_digest("login"), now=now.astimezone(zone))
+
+        assert _grant(expires_at - timedelta(microseconds=1)) == Grant(
+            user="alice", admin=False, scopes=frozenset({READ_SCOPE})
+        )
+        assert _grant(expires_at) is None
+        assert _grant(expires_at + timedelta(days=365)) is None
+
+    def test_a_made_token_never_expires(self, store: ExecutionStore) -> None:
+        """A made token -- the plugin's, CI's -- works until it is
+        revoked."""
+        store.create_user("alice", admin=False, created_at=_ACCESS_AT)
+        made = _token(store, "alice", "made")
+        far_future = datetime(9999, 12, 31, 23, 59, 59, 999999, tzinfo=timezone.utc)
+
+        assert made.expires_at is None
+        assert store.get_token(made.id) == made
+        assert store.authenticate(token_digest("made"), now=far_future) is not None
+
+
+class LocalDatabaseContract:
+    """The contract of an adapter whose databases pytest-vantage's local
+    store can make -- SQLite's and the in-memory double's, never
+    PostgreSQL's. Inherit it beside `ExecutionStoreContract` and override
+    `local_store` with a fresh adapter instance opened as the local store
+    opens one."""
+
+    @pytest.fixture
+    def local_store(self) -> ExecutionStore:
+        raise NotImplementedError("subclasses must override the `local_store` fixture")
+
+    def test_a_database_the_local_store_made_gets_no_first_admin(
+        self, local_store: ExecutionStore
+    ) -> None:
+        """It holds only its owner's runs, so it is served open, as it
+        always was, until its first user is added by hand."""
+        created = local_store.create_first_admin(
+            "admin", password_hash=_HASH, created_at=_ACCESS_AT
+        )
+
+        assert created is None
+        assert local_store.list_users() == ()
+        assert local_store.access_required() is False
+
 
 _ACCESS_AT = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -3338,3 +3696,65 @@ def _token(
         scopes=frozenset(scopes or {READ_SCOPE, RECORD_SCOPE}),
         created_at=_ACCESS_AT,
     )
+
+
+def _stored_hash(mark: str) -> str:
+    """A password hash as a store is given one, told apart from others by
+    `mark` and shaped as `core/domain/passwords.py` makes one. A store keeps
+    a hash as it is and never checks it, so nothing here is hashed."""
+    return f"$scrypt$ln=4,r=8,p=1${mark * 22}${mark * 43}"
+
+
+_HASH = _stored_hash("A")
+_OTHER_HASH = _stored_hash("B")
+_THIRD_HASH = _stored_hash("C")
+
+
+def _user(store: ExecutionStore, name: str, *, admin: bool = False) -> None:
+    """The user `name`, whose password's hash is `_HASH`."""
+    store.create_user(name, admin=admin, created_at=_ACCESS_AT)
+    store.set_password(name, password_hash=_HASH, changed_at=_ACCESS_AT)
+
+
+def _login(
+    store: ExecutionStore,
+    user: str,
+    token: str,
+    *,
+    password_hash: str = _HASH,
+    created_at: datetime = _ACCESS_AT,
+    expires_at: datetime | None = None,
+) -> Token | None:
+    """A login of `user` whose token's text is `token`, its password checked
+    against `password_hash`, at `created_at`, expiring
+    `LOGIN_TOKEN_LIFETIME` later unless `expires_at` says when; or None if
+    the store refuses it."""
+    return store.create_login_token(
+        user,
+        password_hash=password_hash,
+        digest=token_digest(token),
+        created_at=created_at,
+        expires_at=created_at + LOGIN_TOKEN_LIFETIME if expires_at is None else expires_at,
+    )
+
+
+def _logged_in(
+    store: ExecutionStore,
+    user: str,
+    token: str,
+    *,
+    password_hash: str = _HASH,
+    created_at: datetime = _ACCESS_AT,
+    expires_at: datetime | None = None,
+) -> Token:
+    """The token of a `_login` the store must accept."""
+    login = _login(
+        store,
+        user,
+        token,
+        password_hash=password_hash,
+        created_at=created_at,
+        expires_at=expires_at,
+    )
+    assert login is not None
+    return login

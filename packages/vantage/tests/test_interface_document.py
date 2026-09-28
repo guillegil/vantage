@@ -50,6 +50,7 @@ from vantage.core.domain.metadata import (
     METADATA_CONTENT_TYPES,
     METADATA_SOURCES,
 )
+from vantage.core.domain.passwords import PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS, hash_password
 from vantage.core.domain.projects import DEFAULT_PROJECT, PROJECT_NAME_PATTERN
 from vantage.core.domain.result import OUTCOMES
 from vantage.core.ports.storage import ExecutionStore
@@ -75,9 +76,12 @@ from vantage.service.schemas import (
     HeartbeatAcknowledgement,
     HistoryEntryResponse,
     HistoryResponse,
+    LoginRequest,
     MetadataFileResponse,
     MetadataHorizonResponse,
     MetadataItemResponse,
+    PasswordChangeRequest,
+    PasswordSetRequest,
     ProjectCreateRequest,
     ProjectListResponse,
     ProjectResponse,
@@ -105,11 +109,16 @@ from vantage.service.schemas import (
 )
 from vantage.storage.sqlite_store import SqliteExecutionStore
 
+# `cheap_passwords`, so the password routes hash at a tiny cost.
+pytest_plugins = ["password_fixtures"]
+
 _DOCUMENT_BYTES = (
     importlib.resources.files("vantage.service.openapi").joinpath("v1.yaml").read_bytes()
 )
 _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 _Call = Callable[[], httpx.Response]
+# A password the rule takes, for the password routes to set and check.
+_PASSWORD = "an interface probe password"
 
 
 def _parsed_document() -> dict[str, Any]:
@@ -258,11 +267,12 @@ def _admin(store: ExecutionStore, name: str = "alice") -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
+def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None) -> None:
     """A binding table maps every `(method, path)` the document declares to
     a callable producing valid parameters, driven against a dedicated
     fixture database with an admin's token holding every scope, since the
-    users and tokens paths answer nothing else. Includes
+    users and tokens paths answer nothing else. Logging in and changing a
+    password send, instead, the name and password an admin set. Includes
     `GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml` themselves."""
     document = _parsed_document()
     declared = _declared_operations(document)
@@ -305,8 +315,9 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
     ]
 
     # Ordered so the fixture data a later binding needs already exists --
-    # the project must be made before a run is reported in it, and the run
-    # reported before it can be read back or heartbeat'd.
+    # the project must be made before a run is reported in it, the run
+    # reported before it can be read back or heartbeat'd, and a user given
+    # a password before logging in.
     ordered_bindings: list[tuple[tuple[str, str], _Call]] = [
         (
             ("POST", "/projects"),
@@ -354,6 +365,21 @@ def test_every_documented_path_answers_2xx(tmp_path: Path) -> None:
             lambda: client.patch("/api/v1/users/probe", json={"admin": True}),
         ),
         (("GET", "/users"), lambda: client.get("/api/v1/users")),
+        (
+            ("PUT", "/users/{name}/password"),
+            lambda: client.put("/api/v1/users/probe/password", json={"password": _PASSWORD}),
+        ),
+        (
+            ("POST", "/login"),
+            lambda: client.post("/api/v1/login", json={"name": "probe", "password": _PASSWORD}),
+        ),
+        (
+            ("POST", "/password"),
+            lambda: client.post(
+                "/api/v1/password",
+                json={"name": "probe", "password": _PASSWORD, "new_password": _PASSWORD.upper()},
+            ),
+        ),
         (("POST", "/tokens"), mint),
         (("GET", "/tokens"), lambda: client.get("/api/v1/tokens")),
         (
@@ -542,6 +568,21 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
         (("GET", "/tokens"), lambda: client.get("/api/v1/tokens")),
         (("POST", "/tokens"), lambda: client.post("/api/v1/tokens", json={"user": "a"})),
         (("POST", "/tokens/{token_id}/revoke"), lambda: client.post("/api/v1/tokens/1/revoke")),
+        (
+            ("PUT", "/users/{name}/password"),
+            lambda: client.put("/api/v1/users/a/password", json={"password": _PASSWORD}),
+        ),
+        (
+            ("POST", "/login"),
+            lambda: client.post("/api/v1/login", json={"name": "a", "password": _PASSWORD}),
+        ),
+        (
+            ("POST", "/password"),
+            lambda: client.post(
+                "/api/v1/password",
+                json={"name": "a", "password": _PASSWORD, "new_password": _PASSWORD},
+            ),
+        ),
     ]
 
 
@@ -556,15 +597,20 @@ def _undocumented_statuses(
 
 
 def _users_probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
-    """One request per rejection the users and tokens paths give an admin,
-    on a server whose admin is `alice` and has a user `bob`."""
+    """One request per rejection the users, tokens and password paths give
+    an admin, on a server whose admin is `alice` and has a user `bob`, who
+    has no password."""
     json_header = {"content-type": "application/json"}
     too_large = b" " * (MAX_USERS_BODY_BYTES + 1)
+    short = _PASSWORD[:14]
     requests: list[tuple[tuple[str, str], _Call]] = []
     for key, path, send in (
         (("POST", "/users"), "/api/v1/users", client.post),
         (("PATCH", "/users/{name}"), "/api/v1/users/bob", client.patch),
         (("POST", "/tokens"), "/api/v1/tokens", client.post),
+        (("PUT", "/users/{name}/password"), "/api/v1/users/bob/password", client.put),
+        (("POST", "/login"), "/api/v1/login", client.post),
+        (("POST", "/password"), "/api/v1/password", client.post),
     ):
         requests += [
             (key, partial(send, path, content=b"{}", headers={"content-type": "x/y"})),
@@ -600,10 +646,40 @@ def _users_probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
         ),
         (("POST", "/tokens/{token_id}/revoke"), lambda: client.post("/api/v1/tokens/999/revoke")),
         (("POST", "/tokens/{token_id}/revoke"), lambda: client.post("/api/v1/tokens/0/revoke")),
+        (
+            ("PUT", "/users/{name}/password"),
+            lambda: client.put("/api/v1/users/ghost/password", json={"password": _PASSWORD}),
+        ),
+        (
+            ("PUT", "/users/{name}/password"),
+            lambda: client.put("/api/v1/users/NOT-A-NAME/password", json={"password": _PASSWORD}),
+        ),
+        (
+            ("PUT", "/users/{name}/password"),
+            lambda: client.put("/api/v1/users/bob/password", json={"password": short}),
+        ),
+        (
+            ("POST", "/login"),
+            lambda: client.post("/api/v1/login", json={"name": "bob", "password": _PASSWORD}),
+        ),
+        (
+            ("POST", "/password"),
+            lambda: client.post(
+                "/api/v1/password",
+                json={"name": "bob", "password": _PASSWORD, "new_password": short},
+            ),
+        ),
+        (
+            ("POST", "/password"),
+            lambda: client.post(
+                "/api/v1/password",
+                json={"name": "bob", "password": _PASSWORD, "new_password": _PASSWORD},
+            ),
+        ),
     ]
 
 
-def test_every_status_the_server_answers_is_documented() -> None:
+def test_every_status_the_server_answers_is_documented(cheap_passwords: None) -> None:
     """A generated client decides what to handle from the listed statuses,
     so each rejection the server gives must be listed: on an open server,
     and on one whose admin manages users. Half 2 removes one code from a
@@ -634,6 +710,15 @@ def test_every_status_the_server_answers_is_documented() -> None:
         415,
         422,
     }
+    # And every rejection logging in or changing a password can earn.
+    assert {status for _, path, status in observed if path in ("/login", "/password")} == {
+        400,
+        401,
+        409,
+        413,
+        415,
+        422,
+    }
     assert {
         ("POST", "/projects", "project_exists"),
         ("POST", "/projects", "invalid_project_name"),
@@ -641,6 +726,17 @@ def test_every_status_the_server_answers_is_documented() -> None:
         ("POST", "/runs", "unknown_project"),
         ("POST", "/runs", "project_mismatch"),
         ("POST", "/runs", "invalid_report"),
+        ("POST", "/login", "open_server"),
+        ("POST", "/login", "invalid_credentials"),
+        ("POST", "/login", "invalid_login_request"),
+        ("POST", "/password", "open_server"),
+        ("POST", "/password", "invalid_credentials"),
+        ("POST", "/password", "invalid_password_request"),
+        ("POST", "/password", "invalid_password"),
+        ("PUT", "/users/{name}/password", "open_server"),
+        ("PUT", "/users/{name}/password", "unknown_user"),
+        ("PUT", "/users/{name}/password", "invalid_password_request"),
+        ("PUT", "/users/{name}/password", "invalid_password"),
     } <= errors
     nested = {key for key in _declared_operations(_parsed_document()) if "{project}" in key[1]}
     assert {(*key, "unknown_project") for key in nested} <= errors
@@ -663,7 +759,8 @@ def _access_requests(
     where each finds what it needs: the project made first, the run
     reported in it next, the section posted before it is deleted. The users
     bindings add `carol`, demote and mint a token for `bob`, and revoke the
-    token `victim`."""
+    token `victim`; the password bindings set `bob`'s password to
+    `_PASSWORD`, log him in with it and change it to itself."""
     run = f"/api/v1/runs/{_ACCESS_RUN}"
     project = f"/api/v1/projects/{_ACCESS_PROJECT}"
     node = {"node_id": "tests/test_a.py::test_one"}
@@ -734,6 +831,17 @@ def _access_requests(
         ("POST", "/tokens/{token_id}/revoke"): lambda: client.post(
             f"/api/v1/tokens/{victim}/revoke", headers=headers
         ),
+        ("PUT", "/users/{name}/password"): lambda: client.put(
+            "/api/v1/users/bob/password", json={"password": _PASSWORD}, headers=headers
+        ),
+        ("POST", "/login"): lambda: client.post(
+            "/api/v1/login", json={"name": "bob", "password": _PASSWORD}, headers=headers
+        ),
+        ("POST", "/password"): lambda: client.post(
+            "/api/v1/password",
+            json={"name": "bob", "password": _PASSWORD, "new_password": _PASSWORD},
+            headers=headers,
+        ),
     }
 
 
@@ -743,9 +851,10 @@ def _users_operation(operation: Mapping[str, Any]) -> bool:
 
 def test_an_open_server_serves_every_path_but_the_users_ones() -> None:
     """Driven by the document, with no token and no user: every operation
-    tagged `users` answers `409 open_server`, and every other one serves
-    anyone, as before the server had users -- making a project included,
-    as changing sections is. Nothing asked makes a user."""
+    tagged `users` answers `409 open_server`, logging in and changing a
+    password among them, and every other one serves anyone, as before the
+    server had users -- making a project included, as changing sections
+    is. Nothing asked makes a user."""
     store = InMemoryExecutionStore()
     client = TestClient(create_app(store))
     document = _parsed_document()
@@ -777,18 +886,19 @@ def _documented_scope(operation: Mapping[str, Any]) -> str | None:
     return str(match.group(1))
 
 
-def test_every_operation_needs_the_scope_its_document_names() -> None:
+def test_every_operation_needs_the_scope_its_document_names(cheap_passwords: None) -> None:
     """On a server with users, driven by the document: an operation whose
-    `security` is empty answers without a token; every other one refuses a
-    request without one (401) and one granting every scope but the one its
-    `403` names (403), and takes one granting that scope. A report or
-    heartbeat of another user's run is 409. Every status is documented, so
-    a route added without its scope, or a document that names the wrong
-    one, fails here."""
+    `security` is empty answers without a token, and whatever token is
+    sent; every other one refuses a request without one (401) and one
+    granting every scope but the one its `403` names (403), and takes one
+    granting that scope. A report or heartbeat of another user's run is
+    409. Every status is documented, so a route added without its scope, or
+    a document that names the wrong one, fails here."""
     store = InMemoryExecutionStore()
     now = datetime.now(timezone.utc)
     store.create_user("alice", admin=True, created_at=now)
     store.create_user("bob", admin=False, created_at=now)
+    store.set_password("bob", password_hash=hash_password(_PASSWORD), changed_at=now)
 
     def bearer(user: str, scopes: set[str]) -> dict[str, str]:
         token = new_token()
@@ -823,7 +933,10 @@ def test_every_operation_needs_the_scope_its_document_names() -> None:
             assert answered["lacking"] == 403, (key, answered)
             assert 200 <= answered["holding"] < 300, (key, answered)
         else:
-            assert answered["none"] == 200, (key, answered)
+            forged = {"Authorization": f"Bearer {new_token()}"}
+            answered["forged"] = _access_requests(client, forged, victim=victim)[key]().status_code
+            assert 200 <= answered["none"] < 300, (key, answered)
+            assert 200 <= answered["forged"] < 300, (key, answered)
         observed |= {(method, path, status) for status in answered.values() if status >= 400}
 
     for key in (("POST", "/runs"), ("POST", "/runs/{run_id}/heartbeat")):
@@ -855,7 +968,7 @@ def test_every_admin_operation_refuses_a_non_admins_token_holding_every_scope() 
         if _documented_scope(document["paths"][key[1]][key[0].lower()]) == ADMIN_SCOPE
     ]
 
-    assert len(admin_operations) == 9
+    assert len(admin_operations) == 10
     assert ("POST", "/projects") in admin_operations
     for key in admin_operations:
         response = requests[key]()
@@ -957,28 +1070,38 @@ def test_every_documented_integer_bound_is_the_one_the_server_enforces(tmp_path:
         store.close()
 
 
-def test_the_created_token_is_declared_and_sent_as_not_to_be_stored() -> None:
-    """The one answer that carries a token says no cache may keep it, in
-    the document and on the wire, and it is the only one that does."""
+def test_every_created_token_is_declared_and_sent_as_not_to_be_stored(
+    cheap_passwords: None,
+) -> None:
+    """The two answers that carry a token, a made one's and a login's, say
+    no cache may keep it, in the document and on the wire, and they are the
+    only ones that do."""
     document = _parsed_document()
-    created = document["paths"]["/tokens"]["post"]["responses"]["201"]
     store = InMemoryExecutionStore()
     client = TestClient(create_app(store), headers=_admin(store))
+    store.set_password(
+        "alice", password_hash=hash_password(_PASSWORD), changed_at=datetime.now(timezone.utc)
+    )
 
-    response = client.post("/api/v1/tokens", json={"user": "alice"})
+    answers = {
+        "/tokens": client.post("/api/v1/tokens", json={"user": "alice"}),
+        "/login": client.post("/api/v1/login", json={"name": "alice", "password": _PASSWORD}),
+    }
 
-    assert set(created["headers"]) == {"Cache-Control"}
-    assert response.status_code == 201
-    assert response.headers["Cache-Control"] == "no-store"
+    for path, response in answers.items():
+        created = document["paths"][path]["post"]["responses"]["201"]
+        assert set(created["headers"]) == {"Cache-Control"}, path
+        assert response.status_code == 201, path
+        assert response.headers["Cache-Control"] == "no-store", path
     assert "Cache-Control" not in client.get("/api/v1/tokens").headers
-    headed = [
+    headed = {
         (method, path, status)
         for path, operations in document["paths"].items()
         for method, operation in operations.items()
         for status, answer in operation["responses"].items()
         if "headers" in answer
-    ]
-    assert headed == [("post", "/tokens", "201")]
+    }
+    assert headed == {("post", "/tokens", "201"), ("post", "/login", "201")}
 
 
 def test_the_documented_user_name_pattern_is_the_domains() -> None:
@@ -997,6 +1120,29 @@ def test_the_documented_project_name_patterns_are_the_domains() -> None:
 
     assert schemas["ProjectCreateRequest"]["properties"]["name"]["pattern"] == expected
     assert schemas["SessionReport"]["properties"]["project"]["pattern"] == expected
+
+
+def test_the_documented_password_rule_is_the_domains() -> None:
+    """Every place the document states the rule a password to set follows
+    -- each such field, and each `invalid_password` rejection -- states the
+    domain's bounds."""
+    document = _parsed_document()
+    schemas = document["components"]["schemas"]
+    rule = f"{PASSWORD_MIN_CHARS} to {PASSWORD_MAX_CHARS} characters once NFKC-normalised"
+    statements = [
+        schemas["PasswordChangeRequest"]["properties"]["new_password"]["description"],
+        schemas["PasswordSetRequest"]["properties"]["password"]["description"],
+        *(
+            description
+            for operations in document["paths"].values()
+            for operation in operations.values()
+            for description in [operation["responses"].get("422", {}).get("description", "")]
+            if "(invalid_password)" in description
+        ),
+    ]
+
+    assert len(statements) == 4
+    assert all(rule in statement for statement in statements), statements
 
 
 # --- Schema checks ----------------------------------------------------------
@@ -1022,6 +1168,9 @@ _REQUEST_SCHEMAS: dict[str, type[BaseModel]] = {
     "UserCreateRequest": UserCreateRequest,
     "UserUpdateRequest": UserUpdateRequest,
     "TokenCreateRequest": TokenCreateRequest,
+    "LoginRequest": LoginRequest,
+    "PasswordChangeRequest": PasswordChangeRequest,
+    "PasswordSetRequest": PasswordSetRequest,
     "ProjectCreateRequest": ProjectCreateRequest,
 }
 _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
@@ -1293,4 +1442,33 @@ def test_declared_additional_properties_match_the_model_extra_setting() -> None:
         expected = _ADDITIONAL_PROPERTIES.get(str(model.model_config.get("extra")))
         assert schemas[name].get("additionalProperties") == expected, (
             f"{name}: {model.__name__} has extra={model.model_config.get('extra')!r}"
+        )
+
+
+def test_every_password_is_declared_write_only() -> None:
+    """A field a request model keeps out of its `repr` is a password, and
+    its schema says so -- `format: password` and `writeOnly` -- so a
+    generated client masks it and never expects it back. Both directions:
+    a password left unmarked fails, and so does either mark on anything
+    else."""
+    schemas = _declared_schemas()
+    marked = {
+        (name, field)
+        for name, schema in schemas.items()
+        for field, declaration in schema.get("properties", {}).items()
+        if "writeOnly" in declaration or declaration.get("format") == "password"
+    }
+    passwords = {
+        (name, field)
+        for name, model in _REQUEST_SCHEMAS.items()
+        for field, info in model.model_fields.items()
+        if not info.repr
+    }
+
+    assert passwords, "no request model keeps a field out of its repr"
+    assert marked == passwords
+    for name, field in sorted(passwords):
+        declaration = schemas[name]["properties"][field]
+        assert (declaration.get("format"), declaration.get("writeOnly")) == ("password", True), (
+            f"{name}.{field}"
         )

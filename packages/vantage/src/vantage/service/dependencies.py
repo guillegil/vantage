@@ -16,6 +16,7 @@ from datetime import timedelta
 from fastapi import Request
 
 from vantage.core.ports.storage import ExecutionStore
+from vantage.service.slots import PasswordSlots
 
 
 async def get_store(request: Request) -> ExecutionStore:
@@ -30,4 +31,11 @@ async def get_grace_period(request: Request) -> timedelta:
     return grace_period
 
 
-__all__ = ["get_grace_period", "get_store"]
+async def get_password_slots(request: Request) -> PasswordSlots:
+    """What every password hash the server computes waits on
+    (`routes/login.py`)."""
+    slots: PasswordSlots = request.app.state.password_slots
+    return slots
+
+
+__all__ = ["get_grace_period", "get_password_slots", "get_store"]

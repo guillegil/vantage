@@ -30,13 +30,21 @@ key bound is one step.
 from __future__ import annotations
 
 import functools
+import itertools
 import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Concatenate, ParamSpec, TypeVar
 
-from vantage.core.domain.access import Grant, Token, User
+from vantage.core.domain.access import (
+    ADMIN_SCOPE,
+    LOGIN_TOKEN_LABEL,
+    READ_SCOPE,
+    Grant,
+    Token,
+    User,
+)
 from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projects import DEFAULT_PROJECT, Project
@@ -124,7 +132,10 @@ def _past(after: RunKey | None, started_at: datetime, run_id: str) -> bool:
 class InMemoryExecutionStore:
     """Implements `vantage.core.ports.storage.ExecutionStore` with dicts."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, local: bool = False) -> None:
+        # Whether pytest-vantage's local store made this "database", which
+        # `create_first_admin` reads as the adapters read `meta.origin`.
+        self._local = local
         # Not re-entrant: no locked method calls another.
         self._lock = threading.Lock()
         self._executions: dict[str, Execution] = {}
@@ -142,10 +153,13 @@ class InMemoryExecutionStore:
         self._metadata_entries: dict[tuple[str, str], MetadataEntry] = {}
         self._recorded_by: dict[str, str | None] = {}
         self._users: dict[str, User] = {}
-        # Keyed by id, which counts from 1 like an identity column; revoked
-        # tokens stay.
+        self._password_hashes: dict[str, str] = {}
+        # Keyed by id, which counts from 1 like an identity column and never
+        # hands out an id twice, though expired login tokens are deleted;
+        # revoked tokens stay.
         self._tokens: dict[int, Token] = {}
         self._token_ids: dict[str, int] = {}
+        self._next_token_id = itertools.count(1)
 
     @_locked
     def record_session(
@@ -543,6 +557,17 @@ class InMemoryExecutionStore:
         return bool(self._users)
 
     @_locked
+    def create_first_admin(
+        self, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        if self._users or self._local:
+            return None
+        user = User(name=name, admin=True, disabled=False, created_at=created_at, has_password=True)
+        self._users[name] = user
+        self._password_hashes[name] = password_hash
+        return user
+
+    @_locked
     def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
         if name in self._users:
             raise UserExistsError(f"there is already a user named {name!r}")
@@ -575,6 +600,76 @@ class InMemoryExecutionStore:
         return user
 
     @_locked
+    def get_password_hash(self, name: str) -> str | None:
+        user = self._users.get(name)
+        if user is None or user.disabled:
+            return None
+        return self._password_hashes.get(name)
+
+    @_locked
+    def set_password(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        changed_at: datetime,
+        replacing: str | None = None,
+    ) -> bool:
+        user = self._users.get(name)
+        if user is None:
+            return False
+        if replacing is not None and (
+            user.disabled or self._password_hashes.get(name) != replacing
+        ):
+            return False
+        self._password_hashes[name] = password_hash
+        self._users[name] = replace(user, has_password=True)
+        for token_id, token in self._tokens.items():
+            if token.user == name and token.expires_at is not None and token.revoked_at is None:
+                self._tokens[token_id] = replace(token, revoked_at=changed_at)
+        return True
+
+    @_locked
+    def create_login_token(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        digest: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> Token | None:
+        user = self._users.get(name)
+        if user is None or user.disabled or self._password_hashes.get(name) != password_hash:
+            return None
+        if digest in self._token_ids:
+            raise ValueError("a token with that digest is stored already")
+        token = Token(
+            id=next(self._next_token_id),
+            user=name,
+            label=LOGIN_TOKEN_LABEL,
+            scopes=frozenset({READ_SCOPE, ADMIN_SCOPE} if user.admin else {READ_SCOPE}),
+            created_at=created_at,
+            revoked_at=None,
+            expires_at=expires_at,
+        )
+        self._tokens[token.id] = token
+        self._token_ids[digest] = token.id
+        expired = {
+            token_id
+            for token_id, stored in self._tokens.items()
+            if stored.user == name
+            and stored.expires_at is not None
+            and stored.expires_at <= created_at
+            and token_id != token.id
+        }
+        for token_id in expired:
+            del self._tokens[token_id]
+        for stored_digest in [d for d, token_id in self._token_ids.items() if token_id in expired]:
+            del self._token_ids[stored_digest]
+        return token
+
+    @_locked
     def create_token(
         self,
         user: str,
@@ -589,7 +684,7 @@ class InMemoryExecutionStore:
         if digest in self._token_ids:
             raise ValueError("a token with that digest is stored already")
         token = Token(
-            id=len(self._tokens) + 1,
+            id=next(self._next_token_id),
             user=user,
             label=label,
             scopes=frozenset(scopes),
@@ -623,13 +718,15 @@ class InMemoryExecutionStore:
         return True
 
     @_locked
-    def authenticate(self, digest: str) -> Grant | None:
+    def authenticate(self, digest: str, *, now: datetime) -> Grant | None:
         token_id = self._token_ids.get(digest)
         if token_id is None:
             return None
         token = self._tokens[token_id]
         user = self._users[token.user]
         if token.revoked_at is not None or user.disabled:
+            return None
+        if token.expires_at is not None and token.expires_at <= now:
             return None
         return Grant(user=user.name, admin=user.admin, scopes=token.scopes)
 
@@ -667,5 +764,6 @@ class InMemoryExecutionStore:
         self._project_of.clear()
         self._projects.clear()
         self._users.clear()
+        self._password_hashes.clear()
         self._tokens.clear()
         self._token_ids.clear()

@@ -559,7 +559,19 @@ class ExecutionStore(Protocol):
 
     def access_required(self) -> bool:
         """Whether any user exists. Users are never deleted, so once this is
-        true it stays true."""
+        true it stays true. `vantage` gives every database but one
+        pytest-vantage's local store made a user before serving it
+        (`create_first_admin`)."""
+        ...
+
+    def create_first_admin(
+        self, name: str, *, password_hash: str, created_at: datetime
+    ) -> User | None:
+        """Create the enabled admin `name` with the password whose hash is
+        `password_hash`, in one write, only if the database has no user and
+        was not made by the local store. Return that user, or None if
+        either holds, creating nothing -- so of two servers starting on one
+        new database, one creates it."""
         ...
 
     def create_user(self, name: str, *, admin: bool, created_at: datetime) -> User:
@@ -582,6 +594,49 @@ class ExecutionStore(Protocol):
         """Set whichever of `admin` and `disabled` is given, in one write,
         and return the user as it now stands, or None if there is no such
         user."""
+        ...
+
+    def get_password_hash(self, name: str) -> str | None:
+        """Return the password hash of the enabled user `name`, or None if
+        there is no such user, they are disabled, or they have no
+        password. Nothing else hands a hash out."""
+        ...
+
+    def set_password(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        changed_at: datetime,
+        replacing: str | None = None,
+    ) -> bool:
+        """Give `name` the password whose hash is `password_hash` and
+        revoke, at `changed_at`, every login token of theirs that is not
+        revoked yet, in one write; their other tokens are left alone.
+
+        With `replacing`, only while the user is enabled and their stored
+        hash is still `replacing`: a password change checked against the
+        current password loses to any change made meanwhile. Returns False,
+        changing nothing, if there is no such user or that does not hold."""
+        ...
+
+    def create_login_token(
+        self,
+        name: str,
+        *,
+        password_hash: str,
+        digest: str,
+        created_at: datetime,
+        expires_at: datetime,
+    ) -> Token | None:
+        """Store a login token of `name` by its `digest`, labelled
+        `LOGIN_TOKEN_LABEL`, holding the read scope and, for an admin, the
+        admin scope, and expiring at `expires_at` -- only while the user is
+        enabled and their stored hash is still `password_hash`, the one the
+        password was checked against, so a login never outlives a password
+        change made while it was checked. The same write deletes that
+        user's other login tokens that expired by `created_at`. Returns None,
+        storing nothing, if that does not hold."""
         ...
 
     def create_token(
@@ -619,10 +674,11 @@ class ExecutionStore(Protocol):
         `revoked_at`."""
         ...
 
-    def authenticate(self, digest: str) -> Grant | None:
+    def authenticate(self, digest: str, *, now: datetime) -> Grant | None:
         """Return what the token whose digest is `digest` grants, or None
-        if there is no such token, it was revoked, or its user is disabled.
-        The grant's `admin` is the user's standing now."""
+        if there is no such token, it was revoked, it expired by `now`, or
+        its user is disabled. The grant's `admin` is the user's standing
+        now."""
         ...
 
     def close(self) -> None:

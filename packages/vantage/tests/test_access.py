@@ -1,6 +1,8 @@
 """Who may call which route: a server with no user is open, a server with
-one needs a token granting each route's scope, and a run takes reports and
-heartbeats from the user who created it alone (`service/access.py`).
+one needs a token granting each route's scope, a run takes reports and
+heartbeats from the user who created it alone, and logging in or changing
+a password needs no token but a server that has a user
+(`service/access.py`).
 
 Most tests run against every adapter (`any_store`): the rules are the
 service's, but the answers they rest on -- whether a user exists, what a
@@ -9,6 +11,7 @@ token grants, who recorded a run -- are each adapter's.
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -22,17 +25,31 @@ from vantage.core.domain.access import (
     new_token,
     token_digest,
 )
+from vantage.core.domain.passwords import hash_password
 from vantage.core.domain.projects import DEFAULT_PROJECT
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
 
-# `any_store`, each adapter in turn.
-pytest_plugins = ["store_fixtures"]
+# `any_store`, each adapter in turn; `cheap_passwords`, for the tests that
+# give a user a password.
+pytest_plugins = ["store_fixtures", "password_fixtures"]
 
 _NOW = datetime(2026, 9, 27, 12, 0, 0, tzinfo=timezone.utc)
 _RUN = "a" * 32
+_PASSWORD = "correct horse battery staple"
+_JOIN_TIMEOUT_SECONDS = 10
+
+# Logging in and changing a password, each with a body that succeeds once
+# `alice` has `_PASSWORD`.
+_PASSWORD_ROUTES = [
+    ("/api/v1/login", {"name": "alice", "password": _PASSWORD}),
+    (
+        "/api/v1/password",
+        {"name": "alice", "password": _PASSWORD, "new_password": f"{_PASSWORD}!"},
+    ),
+]
 
 
 def _report(run_id: str = _RUN, *, finished: bool = True) -> dict[str, Any]:
@@ -445,3 +462,70 @@ def test_a_token_revoked_after_a_request_is_refused_on_the_next(
     _assert_unauthenticated(
         client.get("/api/v1/projects/default/runs", headers=headers), invalid=True
     )
+
+
+# --- Logging in and changing a password -----------------------------------------------------
+
+
+@pytest.mark.parametrize(("path", "body"), _PASSWORD_ROUTES, ids=["login", "password"])
+def test_logging_in_is_refused_while_nobody_has_a_password_and_answered_once_one_does(
+    any_store: ExecutionStore, cheap_passwords: None, path: str, body: dict[str, str]
+) -> None:
+    """Neither route needs a token, so neither is opened by the server
+    being open: both answer `409 open_server` there, as the users routes
+    do, until the first user closes it, with no restart."""
+    client = TestClient(create_app(any_store))
+
+    while_open = client.post(path, json=body)
+    _user(any_store, "alice")
+    any_store.set_password("alice", password_hash=hash_password(_PASSWORD), changed_at=_NOW)
+    once_closed = client.post(path, json=body)
+
+    assert while_open.status_code == 409
+    assert while_open.json()["error"] == "open_server"
+    assert once_closed.status_code in {201, 204}, once_closed.text
+
+
+@pytest.mark.parametrize(("path", "body"), _PASSWORD_ROUTES, ids=["login", "password"])
+def test_asking_whether_a_user_exists_before_a_login_holds_up_no_other_request(
+    path: str, body: dict[str, str]
+) -> None:
+    """Whether the server is open is asked of the store before the body is
+    read, in a plain `def` dependency FastAPI runs in its threadpool. Asked
+    on the event loop, it would stall every other request until the store
+    answered, heartbeats included."""
+    store = InMemoryExecutionStore()
+    entered, release = threading.Event(), threading.Event()
+    access_required = store.access_required
+
+    def held() -> bool:
+        entered.set()
+        release.wait(2 * _JOIN_TIMEOUT_SECONDS)
+        return access_required()
+
+    store.access_required = held  # type: ignore[method-assign]
+    answered: dict[str, int] = {}
+
+    with TestClient(create_app(store)) as client:
+
+        def _held_request() -> None:
+            answered["held"] = client.post(path, json=body).status_code
+
+        def _capabilities() -> None:
+            answered["capabilities"] = client.get("/api/v1/capabilities").status_code
+
+        holder = threading.Thread(target=_held_request, daemon=True)
+        other = threading.Thread(target=_capabilities, daemon=True)
+        holder.start()
+        try:
+            assert entered.wait(_JOIN_TIMEOUT_SECONDS), f"{path} never asked whether a user exists"
+            other.start()
+            other.join(timeout=_JOIN_TIMEOUT_SECONDS)
+            assert not other.is_alive(), f"a request waited for {path}'s question"
+            assert "held" not in answered
+        finally:
+            release.set()
+            holder.join(timeout=_JOIN_TIMEOUT_SECONDS)
+            other.join(timeout=_JOIN_TIMEOUT_SECONDS)
+
+    assert answered == {"capabilities": 200, "held": 409}

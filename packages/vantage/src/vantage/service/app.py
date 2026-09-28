@@ -12,18 +12,29 @@ disk, on the store's own lock, on another process's write -- and one made on
 the loop would stall every other request until it returned, heartbeats
 included. So every route that reaches the store is a plain `def`, which
 FastAPI runs in its threadpool. `POST /runs`, `POST /projects`, a
-project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`
-and `POST /tokens` are `async` only to stream their bodies under a size cap,
+project's `POST .../config/sections`, `POST /users`, `PATCH /users/{name}`,
+`PUT /users/{name}/password`, `POST /tokens`, `POST /login` and
+`POST /password` are `async` only to stream their bodies under a size cap,
 and hand the rest to the threadpool themselves (`service/body.py`). The
 capabilities and interface-document routes never block and stay `async`, so
 they answer even while every worker thread waits on the store.
 
-**Every route but two needs a token once the database has a user**
+**Every route but four needs a token once the database has a user**
 (`service/access.py`): the capability advertisement and the interface
 document stay open, since a client asks them before it can know it needs
-one. `app.state.access_required` starts false and becomes true, for good,
-the first time a request finds a user. The users and tokens routes need an
-admin's token whether or not the database has a user.
+one, and logging in and changing a password take a name and a password
+instead. `app.state.access_required` starts false and becomes true, for
+good, the first time a request finds a user. The users and tokens routes
+need an admin's token whether or not the database has a user. `create_app`
+never makes a user: `cli.py` gives a database its first admin before
+serving it.
+
+**At most two password hashes at once, and 32 requests waiting for one**
+(`app.state.password_slots`, `service/slots.py`). Each hash takes about
+0.2 s of CPU and 32 MiB, in the threadpool; a login waits for a slot on the
+event loop, holding no thread, and one past the waiting limit is refused
+at once, so a flood of logins can neither grow memory nor keep a report or
+a heartbeat from a thread.
 
 **Every rejection is shaped by `service/errors.py`**, registered here once,
 so no route can answer a rejection in a different shape -- nor can the
@@ -56,11 +67,19 @@ from vantage.core.config.resolution import DEFAULT_GRACE_PERIOD_SECONDS
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.errors import register_error_handlers
 from vantage.service.routes.capabilities import router as capabilities_router
+from vantage.service.routes.login import router as login_router
 from vantage.service.routes.projects import router as projects_router
 from vantage.service.routes.read import router as read_router
 from vantage.service.routes.runs import router as runs_router
 from vantage.service.routes.sections import router as sections_router
 from vantage.service.routes.users import router as users_router
+from vantage.service.slots import PasswordSlots
+
+# How many password hashes the app computes at once -- two of the
+# threadpool's forty threads and 64 MiB at most -- and how many requests may
+# wait for one: about three seconds of hashing, and half a MiB of bodies.
+_PASSWORD_HASHES_AT_ONCE = 2
+_PASSWORD_HASHES_WAITING = 32
 
 
 def create_app(
@@ -96,11 +115,15 @@ def create_app(
     app.state.store = store
     app.state.grace_period = grace_period
     app.state.access_required = False
+    app.state.password_slots = PasswordSlots(
+        running=_PASSWORD_HASHES_AT_ONCE, waiting=_PASSWORD_HASHES_WAITING
+    )
     app.include_router(runs_router, prefix="/api/v1")
     app.include_router(read_router, prefix="/api/v1")
     app.include_router(capabilities_router, prefix="/api/v1")
     app.include_router(sections_router, prefix="/api/v1")
     app.include_router(users_router, prefix="/api/v1")
     app.include_router(projects_router, prefix="/api/v1")
+    app.include_router(login_router, prefix="/api/v1")
     register_error_handlers(app)
     return app

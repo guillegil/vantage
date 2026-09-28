@@ -11,7 +11,9 @@ they follow whichever it has.
 
 A database from a different schema version is refused, not migrated, and so
 is a file that already holds some other schema. `_apply_schema` stamps
-`meta.schema_version` inside the same transaction that creates the tables.
+`meta.schema_version`, and `meta.origin` -- whether pytest-vantage's local
+store made the database -- inside the same transaction that creates the
+tables.
 Everything that decides a refusal only reads, and write-ahead logging --
 which is persistent, and rewrites the file's header -- is switched on only
 once the database is known to be this build's, so a refused database is
@@ -45,6 +47,12 @@ _SCHEMA_SENTINEL_TABLE = "meta"
 # database from failing on the row the first one stamped.
 _STAMP_SCHEMA_VERSION = "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)"
 
+# Who made the database: `local` for pytest-vantage's local store, `server`
+# for anything else. Only the transaction that creates the tables writes
+# it, so opening an existing database with either flag never changes it,
+# and of two processes creating one file, the first one's value stays.
+_STAMP_ORIGIN = "INSERT OR IGNORE INTO meta (key, value) VALUES ('origin', ?)"
+
 # The project of the runs that name none, which every database has from its
 # creation: written with the stamp, not with the best-effort creation
 # metadata, since reports depend on it.
@@ -68,8 +76,10 @@ def isoformat_utc(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
-def open_database(path: Path) -> sqlite3.Connection:
-    """Open (creating if absent) the database at `path`.
+def open_database(path: Path, *, local: bool = False) -> sqlite3.Connection:
+    """Open (creating if absent) the database at `path`. `local` says that
+    pytest-vantage's local store is opening it, which `meta.origin` records
+    if this call creates it.
 
     Creates a missing parent directory at 0700 and a missing database file at
     0600 before `sqlite3.connect` runs, applies `schema.sql` inside one
@@ -115,7 +125,7 @@ def open_database(path: Path) -> sqlite3.Connection:
                 "database; nothing was added to it. Choose a different path."
             )
         else:
-            _apply_schema(conn)
+            _apply_schema(conn, local=local)
             _stamp_creation_metadata(conn)
         _enable_wal(conn)
     except BaseException:
@@ -192,9 +202,10 @@ def _schema_objects(conn: sqlite3.Connection) -> set[str]:
     return {row[0] for row in rows}
 
 
-def _apply_schema(conn: sqlite3.Connection) -> None:
-    """Create the tables, the `default` project and the version stamp in one
-    transaction, so a database never holds some without the others.
+def _apply_schema(conn: sqlite3.Connection, *, local: bool) -> None:
+    """Create the tables, the `default` project, the version stamp and the
+    origin in one transaction, so a database never holds some without the
+    others.
 
     `executescript` commits a pending transaction before it runs, never
     after, so `BEGIN IMMEDIATE` opens the script and the parameterised stamp
@@ -202,12 +213,13 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
 
     Two processes opening the same new file can both find it empty and both
     get here; the second waits for the first's write lock, then every
-    `IF NOT EXISTS` statement and the `OR IGNORE` stamp leave the first's
-    schema as it is.
+    `IF NOT EXISTS` statement and the `OR IGNORE` stamps leave the first's
+    schema and origin as they are.
     """
     schema_sql = _SCHEMA_SQL_PATH.read_text(encoding="utf-8")
     conn.executescript(f"BEGIN IMMEDIATE;\n{schema_sql}")
     conn.execute(_STAMP_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
+    conn.execute(_STAMP_ORIGIN, ("local" if local else "server",))
     conn.execute(
         _CREATE_DEFAULT_PROJECT, (DEFAULT_PROJECT, isoformat_utc(datetime.now(timezone.utc)))
     )

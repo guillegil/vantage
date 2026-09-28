@@ -314,8 +314,8 @@ def _parse_schema_version(raw: object) -> int | None:
 
 
 def _create_schema(conn: PgConnection) -> None:
-    """Create everything and stamp the version, inside the caller's
-    transaction. The schema itself is created only when missing: whoever
+    """Create everything and stamp the version and the origin, inside the
+    caller's transaction. The schema itself is created only when missing: whoever
     made it may have granted the rights to use it without the right to
     create one."""
     if _fetch(conn, "SELECT pg_catalog.to_regnamespace('vantage')") is None:
@@ -325,6 +325,9 @@ def _create_schema(conn: PgConnection) -> None:
     conn.execute(_SCHEMA_SQL_PATH.read_text(encoding="utf-8"))
     stamp = "INSERT INTO vantage.meta (key, value) VALUES (%s, %s)"
     conn.execute(stamp, ("schema_version", str(_SCHEMA_VERSION)))
+    # Only a server opens PostgreSQL, so every such database is the
+    # server's own, which `create_first_admin` gives its first admin.
+    conn.execute(stamp, ("origin", "server"))
     # Every database has the project of the runs that name none from its
     # creation, in the transaction that stamps it.
     conn.execute(

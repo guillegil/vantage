@@ -25,6 +25,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from vantage.core.domain.passwords import PASSWORD_MAX_CHARS, PASSWORD_MIN_CHARS
 from vantage.ingestion.errors import (
     InvalidJsonError,
     InvalidReportError,
@@ -44,7 +45,8 @@ def _rejection_body(error: str, detail: str, fields: list[str] | None = None) ->
 
 
 class IncompleteBodyError(RejectionError):
-    """The client disconnected before sending the whole body.
+    """The client disconnected before sending the whole body -- or, on a
+    password route, while it waited for a slot, before any hash was made.
 
     Raised by `service/body.py`'s `read_bounded_body` when
     `request.stream()` raises `ClientDisconnect`. The client is gone and
@@ -286,9 +288,9 @@ class ChallengeError(RejectionError):
 
 class UnauthenticatedError(ChallengeError):
     """No token on a server that has users, or one that authenticates
-    nothing: malformed, unknown, revoked, or its user's disabled. The last
-    four read alike, so a caller cannot tell a revoked token from one that
-    never existed."""
+    nothing: malformed, unknown, revoked, expired, or its user's disabled.
+    All but the first read alike, so a caller cannot tell a revoked token
+    from one that never existed."""
 
     status_code = 401
     error = "unauthenticated"
@@ -300,7 +302,7 @@ class UnauthenticatedError(ChallengeError):
     @classmethod
     def invalid(cls) -> UnauthenticatedError:
         return cls(
-            "The token is not valid: unknown, revoked, or its user is disabled.",
+            "The token is not valid: unknown, revoked, expired, or its user is disabled.",
             ', error="invalid_token"',
         )
 
@@ -321,18 +323,96 @@ class InsufficientScopeError(ChallengeError):
 
 
 class OpenServerError(RejectionError):
-    """A users or tokens route asked without a token of a database with no
-    user. Nobody can act as an admin there, and the one thing an anonymous
-    caller could do -- make the first user -- only the `vantage` command
-    does. A 409 without a challenge, since no token would help."""
+    """A users, tokens, login or password route asked of a database with no
+    user, which only a database pytest-vantage's local store made can be
+    while served. Nobody can log in or act as an admin there, and the one
+    thing an anonymous caller could do -- make the first user -- only the
+    `vantage` command does. A 409 without a challenge, since no token would
+    help."""
 
     status_code = 409
     error = "open_server"
 
     def __init__(self) -> None:
         super().__init__(
-            "This server has no user yet, so nobody can manage users over HTTP: add the first "
-            "admin with vantage user add NAME --admin on its database."
+            "This server's database was made by pytest-vantage's local store and has no user, "
+            "so it serves every request without a token and nobody logs in or manages users "
+            "here: add the first admin with vantage user add NAME --admin on its database."
+        )
+
+
+class PasswordChecksBusyError(RejectionError):
+    """As many requests hold or wait for a password slot as the server lets
+    them (`service/slots.py`): refused at once rather than queued, with a
+    `Retry-After`, so a flood of logins can queue neither memory nor minutes
+    of hashing."""
+
+    status_code = 503
+    error = "password_checks_busy"
+    headers = {"Retry-After": "1"}
+
+    def __init__(self) -> None:
+        super().__init__(
+            "The server is checking as many passwords as it will at once; try again shortly."
+        )
+
+
+class InvalidCredentialsError(ChallengeError):
+    """A login, or a password change, whose name and password do not match
+    an enabled user's: an unknown name, one nobody can have, a user with no
+    password or a disabled one, a wrong password, or a password changed
+    while it was being checked. Every case reads alike and costs the same
+    work, so a caller learns nothing of which names exist."""
+
+    status_code = 401
+    error = "invalid_credentials"
+
+    def __init__(self) -> None:
+        super().__init__("The name or password is not valid.", "")
+
+
+class InvalidLoginRequestError(RejectionError):
+    """A `POST /login` body that is not exactly a name and a password, both
+    strings. The fields are named, their values never repeated."""
+
+    status_code = 422
+    error = "invalid_login_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidLoginRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
+
+
+class InvalidPasswordRequestError(RejectionError):
+    """A `POST /password` or `PUT /users/{name}/password` body of the wrong
+    shape. The fields are named, their values never repeated."""
+
+    status_code = 422
+    error = "invalid_password_request"
+
+    @classmethod
+    def from_errors(cls, errors: Iterable[Mapping[str, Any]]) -> InvalidPasswordRequestError:
+        return cls(
+            "The submitted request does not match the expected shape.",
+            fields_from_errors(errors),
+        )
+
+
+class PasswordRefusedError(RejectionError):
+    """A password that cannot be set (`check_password`). The password is not
+    repeated."""
+
+    status_code = 422
+    error = "invalid_password"
+
+    def __init__(self, fields: list[str]) -> None:
+        super().__init__(
+            f"A password is {PASSWORD_MIN_CHARS} to {PASSWORD_MAX_CHARS} characters, with no "
+            "control characters.",
+            fields,
         )
 
 
@@ -571,7 +651,7 @@ def _rejection_response(exc: RejectionError) -> JSONResponse:
     return JSONResponse(
         status_code=exc.status_code,
         content=_rejection_body(exc.error, exc.detail, exc.fields),
-        headers=exc.headers if isinstance(exc, ChallengeError) else None,
+        headers=exc.headers if isinstance(exc, (ChallengeError, PasswordChecksBusyError)) else None,
     )
 
 
@@ -640,10 +720,13 @@ __all__ = [
     "ChallengeError",
     "IncompleteBodyError",
     "InsufficientScopeError",
+    "InvalidCredentialsError",
     "InvalidIdentityError",
     "InvalidJsonError",
+    "InvalidLoginRequestError",
     "InvalidMetadataFilterError",
     "InvalidParameterError",
+    "InvalidPasswordRequestError",
     "InvalidProjectRequestError",
     "InvalidReportError",
     "InvalidSectionError",
@@ -656,6 +739,8 @@ __all__ = [
     "NotAnAdminError",
     "OpenServerError",
     "OwnAccountError",
+    "PasswordChecksBusyError",
+    "PasswordRefusedError",
     "PayloadTooLargeError",
     "ProjectNameRefusedError",
     "ProjectNameTakenError",
