@@ -2,6 +2,7 @@
 // system's props. Pure functions, so each mapping is tested on its own.
 
 import type {
+  ChangeWord,
   HistoryEntry,
   Project,
   ResultDetail,
@@ -9,8 +10,10 @@ import type {
   RunDetail,
   RunListItem,
   RunMetadata,
+  RunOutcomes,
 } from '../api/queries';
 import type {
+  Change,
   CommitRefProps,
   HistoryGridProps,
   MetaListProps,
@@ -18,11 +21,12 @@ import type {
   OutcomeCounts,
   PhaseTimelineProps,
   ProjectRef,
+  ResultLike,
   RunItem,
   RunState,
   RunStatusProps,
 } from '../ds';
-import { describeCounts, isOutcome, visibleText } from '../ds';
+import { describeCounts, fmtCount, isOutcome, plural, visibleText } from '../ds';
 
 // Lists and headings print a run by the first 8 characters of its id.
 export function runLabel(id: string): string {
@@ -65,6 +69,54 @@ export function outcomesToResults(outcomes: string): Outcome[] {
   return out;
 }
 
+// The API's change words, snake_case like every API code, as the design system spells them.
+export const CHANGE: Record<ChangeWord, Change> = {
+  new_failure: 'new-failure',
+  still_failing: 'still-failing',
+  fixed: 'fixed',
+  new_test: 'new-test',
+  removed: 'removed',
+  not_reached: 'not-reached',
+};
+
+// GET /runs/{id}/outcomes' change characters, aligned with its outcomes; `-` is no change.
+const CHANGE_CHARS: Record<string, Change> = {
+  n: 'new-failure',
+  s: 'still-failing',
+  f: 'fixed',
+  t: 'new-test',
+};
+
+// A run's line: each outcome, with its change where the run was compared and the result
+// changed. Without changes -- a run pending or with nothing to compare with -- the plain
+// outcomes.
+export function lineResults(outcomes: string, changes: string | null): ResultLike[] {
+  const out: ResultLike[] = [];
+  let i = 0;
+  for (const ch of outcomes) {
+    const outcome = CHARS[ch];
+    const change = changes === null ? undefined : CHANGE_CHARS[changes[i] ?? '-'];
+    i += 1;
+    if (!outcome) continue;
+    out.push(change ? { outcome, change } : outcome);
+  }
+  return out;
+}
+
+// Whether a run was compared: then, and only then, the API gives its baseline and counts.
+function compared(
+  comparison: RunListItem['comparison'],
+): comparison is RunListItem['comparison'] & {
+  baseline: NonNullable<RunListItem['comparison']['baseline']>;
+  counts: NonNullable<RunListItem['comparison']['counts']>;
+} {
+  return (
+    (comparison.state === 'branch' || comparison.state === 'project') &&
+    comparison.baseline !== null &&
+    comparison.counts !== null
+  );
+}
+
 function seconds(startedAt: string, finishedAt: string | null): number | undefined {
   if (!finishedAt) return undefined;
   const s = (Date.parse(finishedAt) - Date.parse(startedAt)) / 1000;
@@ -73,7 +125,7 @@ function seconds(startedAt: string, finishedAt: string | null): number | undefin
 
 export function runItem(
   item: RunListItem,
-  { sessionUser, outcomes }: { sessionUser: string | null; outcomes?: string },
+  { sessionUser, outcomes }: { sessionUser: string | null; outcomes?: RunOutcomes | undefined },
 ): RunItem {
   const run: RunItem = {
     id: item.id,
@@ -95,13 +147,84 @@ export function runItem(
   if (item.recorded_by != null) {
     run.by = { name: item.recorded_by, you: item.recorded_by === sessionUser };
   }
-  if (outcomes !== undefined) run.results = outcomesToResults(outcomes);
+  if (outcomes !== undefined) run.results = lineResults(outcomes.outcomes, outcomes.changes);
+  const comparison = item.comparison;
+  if (compared(comparison)) {
+    run.changes = {
+      newFailures: comparison.counts.new_failure,
+      fixed: comparison.counts.fixed,
+      baseline: runLabel(comparison.baseline.id),
+    };
+  }
   return run;
 }
 
-// What the run page's line says it draws: stored order is the order pytest reported results.
-export function dotlineLabel(counts: OutcomeCounts, running: boolean): string {
-  return `Results in the order pytest reported them: ${describeCounts(counts)}${running ? ', still running' : ''}`;
+// What the run page's line says it draws: stored order is the order pytest reported results,
+// and the changes its marks show, as the line itself counts them.
+export function dotlineLabel(
+  counts: OutcomeCounts,
+  running: boolean,
+  changes: { new_failure: number; fixed: number } | null = null,
+): string {
+  const changed: string[] = [];
+  if (changes?.new_failure)
+    changed.push(plural(changes.new_failure, 'new failure', 'new failures'));
+  if (changes?.fixed) changed.push(`${fmtCount(changes.fixed)} fixed`);
+  return `Results in the order pytest reported them: ${describeCounts(counts)}${
+    changed.length ? `; ${changed.join(', ')}` : ''
+  }${running ? ', still running' : ''}`;
+}
+
+// How much earlier `from` started than `to`, in the words a run list's times use: "42 min",
+// "3 h", "2 d". Two start times, since a baseline is chosen by when it started.
+export function earlier(from: string, to: string): string {
+  const s = Math.floor((Date.parse(to) - Date.parse(from)) / 1000);
+  if (!Number.isFinite(s) || s < 1) return 'under 1 s';
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h`;
+  return `${fmtCount(Math.floor(h / 24))} d`;
+}
+
+// The run page's line saying what the run was compared with: the words before the
+// baseline's label, the baseline (null when there is none), and the words after it.
+export interface BaselineLine {
+  lead: string;
+  baseline: { id: string; label: string; href: string } | null;
+  tail: string;
+}
+
+export function baselineLine(detail: RunDetail): BaselineLine {
+  const comparison = detail.comparison;
+  if (!compared(comparison)) {
+    let lead: string;
+    if (comparison.state === 'none') lead = 'Nothing to compare with yet.';
+    else if (detail.presentation === 'running')
+      lead = 'Compared with its baseline once the session ends.';
+    else lead = 'Not compared: no end was recorded.';
+    return { lead, baseline: null, tail: '' };
+  }
+  const base = comparison.baseline;
+  let lead = 'Compared with ';
+  if (comparison.state === 'project') {
+    // Why it fell back to the project's latest complete run, from what this run recorded.
+    // A recorded name is plain text here, so a character that reorders text is written out.
+    const vcs = detail.vcs;
+    let why: string;
+    if (vcs?.branch) why = `No earlier complete run on ${visibleText(vcs.branch)}`;
+    else if (vcs?.commit) why = `No branch recorded (detached HEAD at ${vcs.commit.slice(0, 7)})`;
+    else if (vcs) why = 'No branch recorded';
+    else why = 'Recorded outside a git repository';
+    lead = `${why}; compared with `;
+  }
+  const on = base.branch ? ` on ${visibleText(base.branch)}` : '';
+  return {
+    lead,
+    baseline: { id: base.id, label: runLabel(base.id), href: runHref(base.id) },
+    tail: `${on}, ${earlier(base.started_at, detail.started_at)} earlier`,
+  };
 }
 
 export function projectRef(project: Project): ProjectRef {
@@ -385,6 +508,8 @@ function commitDetail(vcs: HistoryEntry['vcs']): string | undefined {
 export interface HistoryStrip {
   runs: (HistoryGridProps['runs'][number] & { href: string })[];
   outcomes: Outcome[];
+  // Aligned to outcomes: how each result changed against its own run's baseline.
+  changes: (Change | null)[];
   durations: (number | null)[];
 }
 
@@ -403,6 +528,7 @@ export function historyStrip(entries: HistoryEntry[], nodeId: string): HistorySt
       return run;
     }),
     outcomes: oldest.map((e) => e.outcome),
+    changes: oldest.map((e) => (e.change ? CHANGE[e.change] : null)),
     durations: oldest.map((e) => e.duration),
   };
 }

@@ -1290,17 +1290,32 @@ those blocks, since a custom property's `var()` is resolved where it is
 declared.
 
 **State.** Server state lives in TanStack Query alone, view state in the
-address; web storage holds only the last project opened. A finished run's
-detail, outcomes, results and each result in full never change, so they
-are never refetched;
-lists go stale after 30 seconds. A refusal is not retried; no answer or a
-server error is retried once. `GET /session` decides the layout: a `401`
+address; web storage holds only the last project opened. A run is final
+once it has an exit status (`isFinal`): its detail, outcomes, results,
+each result in full and its comparison never change after that, so they
+are never refetched. An abandoned run has no exit status and is refetched
+like a running one, since `vantage push` may still deliver its end and
+with it its comparison; lists go stale after 30 seconds. A refusal is not
+retried; no answer or a server error is retried once. `GET /session` decides the layout: a `401`
 there sends the browser to `/sign-in?next=`, where `next` is kept only as a
 path on this origin. A `401` on anything else means a session that was
 working ended: the page keeps what it shows under a notice offering to sign
 in again, and a link followed from then on leads to sign-in first. Signing
 in and signing out clear every query, so nothing read as one user stays for
 the next.
+
+**Changes.** `src/adapt` alone turns the API's change words, snake_case
+like every API code, into the design system's hyphenated `Change`
+(`CHANGE`). A run's line is `lineResults` of its `/outcomes`: each outcome
+carries its character of `changes`, which is null until the run is
+compared, so a pending run or one with nothing to compare with draws plain
+marks. A compared run's list row carries its new failures and fixes from
+its `comparison.counts`, and a history strip each entry's `change`.
+`baselineLine` words what the run page says it was compared with from the
+run's `comparison`, its presentation and its own branch and commit, and
+`earlier` how much sooner the baseline started, from the two start
+times; a recorded branch in it is plain text, so goes through
+`visibleText`.
 
 **Links** are the design system's plain `<a href>`, which keep middle-click
 and copying the address. One click listener on the document routes a plain
@@ -1345,7 +1360,13 @@ against two servers on loopback, a closed one with users and an open one
 serving a local store's database, each having recorded a real pytest
 session with hostile node ids and failure text, and characters that
 reorder text, in every field a result page shows (the open one twice, so a
-test there has a history). The image builds the client
+test there has a history). The closed one also records rounds of a second
+suite into the project `triage`, from a git repository of its own, so its
+runs hold every change and every comparison state: on the branch, falling
+back from another branch, from a detached HEAD and from outside a
+repository, nothing to compare with, stopped by `pytest.exit`, and two
+killed sessions, one abandoned after the server's short grace period and
+one the tests keep running with its heartbeat. The image builds the client
 in a Node stage from the lock and copies only its output into the package
 before `uv sync`; the image itself holds no Node, and its job checks that
 the published port answers the page and its script.

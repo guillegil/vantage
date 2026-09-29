@@ -19,6 +19,8 @@ export type ResultItem = Schemas['ResultListItem'];
 export type RunMetadata = Schemas['RunMetadataResponse'];
 export type ResultDetail = Schemas['ResultDetailResponse'];
 export type HistoryEntry = Schemas['HistoryEntry'];
+export type RunOutcomes = Schemas['RunOutcomesResponse'];
+export type ChangeWord = Schemas['ChangeItem']['change'];
 export type OutcomeWord = ResultItem['outcome'];
 
 export const RUNS_PAGE = 50;
@@ -68,9 +70,11 @@ export function makeQueryClient(handlers: Unauthorized): QueryClient {
   });
 }
 
-// A finished run never changes, so what was read of it stays true.
-function finishedRun(detail: RunDetail | undefined): boolean {
-  return detail !== undefined && detail.presentation !== 'running';
+// A run is final once it has an exit status: nothing it holds changes after
+// that, its comparison included, so what was read of it stays true. An
+// abandoned run is not final, since vantage push may still deliver its end.
+export function isFinal(run: { exit_status: number | null } | undefined): boolean {
+  return run !== undefined && run.exit_status !== null;
 }
 
 export function useSession() {
@@ -120,7 +124,7 @@ export function useRun(runId: string, enabled = true) {
           signal,
         }),
       ),
-    staleTime: (query) => (finishedRun(query.state.data) ? Number.POSITIVE_INFINITY : LIST_STALE),
+    staleTime: (query) => (isFinal(query.state.data) ? Number.POSITIVE_INFINITY : LIST_STALE),
   });
 }
 
@@ -142,15 +146,15 @@ export function useRunOutcomes(runId: string, finished: boolean, enabled = true)
   return useQuery({ ...outcomesQuery(runId, finished), enabled });
 }
 
-// The outcomes of every listed run in view, by run id.
+// The outcomes of every listed run in view, and their changes, by run id.
 export function useOutcomesOf(runs: { id: string; finished: boolean }[]) {
   return useQueries({
     queries: runs.map((r) => outcomesQuery(r.id, r.finished)),
     combine: (answers) => {
-      const byId = new Map<string, string>();
+      const byId = new Map<string, RunOutcomes>();
       answers.forEach((a, i) => {
         const run = runs[i];
-        if (run && a.data) byId.set(run.id, a.data.outcomes);
+        if (run && a.data) byId.set(run.id, a.data);
       });
       return byId;
     },
@@ -205,7 +209,7 @@ export function useRunMetadata(runId: string, finished: boolean, enabled = true)
   });
 }
 
-// One result of a run, in full. A finished run's results never change.
+// One result of a run, in full. A final run's results never change.
 export function useResult(runId: string, nodeId: string, finished: boolean) {
   return useQuery({
     queryKey: ['run', runId, 'result', nodeId],

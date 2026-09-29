@@ -736,14 +736,29 @@ project you had open last, or of `default`.
   counts in pytest's words (`2 failed · 208 passed · 1 error`) and a line of
   marks, one per result in the order pytest reported them (or one for a few,
   the most severe, in a long run), where a failure stands up out of the
-  line. The latest finished run's closing line, as
+  line. A run that was compared (see
+  [What a run is compared with](#what-a-run-is-compared-with)) leads its
+  counts with what changed against its baseline, `2 new · 1 fixed` -- its
+  new failures and its fixed tests -- and its line marks them: a new
+  failure stands taller than one already failing, and a fixed test's mark
+  wears a ring. The latest finished run's closing line, as
   pytest printed it, heads the list. A project with no runs yet shows the
   exact `pytest` command that records one into it on this server.
 - **A run**: its status (and why, when it was interrupted or abandoned), its
   commit and subject, who recorded it, when it started and finished, pytest's
-  closing line, the line of every result, what did not pass (failed, error,
+  closing line, the line of every result with its change marks, what it was
+  compared with, what did not pass (failed, error,
   xpassed) with the first line of each failure, every result in order, and
-  its metadata. Failure text shows only for runs recorded with
+  its metadata. What it was compared with is one line: *Compared with
+  1adf29af on main, 42 min earlier*, the baseline linking to its run, and
+  starting *No earlier complete run on feat/x*, *No branch recorded
+  (detached HEAD at 4b8f6a3)* or *Recorded outside a git repository* when
+  it fell back to the project's latest complete run; or *Nothing to compare
+  with yet.*, *Compared with its baseline once the session ends.* while it
+  runs, and *Not compared: no end was recorded.* when it was abandoned. A
+  run with an exit status never changes, so what the page read of it is
+  kept; an abandoned one is read again, since `vantage push` may still
+  deliver its end. Failure text shows only for runs recorded with
   `--vantage-failure-text`. Under pytest-xdist the workers' results
   interleave in the line, as they were reported. Each result opens its own
   page.
@@ -757,7 +772,9 @@ project you had open last, or of `default`.
   credentials included; how long setup, call and teardown took and which of
   them failed; the run's metadata; and the test's latest 24 runs in the
   run's project, oldest first, as a line of marks with its pass rate or
-  failing streak and a line of durations, each run opening its result there.
+  failing streak and a line of durations, each run opening its result there,
+  where each mark shows how the test changed against that run's baseline
+  as a run's line does, and the readout names it (*failed, new failure*).
   Where a result holds none of this, the page says why: a failure without
   failure text was recorded without `--vantage-failure-text`; any other
   result may also have run with output capture off (`-s`).
@@ -767,7 +784,8 @@ project you had open last, or of `default`.
   something else.
 - **A test's history** in a project, newest first, fifty at a time: each
   run's outcome, commit, start and duration, each opening that run's
-  result, under the same line of marks and durations for the runs listed.
+  result, under the same line of marks, change marks included, and
+  durations for the runs listed.
 - **A server with no users**, as one serving a local store's database, needs
   no sign-in, and says that anyone who can reach it can read and record.
 - **A server with users** asks you to sign in with a user's name and

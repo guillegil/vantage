@@ -15,4 +15,4 @@ A run's results in collection order, drawn so that height is attention: a pass i
 
 ## Port notes
 
-- Ported one to one, change marks included: the client passes plain outcomes until the server says what changed against a baseline.
+- Ported one to one, change marks included: the client passes each result's change from `/runs/{id}/outcomes` for a run that was compared, and plain outcomes for one pending its comparison or with nothing to compare with.

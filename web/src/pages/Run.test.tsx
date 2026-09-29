@@ -1,7 +1,8 @@
 // The run page's result tables lead to each result.
+import type { Query } from '@tanstack/react-query';
 import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resultHref } from '../adapt';
 import { clearSessionEnded } from '../app/sessionEnd';
 import { json, refuse, renderAt, stubServer } from '../testing/server';
@@ -177,4 +178,127 @@ it('keeps its heading focused when it follows a link to a run it has not read ye
   const heading = screen.getByRole('heading', { level: 1 });
   expect(heading).toBe(loading);
   expect(document.activeElement).toBe(heading);
+});
+
+// How long what a query read stays fresh, as the page's hook asked for it.
+function staleTimeOf(query: Query | undefined): unknown {
+  const time = query?.observers[0]?.options.staleTime;
+  return typeof time === 'function' && query ? time(query) : time;
+}
+
+describe('what the run was compared with', () => {
+  const BASE = '1adf29af1adf29af1adf29af1adf29af';
+  const COMPARED = {
+    ...RUN,
+    vcs: {
+      commit: '7f3a2c1e9b0d',
+      branch: 'main',
+      commit_subject: 'Tune the rails',
+      commit_subject_truncated: false,
+      dirty: false,
+    },
+    comparison: {
+      state: 'branch',
+      baseline: { id: BASE, started_at: '2026-09-27T08:18:00Z', branch: 'main' },
+      counts: {
+        new_failure: 1,
+        still_failing: 0,
+        fixed: 1,
+        new_test: 0,
+        removed: 0,
+        not_reached: 0,
+      },
+    },
+  };
+
+  function serve(run: object, outcomes: object) {
+    stubServer((_m, path, query) => {
+      if (path === `/runs/${ID}`) return json(200, run);
+      if (path === `/runs/${ID}/outcomes`) return json(200, outcomes);
+      return answer(ID, path, query);
+    });
+  }
+
+  it('names its baseline, linking to that run, and how much earlier it started', async () => {
+    serve(COMPARED, { outcomes: 'F.', changes: 'nf' });
+    renderAt(`/runs/${ID}`);
+    const link = await screen.findByRole('link', { name: '1adf29af' });
+    expect(link).toHaveAttribute('href', `/runs/${BASE}`);
+    expect(link).toHaveAttribute('title', BASE);
+    expect(link.closest('.dl-runhead__base')).toHaveTextContent(
+      'Compared with 1adf29af on main, 42 min earlier',
+    );
+  });
+
+  it('marks the new failure and the fix in the run’s line, and says so', async () => {
+    serve(COMPARED, { outcomes: 'F.', changes: 'nf' });
+    renderAt(`/runs/${ID}`);
+    const line = await screen.findByRole('img', {
+      name: 'Results in the order pytest reported them: 1 failed, 1 passed; 1 new failure, 1 fixed',
+    });
+    // A new failure stands above the track; a fixed result wears a ring.
+    const bar = line.querySelector('.dl-m--failed');
+    expect(Number(bar?.getAttribute('y'))).toBeLessThan(0);
+    expect(line.querySelector('.dl-ring--passed')).not.toBeNull();
+  });
+
+  it('draws a plain line for a run with nothing to compare with, and says so', async () => {
+    serve(RUN, { outcomes: 'F.', changes: null });
+    renderAt(`/runs/${ID}`);
+    const said = await screen.findByText('Nothing to compare with yet.');
+    expect(said.closest('.dl-runhead__base')).not.toBeNull();
+    const line = await screen.findByRole('img', {
+      name: 'Results in the order pytest reported them: 1 failed, 1 passed',
+    });
+    expect(Number(line.querySelector('.dl-m--failed')?.getAttribute('y'))).toBe(0);
+    expect(line.querySelector('.dl-ring')).toBeNull();
+  });
+
+  const PENDING = {
+    ...RUN,
+    finished_at: null,
+    exit_status: null,
+    comparison: { state: 'pending', baseline: null, counts: null },
+  };
+
+  it('says a running run is compared once its session ends', async () => {
+    serve({ ...PENDING, presentation: 'running' }, { outcomes: 'F.', changes: null });
+    renderAt(`/runs/${ID}`);
+    expect(
+      await screen.findByText('Compared with its baseline once the session ends.'),
+    ).toBeInTheDocument();
+  });
+
+  it('says an abandoned run was not compared, and reads it again once stale', async () => {
+    serve({ ...PENDING, presentation: 'abandoned' }, { outcomes: 'F.', changes: null });
+    const { queryClient } = renderAt(`/runs/${ID}`);
+    expect(await screen.findByText('Not compared: no end was recorded.')).toBeInTheDocument();
+    // vantage push may still deliver its end, and with it its comparison.
+    for (const key of [
+      ['run', ID],
+      ['run', ID, 'outcomes'],
+    ]) {
+      const query = queryClient.getQueryCache().find({ queryKey: key, exact: true });
+      expect(staleTimeOf(query)).toBe(30_000);
+    }
+  });
+
+  it('keeps what it read of a run with an exit status for good', async () => {
+    serve(COMPARED, { outcomes: 'F.', changes: 'nf' });
+    const { queryClient } = renderAt(`/runs/${ID}`);
+    await screen.findByRole('link', { name: '1adf29af' });
+    await waitFor(() =>
+      expect(
+        queryClient.getQueryCache().find({ queryKey: ['run', ID, 'outcomes'], exact: true })?.state
+          .data,
+      ).toBeDefined(),
+    );
+    for (const key of [
+      ['run', ID],
+      ['run', ID, 'outcomes'],
+    ]) {
+      const query = queryClient.getQueryCache().find({ queryKey: key, exact: true });
+      expect(staleTimeOf(query)).toBe(Number.POSITIVE_INFINITY);
+    }
+  });
 });

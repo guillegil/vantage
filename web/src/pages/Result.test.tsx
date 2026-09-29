@@ -251,12 +251,63 @@ describe('a result', () => {
 
   it('keeps a running run’s result for a while only', async () => {
     server((_m, path) =>
-      path === `/runs/${ID}` ? json(200, { ...RUN, presentation: 'running' }) : undefined,
+      path === `/runs/${ID}`
+        ? json(200, {
+            ...RUN,
+            finished_at: null,
+            exit_status: null,
+            presentation: 'running',
+            comparison: { state: 'pending', baseline: null, counts: null },
+          })
+        : undefined,
     );
     const { queryClient } = renderAt(HERE);
     await screen.findByRole('heading', { level: 2, name: 'Traceback' });
     const query = queryClient.getQueryCache().find({ queryKey: ['run', ID, 'result', NODE] });
     expect(query?.observers[0]?.options.staleTime).toBe(30_000);
+  });
+
+  it('keeps an abandoned run’s result for a while only, since its end may still arrive', async () => {
+    server((_m, path) =>
+      path === `/runs/${ID}`
+        ? json(200, {
+            ...RUN,
+            finished_at: null,
+            exit_status: null,
+            presentation: 'abandoned',
+            comparison: { state: 'pending', baseline: null, counts: null },
+          })
+        : undefined,
+    );
+    const { queryClient } = renderAt(HERE);
+    await screen.findByRole('heading', { level: 2, name: 'Traceback' });
+    const query = queryClient.getQueryCache().find({ queryKey: ['run', ID, 'result', NODE] });
+    expect(query?.observers[0]?.options.staleTime).toBe(30_000);
+  });
+
+  it('marks how the test changed in each of its latest runs', async () => {
+    server((_m, path) =>
+      path === '/projects/firmware/tests/history'
+        ? json(200, {
+            ...HISTORY,
+            items: [
+              { ...HISTORY.items[0], change: 'new_failure' },
+              { ...HISTORY.items[1], change: 'fixed' },
+            ],
+          })
+        : undefined,
+    );
+    renderAt(HERE);
+    const slider = await screen.findByRole('slider', { name: `History of ${NODE}` });
+    expect(slider).toHaveAttribute('aria-valuetext', '0123abcd: failed, new failure');
+    fireEvent.focus(slider);
+    fireEvent.keyDown(slider, { key: 'Home' });
+    expect(slider).toHaveAttribute('aria-valuetext', `${OLD.slice(0, 8)}: passed, fixed`);
+    // A new failure stands above the track; a fixed result wears a ring.
+    expect(slider.querySelector('.dl-ring--passed')).not.toBeNull();
+    expect(
+      [...slider.querySelectorAll('.dl-m--failed')].some((r) => Number(r.getAttribute('y')) < 0),
+    ).toBe(true);
   });
 
   it('says failure text was not recorded when the run did not record it', async () => {

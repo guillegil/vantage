@@ -55,7 +55,11 @@ test('a failing result opens from its run, with its evidence and its history', a
   ).toBeVisible();
 
   const slider = page.getByRole('slider', { name: 'History of suite.py::test_assert_fails' });
-  await expect(slider).toHaveAttribute('aria-valuetext', `${newest.slice(0, 8)}: failed`);
+  // The newer run was compared with the older, where the test failed too.
+  await expect(slider).toHaveAttribute(
+    'aria-valuetext',
+    `${newest.slice(0, 8)}: failed, still failing`,
+  );
   await expect(page.getByText(`failing 2 runs since ${older.slice(0, 8)}`)).toBeVisible();
   // The first cell is the older run.
   await slider.click({ position: { x: 4, y: 8 } });

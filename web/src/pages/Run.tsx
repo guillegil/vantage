@@ -1,9 +1,10 @@
 import { type ReactNode, useMemo } from 'react';
 import { useOutletContext, useParams } from 'react-router';
 import {
+  baselineLine,
   dotlineLabel,
+  lineResults,
   metaItems,
-  outcomesToResults,
   type ResultRow,
   resultRow,
   runHead,
@@ -11,6 +12,7 @@ import {
 } from '../adapt';
 import { isApiError } from '../api/client';
 import {
+  isFinal,
   RESULTS_PAGE,
   type RunDetail,
   type Session,
@@ -125,9 +127,27 @@ function ResultsPanel({
   );
 }
 
+// What the run was compared with, its label linking to that run, or why it was not.
+function BaselineSentence({ detail }: { detail: RunDetail }) {
+  const line = baselineLine(detail);
+  return (
+    <div className="dl-runhead__base">
+      <span>
+        {line.lead}
+        {line.baseline ? (
+          <a className="dl-link dl-mono" href={line.baseline.href} title={line.baseline.id}>
+            {line.baseline.label}
+          </a>
+        ) : null}
+        {line.tail}
+      </span>
+    </div>
+  );
+}
+
 function RunBody({ detail }: { detail: RunDetail }) {
   const head = runHead(detail);
-  const finished = !head.running;
+  const finished = isFinal(detail);
   const outcomes = useRunOutcomes(detail.id, finished);
   const c = detail.counts;
   const notPassingCount = c.failed + c.error + c.xpassed;
@@ -135,7 +155,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
   const results = useResults(detail.id, finished);
   const metadata = useRunMetadata(detail.id, finished);
   const total = c.passed + c.failed + c.error + c.skipped + c.xfailed + c.xpassed;
-  const list = outcomes.data ? outcomesToResults(outcomes.data.outcomes) : null;
+  const list = outcomes.data ? lineResults(outcomes.data.outcomes, outcomes.data.changes) : null;
   const summary = <SummaryLine counts={c} seconds={head.seconds} running={head.running} />;
   return (
     <div className="dl-split">
@@ -151,7 +171,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
               results={list}
               width="auto"
               running={head.running}
-              label={dotlineLabel(c, head.running)}
+              label={dotlineLabel(c, head.running, detail.comparison.counts)}
             />
           ) : outcomes.isError && !isApiError(outcomes.error, 401) ? (
             <FailureNotice error={outcomes.error} retry={() => outcomes.refetch()} />
@@ -161,6 +181,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
             </p>
           )}
         </div>
+        <BaselineSentence detail={detail} />
         {notPassingCount > 0 ? (
           <ResultsPanel
             runId={detail.id}
