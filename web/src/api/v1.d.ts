@@ -101,6 +101,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/runs/{run_id}/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Page through the tests that changed in one run against its baseline.
+         * @description The tests whose change the run's comparison records, in the order they need looking at: new_failure, still_failing, fixed, new_test, then removed or not_reached -- the tests the baseline has and the run lacks -- and within each change in the run's stored order, a missing test in the baseline's. A test that did not change is not listed. A run whose comparison is pending (no exit status yet) or none (no earlier complete run) has none, so its page is empty. change, repeated once per change wanted -- ?change=new_failure&change=still_failing -- keeps only the tests holding one of them, and limit, offset and has_more page over those alone.
+         */
+        get: operations["list_changes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/runs/{run_id}/outcomes": {
         parameters: {
             query?: never;
@@ -110,7 +130,7 @@ export interface paths {
         };
         /**
          * Every outcome of one run, in the order the plugin reported them.
-         * @description One of pytest's own characters per result, in stored order: . passed, F failed, E error, s skipped, x xfailed, X xpassed. Stored order is the order the plugin reported results, which is the order they ran in; under pytest-xdist the workers' results interleave. Not paged: a byte a result. A run still running has none until its results are reported.
+         * @description One of pytest's own characters per result, in stored order: . passed, F failed, E error, s skipped, x xfailed, X xpassed. Stored order is the order the plugin reported results, which is the order they ran in; under pytest-xdist the workers' results interleave. Not paged: a byte a result. A run still running has none until its results are reported. changes is aligned with outcomes, one character per result -- - unchanged, n new_failure, s still_failing, f fixed, t new_test -- against the run's baseline; it is null while the comparison is pending (no exit status yet) and when it is none (no earlier complete run), and a test the run lacks has no character in either.
          */
         get: operations["get_run_outcomes"];
         put?: never;
@@ -130,7 +150,7 @@ export interface paths {
         };
         /**
          * The full record for one result, unbounded by any list display width.
-         * @description node_id is a named query parameter, not a path segment, because a node id may contain `/` -- the same as on /projects/{project}/tests/history. A node_id holding U+0000 names no result.
+         * @description node_id is a named query parameter, not a path segment, because a node id may contain `/` -- the same as on /projects/{project}/tests/history. A node_id holding U+0000 names no result. position is the result's index in the run's stored order, its character in /runs/{run_id}/outcomes. change, was and streak say how it changed against the run's baseline, as on /runs/{run_id}/changes; all three are null when it did not change, and while the run's comparison is pending (no exit status yet) or none (no earlier complete run).
          */
         get: operations["get_result"];
         put?: never;
@@ -251,7 +271,7 @@ export interface paths {
         };
         /**
          * A test's execution history in a project, newest first, by its node id.
-         * @description node_id is a named query parameter, not a path segment, because a node id may contain `/`. The parameter name is the identity scheme, so another scheme can later be added as a sibling parameter. The project's own catalogue says what the node id is, and another project's test of the same node id is another test. A node_id holding U+0000 has no history.
+         * @description node_id is a named query parameter, not a path segment, because a node id may contain `/`. The parameter name is the identity scheme, so another scheme can later be added as a sibling parameter. The project's own catalogue says what the node id is, and another project's test of the same node id is another test. A node_id holding U+0000 has no history. Each entry's change is how that result changed against its own run's baseline -- new_failure, still_failing, fixed or new_test -- and null when it did not change, and while that run's comparison is pending (no exit status yet) or none (no earlier complete run).
          */
         get: operations["list_history"];
         put?: never;
@@ -728,6 +748,7 @@ export interface components {
         };
         RunOutcomesResponse: {
             outcomes: string;
+            changes: string | null;
         };
         MetadataItem: {
             key: string;
@@ -782,6 +803,37 @@ export interface components {
             worker_id: string | null;
             failure: components["schemas"]["FailureProjection"] | null;
         };
+        Streak: {
+            runs: number;
+            since: string;
+        };
+        ChangeItem: {
+            node_id: string;
+            file_path: string;
+            class_name: string | null;
+            function_name: string;
+            param_id: string | null;
+            /**
+             * @description new_failure: failing (failed or error) here, and not failing or absent in the baseline. still_failing: failing in both. fixed: failing there and not here. new_test: not failing here and absent there. removed: in the baseline and not in this run, which ran to its end (exit 0, 1 or 5). not_reached: the same, in a run that did not.
+             * @enum {string}
+             */
+            change: "new_failure" | "still_failing" | "fixed" | "new_test" | "removed" | "not_reached";
+            /** @enum {string|null} */
+            outcome: "passed" | "failed" | "error" | "skipped" | "xfailed" | "xpassed" | null;
+            /**
+             * @description The test's outcome in the baseline.
+             * @enum {string|null}
+             */
+            was: "passed" | "failed" | "error" | "skipped" | "xfailed" | "xpassed" | null;
+            duration: number | null;
+            /** @description The result's index in the run's stored order, its character in /runs/{run_id}/outcomes. */
+            position: number | null;
+            streak: components["schemas"]["Streak"] | null;
+        };
+        ChangesResponse: {
+            items: components["schemas"]["ChangeItem"][];
+            has_more: boolean;
+        };
         ResultsResponse: {
             items: components["schemas"]["ResultListItem"][];
             has_more: boolean;
@@ -823,6 +875,12 @@ export interface components {
             captured_stdout_truncated: boolean;
             captured_stderr: string | null;
             captured_stderr_truncated: boolean;
+            position: number;
+            /** @enum {string|null} */
+            change: "new_failure" | "still_failing" | "fixed" | "new_test" | null;
+            /** @enum {string|null} */
+            was: "passed" | "failed" | "error" | "skipped" | "xfailed" | "xpassed" | null;
+            streak: components["schemas"]["Streak"] | null;
         };
         HistoryEntry: {
             run_id: string;
@@ -834,6 +892,8 @@ export interface components {
             outcome: "passed" | "failed" | "error" | "skipped" | "xfailed" | "xpassed";
             duration: number | null;
             vcs: components["schemas"]["RunVcs"] | null;
+            /** @enum {string|null} */
+            change: "new_failure" | "still_failing" | "fixed" | "new_test" | null;
         };
         HistoryResponse: {
             items: components["schemas"]["HistoryEntry"][];
@@ -1377,6 +1437,70 @@ export interface operations {
                 };
             };
             /** @description run_id is not 32 lowercase hex characters; or, once the run is found and the caller may read it, limit below 1 or offset out of range -- not a page -- or an outcome that is not one of the six, whose fields is [query.outcome] (invalid_parameter). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Rejection"];
+                };
+            };
+        };
+    };
+    list_changes: {
+        parameters: {
+            query?: {
+                /** @description Page size. Values above 200 are clamped to 200; the response reports whether more items exist. A value below 1 is rejected with 422 -- it is not a page size. */
+                limit?: components["parameters"]["limit"];
+                offset?: components["parameters"]["offset"];
+                /** @description Only tests with one of these changes; absent, every change. */
+                change?: ("new_failure" | "still_failing" | "fixed" | "new_test" | "removed" | "not_reached")[];
+            };
+            header?: never;
+            path: {
+                run_id: components["parameters"]["run_id"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description A page of changed tests. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChangesResponse"];
+                };
+            };
+            /** @description No credential -- neither Authorization: Bearer <token> nor the session cookie __Host-vantage_session -- on a server that has users; or a token that is not valid -- unknown, revoked, expired, or of a disabled user -- in the header on any server, or in the cookie on a server that has users (unauthenticated). */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Rejection"];
+                };
+            };
+            /** @description The token does not grant the read scope (insufficient_scope); or its user is not a member of the run's project (not_a_member). A session cookie on a request the browser marked Sec-Fetch-Site other than same-origin or none -- from another site, or another port of this host -- is refused before it is looked up (cross_site_request). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Rejection"];
+                };
+            };
+            /** @description No run with that id has been recorded (unknown_run). */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Rejection"];
+                };
+            };
+            /** @description run_id is not 32 lowercase hex characters; or, once the run is found and the caller may read it, limit below 1 or offset out of range -- not a page -- or a change that is not one of the six, whose fields is [query.change] (invalid_parameter). */
             422: {
                 headers: {
                     [name: string]: unknown;

@@ -728,9 +728,10 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
     the `Project`.
   - `_run_access(authorizes, role)` builds the dependency of every route
     with `{run_id}` in its path: `requires_read_run` (viewer: a run's
-    detail, metadata, results, outcomes, one result and section summary) and
-    `requires_record_run` (editor: the heartbeat). It takes the caller as
-    a sub-dependency and the run id as its own path parameter: FastAPI
+    detail, metadata, results, changes, outcomes, one result and section
+    summary) and `requires_record_run` (editor: the heartbeat). It takes
+    the caller as a sub-dependency and the run id as its own path
+    parameter: FastAPI
     resolves sub-dependencies before a dependant's own parameters, so a
     caller refused for who they are is never told the id is malformed,
     whereas authorizing inside its body would answer the `422` first. It reads

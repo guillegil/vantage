@@ -174,9 +174,13 @@ class RunOutcomesResponse(BaseModel):
     pytest's own characters per result -- `.` passed, `F` failed, `E`
     error, `s` skipped, `x` xfailed, `X` xpassed -- in stored order, the
     order the plugin reported them. Not paged: about a byte a result, the
-    whole run's shape at once."""
+    whole run's shape at once. `changes` is aligned with `outcomes`, one
+    character per result -- `-` unchanged, `n` new failure, `s` still
+    failing, `f` fixed, `t` new test -- and `None` unless the run was
+    compared with another run."""
 
     outcomes: str
+    changes: str | None
 
 
 class MetadataItemResponse(BaseModel):
@@ -255,6 +259,44 @@ class ResultListItemResponse(BaseModel):
     failure: FailureProjectionResponse | None
 
 
+class StreakResponse(BaseModel):
+    """How many consecutive runs failed a still-failing test along its
+    run's chain of baselines, the run itself included, and the first of
+    them."""
+
+    runs: int
+    since: str
+
+
+class ChangeItemResponse(BaseModel):
+    """One entry of `ChangesResponse`: a test whose change a run's
+    comparison records. `outcome`, `duration` and `position` -- the
+    result's index in the run's stored order, its mark in the run's
+    outcomes -- are `None` for a test the run lacks (`removed`,
+    `not_reached`); `was` is the baseline's outcome, `None` when the
+    baseline lacks the test; `streak` is set exactly for `still_failing`.
+    Built field by field in `routes/read.py`."""
+
+    node_id: str
+    file_path: str
+    class_name: str | None
+    function_name: str
+    param_id: str | None
+    change: str
+    outcome: str | None
+    was: str | None
+    duration: float | None
+    position: int | None
+    streak: StreakResponse | None
+
+
+class ChangesResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/changes`."""
+
+    items: list[ChangeItemResponse]
+    has_more: bool
+
+
 class ResultsResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}/results`."""
 
@@ -268,7 +310,10 @@ class ResultDetailResponse(BaseModel):
     display width. Flat, matching `ResultReport`'s own wire shape for the
     same fields, rather than nesting `failure`/`captured` sub-objects. Built
     field by field in `routes/read.py`, never
-    `model_validate(..., from_attributes=True)`."""
+    `model_validate(..., from_attributes=True)`. `position` is the result's
+    index in its run's stored order; `change`, `was` and `streak` are as on
+    `ChangeItemResponse`, all `None` when the result did not change or the
+    run was not compared with another run."""
 
     node_id: str
     file_path: str
@@ -303,12 +348,18 @@ class ResultDetailResponse(BaseModel):
     captured_stdout_truncated: bool
     captured_stderr: str | None
     captured_stderr_truncated: bool
+    position: int
+    change: str | None
+    was: str | None
+    streak: StreakResponse | None
 
 
 class HistoryEntryResponse(BaseModel):
     """One entry of `HistoryResponse`. `vcs` is a lean `RunVcsResponse`
     built from `HistoryEntry.vcs`, a `VcsProjection` with no `root` field --
-    the same exclusion as the run list."""
+    the same exclusion as the run list. `change` is the result's change
+    against its own run's baseline, `None` when it did not change or that
+    run was not compared with another run."""
 
     run_id: str
     started_at: datetime
@@ -316,6 +367,7 @@ class HistoryEntryResponse(BaseModel):
     outcome: str
     duration: float | None
     vcs: RunVcsResponse | None
+    change: str | None
 
 
 class HistoryResponse(BaseModel):

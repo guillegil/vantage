@@ -47,7 +47,7 @@ from vantage.core.domain.access import (
     new_token,
     token_digest,
 )
-from vantage.core.domain.changes import COMPARISON_STATES
+from vantage.core.domain.changes import CHANGES, COMPARISON_STATES, RESULT_CHANGES
 from vantage.core.domain.liveness import PRESENTATIONS
 from vantage.core.domain.metadata import (
     FILE_STATUSES,
@@ -87,6 +87,8 @@ from vantage.service.schemas import (
     Acknowledgement,
     BaselineResponse,
     ChangeCountsResponse,
+    ChangeItemResponse,
+    ChangesResponse,
     ComparisonResponse,
     CreatedTokenResponse,
     FailureProjectionResponse,
@@ -123,6 +125,7 @@ from vantage.service.schemas import (
     SectionUpsertRequest,
     SessionResponse,
     SessionUserResponse,
+    StreakResponse,
     TokenCreateRequest,
     TokenListResponse,
     TokenResponse,
@@ -368,6 +371,7 @@ def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None
         (("GET", "/runs/{run_id}"), lambda: client.get(run)),
         (("GET", "/runs/{run_id}/metadata"), lambda: client.get(f"{run}/metadata")),
         (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{run}/results")),
+        (("GET", "/runs/{run_id}/changes"), lambda: client.get(f"{run}/changes")),
         (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{run}/outcomes")),
         (
             ("GET", "/runs/{run_id}/result"),
@@ -583,6 +587,12 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
         (
             ("GET", "/runs/{run_id}/results"),
             lambda: client.get(f"{known_shape}/results", params={"limit": 0}),
+        ),
+        (("GET", "/runs/{run_id}/changes"), lambda: client.get(f"{known_shape}/changes")),
+        (("GET", "/runs/{run_id}/changes"), lambda: client.get(f"{malformed}/changes")),
+        (
+            ("GET", "/runs/{run_id}/changes"),
+            lambda: client.get(f"{known_shape}/changes", params={"limit": 0}),
         ),
         (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{known_shape}/outcomes")),
         (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{malformed}/outcomes")),
@@ -1040,6 +1050,7 @@ def _access_requests(
         ("GET", "/runs/{run_id}"): lambda: client.get(run, headers=headers),
         ("GET", "/runs/{run_id}/metadata"): lambda: client.get(f"{run}/metadata", headers=headers),
         ("GET", "/runs/{run_id}/results"): lambda: client.get(f"{run}/results", headers=headers),
+        ("GET", "/runs/{run_id}/changes"): lambda: client.get(f"{run}/changes", headers=headers),
         ("GET", "/runs/{run_id}/outcomes"): lambda: client.get(f"{run}/outcomes", headers=headers),
         ("GET", "/runs/{run_id}/result"): lambda: client.get(
             f"{run}/result", params=node, headers=headers
@@ -1564,6 +1575,9 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "Baseline": BaselineResponse,
     "ChangeCounts": ChangeCountsResponse,
     "Comparison": ComparisonResponse,
+    "Streak": StreakResponse,
+    "ChangeItem": ChangeItemResponse,
+    "ChangesResponse": ChangesResponse,
     "RunListItem": RunListItemResponse,
     "RunListResponse": RunListResponse,
     "MetadataHorizon": MetadataHorizonResponse,
@@ -1612,6 +1626,12 @@ _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
     ("RunListItem", "presentation"): PRESENTATIONS,
     ("RunDetailResponse", "presentation"): PRESENTATIONS,
     ("Comparison", "state"): COMPARISON_STATES,
+    ("ChangeItem", "change"): CHANGES,
+    ("ChangeItem", "outcome"): OUTCOMES,
+    ("ChangeItem", "was"): OUTCOMES,
+    ("ResultDetailResponse", "change"): RESULT_CHANGES,
+    ("ResultDetailResponse", "was"): OUTCOMES,
+    ("HistoryEntry", "change"): RESULT_CHANGES,
     ("ResultListItem", "outcome"): OUTCOMES,
     ("ResultDetailResponse", "outcome"): OUTCOMES,
     ("HistoryEntry", "outcome"): OUTCOMES,

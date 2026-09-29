@@ -654,6 +654,7 @@ _STORE_ROUTES: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "get_run_detail": ("GET", f"/api/v1/runs/{_HELD_RUN}", {}, "get_run_detail"),
     "get_run_metadata": ("GET", f"/api/v1/runs/{_HELD_RUN}/metadata", {}, "get_run_metadata"),
     "list_results": ("GET", f"/api/v1/runs/{_HELD_RUN}/results", {}, "get_run_detail"),
+    "list_changes": ("GET", f"/api/v1/runs/{_HELD_RUN}/changes", {}, "get_run_detail"),
     "get_run_outcomes": ("GET", f"/api/v1/runs/{_HELD_RUN}/outcomes", {}, "get_run_detail"),
     "get_result": (
         "GET",
@@ -774,8 +775,9 @@ _ROLE_LOOKUPS: dict[str, tuple[str, str, dict[str, Any], str]] = {
     ),
 }
 
-# A run's counts and its outcomes are read by the route itself, after the
-# page or the run is found, so that later call is held too.
+# A run's counts, its outcomes, its changes and a result's change are read
+# by the route itself, after the page or the run is found, so that later
+# call is held too.
 _ROUTE_READS: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "list_runs-counts": ("GET", "/api/v1/projects/default/runs", {}, "count_outcomes"),
     "get_run_detail-counts": ("GET", f"/api/v1/runs/{_HELD_RUN}", {}, "count_outcomes"),
@@ -786,6 +788,30 @@ _ROUTE_READS: dict[str, tuple[str, str, dict[str, Any], str]] = {
         f"/api/v1/runs/{_HELD_RUN}/outcomes",
         {},
         "get_run_case_outcomes",
+    ),
+    "list_changes-changes": (
+        "GET",
+        f"/api/v1/runs/{_HELD_COMPARED}/changes",
+        {},
+        "list_changes",
+    ),
+    "get_run_outcomes-changes": (
+        "GET",
+        f"/api/v1/runs/{_HELD_COMPARED}/outcomes",
+        {},
+        "get_run_changes",
+    ),
+    "get_result-result": (
+        "GET",
+        f"/api/v1/runs/{_HELD_COMPARED}/result",
+        {"params": {"node_id": _HELD_NODE}},
+        "get_result",
+    ),
+    "get_result-change": (
+        "GET",
+        f"/api/v1/runs/{_HELD_COMPARED}/result",
+        {"params": {"node_id": _HELD_NODE}},
+        "get_result_change",
     ),
 }
 

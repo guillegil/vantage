@@ -72,6 +72,10 @@ const RESULT = {
   captured_stdout_truncated: false,
   captured_stderr: null,
   captured_stderr_truncated: true,
+  position: 0,
+  change: null,
+  was: null,
+  streak: null,
 };
 
 const NOTHING = {
@@ -88,7 +92,15 @@ const NOTHING = {
 };
 
 function entry(runId: string, outcome: string, startedAt: string, duration: number) {
-  return { run_id: runId, started_at: startedAt, finished_at: null, outcome, duration, vcs: null };
+  return {
+    run_id: runId,
+    started_at: startedAt,
+    finished_at: null,
+    outcome,
+    duration,
+    vcs: null,
+    change: null,
+  };
 }
 
 const HISTORY = {

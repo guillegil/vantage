@@ -875,16 +875,17 @@ side:
 | `GET /api/v1/runs/{run_id}` | One run, and the project it belongs to |
 | `GET /api/v1/runs/{run_id}/metadata` | One run's metadata, from declared files and from the session, and each declared file's status |
 | `GET /api/v1/runs/{run_id}/results` | One run's results in the order reported, with a short failure summary; `?outcome=failed&outcome=error` keeps only those |
-| `GET /api/v1/runs/{run_id}/outcomes` | Every outcome of one run in the order reported, one of pytest's characters each (`.` `F` `E` `s` `x` `X`), unpaged |
-| `GET /api/v1/runs/{run_id}/result?node_id=...` | One result in full, failure text included |
-| `GET /api/v1/projects/{project}/tests/history?node_id=...` | One test across the project's runs, newest first |
+| `GET /api/v1/runs/{run_id}/changes` | The tests that changed against the run it was compared with, new failures first, then still failing, fixed, new and missing tests; `?change=new_failure` keeps only those |
+| `GET /api/v1/runs/{run_id}/outcomes` | Every outcome of one run in the order reported, one of pytest's characters each (`.` `F` `E` `s` `x` `X`), unpaged, and beside it each result's change (`-` unchanged, `n` new failure, `s` still failing, `f` fixed, `t` new test) |
+| `GET /api/v1/runs/{run_id}/result?node_id=...` | One result in full, failure text included, with its place in the run and its change |
+| `GET /api/v1/projects/{project}/tests/history?node_id=...` | One test across the project's runs, newest first, each result with its change in its own run |
 | `GET`, `POST`, `DELETE /api/v1/projects/{project}/config/sections` | The project's named file-path prefixes that group results |
 | `GET /api/v1/runs/{run_id}/sections` | One run's pass rate per section of its project |
 
-The run list, a run's results and a test's history are paged: they take
-`limit` (at most 200 per page) and `offset`, and say in `has_more` whether
-more items exist. The section lists and a run's metadata are returned
-whole.
+The run list, a run's results and changes, and a test's history are
+paged: they take `limit` (at most 200 per page) and `offset`, and say in
+`has_more` whether more items exist. The section lists and a run's
+metadata are returned whole.
 
 An offset counts from the newest run, so a run recorded while you page
 through the run list or a test's history pushes one you have already seen

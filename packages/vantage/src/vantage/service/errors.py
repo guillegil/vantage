@@ -199,6 +199,19 @@ class InvalidOutcomeFilterError(InvalidParameterError):
         )
 
 
+class InvalidChangeFilterError(InvalidParameterError):
+    """A `change` of `GET /api/v1/runs/{run_id}/changes` is not one of the
+    six changes a comparison records. The sentence names the six, never
+    the word sent."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "change must be one of new_failure, still_failing, fixed, new_test, removed"
+            " and not_reached.",
+            ["query.change"],
+        )
+
+
 class UnknownRunError(RejectionError):
     """No run matches the `run_id` in a heartbeat or read path.
 
@@ -830,6 +843,7 @@ __all__ = [
     "IncompleteBodyError",
     "InsufficientRoleError",
     "InsufficientScopeError",
+    "InvalidChangeFilterError",
     "InvalidCredentialsError",
     "InvalidIdentityError",
     "InvalidJsonError",
