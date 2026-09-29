@@ -9,6 +9,7 @@ import type {
   RunMetadata,
 } from '../api/queries';
 import {
+  type BaselineWords,
   baselineLine,
   CHANGE,
   dotlineLabel,
@@ -214,49 +215,61 @@ describe('baselineLine', () => {
       counts: CHANGE_COUNTS,
     },
   });
+  // Each recorded name in braces, the baseline's label in brackets.
+  const words = (w: BaselineWords) =>
+    w.map((p) => (typeof p === 'string' ? p : `{${p.recorded}}`)).join('');
   const said = (line: ReturnType<typeof baselineLine>) =>
-    `${line.lead}${line.baseline ? `[${line.baseline.label}]` : ''}${line.tail}`;
+    `${words(line.lead)}${line.baseline ? `[${line.baseline.label}]` : ''}${words(line.tail)}`;
 
   it('names the baseline on the run’s own branch, and how much earlier it started', () => {
     const line = baselineLine(RUN);
     expect(line.baseline).toEqual({ id: BASE, label: '1adf29af', href: `/runs/${BASE}` });
-    expect(said(line)).toBe('Compared with [1adf29af] on main, 42 min earlier');
+    expect(said(line)).toBe('Compared with [1adf29af] on {main}, 42 min earlier');
   });
 
   it('says why it fell back to the project’s latest complete run', () => {
     expect(said(baselineLine(project({ ...VCS, branch: 'feat/uart-dma' })))).toBe(
-      'No earlier complete run on feat/uart-dma; compared with [0b77e4f2] on main, 3 h earlier',
+      'No earlier complete run on {feat/uart-dma}; compared with [0b77e4f2] on {main}, 3 h earlier',
     );
     expect(said(baselineLine(project({ ...VCS, branch: null, commit: '4b8f6a3c2d' })))).toBe(
-      'No branch recorded (detached HEAD at 4b8f6a3); compared with [0b77e4f2] on main, 3 h earlier',
+      'No branch recorded (detached HEAD at {4b8f6a3}); compared with [0b77e4f2] on {main}, 3 h earlier',
     );
     expect(said(baselineLine(project(null)))).toBe(
-      'Recorded outside a git repository; compared with [0b77e4f2] on main, 3 h earlier',
+      'Recorded outside a git repository; compared with [0b77e4f2] on {main}, 3 h earlier',
     );
     expect(said(baselineLine(project({ ...VCS, branch: null, commit: null })))).toBe(
-      'No branch recorded; compared with [0b77e4f2] on main, 3 h earlier',
+      'No branch recorded; compared with [0b77e4f2] on {main}, 3 h earlier',
     );
   });
 
   it('names no branch for a baseline that recorded none', () => {
     expect(said(baselineLine(project({ ...VCS, branch: 'feat/uart-dma' }, null)))).toBe(
-      'No earlier complete run on feat/uart-dma; compared with [0b77e4f2], 3 h earlier',
+      'No earlier complete run on {feat/uart-dma}; compared with [0b77e4f2], 3 h earlier',
     );
   });
 
-  it('writes out a hidden character in a branch name, since the sentence is plain text', () => {
+  it('keeps each recorded branch and commit apart from the words, as recorded', () => {
     const rlo = String.fromCodePoint(0x202e);
     expect(said(baselineLine(project({ ...VCS, branch: `x${rlo}` }, `y${rlo}`)))).toBe(
-      'No earlier complete run on x⟨U+202E⟩; compared with [0b77e4f2] on y⟨U+202E⟩, 3 h earlier',
+      `No earlier complete run on {x${rlo}}; compared with [0b77e4f2] on {y${rlo}}, 3 h earlier`,
     );
+    expect(said(baselineLine(project({ ...VCS, branch: null, commit: `${rlo}ab12cd99` })))).toBe(
+      `No branch recorded (detached HEAD at {${rlo}ab12cd}); compared with [0b77e4f2] on {main}, 3 h earlier`,
+    );
+  });
+
+  it('shortens a recorded commit by character, never splitting one', () => {
+    const face = String.fromCodePoint(0x1f600);
+    const line = baselineLine(project({ ...VCS, branch: null, commit: `abcdef${face}99` }));
+    expect(line.lead).toContainEqual({ recorded: `abcdef${face}` });
   });
 
   it('says there is nothing to compare with, or when a pending run is compared', () => {
     const none = { ...RUN, comparison: { state: 'none' as const, baseline: null, counts: null } };
     expect(baselineLine(none)).toEqual({
-      lead: 'Nothing to compare with yet.',
+      lead: ['Nothing to compare with yet.'],
       baseline: null,
-      tail: '',
+      tail: [],
     });
     const pending = {
       ...RUN,

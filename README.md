@@ -756,9 +756,10 @@ project you had open last, or of `default`.
   it fell back to the project's latest complete run; or *Nothing to compare
   with yet.*, *Compared with its baseline once the session ends.* while it
   runs, and *Not compared: no end was recorded.* when it was abandoned. A
-  run with an exit status never changes, so what the page read of it is
-  kept; an abandoned one is read again, since `vantage push` may still
-  deliver its end. Failure text shows only for runs recorded with
+  run with an exit status never changes, so what the page read of it once
+  it had one is kept; an abandoned one is read again, since `vantage push`
+  may still deliver its end, and a run seen to get its exit status is read
+  afresh, its marks with it. Failure text shows only for runs recorded with
   `--vantage-failure-text`. Under pytest-xdist the workers' results
   interleave in the line, as they were reported. Each result opens its own
   page.

@@ -1,6 +1,7 @@
-import { type ReactNode, useMemo } from 'react';
+import { Fragment, type ReactNode, useMemo } from 'react';
 import { useOutletContext, useParams } from 'react-router';
 import {
+  type BaselineWords,
   baselineLine,
   dotlineLabel,
   lineResults,
@@ -127,19 +128,27 @@ function ResultsPanel({
   );
 }
 
+// A recorded name or commit in running prose sits in its own bidi isolate.
+function Words({ words }: { words: BaselineWords }) {
+  return words.map((w, i) => (
+    // biome-ignore lint/suspicious/noArrayIndexKey: a sentence's words keep their order.
+    <Fragment key={i}>{typeof w === 'string' ? w : <bdi>{visible(w.recorded)}</bdi>}</Fragment>
+  ));
+}
+
 // What the run was compared with, its label linking to that run, or why it was not.
 function BaselineSentence({ detail }: { detail: RunDetail }) {
   const line = baselineLine(detail);
   return (
     <div className="dl-runhead__base">
       <span>
-        {line.lead}
+        <Words words={line.lead} />
         {line.baseline ? (
           <a className="dl-link dl-mono" href={line.baseline.href} title={line.baseline.id}>
             {line.baseline.label}
           </a>
         ) : null}
-        {line.tail}
+        <Words words={line.tail} />
       </span>
     </div>
   );

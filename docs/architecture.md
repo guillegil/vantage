@@ -1292,17 +1292,22 @@ declared.
 **State.** Server state lives in TanStack Query alone, view state in the
 address; web storage holds only the last project opened. A run is final
 once it has an exit status (`isFinal`): its detail, outcomes, results,
-each result in full and its comparison never change after that, so they
-are never refetched. An abandoned run has no exit status and is refetched
-like a running one, since `vantage push` may still deliver its end and
-with it its comparison; lists go stale after 30 seconds. A refusal is not
-retried; no answer or a server error is retried once. `GET /session` decides the layout: a `401`
-there sends the browser to `/sign-in?next=`, where `next` is kept only as a
-path on this origin. A `401` on anything else means a session that was
-working ended: the page keeps what it shows under a notice offering to sign
-in again, and a link followed from then on leads to sign-in first. Signing
-in and signing out clear every query, so nothing read as one user stays for
-the next.
+each result in full and its comparison never change after that, so what
+was read of them once it was final is never refetched. An abandoned run
+has no exit status and is refetched like a running one, since `vantage
+push` may still deliver its end and with it its comparison; lists go stale
+after 30 seconds. Each read of what a run holds is keyed by whether the
+run was final when it was asked for (`['run', id, 'outcomes', 'final']`),
+so a read made while it ran or was abandoned, which may lack its last
+results and its changes, is never kept for good: the first sight of the
+run final reads it again, showing the earlier answer until the new one
+arrives. A refusal is not retried; no answer or a server error is retried
+once. `GET /session` decides the layout: a `401` there sends the browser
+to `/sign-in?next=`, where `next` is kept only as a path on this origin. A
+`401` on anything else means a session that was working ended: the page
+keeps what it shows under a notice offering to sign in again, and a link
+followed from then on leads to sign-in first. Signing in and signing out
+clear every query, so nothing read as one user stays for the next.
 
 **Changes.** `src/adapt` alone turns the API's change words, snake_case
 like every API code, into the design system's hyphenated `Change`
@@ -1314,8 +1319,10 @@ its `comparison.counts`, and a history strip each entry's `change`.
 `baselineLine` words what the run page says it was compared with from the
 run's `comparison`, its presentation and its own branch and commit, and
 `earlier` how much sooner the baseline started, from the two start
-times; a recorded branch in it is plain text, so goes through
-`visibleText`.
+times. It returns each recorded branch and commit as a part of its own
+(the commit cut to seven characters by code point), which the page sets in
+a `<bdi>` through `visible`, so neither a right-to-left name nor a
+character that reorders text moves the words around it.
 
 **Links** are the design system's plain `<a href>`, which keep middle-click
 and copying the address. One click listener on the document routes a plain
@@ -1326,17 +1333,17 @@ built files, without a reload.
 `build/no-html-sinks.grit` refuses `innerHTML`, `outerHTML`,
 `insertAdjacentHTML` and `document.write`, `dangerouslySetInnerHTML` is an
 error, and the page policy's Trusted Types make any such sink throw.
-Recorded text is also shown as it is: `NodeId`, `Evidence` (its body and
-a string `meta`, which may name a recorded path or exception type), the
-run page's first line of each failure and both pages' interrupt reason
-print each bidirectional control, invisible format character, Hangul
-filler, variation selector, C0 or C1 control (tab and line breaks aside)
-and U+FFFD as its code point in a marked box (`ds/lib/visible.tsx`).
-Where recorded text becomes a plain string -- the window's title, the
-history slider's name, its readout's branch -- `visibleText` writes it as
-`⟨U+202E⟩`. So a right-to-left override can never make a node id or a
-traceback read as something else; *Copy* still copies the text as
-recorded.
+Recorded text is also shown as it is: `NodeId`, `Evidence` (its body and a
+string `meta`, which may name a recorded path or exception type), the run
+page's first line of each failure, its baseline sentence's branches and
+commit, and both pages' interrupt reason print each bidirectional control,
+invisible format character, Hangul filler, variation selector, C0 or C1
+control (tab and line breaks aside) and U+FFFD as its code point in a
+marked box (`ds/lib/visible.tsx`). Where recorded text becomes a plain
+string -- the window's title, the history slider's name, its readout's
+branch -- `visibleText` writes it as `⟨U+202E⟩`. So a right-to-left
+override can never make a node id or a traceback read as something else;
+*Copy* still copies the text as recorded.
 
 ### Build, packaging and CI
 

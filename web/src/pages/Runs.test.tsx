@@ -1,7 +1,7 @@
 // A project's runs against a stand-in server: each row's changes against
 // its baseline, and its line's change marks.
 import type { Query } from '@tanstack/react-query';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { clearSessionEnded } from '../app/sessionEnd';
 import { json, renderAt, stubServer } from '../testing/server';
@@ -100,12 +100,59 @@ it('reads an abandoned run’s line again once stale, and a final run’s never'
   serve();
   const { queryClient } = renderAt('/p/default/runs');
   await screen.findByTitle(COMPARED);
-  const staleTime = (id: string) => {
+  const staleTime = (id: string, read: string) => {
     const query: Query | undefined = queryClient
       .getQueryCache()
-      .find({ queryKey: ['run', id, 'outcomes'], exact: true });
+      .find({ queryKey: ['run', id, 'outcomes', read], exact: true });
     return query?.observers[0]?.options.staleTime;
   };
-  await waitFor(() => expect(staleTime(PENDING)).toBe(30_000));
-  expect(staleTime(COMPARED)).toBe(Number.POSITIVE_INFINITY);
+  await waitFor(() => expect(staleTime(PENDING, 'pending')).toBe(30_000));
+  expect(staleTime(COMPARED, 'final')).toBe(Number.POSITIVE_INFINITY);
+});
+
+it('reads a run’s line again on its page once its end has arrived, and marks it', async () => {
+  // Abandoned when the list read its line; vantage push then delivers its end.
+  let ended = false;
+  const endedRun = {
+    ...run(PENDING, '2026-09-27T11:00:00Z', {
+      state: 'branch',
+      baseline: { id: COMPARED, started_at: '2026-09-27T10:00:00Z', branch: 'main' },
+      counts: {
+        new_failure: 1,
+        still_failing: 1,
+        fixed: 1,
+        new_test: 0,
+        removed: 0,
+        not_reached: 0,
+      },
+    }),
+    interrupt_reason: null,
+    project: 'default',
+  };
+  stubServer((_m, path) => {
+    if (path === '/projects/default/runs') {
+      const items = ended ? [endedRun, ...RUNS.slice(1)] : RUNS;
+      return json(200, { items, has_more: false, next_cursor: null, metadata_horizon: null });
+    }
+    if (path === `/runs/${PENDING}`) return json(200, endedRun);
+    if (path === `/runs/${PENDING}/outcomes`) {
+      return json(200, ended ? { outcomes: '.F.F', changes: 'fs-n' } : OUTCOMES[PENDING]);
+    }
+    if (path === `/runs/${PENDING}/metadata`) return json(200, { items: [], files: [] });
+    if (path === `/runs/${PENDING}/results`) return json(200, { items: [], has_more: false });
+    const outcomes = /^\/runs\/([0-9a-f]{32})\/outcomes$/.exec(path);
+    if (outcomes?.[1]) return json(200, OUTCOMES[outcomes[1]]);
+    return undefined;
+  });
+  const { router } = renderAt('/p/default/runs');
+  await screen.findByTitle(PENDING);
+  await waitFor(() => expect(rowOf(PENDING).querySelectorAll('.dl-m--failed')).toHaveLength(2));
+  ended = true;
+  await act(() => router.navigate(`/runs/${PENDING}`));
+  const line = await screen.findByRole('img', { name: /; 1 new failure, 1 fixed$/ });
+  await waitFor(() => expect(line.querySelector('.dl-ring--passed')).not.toBeNull());
+  const lifted = [...line.querySelectorAll('.dl-m--failed')].filter(
+    (r) => Number(r.getAttribute('y')) < 0,
+  );
+  expect(lifted).toHaveLength(1);
 });

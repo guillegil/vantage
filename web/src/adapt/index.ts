@@ -190,10 +190,15 @@ export function earlier(from: string, to: string): string {
 
 // The run page's line saying what the run was compared with: the words before the
 // baseline's label, the baseline (null when there is none), and the words after it.
+// A recorded branch or commit is its own part, as recorded: the page sets it apart
+// from the words around it, so neither its direction nor a character that reorders
+// text reaches them, and shows its hidden characters.
+export type BaselineWords = (string | { recorded: string })[];
+
 export interface BaselineLine {
-  lead: string;
+  lead: BaselineWords;
   baseline: { id: string; label: string; href: string } | null;
-  tail: string;
+  tail: BaselineWords;
 }
 
 export function baselineLine(detail: RunDetail): BaselineLine {
@@ -204,26 +209,27 @@ export function baselineLine(detail: RunDetail): BaselineLine {
     else if (detail.presentation === 'running')
       lead = 'Compared with its baseline once the session ends.';
     else lead = 'Not compared: no end was recorded.';
-    return { lead, baseline: null, tail: '' };
+    return { lead: [lead], baseline: null, tail: [] };
   }
   const base = comparison.baseline;
-  let lead = 'Compared with ';
+  let lead: BaselineWords = ['Compared with '];
   if (comparison.state === 'project') {
     // Why it fell back to the project's latest complete run, from what this run recorded.
-    // A recorded name is plain text here, so a character that reorders text is written out.
     const vcs = detail.vcs;
-    let why: string;
-    if (vcs?.branch) why = `No earlier complete run on ${visibleText(vcs.branch)}`;
-    else if (vcs?.commit) why = `No branch recorded (detached HEAD at ${vcs.commit.slice(0, 7)})`;
-    else if (vcs) why = 'No branch recorded';
-    else why = 'Recorded outside a git repository';
-    lead = `${why}; compared with `;
+    if (vcs?.branch) lead = ['No earlier complete run on ', { recorded: vcs.branch }];
+    else if (vcs?.commit) {
+      // By code point, so a character is never split in two.
+      const sha = [...vcs.commit].slice(0, 7).join('');
+      lead = ['No branch recorded (detached HEAD at ', { recorded: sha }, ')'];
+    } else if (vcs) lead = ['No branch recorded'];
+    else lead = ['Recorded outside a git repository'];
+    lead.push('; compared with ');
   }
-  const on = base.branch ? ` on ${visibleText(base.branch)}` : '';
+  const on: BaselineWords = base.branch ? [' on ', { recorded: base.branch }] : [];
   return {
     lead,
     baseline: { id: base.id, label: runLabel(base.id), href: runHref(base.id) },
-    tail: `${on}, ${earlier(base.started_at, detail.started_at)} earlier`,
+    tail: [...on, `, ${earlier(base.started_at, detail.started_at)} earlier`],
   };
 }
 

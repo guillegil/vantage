@@ -230,6 +230,32 @@ describe('what the run was compared with', () => {
     );
   });
 
+  it('sets each recorded branch and commit apart, showing its hidden characters', async () => {
+    // A right-to-left branch, and a commit that would reverse what follows it.
+    const hebrew = 'תיקון';
+    serve(
+      {
+        ...COMPARED,
+        vcs: { ...COMPARED.vcs, branch: null, commit: `${RLO}ab12cd99` },
+        comparison: {
+          ...COMPARED.comparison,
+          state: 'project',
+          baseline: { ...COMPARED.comparison.baseline, branch: hebrew },
+        },
+      },
+      { outcomes: 'F.', changes: 'nf' },
+    );
+    renderAt(`/runs/${ID}`);
+    const link = await screen.findByRole('link', { name: '1adf29af' });
+    const said = link.closest('.dl-runhead__base') as HTMLElement;
+    expect(said).toHaveTextContent(
+      `No branch recorded (detached HEAD at U+202Eab12cd); compared with 1adf29af on ${hebrew}, 42 min earlier`,
+    );
+    expect(said.textContent).not.toContain(RLO);
+    const isolated = [...said.querySelectorAll('bdi')].map((b) => b.textContent);
+    expect(isolated).toEqual(['U+202Eab12cd', hebrew]);
+  });
+
   it('marks the new failure and the fix in the run’s line, and says so', async () => {
     serve(COMPARED, { outcomes: 'F.', changes: 'nf' });
     renderAt(`/runs/${ID}`);
@@ -276,11 +302,43 @@ describe('what the run was compared with', () => {
     // vantage push may still deliver its end, and with it its comparison.
     for (const key of [
       ['run', ID],
-      ['run', ID, 'outcomes'],
+      ['run', ID, 'outcomes', 'pending'],
     ]) {
       const query = queryClient.getQueryCache().find({ queryKey: key, exact: true });
       expect(staleTimeOf(query)).toBe(30_000);
     }
+  });
+
+  it('reads the line again once the run it showed running has its end, and marks it', async () => {
+    let ended = false;
+    let release: () => void = () => undefined;
+    const held = new Promise<Response>((resolve) => {
+      release = () => resolve(json(200, { outcomes: 'F.', changes: 'nf' }));
+    });
+    stubServer((_m, path, query) => {
+      if (path === `/runs/${ID}`)
+        return json(200, ended ? COMPARED : { ...PENDING, presentation: 'running' });
+      if (path === `/runs/${ID}/outcomes`) {
+        return ended ? held : json(200, { outcomes: 'F.', changes: null });
+      }
+      return answer(ID, path, query);
+    });
+    const { queryClient } = renderAt(`/runs/${ID}`);
+    await screen.findByText('Compared with its baseline once the session ends.');
+    const line = () => document.querySelector('svg[role="img"]');
+    await waitFor(() => expect(line()).not.toBeNull());
+    expect(line()?.querySelector('.dl-ring')).toBeNull();
+    ended = true;
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ['run', ID], exact: true });
+    });
+    await screen.findByRole('link', { name: '1adf29af' });
+    // The line read while it ran stays drawn until the new one arrives.
+    expect(line()).not.toBeNull();
+    expect(screen.queryByText('Loading results…')).toBeNull();
+    await act(async () => release());
+    await waitFor(() => expect(line()?.querySelector('.dl-ring--passed')).not.toBeNull());
+    expect(Number(line()?.querySelector('.dl-m--failed')?.getAttribute('y'))).toBeLessThan(0);
   });
 
   it('keeps what it read of a run with an exit status for good', async () => {
@@ -289,13 +347,14 @@ describe('what the run was compared with', () => {
     await screen.findByRole('link', { name: '1adf29af' });
     await waitFor(() =>
       expect(
-        queryClient.getQueryCache().find({ queryKey: ['run', ID, 'outcomes'], exact: true })?.state
-          .data,
+        queryClient
+          .getQueryCache()
+          .find({ queryKey: ['run', ID, 'outcomes', 'final'], exact: true })?.state.data,
       ).toBeDefined(),
     );
     for (const key of [
       ['run', ID],
-      ['run', ID, 'outcomes'],
+      ['run', ID, 'outcomes', 'final'],
     ]) {
       const query = queryClient.getQueryCache().find({ queryKey: key, exact: true });
       expect(staleTimeOf(query)).toBe(Number.POSITIVE_INFINITY);

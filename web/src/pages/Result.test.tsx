@@ -245,7 +245,9 @@ describe('a result', () => {
     server();
     const { queryClient } = renderAt(HERE);
     await screen.findByRole('heading', { level: 2, name: 'Traceback' });
-    const query = queryClient.getQueryCache().find({ queryKey: ['run', ID, 'result', NODE] });
+    const query = queryClient
+      .getQueryCache()
+      .find({ queryKey: ['run', ID, 'result', NODE, 'final'] });
     expect(query?.observers[0]?.options.staleTime).toBe(Number.POSITIVE_INFINITY);
   });
 
@@ -263,7 +265,9 @@ describe('a result', () => {
     );
     const { queryClient } = renderAt(HERE);
     await screen.findByRole('heading', { level: 2, name: 'Traceback' });
-    const query = queryClient.getQueryCache().find({ queryKey: ['run', ID, 'result', NODE] });
+    const query = queryClient
+      .getQueryCache()
+      .find({ queryKey: ['run', ID, 'result', NODE, 'pending'] });
     expect(query?.observers[0]?.options.staleTime).toBe(30_000);
   });
 
@@ -281,7 +285,9 @@ describe('a result', () => {
     );
     const { queryClient } = renderAt(HERE);
     await screen.findByRole('heading', { level: 2, name: 'Traceback' });
-    const query = queryClient.getQueryCache().find({ queryKey: ['run', ID, 'result', NODE] });
+    const query = queryClient
+      .getQueryCache()
+      .find({ queryKey: ['run', ID, 'result', NODE, 'pending'] });
     expect(query?.observers[0]?.options.staleTime).toBe(30_000);
   });
 
