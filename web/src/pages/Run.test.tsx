@@ -1,9 +1,10 @@
 // The run page's result tables lead to each result.
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { resultHref } from '../adapt';
-import { json, renderAt, stubServer } from '../testing/server';
+import { clearSessionEnded } from '../app/sessionEnd';
+import { json, refuse, renderAt, stubServer } from '../testing/server';
 
 const ID = '0123abcd0123abcd0123abcd0123abcd';
 const RLO = String.fromCodePoint(0x202e);
@@ -56,6 +57,27 @@ function item(node: string, outcome: string, message: string | null) {
 
 const FAILING = 'tests/test_a.py::test_fails';
 const PASSING = 'tests/test_a.py::test_passes';
+
+const OTHER = '9876fedc9876fedc9876fedc9876fedc';
+
+// A finished run of default, `id`, with one failing and one passing result.
+function answer(id: string, path: string, query: URLSearchParams) {
+  if (path === `/runs/${id}`) return json(200, { ...RUN, id });
+  if (path === `/runs/${id}/outcomes`) return json(200, { outcomes: 'F.' });
+  if (path === `/runs/${id}/metadata`) return json(200, { items: [], files: [] });
+  if (path === `/runs/${id}/results`) {
+    const failing = item(FAILING, 'failed', 'AssertionError: boom');
+    const items = query.getAll('outcome').length
+      ? [failing]
+      : [failing, item(PASSING, 'passed', null)];
+    return json(200, { items, has_more: false });
+  }
+  return undefined;
+}
+
+beforeEach(() => {
+  clearSessionEnded();
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -113,4 +135,45 @@ it('shows a hidden character in why the run was interrupted as its code point', 
   const reason = await screen.findByText(/^KeyboardInterrupt/);
   expect(reason).toHaveTextContent('KeyboardInterrupt U+202Etpurretni');
   expect(reason.closest('.dl-pagehead__sub')?.textContent).not.toContain(RLO);
+});
+
+it('keeps everything it shows when the session ends, and says so', async () => {
+  let revoked = false;
+  stubServer((_m, path, query) => {
+    if (revoked && path !== '/session') return refuse(401, 'unauthenticated');
+    return answer(ID, path, query);
+  });
+  const { queryClient } = renderAt(`/runs/${ID}`);
+  await screen.findByRole('heading', { level: 2, name: 'Not passing' });
+  revoked = true;
+  await act(async () => {
+    await queryClient.refetchQueries({ queryKey: ['run', ID] });
+  });
+  expect(await screen.findByText(/^Your session ended at \d\d:\d\d UTC$/)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { level: 2, name: 'Not passing' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { level: 2, name: 'All results' })).toBeInTheDocument();
+  expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeInTheDocument();
+  expect(screen.queryByRole('alert')).toBeNull();
+});
+
+it('keeps its heading focused when it follows a link to a run it has not read yet', async () => {
+  let release: () => void = () => undefined;
+  const held = new Promise<Response>((resolve) => {
+    release = () => resolve(json(200, { ...RUN, id: OTHER }));
+  });
+  stubServer((_m, path, query) => {
+    if (path === `/runs/${OTHER}`) return held;
+    return answer(ID, path, query) ?? answer(OTHER, path, query);
+  });
+  const { router } = renderAt(`/runs/${ID}`);
+  await screen.findByRole('heading', { level: 2, name: 'Not passing' });
+  await act(() => router.navigate(`/runs/${OTHER}`));
+  const loading = await screen.findByRole('heading', { level: 1 });
+  await waitFor(() => expect(document.activeElement).toBe(loading));
+  expect(screen.getByText('Loading…')).toBeInTheDocument();
+  await act(async () => release());
+  await screen.findByRole('navigation', { name: 'Breadcrumb' });
+  const heading = screen.getByRole('heading', { level: 1 });
+  expect(heading).toBe(loading);
+  expect(document.activeElement).toBe(heading);
 });

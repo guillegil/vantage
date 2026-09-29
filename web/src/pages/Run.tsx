@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { type ReactNode, useMemo } from 'react';
 import { useOutletContext, useParams } from 'react-router';
 import {
   dotlineLabel,
@@ -215,8 +215,13 @@ function RunView({ runId }: { runId: string }) {
       </span>
     </h1>
   );
-  if (run.isError) {
-    let body = null;
+  let crumbs: ReactNode = null;
+  let sub: ReactNode = null;
+  let body: ReactNode = null;
+  let loose = false;
+  // A session that ended keeps what is shown.
+  if (run.isError && !(isApiError(run.error, 401) && detail)) {
+    loose = true;
     if (isApiError(run.error, 404)) {
       body = (
         <EmptyState
@@ -239,26 +244,15 @@ function RunView({ runId }: { runId: string }) {
     } else if (!isApiError(run.error, 401)) {
       body = <FailureNotice error={run.error} retry={() => run.refetch()} busy={run.isFetching} />;
     }
-    return (
-      <div className="dl-stack dl-stack--loose">
-        {title}
-        {body}
-      </div>
+  } else if (!detail) {
+    body = (
+      <p className="dl-caption" role="status">
+        Loading…
+      </p>
     );
-  }
-  if (!detail) {
-    return (
-      <div className="dl-stack">
-        {title}
-        <p className="dl-caption" role="status">
-          Loading…
-        </p>
-      </div>
-    );
-  }
-  const head = runHead(detail);
-  return (
-    <div className="dl-stack">
+  } else {
+    const head = runHead(detail);
+    crumbs = (
       <nav className="dl-crumbs" aria-label="Breadcrumb">
         <a className="dl-link" href={runsHref(detail.project)}>
           Runs
@@ -268,37 +262,44 @@ function RunView({ runId }: { runId: string }) {
           {head.label}
         </span>
       </nav>
+    );
+    sub = (
+      <div className="dl-pagehead__sub">
+        <RunStatus {...head.status} />
+        {head.reason ? <span>{visible(head.reason)}</span> : null}
+        <CommitRef {...head.commit} />
+        {head.recordedBy ? (
+          <UserChip name={head.recordedBy} you={head.recordedBy === session.user?.name} size="sm" />
+        ) : (
+          <span>recorded without a token</span>
+        )}
+        <span>
+          started <Time value={head.startedAt} mode="absolute" />
+        </span>
+        {head.finishedAt ? (
+          <span>
+            finished <Time value={head.finishedAt} mode="absolute" />
+          </span>
+        ) : null}
+        {head.seconds !== undefined ? (
+          <span className="dl-num">{fmtSeconds(head.seconds)}</span>
+        ) : null}
+      </div>
+    );
+    body = <RunBody detail={detail} />;
+  }
+  // One head in every state: the heading focused after a navigation, while the run loads,
+  // is the element that stays once it has, so focus is not dropped to the page's body.
+  return (
+    <div className={loose ? 'dl-stack dl-stack--loose' : 'dl-stack'}>
+      {crumbs}
       <div className="dl-pagehead">
         <div className="dl-pagehead__main">
           {title}
-          <div className="dl-pagehead__sub">
-            <RunStatus {...head.status} />
-            {head.reason ? <span>{visible(head.reason)}</span> : null}
-            <CommitRef {...head.commit} />
-            {head.recordedBy ? (
-              <UserChip
-                name={head.recordedBy}
-                you={head.recordedBy === session.user?.name}
-                size="sm"
-              />
-            ) : (
-              <span>recorded without a token</span>
-            )}
-            <span>
-              started <Time value={head.startedAt} mode="absolute" />
-            </span>
-            {head.finishedAt ? (
-              <span>
-                finished <Time value={head.finishedAt} mode="absolute" />
-              </span>
-            ) : null}
-            {head.seconds !== undefined ? (
-              <span className="dl-num">{fmtSeconds(head.seconds)}</span>
-            ) : null}
-          </div>
+          {sub}
         </div>
       </div>
-      <RunBody detail={detail} />
+      {body}
     </div>
   );
 }
