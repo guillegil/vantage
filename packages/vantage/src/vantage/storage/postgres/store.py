@@ -312,7 +312,8 @@ _COUNT_PROJECT_RUNS = "SELECT count(*) FROM vantage.run WHERE project = %s"
 
 # A run that can be a baseline, restated from `is_baseline_candidate`: it
 # ran to its end with a verdict on its tests. Only the module's constants
-# are interpolated.
+# are interpolated. The baseline indexes of `schema.sql` repeat it as their
+# WHERE, which is what lets the planner use them.
 _COMPLETE = f"""
     run.finished_at IS NOT NULL AND NOT run.interrupted AND run.interrupt_reason IS NULL
     AND run.exit_status IN ({", ".join(str(status) for status in sorted(BASELINE_EXIT_STATUSES))})
@@ -320,11 +321,12 @@ _COMPLETE = f"""
 
 # A finishing run's baseline: the latest complete run of its project
 # earlier than it in the run list's order, on its branch, read backwards
-# along `run_project_branch_started_at`; the digest finds the branch and
-# the text keeps the match exact. Binds the project, the branch twice, then
-# the run's `started_at` and id. Plain statements at READ COMMITTED: a
-# complete run and its comparison commit together, so a candidate is seen
-# whole or not at all, and either answer stays a valid baseline.
+# along `run_baseline_branch`, which holds complete runs alone; the digest
+# finds the branch and the text keeps the match exact. Binds the project,
+# the branch twice, then the run's `started_at` and id. Plain statements at
+# READ COMMITTED: a complete run and its comparison commit together, so a
+# candidate is seen whole or not at all, and either answer stays a valid
+# baseline.
 _BRANCH_BASELINE = f"""
     SELECT run.id FROM vantage.run AS run
     WHERE run.project = %s
@@ -335,8 +337,7 @@ _BRANCH_BASELINE = f"""
 """  # noqa: S608
 
 # The same on any branch, a run without one included, along
-# `run_project_started_at`. Binds the project, then the run's `started_at`
-# and id.
+# `run_baseline`. Binds the project, then the run's `started_at` and id.
 _PROJECT_BASELINE = f"""
     SELECT run.id FROM vantage.run AS run
     WHERE run.project = %s AND {_COMPLETE} AND {_AFTER_RUN_KEY}

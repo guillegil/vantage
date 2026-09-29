@@ -218,9 +218,14 @@ CREATE TABLE vantage.run_metadata (
 -- `run(project, started_at, id)`: a project's run list and history order,
 -- read backwards, and the metadata horizon count; every read of the run
 -- list is within one project.
--- `run(project, text_key(vcs_branch), started_at, id)`: a finishing run's
--- baseline on its branch, read backwards; a branch is unbounded, so it goes
--- through `text_key`, and the lookup compares the text as well.
+-- `run(project, text_key(vcs_branch), started_at, id)` and `run(project,
+-- started_at, id)`, both of complete runs alone: a finishing run's
+-- baseline, on its branch and on any, read backwards from its own key. Each
+-- holds only the runs that can be a baseline, so the scan never passes over
+-- one that cannot, however many of a project's runs stopped early; their
+-- WHERE is `_COMPLETE`'s, which the statements repeat so the planner can
+-- prove it. A branch is unbounded, so it goes through `text_key`, and the
+-- lookup compares the text as well.
 -- `result_change(run_id, change, ordinal)`: a page of runs' change counts, a
 -- run's changes of one kind in order, and its changed results' positions.
 -- `result_change`'s primary key: a result's change, and each entry of a
@@ -237,8 +242,14 @@ CREATE TABLE vantage.run_metadata (
 -- role. `project_member(account, project)`: a user's memberships, which the
 -- project list is filtered by.
 CREATE INDEX run_project_started_at ON vantage.run (project, started_at, id);
-CREATE INDEX run_project_branch_started_at
-    ON vantage.run (project, vantage.text_key(vcs_branch), started_at, id);
+CREATE INDEX run_baseline_branch
+    ON vantage.run (project, vantage.text_key(vcs_branch), started_at, id)
+    WHERE finished_at IS NOT NULL AND NOT interrupted AND interrupt_reason IS NULL
+      AND exit_status IN (0, 1);
+CREATE INDEX run_baseline
+    ON vantage.run (project, started_at, id)
+    WHERE finished_at IS NOT NULL AND NOT interrupted AND interrupt_reason IS NULL
+      AND exit_status IN (0, 1);
 CREATE INDEX result_run_id ON vantage.result (run_id, id);
 CREATE INDEX result_test_case_id ON vantage.result (test_case_id);
 CREATE UNIQUE INDEX test_case_node_key

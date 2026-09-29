@@ -1283,9 +1283,10 @@ def test_changes_are_read_along_their_own_indexes(
     postgres_store: PostgresExecutionStore, postgres_url: str
 ) -> None:
     """A finishing run's baseline is found by one backward index scan from
-    its own key, inside its transaction, on its branch or on any; and one
-    kind of a run's changes is read in order from `result_change_run`,
-    without a sort."""
+    its own key, inside its transaction, on its branch or on any, of an
+    index holding complete runs alone, so no run that cannot be a baseline
+    is read and filtered out on the way; and one kind of a run's changes is
+    read in order from `result_change_run`, without a sort."""
     started = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
     with psycopg.connect(postgres_url, autocommit=True) as conn:
         plans = [
@@ -1307,7 +1308,9 @@ def test_changes_are_read_along_their_own_indexes(
         ]
 
     branch, project, one_kind = plans
-    assert "Index Scan Backward using run_project_branch_started_at on run" in branch
-    assert "Index Scan Backward using run_project_started_at on run" in project
+    assert "Index Scan Backward using run_baseline_branch on run" in branch
+    assert "Index Only Scan Backward using run_baseline on run" in project
+    assert "interrupt" not in branch
+    assert "interrupt" not in project
     assert "Index Scan using result_change_run on result_change rc" in one_kind
     assert "Sort" not in one_kind

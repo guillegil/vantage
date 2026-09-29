@@ -4222,16 +4222,24 @@ class ExecutionStoreContract:
             "exit-2-finished",
             "usage-error",
             "no-tests",
+            "exit-0-flagged-interrupted",
+            "exit-1-unfinished",
+            "exit-0-unfinished-interrupted",
             "another-project",
             "started-later",
         ],
     )
+    @pytest.mark.parametrize("branch", ["main", None], ids=["on-its-branch", "without-a-branch"])
     def test_only_an_earlier_complete_run_of_the_project_is_ever_a_baseline(
-        self, store: ExecutionStore, kind: str
+        self, store: ExecutionStore, kind: str, branch: str | None
     ) -> None:
         """Running and abandoned runs have no exit status; the others ended
         without a verdict on every test, belong elsewhere, or started after
-        the run compared."""
+        the run compared. An exit status of 0 or 1 is not enough alone: a
+        run with no finish time, or flagged interrupted -- as `pytest.exit`
+        with status 0 and no message leaves one -- is passed over too. Each
+        rule holds for the seek on the run's branch and for the one on any
+        branch."""
         store.create_project("firmware", created_at=_at(0))
         _finish(store, _compared_run(1, 0), {"test_a": "passed"})
         project = "firmware" if kind == "another-project" else DEFAULT_PROJECT
@@ -4246,14 +4254,20 @@ class ExecutionStoreContract:
             "exit-2-finished": _compared_run(2, minutes, exit_status=2),
             "usage-error": _compared_run(2, minutes, exit_status=4),
             "no-tests": _compared_run(2, minutes, exit_status=5),
+            "exit-0-flagged-interrupted": _compared_run(2, minutes, interrupted=True),
+            "exit-1-unfinished": _compared_run(2, minutes, exit_status=1, finished=False),
+            "exit-0-unfinished-interrupted": _compared_run(
+                2, minutes, finished=False, interrupted=True
+            ),
             "another-project": _compared_run(2, minutes),
             "started-later": _compared_run(2, minutes),
         }[kind]
         _finish(store, passed_over, {"test_a": "passed"}, project=project)
 
-        _finish(store, _compared_run(3, 5), {"test_a": "passed"})
+        _finish(store, _compared_run(3, 5, branch=branch), {"test_a": "passed"})
 
-        assert _comparison_of(store, _rid(3)) == ("branch", _rid(1))
+        state = "project" if branch is None else "branch"
+        assert _comparison_of(store, _rid(3)) == (state, _rid(1))
 
     def test_a_tie_on_started_at_is_settled_by_id(self, store: ExecutionStore) -> None:
         """The run list's own order: of runs started together, the one with
@@ -4376,6 +4390,8 @@ class ExecutionStoreContract:
 
         assert _changes(store, _rid(2)) == [("test_b", missing, None)]
         assert store.count_changes([_rid(2)]) == {_rid(2): {missing: 1}}
+        # A missing test has no position, and none of the run's results changed.
+        assert store.get_run_changes(_rid(2)) == ()
         (entry,) = store.list_changes(_rid(2), limit=10, offset=0).items
         assert (entry.outcome, entry.was, entry.position, entry.duration) == (
             None,
@@ -4388,11 +4404,11 @@ class ExecutionStoreContract:
         self, store: ExecutionStore
     ) -> None:
         """The first run was compared with nothing, so the second's streak
-        starts there; a run on another branch between them is no link of
-        the chain."""
+        starts there; a run on another branch between them, the project's
+        latest when the third finishes, is no link of the chain."""
         for run in range(1, 5):
             if run == 3:
-                _finish(store, _compared_run(9, 3, branch="feat/x"), {"test_a": "passed"})
+                _finish(store, _compared_run(9, 5, branch="feat/x"), {"test_a": "passed"})
             _finish(store, _compared_run(run, run * 2, exit_status=1), {"test_a": "failed"})
 
         streaks = [
@@ -4491,6 +4507,9 @@ class ExecutionStoreContract:
 
         # The first was compared with nothing, the second changed nothing.
         assert counts == {_rid(3): {"new_failure": 1, "new_test": 1, "removed": 1}}
+        assert _comparison_of(store, _rid(2)) == ("branch", _rid(1))
+        assert store.get_run_changes(_rid(2)) == ()
+        assert store.list_changes(_rid(2), limit=10, offset=0).items == ()
         tallies: dict[str, int] = {}
         for entry in store.list_changes(_rid(3), limit=10, offset=0).items:
             tallies[entry.change] = tallies.get(entry.change, 0) + 1

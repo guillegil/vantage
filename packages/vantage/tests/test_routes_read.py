@@ -747,6 +747,53 @@ def test_each_run_says_what_it_was_compared_with_on_the_list_and_on_its_own(
     }
 
 
+def test_a_run_that_changed_nothing_still_names_its_baseline_with_every_count_zero(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """The most common finished run stores no change at all, and is still
+    compared: it names its baseline, counts nothing, marks every result
+    unchanged and lists no change -- not "nothing to compare with"."""
+    now = datetime.now(timezone.utc)
+    first, second = _run_id(71), _run_id(72)
+    started = {first: now - timedelta(hours=2), second: now - timedelta(hours=1)}
+    for run_id, started_at in started.items():
+        store.record_session(
+            _execution(
+                run_id,
+                started_at=started_at,
+                finished_at=started_at + timedelta(minutes=1),
+                vcs=_vcs(branch="main"),
+            ),
+            results=[
+                _result("t.py::test_a", outcome="passed"),
+                _result("t.py::test_b", outcome="skipped"),
+            ],
+            received_at=started_at,
+            project=DEFAULT_PROJECT,
+        )
+
+    listed = {item["id"]: item["comparison"] for item in client.get(_RUNS).json()["items"]}
+    detailed = client.get(f"/api/v1/runs/{second}").json()["comparison"]
+
+    assert listed[second] == detailed
+    assert _instant(detailed["baseline"].pop("started_at")) == started[first]
+    assert detailed == {
+        "state": "branch",
+        "baseline": {"id": first, "branch": "main"},
+        "counts": dict.fromkeys(
+            ("new_failure", "still_failing", "fixed", "new_test", "removed", "not_reached"), 0
+        ),
+    }
+    assert client.get(f"/api/v1/runs/{second}/outcomes").json() == {
+        "outcomes": ".s",
+        "changes": "--",
+    }
+    assert client.get(f"/api/v1/runs/{second}/changes").json() == {
+        "items": [],
+        "has_more": False,
+    }
+
+
 def test_run_detail_carries_every_stored_field_by_value(
     client: TestClient, store: ExecutionStore
 ) -> None:

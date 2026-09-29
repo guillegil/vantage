@@ -1013,7 +1013,9 @@ where it would see rows not yet committed. Multi-statement writes open with
 login's token, so those serialise with each other in one process and
 across processes on one file. A finishing report's comparison runs inside
 its transaction and so under both, for about 30 ms at 20,000 results and
-170 ms at 100,000, while every other store call in the process waits.
+170 ms at 100,000 (more when the run and its baseline hold different
+tests, as under "Storage" below), while every other store call in the
+process waits.
 WAL mode and a five-second busy timeout cover a second process on the same
 file, which no in-process lock can reach: the pytest
 sessions storing into a local database, and a `vantage` serving it. Opening
@@ -1483,7 +1485,15 @@ state (`pending`, `none`, `branch`, `project`) is derived from
 the counts from the rows; neither is stored. Comparing at the finish costs
 one pass over both runs' results: about 30 ms for 20,000 results on SQLite
 and 80 ms on PostgreSQL, once per run, well inside the plugin's 10-second
-report timeout. Computing the same when read would cost every run-list
+report timeout. Those figures hold for runs of the same tests. The rows
+follow the tests the two runs do not share as well as those that changed,
+so a subset of the suite (`-k`, a path, `--lf`, one CI shard) compared
+with a full run, or a full run with a subset, writes a row for every test
+only one of them holds. At 20,000 tests that is tenths of a second on
+SQLite, under its write lock, and seconds on PostgreSQL, where each row's
+foreign keys are checked; shards of one branch that alternate halves of a
+suite pay it on every finish. The README tells such runs to record into a
+project of their own. Computing the same when read would cost every run-list
 page a comparison of each of its runs with its baseline: measured at
 0.3 s for a 40-run page of 20,000 results each on SQLite and 0.9 s on
 PostgreSQL, where counting the stored rows takes a few milliseconds. A
@@ -1492,10 +1502,16 @@ between two others, where a stored one, once shown, never does. The
 result rows stay write-once: the comparison is a table of its own rather
 than columns on `result`, so no wide row is updated.
 
-- `run(project, vcs_branch, started_at, id)` serves the branch seek, one
-  backward step; without it the first run of a new branch would scan its
-  project's history inside the write lock. The project seek reads
-  `run(project, started_at, id)`, the run list's own index.
+- `run(project, vcs_branch, started_at, id)` serves the branch seek and
+  `run(project, started_at, id)` the project seek, each one backward step
+  from the finishing run's key. Both are partial, holding complete runs
+  alone, with `_COMPLETE`'s terms as their `WHERE` (SQLite uses a partial
+  index only for a statement that repeats its terms): an index of every
+  run would make the seek read back past each run that cannot be a
+  baseline, so a project whose runs all stop early (a failing suite run
+  with `-x`) would read its whole history on every finish, inside
+  SQLite's write lock. Without the branch index the first run of a new
+  branch would scan its project's history.
 - `result_change(run_id, change, ordinal)` serves a page of runs' change
   counts (`count_changes`, one `GROUP BY run_id, change` from the index
   alone, batched as `count_outcomes` is), a run's changes of one kind in

@@ -840,9 +840,12 @@ abandoned run whose finish arrives later is compared then.
   request, so such a run is compared with the project's latest complete
   run on any branch. Two runs without a branch are never taken as the same
   branch, so pull-request checkouts do not compare with each other.
-- **A subset of the suite** (`-k`, `-m`, a path, `--lf`) is complete by
-  these rules, since nothing records the selection: the tests outside it
-  read as `removed`, and the next full run shows them again as `new_test`.
+- **A subset of the suite** (`-k`, `-m`, a path, `--lf`, one shard of a
+  suite split across CI jobs) is complete by these rules, since nothing
+  records the selection: the tests outside it read as `removed`, and the
+  next full run shows them again as `new_test`. Each of those is a stored
+  change, so such a comparison also costs in proportion to the suite
+  rather than to what changed: seconds, on a large suite in PostgreSQL.
   Record partial runs into a project of their own
   (`--vantage-project`) to keep them out of the full runs' comparisons.
 - **"Before" follows each machine's clock**, the start time the plugin

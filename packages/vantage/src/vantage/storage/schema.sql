@@ -291,9 +291,14 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 -- `run(project, started_at, id)`: a project's run list in its order, the
 -- cursor's range, and the metadata horizon count. It leads with the
 -- project because every read of the run list is within one.
--- `run(project, vcs_branch, started_at, id)`: a finishing run's baseline on
--- its branch, found by one backward seek; without it the first run of a new
--- branch would scan its project's history inside the write lock.
+-- `run(project, vcs_branch, started_at, id)` and `run(project, started_at,
+-- id)`, both of complete runs alone: a finishing run's baseline, on its
+-- branch and on any, found by one backward seek. Each holds only the runs
+-- that can be a baseline, so the seek never passes over one that cannot:
+-- without them, a new branch's first run, or a project whose runs all stop
+-- early, would read back through its history inside the write lock. Their
+-- WHERE is `_COMPLETE`'s, term for term, since SQLite uses a partial index
+-- only for a statement that repeats its terms.
 -- `result_change(run_id, change, ordinal)`: a page of runs' change counts,
 -- from the index alone, a run's changes of one kind in order, and its
 -- changed results' positions. `result_change`'s primary key: a result's
@@ -313,8 +318,14 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_project_started_at
     ON run (project, started_at, id);
-CREATE INDEX IF NOT EXISTS idx_run_project_branch_started_at
-    ON run (project, vcs_branch, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_run_baseline_branch
+    ON run (project, vcs_branch, started_at, id)
+    WHERE finished_at IS NOT NULL AND interrupted = 0 AND interrupt_reason IS NULL
+      AND exit_status IN (0, 1);
+CREATE INDEX IF NOT EXISTS idx_run_baseline
+    ON run (project, started_at, id)
+    WHERE finished_at IS NOT NULL AND interrupted = 0 AND interrupt_reason IS NULL
+      AND exit_status IN (0, 1);
 CREATE INDEX IF NOT EXISTS idx_result_run_id
     ON result (run_id);
 CREATE INDEX IF NOT EXISTS idx_result_test_case_id

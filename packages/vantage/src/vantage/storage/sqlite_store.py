@@ -317,7 +317,8 @@ _COUNT_RUNS_PREDATING_KEY = """
 
 # A run that can be a baseline, restated from `is_baseline_candidate`: it
 # ran to its end with a verdict on its tests. Only the module's constants
-# are interpolated.
+# are interpolated. The baseline indexes of `schema.sql` repeat it term for
+# term as their WHERE, which is what lets SQLite seek them.
 _COMPLETE = f"""
     run.finished_at IS NOT NULL AND run.interrupted = 0 AND run.interrupt_reason IS NULL
     AND run.exit_status IN ({", ".join(str(status) for status in sorted(BASELINE_EXIT_STATUSES))})
@@ -325,8 +326,8 @@ _COMPLETE = f"""
 
 # A finishing run's baseline: the latest complete run of its project
 # earlier than it in the run list's order, on its branch, found by one
-# backward seek of `idx_run_project_branch_started_at`. Binds the project,
-# the branch, then the run's `started_at` and id.
+# backward seek of `idx_run_baseline_branch`, which holds complete runs
+# alone. Binds the project, the branch, then the run's `started_at` and id.
 _BRANCH_BASELINE = f"""
     SELECT run.id FROM run
     WHERE run.project = ? AND run.vcs_branch = ? AND {_COMPLETE} AND {_AFTER_RUN_KEY}
@@ -335,8 +336,7 @@ _BRANCH_BASELINE = f"""
 """  # noqa: S608
 
 # The same on any branch, a run without one included, along
-# `idx_run_project_started_at`. Binds the project, then the run's
-# `started_at` and id.
+# `idx_run_baseline`. Binds the project, then the run's `started_at` and id.
 _PROJECT_BASELINE = f"""
     SELECT run.id FROM run
     WHERE run.project = ? AND {_COMPLETE} AND {_AFTER_RUN_KEY}

@@ -29,6 +29,7 @@ from vantage.core.ports.storage import (
     RunMetadata,
 )
 from vantage.storage import sqlite_store
+from vantage.storage.connection import isoformat_utc
 from vantage.storage.sqlite_store import (
     _BRANCH_BASELINE,
     _COUNT_RUNS_PREDATING_KEY,
@@ -51,7 +52,9 @@ from vantage_port_contract import (
     ExecutionStoreContract,
     LocalDatabaseContract,
     StoredMetadata,
+    _at,
     _captured,
+    _compared_run,
     _execution,
     _failure,
     _result,
@@ -968,9 +971,10 @@ def _plan(store: SqliteExecutionStore, sql: str, params: Sequence[object]) -> st
 
 def test_a_finishing_runs_baseline_is_found_by_one_backward_seek(tmp_path: Path) -> None:
     """Both baseline statements run inside the write lock, so each must
-    start at the finishing run's key: a plan that scanned the project's
-    history -- or, for a new branch, all of it -- would hold every writer
-    for as long."""
+    start at the finishing run's key, in an index of complete runs alone: a
+    plan that scanned the project's history -- or, for a new branch, all of
+    it -- or one that passed over every run stopped early on the way would
+    hold every writer for as long."""
     store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
     key = ("2026-08-15T09:00:00.000000+00:00", "a" * 32)
     try:
@@ -980,12 +984,62 @@ def test_a_finishing_runs_baseline_is_found_by_one_backward_seek(tmp_path: Path)
         store.close()
 
     assert branch == (
-        "SEARCH run USING INDEX idx_run_project_branch_started_at"
+        "SEARCH run USING INDEX idx_run_baseline_branch"
         " (project=? AND vcs_branch=? AND (started_at,id)<(?,?))"
     )
     assert project == (
-        "SEARCH run USING INDEX idx_run_project_started_at (project=? AND (started_at,id)<(?,?))"
+        "SEARCH run USING INDEX idx_run_baseline (project=? AND (started_at,id)<(?,?))"
     )
+
+
+def test_a_baseline_seek_passes_over_no_run_that_cannot_be_one(tmp_path: Path) -> None:
+    """A suite run with `-x` that keeps failing stops early every time, so
+    none of its runs is ever complete. Finding that no baseline exists must
+    still cost one step, not a read back through every such run inside the
+    write lock: the work the seeks do is the same for 5 such runs as for
+    300."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    key = (isoformat_utc(_at(10_000)), "f" * 32)
+
+    def steps(sql: str, params: Sequence[object]) -> int:
+        """The virtual machine instructions `sql` runs."""
+        counted = [0]
+
+        def count() -> int:
+            counted[0] += 1
+            return 0
+
+        store._conn.set_progress_handler(count, 1)  # noqa: SLF001
+        try:
+            assert store._conn.execute(sql, params).fetchall() == []  # noqa: SLF001
+        finally:
+            store._conn.set_progress_handler(None, 1)  # noqa: SLF001
+        return counted[0]
+
+    def both() -> tuple[int, int]:
+        return (
+            steps(_BRANCH_BASELINE, (DEFAULT_PROJECT, "main", *key)),
+            steps(_PROJECT_BASELINE, (DEFAULT_PROJECT, *key)),
+        )
+
+    def stopped_early(numbers: range) -> None:
+        for number in numbers:
+            store.record_session(
+                _compared_run(number, number, exit_status=1, reason="stopped after 1 failure"),
+                results=(),
+                received_at=_at(number),
+                project=DEFAULT_PROJECT,
+            )
+
+    try:
+        stopped_early(range(1, 6))
+        few = both()
+        stopped_early(range(6, 301))
+        many = both()
+    finally:
+        store.close()
+
+    assert many == few
 
 
 def test_changes_are_read_along_their_own_indexes(tmp_path: Path) -> None:
