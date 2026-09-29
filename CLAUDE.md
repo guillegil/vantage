@@ -141,12 +141,17 @@ its `postgres` extra.
   report that gives it its exit status, after its results: the store
   chooses its baseline -- the latest complete run (finished, neither
   interrupted nor stopped early, exit 0 or 1) of its project earlier in
-  `(started_at, id)` order, on its branch first, else on any -- writes
-  `run.baseline_id` and the `result_change` rows `compare` returns, and
-  nothing ever writes either again. `core/domain/changes.py` is the only
-  statement of the rules; the SQL restates them from its constants, and
-  the state (`pending`, `none`, `branch`, `project`) is derived when read,
-  never stored.
+  `(started_at, id)` order, on its branch first (two null branches never
+  match), else on any -- writes `run.baseline_id` and the `result_change`
+  rows `compare` returns, and nothing ever writes either again: no run is
+  re-compared, however late another arrives. `core/domain/changes.py` is
+  the only statement of the rules; the SQL restates them from its
+  constants, and the state (`pending`, `none`, `branch`, `project`) and
+  the counts are derived when read, never stored. On PostgreSQL the
+  finishing transaction's run row lock makes it the only one to compare
+  the run, and the baseline is read at `READ COMMITTED` with no lock of its
+  own, since a complete run commits with its comparison and either of two
+  racing finishes is a valid baseline for good.
 - **Timestamps** are stored as fixed-width UTC text in SQLite
   (`isoformat_utc`), so text order is time order, and as `timestamptz` in
   PostgreSQL, read back as UTC.
