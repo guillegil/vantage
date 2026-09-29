@@ -93,3 +93,24 @@ it('links every result in both tables to its page, and shows hidden characters',
   await userEvent.click(link);
   await waitFor(() => expect(router.state.location.pathname).toBe(`/runs/${ID}/result`));
 });
+
+it('shows a hidden character in why the run was interrupted as its code point', async () => {
+  stubServer((_m, path) => {
+    if (path === `/runs/${ID}`) {
+      return json(200, {
+        ...RUN,
+        interrupted: true,
+        interrupt_reason: `KeyboardInterrupt ${RLO}tpurretni`,
+        presentation: 'interrupted',
+      });
+    }
+    if (path === `/runs/${ID}/outcomes`) return json(200, { outcomes: 'F.' });
+    if (path === `/runs/${ID}/metadata`) return json(200, { items: [], files: [] });
+    if (path === `/runs/${ID}/results`) return json(200, { items: [], has_more: false });
+    return undefined;
+  });
+  renderAt(`/runs/${ID}`);
+  const reason = await screen.findByText(/^KeyboardInterrupt/);
+  expect(reason).toHaveTextContent('KeyboardInterrupt U+202Etpurretni');
+  expect(reason.closest('.dl-pagehead__sub')?.textContent).not.toContain(RLO);
+});

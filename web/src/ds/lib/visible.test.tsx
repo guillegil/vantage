@@ -35,6 +35,32 @@ describe('visible', () => {
     expect(visibleText('plain')).toBe('plain');
   });
 
+  it('shows the characters that print nothing but are not controls', () => {
+    const cases: [number, string][] = [
+      [0x115f, 'U+115F hangul choseong filler'],
+      [0x1160, 'U+1160 hangul jungseong filler'],
+      [0x3164, 'U+3164 hangul filler'],
+      [0xffa0, 'U+FFA0 halfwidth hangul filler'],
+      [0x034f, 'U+034F combining grapheme joiner'],
+      [0xfe00, 'U+FE00 variation selector-1'],
+      [0xfe0f, 'U+FE0F variation selector-16'],
+      [0xe0100, 'U+E0100 variation selector-17'],
+      [0xe01ef, 'U+E01EF variation selector-256'],
+    ];
+    for (const [cp, title] of cases) {
+      const { container, unmount } = render(
+        <span>{visible(`test_login[admin${String.fromCodePoint(cp)}]`)}</span>,
+      );
+      expect(container.textContent).toBe(`test_login[admin${title.split(' ')[0]}]`);
+      expect(container.querySelector('.dl-hidden-char')).toHaveAttribute('title', title);
+      unmount();
+    }
+    // Their neighbours still print.
+    expect(
+      [0x115e, 0x1161, 0x3165, 0xffa1, 0x034e, 0xfdff, 0xfe10, 0xe00ff, 0xe01f0].some(isHidden),
+    ).toBe(false);
+  });
+
   it('never hides tab, line feed or carriage return', () => {
     expect([0x09, 0x0a, 0x0d].some(isHidden)).toBe(false);
     expect([0x00, 0x1b, 0x7f, 0x85, 0x061c, 0x2069, 0xfeff].every(isHidden)).toBe(true);

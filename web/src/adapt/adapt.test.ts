@@ -351,8 +351,7 @@ describe('resultEvidence', () => {
       },
     ]);
     expect(ev.dropped).toEqual(['Captured stderr']);
-    expect(ev.recorded).toBe(true);
-    expect(ev.silent).toBe(false);
+    expect(ev.absence).toBeNull();
   });
 
   it('gives a skip and an xfail their reasons', () => {
@@ -377,9 +376,23 @@ describe('resultEvidence', () => {
     ]);
   });
 
-  it('knows failure text was not recorded when every field is null', () => {
+  it('knows failure text was not recorded when a failure holds none', () => {
     const ev = resultEvidence({ ...DETAIL, ...NOTHING });
-    expect(ev).toEqual({ blocks: [], dropped: [], recorded: false, silent: false });
+    expect(ev).toEqual({ blocks: [], dropped: [], absence: 'unrecorded' });
+    expect(resultEvidence({ ...DETAIL, ...NOTHING, outcome: 'error' }).absence).toBe('unrecorded');
+  });
+
+  it('never claims failure text was not recorded where output capture may have been off', () => {
+    // A pass recorded with --vantage-failure-text under -s holds every field null too.
+    expect(resultEvidence({ ...DETAIL, ...NOTHING, outcome: 'passed' })).toEqual({
+      blocks: [],
+      dropped: [],
+      absence: 'unknown',
+    });
+    // A bare xfail under -s: its reason recorded empty, its output not at all.
+    expect(
+      resultEvidence({ ...DETAIL, ...NOTHING, outcome: 'xfailed', xfail_reason: '' }).absence,
+    ).toBe('unknown');
   });
 
   it('knows output was captured and empty', () => {
@@ -390,7 +403,16 @@ describe('resultEvidence', () => {
       captured_stdout: '',
       captured_stderr: '',
     });
-    expect(ev).toEqual({ blocks: [], dropped: [], recorded: true, silent: true });
+    expect(ev).toEqual({ blocks: [], dropped: [], absence: 'silent' });
+    expect(
+      resultEvidence({
+        ...DETAIL,
+        ...NOTHING,
+        outcome: 'xfailed',
+        xfail_reason: '',
+        captured_stdout: '',
+      }).absence,
+    ).toBe('silent');
   });
 });
 
@@ -488,6 +510,20 @@ describe('history', () => {
     expect(only({ commit: null })).toBe('main');
     expect(only({ branch: null })).toBe('7aa1c5d');
     expect(only({ branch: null, commit: null })).toBeUndefined();
+  });
+
+  it('writes out a hidden character in a branch name, since the readout is plain text', () => {
+    const vcs = ENTRIES[0]?.vcs as NonNullable<HistoryEntry['vcs']>;
+    const [run] = historyStrip(
+      [
+        {
+          ...(ENTRIES[0] as HistoryEntry),
+          vcs: { ...vcs, branch: `x${String.fromCodePoint(0x202e)}` },
+        },
+      ],
+      NODE,
+    ).runs;
+    expect(run?.detail).toBe('x⟨U+202E⟩ at 7aa1c5d');
   });
 
   it('maps an entry onto a row of the history table', () => {

@@ -22,7 +22,7 @@ import type {
   RunState,
   RunStatusProps,
 } from '../ds';
-import { describeCounts, isOutcome } from '../ds';
+import { describeCounts, isOutcome, visibleText } from '../ds';
 
 // Lists and headings print a run by the first 8 characters of its id.
 export function runLabel(id: string): string {
@@ -224,10 +224,12 @@ export interface ResultEvidence {
   blocks: EvidenceBlock[];
   // The titles of fields dropped whole: the session's failure text passed its budget.
   dropped: string[];
-  // Whether the run recorded failure text at all: without --vantage-failure-text every field is null.
-  recorded: boolean;
-  // Output was captured and was empty, and nothing else is shown.
-  silent: boolean;
+  // Why nothing is shown, when nothing is: 'silent', output was captured and was empty;
+  // 'unrecorded', a failure carries no failure text, which a run that recorded it always
+  // holds, so the run did not record it; 'unknown', a result that did not fail holds
+  // nothing, as it does when the run recorded no failure text and also when it did with
+  // output capture off (-s), which the API does not tell apart.
+  absence: 'silent' | 'unrecorded' | 'unknown' | null;
 }
 
 const PHASES = ['setup', 'call', 'teardown'] as const;
@@ -335,8 +337,16 @@ export function resultEvidence(detail: ResultDetail): ResultEvidence {
       dropped.push(f.title);
     }
   }
-  const recorded = fields.some((f) => f.text !== null || f.truncated);
-  return { blocks, dropped, recorded, silent: recorded && !blocks.length && !dropped.length };
+  let absence: ResultEvidence['absence'] = null;
+  if (!blocks.length && !dropped.length) {
+    if (detail.captured_stdout === '' || detail.captured_stderr === '') absence = 'silent';
+    else if (detail.outcome === 'failed' || detail.outcome === 'error') {
+      const recorded =
+        detail.failure_type !== null || fields.some((f) => f.text !== null || f.truncated);
+      absence = recorded ? 'unknown' : 'unrecorded';
+    } else absence = 'unknown';
+  }
+  return { blocks, dropped, absence };
 }
 
 // pytest reports each phase as passed, failed or skipped; the timeline names
@@ -363,8 +373,10 @@ export function resultPhases(detail: ResultDetail): PhaseTimelineProps['phases']
 }
 
 // The branch and commit a run was made at, as the history readout names it: main at 7aa1c5d.
+// The readout is a sentence of plain text, so a bidi control in a recorded branch name is
+// written out rather than left to reorder the outcome it names.
 function commitDetail(vcs: HistoryEntry['vcs']): string | undefined {
-  const branch = vcs?.branch || null;
+  const branch = vcs?.branch ? visibleText(vcs.branch) : null;
   const sha = vcs?.commit ? vcs.commit.slice(0, 7) : null;
   if (branch && sha) return `${branch} at ${sha}`;
   return branch ?? sha ?? undefined;

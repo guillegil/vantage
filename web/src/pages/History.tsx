@@ -21,6 +21,7 @@ import {
   Pager,
   Panel,
   Time,
+  visibleText,
 } from '../ds';
 import { FailureNotice } from './Failure';
 import { NotFoundPage } from './NotFound';
@@ -61,7 +62,8 @@ function columns(now: Date): DataTableColumn<HistoryRow>[] {
 }
 
 function HistoryView({ project, nodeId }: { project: string; nodeId: string }) {
-  const heading = usePage(`${nodeId} · history · ${project} · vantage`);
+  // A string sink: a bidi control in the node id would reorder the rest of the tab's title.
+  const heading = usePage(`${visibleText(nodeId)} · history · ${project} · vantage`);
   const now = useNow();
   const go = useGo();
   const history = useHistory(project, nodeId);

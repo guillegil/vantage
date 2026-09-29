@@ -41,6 +41,7 @@ import {
   RunStatus,
   UserChip,
   visible,
+  visibleText,
 } from '../ds';
 import { FailureNotice } from './Failure';
 import { NotFoundPage } from './NotFound';
@@ -59,11 +60,19 @@ function Loading({ children = 'Loading…' }: { children?: string }) {
 // and its output, each where pytest would print it.
 function EvidenceColumn({ result }: { result: ResultDetail }) {
   const ev = resultEvidence(result);
-  if (!ev.recorded) {
+  if (ev.absence === 'unrecorded') {
     return (
       <p className="dl-caption">
         Failure text was not recorded; run with{' '}
         <code className="dl-mono">--vantage-failure-text</code>
+      </p>
+    );
+  }
+  if (ev.absence === 'unknown') {
+    return (
+      <p className="dl-caption">
+        Nothing was captured for this result: output capture was off, or the run did not record
+        failure text (<code className="dl-mono">--vantage-failure-text</code>).
       </p>
     );
   }
@@ -87,7 +96,9 @@ function EvidenceColumn({ result }: { result: ResultDetail }) {
           results first.
         </Notice>
       ))}
-      {ev.silent ? <p className="dl-caption">Nothing was printed to stdout or stderr.</p> : null}
+      {ev.absence === 'silent' ? (
+        <p className="dl-caption">Nothing was printed to stdout or stderr.</p>
+      ) : null}
     </>
   );
 }
@@ -97,7 +108,8 @@ function HistoryPanel({ project, nodeId }: { project: string; nodeId: string }) 
   const recent = useRecentHistory(project, nodeId);
   const go = useGo();
   let body: ReactNode;
-  if (recent.isError) {
+  // A session that ended keeps what is shown, as every panel here does.
+  if (recent.isError && !(isApiError(recent.error, 401) && recent.data)) {
     body = isApiError(recent.error, 401) ? null : (
       <FailureNotice error={recent.error} retry={() => recent.refetch()} busy={recent.isFetching} />
     );
@@ -157,7 +169,7 @@ function SessionPanel({ runId, finished }: { runId: string; finished: boolean })
   const metadata = useRunMetadata(runId, finished);
   return (
     <Panel title="Session">
-      {metadata.isError ? (
+      {metadata.isError && !(isApiError(metadata.error, 401) && metadata.data) ? (
         isApiError(metadata.error, 401) ? null : (
           <FailureNotice error={metadata.error} retry={() => metadata.refetch()} />
         )
@@ -181,7 +193,7 @@ function ResultBody({
 }) {
   const finished = detail.presentation !== 'running';
   let main: ReactNode;
-  if (result.isError) {
+  if (result.isError && !(isApiError(result.error, 401) && result.data)) {
     main = isApiError(result.error, 401) ? null : (
       <FailureNotice error={result.error} retry={() => result.refetch()} busy={result.isFetching} />
     );
@@ -212,21 +224,26 @@ function ResultView({ runId, nodeId }: { runId: string; nodeId: string }) {
     detail !== undefined && detail.presentation !== 'running',
   );
   const label = runLabel(runId);
+  // A string sink: a bidi control in the node id would reorder the rest of the tab's title.
+  const shown = visibleText(nodeId);
   const heading = usePage(
-    detail
-      ? `${nodeId} · ${label} · ${detail.project} · vantage`
-      : `${nodeId} · ${label} · vantage`,
+    detail ? `${shown} · ${label} · ${detail.project} · vantage` : `${shown} · ${label} · vantage`,
   );
   const title = (
     <h1 className="dl-pagehead__node app-heading" ref={heading} tabIndex={-1}>
       <NodeId value={nodeId} size="lg" />
     </h1>
   );
-  const outcome = result.data ? <OutcomeBadge outcome={result.data.outcome} /> : null;
 
-  // Who may read the run is answered before what the run holds.
-  if (run.isError) {
-    let body: ReactNode = null;
+  let crumbs: ReactNode = null;
+  let outcome: ReactNode = null;
+  let sub: ReactNode = null;
+  let body: ReactNode = null;
+  let loose = false;
+  // Who may read the run is answered before what the run holds; a session that ended
+  // keeps what is shown.
+  if (run.isError && !(isApiError(run.error, 401) && detail)) {
+    loose = true;
     if (isApiError(run.error, 404)) {
       body = (
         <EmptyState
@@ -249,42 +266,25 @@ function ResultView({ runId, nodeId }: { runId: string; nodeId: string }) {
     } else if (!isApiError(run.error, 401)) {
       body = <FailureNotice error={run.error} retry={() => run.refetch()} busy={run.isFetching} />;
     }
-    return (
-      <div className="dl-stack dl-stack--loose">
-        {title}
-        {body}
-      </div>
+  } else if (!detail) {
+    body = <Loading />;
+  } else {
+    crumbs = (
+      <nav className="dl-crumbs" aria-label="Breadcrumb">
+        <a className="dl-link" href={runsHref(detail.project)}>
+          Runs
+        </a>
+        <Icon name="chevron-right" size={14} />
+        <a className="dl-link dl-mono" href={runHref(runId)} title={runId}>
+          {label}
+        </a>
+        <Icon name="chevron-right" size={14} />
+        <span aria-current="page">result</span>
+      </nav>
     );
-  }
-  if (!detail) {
-    return (
-      <div className="dl-stack">
-        {title}
-        <Loading />
-      </div>
-    );
-  }
-  const head = runHead(detail);
-  const crumbs = (
-    <nav className="dl-crumbs" aria-label="Breadcrumb">
-      <a className="dl-link" href={runsHref(detail.project)}>
-        Runs
-      </a>
-      <Icon name="chevron-right" size={14} />
-      <a className="dl-link dl-mono" href={runHref(runId)} title={runId}>
-        {label}
-      </a>
-      <Icon name="chevron-right" size={14} />
-      <span aria-current="page">result</span>
-    </nav>
-  );
-  if (isApiError(result.error, 404, 'unknown_result')) {
-    return (
-      <div className="dl-stack dl-stack--loose">
-        <div className="dl-stack dl-stack--tight">
-          {crumbs}
-          {title}
-        </div>
+    if (isApiError(result.error, 404, 'unknown_result')) {
+      loose = true;
+      body = (
         <EmptyState
           title={`Run ${label} has no result for this test`}
           action={
@@ -296,20 +296,14 @@ function ResultView({ runId, nodeId }: { runId: string; nodeId: string }) {
           The run did not report this node id: the test was not collected in it, or the address is
           mistyped.
         </EmptyState>
-      </div>
-    );
-  }
-  return (
-    <div className="dl-stack">
-      <div className="dl-stack dl-stack--tight">
-        {crumbs}
-        <div className="dl-pagehead__row">
-          {title}
-          {outcome}
-        </div>
+      );
+    } else {
+      const head = runHead(detail);
+      outcome = result.data ? <OutcomeBadge outcome={result.data.outcome} /> : null;
+      sub = (
         <div className="dl-pagehead__sub">
           <RunStatus {...head.status} />
-          {head.reason ? <span>{head.reason}</span> : null}
+          {head.reason ? <span>{visible(head.reason)}</span> : null}
           <CommitRef {...head.commit} />
           {head.recordedBy ? (
             <UserChip
@@ -324,8 +318,23 @@ function ResultView({ runId, nodeId }: { runId: string; nodeId: string }) {
             <span className="dl-num">{fmtSeconds(result.data.duration)}</span>
           ) : null}
         </div>
+      );
+      body = <ResultBody detail={detail} nodeId={nodeId} result={result} />;
+    }
+  }
+  // One head in every state: the heading focused after a navigation, while the run loads,
+  // is the element that stays once it has, so focus is not dropped to the page's body.
+  return (
+    <div className={loose ? 'dl-stack dl-stack--loose' : 'dl-stack'}>
+      <div className="dl-stack dl-stack--tight">
+        {crumbs}
+        <div className="dl-pagehead__row">
+          {title}
+          {outcome}
+        </div>
+        {sub}
       </div>
-      <ResultBody detail={detail} nodeId={nodeId} result={result} />
+      {body}
     </div>
   );
 }

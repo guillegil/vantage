@@ -12,7 +12,7 @@ export type Handler = (
   path: string,
   query: URLSearchParams,
   request: Request,
-) => Response | undefined;
+) => Response | Promise<Response> | undefined;
 
 export const ALICE = {
   open: false,

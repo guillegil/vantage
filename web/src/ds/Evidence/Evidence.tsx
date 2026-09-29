@@ -38,7 +38,7 @@ export function Evidence(p: EvidenceProps) {
     <section className={cx('dl-evidence', p.className)} data-copy-scope="">
       <div className="dl-evidence__head">
         {createElement(`h${level}`, { className: 'dl-evidence__title' }, title)}
-        {p.meta ? <span>{p.meta}</span> : null}
+        {p.meta ? <span>{typeof p.meta === 'string' ? visible(p.meta) : p.meta}</span> : null}
         {p.actions || null}
         {p.controls === false ? null : (
           <span className="dl-evidence__tools">

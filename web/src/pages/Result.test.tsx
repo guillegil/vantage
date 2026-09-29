@@ -257,6 +257,32 @@ describe('a result', () => {
     expect(screen.queryByText(/credentials included/)).toBeNull();
   });
 
+  it('never blames the flag when a result that did not fail holds nothing', async () => {
+    // A passing result of a run recorded with --vantage-failure-text under -s holds nothing either.
+    server((_m, path) =>
+      path === `/runs/${ID}/result`
+        ? json(200, { ...RESULT, ...NOTHING, outcome: 'passed', captured_stderr_truncated: false })
+        : undefined,
+    );
+    renderAt(HERE);
+    expect(await screen.findByText(/^Nothing was captured for this result/)).toHaveTextContent(
+      'Nothing was captured for this result: output capture was off, or the run did not record failure text (--vantage-failure-text).',
+    );
+    expect(screen.queryByText(/^Failure text was not recorded/)).toBeNull();
+  });
+
+  it('never says nothing was printed when output was not captured', async () => {
+    // A bare xfail under -s: its reason is recorded empty, its output not at all.
+    server((_m, path) =>
+      path === `/runs/${ID}/result`
+        ? json(200, { ...RESULT, ...NOTHING, outcome: 'xfailed', xfail_reason: '' })
+        : undefined,
+    );
+    renderAt(HERE);
+    expect(await screen.findByText(/^Nothing was captured for this result/)).toBeInTheDocument();
+    expect(screen.queryByText('Nothing was printed to stdout or stderr.')).toBeNull();
+  });
+
   it('gives a skip its reason, and says when nothing was printed', async () => {
     server((_m, path) =>
       path === `/runs/${ID}/result`
@@ -287,21 +313,114 @@ describe('a result', () => {
     expect(await screen.findByText('Nothing was printed to stdout or stderr.')).toBeTruthy();
   });
 
-  it('shows a bidi control in the evidence and the node id as its code point', async () => {
+  it('shows a bidi control in anything recorded as its code point', async () => {
     const node = `tests/test_a.py::test_x[${RLO}gnp.exe]`;
-    server((_m, path, query) =>
-      path === `/runs/${ID}/result` && query.get('node_id') === node
-        ? json(200, { ...RESULT, node_id: node, traceback: `E   assert "${RLO}cba" == ""` })
-        : undefined,
-    );
+    server((_m, path, query) => {
+      if (path === `/runs/${ID}`) {
+        return json(200, {
+          ...RUN,
+          interrupted: true,
+          interrupt_reason: `KeyboardInterrupt ${RLO}tpurretni`,
+          presentation: 'interrupted',
+        });
+      }
+      if (path === `/runs/${ID}/result` && query.get('node_id') === node) {
+        return json(200, {
+          ...RESULT,
+          node_id: node,
+          traceback: `E   assert "${RLO}cba" == ""`,
+          failure_path: `tests/${RLO}yp.nimda_tset`,
+          failure_lineno: 12,
+          failure_type: `${RLO}rorrEnoitressA`,
+        });
+      }
+      if (path === '/projects/firmware/tests/history') {
+        return json(200, {
+          ...HISTORY,
+          items: [
+            {
+              ...entry(ID, 'failed', '2026-09-27T09:00:00Z', 7.4),
+              vcs: {
+                branch: `x${RLO}`,
+                commit: '7aa1c5d9e0',
+                commit_subject: null,
+                commit_subject_truncated: false,
+                dirty: false,
+              },
+            },
+          ],
+        });
+      }
+      return undefined;
+    });
     renderAt(resultHref(ID, node));
     const traceback = await screen.findByRole('heading', { level: 2, name: 'Traceback' });
-    const body = traceback.closest('section')?.querySelector('pre') as HTMLElement;
-    expect(body.textContent).toBe('E   assert "U+202Ecba" == ""');
+    const section = traceback.closest('section') as HTMLElement;
+    expect(section.querySelector('pre')?.textContent).toBe('E   assert "U+202Ecba" == ""');
+    expect(section.querySelector('.dl-evidence__head')).toHaveTextContent(
+      'call phase · tests/U+202Eyp.nimda_tset:12',
+    );
+    const message = screen
+      .getByRole('heading', { level: 2, name: 'Message' })
+      .closest('section') as HTMLElement;
+    expect(message.querySelector('.dl-evidence__head')).toHaveTextContent('U+202ErorrEnoitressA');
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
       'tests/test_a.py::test_x[U+202Egnp.exe]',
     );
+    expect(await screen.findByText(/^KeyboardInterrupt/)).toHaveTextContent(
+      'KeyboardInterrupt U+202Etpurretni',
+    );
+    const shown = `tests/test_a.py::test_x[⟨U+202E⟩gnp.exe]`;
+    const slider = await screen.findByRole('slider', { name: `History of ${shown}` });
+    expect(slider).toHaveAttribute('aria-valuetext', '0123abcd (x⟨U+202E⟩ at 7aa1c5d): failed');
+    fireEvent.focus(slider);
+    expect(document.querySelector('.dl-hgrid__readout')).toHaveTextContent(
+      '0123abcd (x⟨U+202E⟩ at 7aa1c5d): failed',
+    );
     expect(document.querySelector('main')?.textContent).not.toContain(RLO);
+    expect(document.title).toBe(`${shown} · 0123abcd · firmware · vantage`);
+  });
+
+  it('keeps its heading focused when it follows a link to a run it has not read yet', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<Response>((resolve) => {
+      release = () => resolve(json(200, { ...RUN, id: OLD }));
+    });
+    server((_m, path, query) => {
+      if (path === `/runs/${OLD}`) return held;
+      if (path === `/runs/${OLD}/result` && query.get('node_id') === NODE) {
+        return json(200, { ...RESULT, outcome: 'passed', ...NOTHING });
+      }
+      if (path === `/runs/${OLD}/metadata`) return json(200, METADATA);
+      return undefined;
+    });
+    const { router } = renderAt(HERE);
+    await screen.findByRole('slider');
+    await act(() => router.navigate(resultHref(OLD, NODE)));
+    const loading = await screen.findByRole('heading', { level: 1 });
+    await waitFor(() => expect(document.activeElement).toBe(loading));
+    expect(screen.getByText('Loading…')).toBeInTheDocument();
+    await act(async () => release());
+    await waitFor(() =>
+      expect(document.querySelector('.dl-badge--passed')).toHaveTextContent('passed'),
+    );
+    const heading = screen.getByRole('heading', { level: 1 });
+    expect(heading).toBe(loading);
+    expect(document.activeElement).toBe(heading);
+  });
+
+  it('heads the page while the result loads', async () => {
+    server((_m, path) =>
+      path === `/runs/${ID}/result` ? new Promise<Response>(() => undefined) : undefined,
+    );
+    renderAt(HERE);
+    expect(await screen.findByText('Loading the result…')).toHaveAttribute('role', 'status');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(NODE);
+    expect(
+      within(screen.getByRole('navigation', { name: 'Breadcrumb' })).getByRole('link', {
+        name: '0123abcd',
+      }),
+    ).toHaveAttribute('href', `/runs/${ID}`);
   });
 });
 
@@ -357,18 +476,32 @@ describe('a result that cannot be shown', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(NODE);
   });
 
-  it('keeps the page when the session ends, and says so', async () => {
-    let revoked = false;
-    server((_m, path) =>
-      revoked && path !== '/session' ? refuse(401, 'unauthenticated') : undefined,
-    );
-    const { queryClient } = renderAt(HERE);
-    await screen.findByRole('heading', { level: 2, name: 'Traceback' });
-    revoked = true;
-    await act(() => queryClient.refetchQueries({ queryKey: ['history'] }));
-    expect(await screen.findByText(/^Your session ended at \d\d:\d\d UTC$/)).toBeInTheDocument();
-    expect(screen.getByRole('heading', { level: 2, name: 'Traceback' })).toBeInTheDocument();
-  });
+  it.each(['finished', 'running'])(
+    'keeps everything a %s run’s page shows when the session ends, and says so',
+    async (presentation) => {
+      let revoked = false;
+      server((_m, path) => {
+        if (revoked && path !== '/session') return refuse(401, 'unauthenticated');
+        return path === `/runs/${ID}` ? json(200, { ...RUN, presentation }) : undefined;
+      });
+      const { queryClient } = renderAt(HERE);
+      await screen.findByRole('heading', { level: 2, name: 'Traceback' });
+      await screen.findByRole('slider');
+      await screen.findByText('bench-02');
+      revoked = true;
+      await act(async () => {
+        await queryClient.refetchQueries({ queryKey: ['history'] });
+        await queryClient.refetchQueries({ queryKey: ['run', ID] });
+      });
+      expect(await screen.findByText(/^Your session ended at \d\d:\d\d UTC$/)).toBeInTheDocument();
+      expect(screen.getByRole('heading', { level: 2, name: 'Traceback' })).toBeInTheDocument();
+      expect(screen.getByRole('slider', { name: `History of ${NODE}` })).toBeInTheDocument();
+      expect(screen.getByRole('img', { name: /^Duration over 2 runs/ })).toBeInTheDocument();
+      expect(screen.getByText('bench-02')).toBeInTheDocument();
+      expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toBeInTheDocument();
+      expect(screen.queryByRole('alert')).toBeNull();
+    },
+  );
 
   it('is no page without a test', async () => {
     const calls = server();

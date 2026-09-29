@@ -12,6 +12,7 @@ import { cx } from '../lib/cx';
 import { fmtCount, plural } from '../lib/format';
 import { useOverflowFocus, useUid } from '../lib/hooks';
 import { isFailing } from '../lib/outcomes';
+import { visibleText } from '../lib/visible';
 import { NodeId } from '../NodeId/NodeId';
 
 type HistoryRun = HistoryGridProps['runs'][number] & {
@@ -197,7 +198,7 @@ function HistoryRow(p: {
         className="dl-hgrid__marks"
         tabIndex={n ? 0 : undefined}
         role={n ? 'slider' : 'img'}
-        aria-label={`History of ${row.nodeid || 'this test'}`}
+        aria-label={`History of ${row.nodeid ? visibleText(row.nodeid) : 'this test'}`}
         aria-describedby={noteId}
         aria-orientation={n ? 'horizontal' : undefined}
         aria-valuemin={n ? 1 : undefined}

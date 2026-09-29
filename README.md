@@ -757,6 +757,9 @@ project you had open last, or of `default`.
   them failed; the run's metadata; and the test's latest 24 runs in the
   run's project, oldest first, as a line of marks with its pass rate or
   failing streak and a line of durations, each run opening its result there.
+  Where a result holds none of this, the page says why: a failure without
+  failure text was recorded without `--vantage-failure-text`; any other
+  result may also have run with output capture off (`-s`).
   A character that reorders or hides text, such as a right-to-left override,
   a zero-width space, or the U+FFFD the server stores for U+0000, shows as
   its code point (`U+202E`) in node ids and failure text, so neither reads as

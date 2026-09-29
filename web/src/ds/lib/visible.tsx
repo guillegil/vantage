@@ -1,14 +1,18 @@
 import type { ReactNode } from 'react';
 
 // Characters that print nothing or reorder the text around them: bidirectional
-// controls, zero-width and other invisible format characters, C0 and C1
-// controls other than tab, line feed and carriage return, and U+FFFD, which
+// controls, zero-width and other invisible format characters, the Hangul
+// fillers, the combining grapheme joiner and the variation selectors, C0 and
+// C1 controls other than tab, line feed and carriage return, and U+FFFD, which
 // the server stores where a report carried U+0000 or a lone surrogate.
 // Recorded text shows each as its code point, so what a test printed can
 // never read as something else.
 const NAMES = new Map<number, string>([
   [0x00ad, 'soft hyphen'],
+  [0x034f, 'combining grapheme joiner'],
   [0x061c, 'arabic letter mark'],
+  [0x115f, 'hangul choseong filler'],
+  [0x1160, 'hangul jungseong filler'],
   [0x180e, 'mongolian vowel separator'],
   [0x200b, 'zero width space'],
   [0x200c, 'zero width non-joiner'],
@@ -27,7 +31,9 @@ const NAMES = new Map<number, string>([
   [0x2067, 'right-to-left isolate'],
   [0x2068, 'first strong isolate'],
   [0x2069, 'pop directional isolate'],
+  [0x3164, 'hangul filler'],
   [0xfeff, 'zero width no-break space'],
+  [0xffa0, 'halfwidth hangul filler'],
   [0xfffd, 'replacement character, where the report held U+0000 or a lone surrogate'],
 ]);
 
@@ -41,12 +47,25 @@ export function isHidden(cp: number): boolean {
     (cp >= 0x2060 && cp <= 0x206f) ||
     (cp >= 0xfff9 && cp <= 0xfffb) ||
     (cp >= 0xe0000 && cp <= 0xe007f) ||
+    (cp >= 0xfe00 && cp <= 0xfe0f) ||
+    (cp >= 0xe0100 && cp <= 0xe01ef) ||
     cp === 0x00ad ||
+    cp === 0x034f ||
     cp === 0x061c ||
+    cp === 0x115f ||
+    cp === 0x1160 ||
     cp === 0x180e ||
+    cp === 0x3164 ||
     cp === 0xfeff ||
+    cp === 0xffa0 ||
     cp === 0xfffd
   );
+}
+
+function nameOf(cp: number): string | undefined {
+  if (cp >= 0xfe00 && cp <= 0xfe0f) return `variation selector-${cp - 0xfe00 + 1}`;
+  if (cp >= 0xe0100 && cp <= 0xe01ef) return `variation selector-${cp - 0xe0100 + 17}`;
+  return NAMES.get(cp);
 }
 
 export function codePoint(cp: number): string {
@@ -68,7 +87,7 @@ export function visible(text: string): ReactNode {
     out = out ?? [];
     if (plain) out.push(plain);
     plain = '';
-    const name = NAMES.get(cp);
+    const name = nameOf(cp);
     out.push(
       <span
         key={`u${n++}`}

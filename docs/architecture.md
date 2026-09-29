@@ -1279,12 +1279,17 @@ built files, without a reload.
 `build/no-html-sinks.grit` refuses `innerHTML`, `outerHTML`,
 `insertAdjacentHTML` and `document.write`, `dangerouslySetInnerHTML` is an
 error, and the page policy's Trusted Types make any such sink throw.
-Recorded text is also shown as it is: `NodeId`, `Evidence` and the run
-page's first line of each failure print each bidirectional control,
-invisible format character, C0 or C1 control (tab and line breaks aside)
-and U+FFFD as its code point in a marked box (`ds/lib/visible.tsx`), so a
-right-to-left override can never make a node id or a traceback read as
-something else; *Copy* still copies the text as recorded.
+Recorded text is also shown as it is: `NodeId`, `Evidence` (its body and
+a string `meta`, which may name a recorded path or exception type), the
+run page's first line of each failure and both pages' interrupt reason
+print each bidirectional control, invisible format character, Hangul
+filler, variation selector, C0 or C1 control (tab and line breaks aside)
+and U+FFFD as its code point in a marked box (`ds/lib/visible.tsx`).
+Where recorded text becomes a plain string -- the window's title, the
+history slider's name, its readout's branch -- `visibleText` writes it as
+`⟨U+202E⟩`. So a right-to-left override can never make a node id or a
+traceback read as something else; *Copy* still copies the text as
+recorded.
 
 ### Build, packaging and CI
 

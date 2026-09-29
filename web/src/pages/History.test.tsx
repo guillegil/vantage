@@ -110,6 +110,36 @@ describe('a test’s history', () => {
     expect(new URLSearchParams(router.state.location.search).get('node_id')).toBe(NODE);
   });
 
+  it('heads the page while its results load', async () => {
+    server((_m, path) =>
+      path === '/projects/firmware/tests/history'
+        ? new Promise<Response>(() => undefined)
+        : undefined,
+    );
+    renderAt(HERE);
+    expect(await screen.findByText('Loading results…')).toHaveAttribute('role', 'status');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(NODE);
+    expect(document.title).toBe(`${NODE} · history · firmware · vantage`);
+  });
+
+  it('writes out a hidden character in the node id in the window’s title', async () => {
+    const node = `tests/test_a.py::test_x[${String.fromCodePoint(0x202e)}gnp.exe]`;
+    server((_m, path) =>
+      path === '/projects/firmware/tests/history'
+        ? json(200, { items: [], has_more: false, next_cursor: null })
+        : undefined,
+    );
+    renderAt(historyHref('firmware', node));
+    expect(await screen.findByRole('heading', { level: 1 })).toHaveTextContent(
+      'tests/test_a.py::test_x[U+202Egnp.exe]',
+    );
+    await waitFor(() =>
+      expect(document.title).toBe(
+        'tests/test_a.py::test_x[⟨U+202E⟩gnp.exe] · history · firmware · vantage',
+      ),
+    );
+  });
+
   it('says so when no run of the project reported the test', async () => {
     server((_m, path) =>
       path === '/projects/firmware/tests/history'
@@ -148,6 +178,21 @@ describe('a history that cannot be shown', () => {
       'The server answered 503',
     );
     expect(screen.queryByRole('table')).toBeNull();
+  });
+
+  it('keeps what it listed when the session ends, and says so', async () => {
+    server((_m, path, query) =>
+      path === '/projects/firmware/tests/history' && query.get('cursor') === 'past-new'
+        ? refuse(401, 'unauthenticated')
+        : undefined,
+    );
+    renderAt(HERE);
+    await userEvent.click(await screen.findByRole('button', { name: 'Load 50 more' }));
+    expect(await screen.findByText(/^Your session ended at \d\d:\d\d UTC$/)).toBeInTheDocument();
+    const table = screen.getByRole('table', { name: 'This test’s results, newest first' });
+    expect(within(table).getByRole('link', { name: '0123abcd' })).toBeInTheDocument();
+    expect(screen.getByRole('slider', { name: `History of ${NODE}` })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('is no page without a test', async () => {

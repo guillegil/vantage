@@ -21,11 +21,19 @@ describe('historyNote', () => {
     );
   });
 
-  it('calls a test flaky at three flips', () => {
+  it('calls a test flaky at three flips, and not at two', () => {
+    expect(historyNote(['failed', 'passed', 'failed', 'passed'], runsOf(4))).toEqual({
+      kind: 'flaky',
+      strong: 'flaky',
+      rest: ' · 3 flips in 4 runs',
+    });
     expect(historyNote(['passed', 'failed', 'passed', 'failed', 'passed'], runsOf(5))).toEqual({
       kind: 'flaky',
       strong: 'flaky',
       rest: ' · 4 flips in 5 runs',
+    });
+    expect(historyNote(['passed', 'failed', 'passed'], runsOf(3))).toMatchObject({
+      kind: 'passing',
     });
   });
 
@@ -98,6 +106,14 @@ describe('HistoryGrid', () => {
     expect(container.querySelector('.dl-hgrid__label')).toBeNull();
     expect(screen.queryByText(/oldest to newest/)).toBeNull();
     expect(container.querySelector('.dl-hgrid__note')).toHaveTextContent('100% passing');
+  });
+
+  it('writes out a hidden character in the node id it names the slider by', () => {
+    const node = `tests/test_a.py::test_x[${String.fromCodePoint(0x202e)}gnp.exe]`;
+    render(<HistoryGrid stacked runs={RUNS} rows={[{ nodeid: node, outcomes: ['passed'] }]} />);
+    expect(
+      screen.getByRole('slider', { name: 'History of tests/test_a.py::test_x[⟨U+202E⟩gnp.exe]' }),
+    ).toBeInTheDocument();
   });
 
   it('names a change against the baseline in the readout and hides a note on request', () => {

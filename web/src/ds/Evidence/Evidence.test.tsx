@@ -86,4 +86,14 @@ describe('Evidence', () => {
     expect(body.textContent).toBe('E   assert "U+202Eabc" == ""\nokU+200BU+FFFD');
     expect(body.querySelectorAll('.dl-hidden-char')).toHaveLength(3);
   });
+
+  it('shows one in a meta line too, which may name a recorded path', () => {
+    const { container } = render(
+      <Evidence text="x" meta={`call phase · tests/${RLO}yp.nimda_tset:12`} />,
+    );
+    const head = container.querySelector('.dl-evidence__head') as HTMLElement;
+    expect(head.textContent).toContain('call phase · tests/U+202Eyp.nimda_tset:12');
+    expect(head.textContent).not.toContain(RLO);
+    expect(head.querySelectorAll('.dl-hidden-char')).toHaveLength(1);
+  });
 });

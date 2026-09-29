@@ -113,6 +113,11 @@ test('characters that reorder or hide text are shown, not obeyed', async ({ page
   const heading = page.getByRole('heading', { level: 1 });
   await expect(heading).toHaveText('suite.py::test_hostile_id[U+202Egnp.exe]');
   expect(await heading.textContent()).not.toContain(RLO);
+  // The tab's title is a string: the override is written out there too.
+  await expect(page).toHaveTitle(/^suite\.py::test_hostile_id\[⟨U\+202E⟩gnp\.exe\] · /);
+  await expect(
+    page.getByRole('slider', { name: 'History of suite.py::test_hostile_id[⟨U+202E⟩gnp.exe]' }),
+  ).toBeVisible();
 
   await page.goto(resultOf(newest, 'suite.py::test_hostile_output'));
   const stdout = section(page, 'Captured stdout');
