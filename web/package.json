@@ -1,0 +1,47 @@
+{
+  "name": "vantage-web",
+  "private": true,
+  "version": "0.1.0",
+  "description": "The vantage web client, built into the vantage package and served by vantage at /.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@12.4.2",
+  "engines": {
+    "node": ">=22.22"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome ci .",
+    "test": "vitest run",
+    "e2e": "playwright test",
+    "api:types": "openapi-typescript ../packages/vantage/src/vantage/service/openapi/v1.yaml -o src/api/v1.d.ts",
+    "check:build": "node build/check-build.mjs"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.104.0",
+    "openapi-fetch": "0.17.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-router": "8.4.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@biomejs/biome": "2.5.14",
+    "@playwright/test": "1.63.0",
+    "@testing-library/dom": "10.4.2",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.7",
+    "@types/node": "22.20.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "jsdom": "30.1.1",
+    "openapi-typescript": "7.13.0",
+    "typescript": "~6.0.3",
+    "vite": "8.3.1",
+    "vitest": "5.0.2"
+  }
+}

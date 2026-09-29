@@ -1,0 +1,12 @@
+// Text reaches the page only as text. React escapes what it renders; these
+// sinks would parse a string as HTML, and the page's Trusted Types policy
+// makes them throw at run time, so they are refused here first.
+or {
+  `$el.innerHTML = $value`,
+  `$el.outerHTML = $value`,
+  `$el.insertAdjacentHTML($where, $value)`,
+  `document.write($value)`,
+  `document.writeln($value)`
+} as $sink where {
+  register_diagnostic(span=$sink, message="Parses a string as HTML: render text through React instead.", severity="error")
+}

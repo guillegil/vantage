@@ -67,6 +67,8 @@ SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
 # The suffixes a client build holds, each with its media type. Fixed here
 # rather than asked of `mimetypes`, whose answers vary by platform; any
 # other file is bytes, which `nosniff` keeps a browser from running.
+# `web/build/check-build.mjs` refuses a build holding any other suffix
+# (`.html` is the page's own); keep the two lists equal.
 _MEDIA_TYPES: Mapping[str, str] = MappingProxyType(
     {
         ".js": "text/javascript; charset=utf-8",

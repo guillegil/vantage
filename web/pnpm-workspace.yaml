@@ -1,0 +1,13 @@
+# Settings for the web client alone; it is one package, so there is no
+# `packages:` list. pnpm refuses dependency build scripts by default and none
+# is needed, so nothing is allowed to run one.
+
+# A version must have been published for a day before it is installed.
+minimumReleaseAge: 1440
+
+peerDependencyRules:
+  allowedVersions:
+    # openapi-typescript declares typescript ^5 but needs only the compiler
+    # API, and its output is identical under 6.0. Move to TypeScript 7 once
+    # the generator runs on it.
+    openapi-typescript>typescript: "6"
