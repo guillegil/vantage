@@ -9,7 +9,9 @@ implementation, not a stub: it mirrors the SQLite adapter's catalogue
 monotonicity, first-write-wins results keyed by ``(run_id, node_id)``, and
 the run upsert guard -- a finish-write (`exit_status` is not `None`) applies
 over a start-only row, never the reverse. It compares real `datetime`s where
-the SQLite adapter compares fixed-width UTC text; the two orders agree.
+the SQLite adapter compares fixed-width UTC text; the two orders agree. A
+finishing run is compared as the adapters compare it: the baseline chosen
+by the same rules, and the rows from the same `compare`.
 
 A result's identity is read through the catalogue, as the SQLite adapter
 reads it through its `test_case` row: one decomposition per node id, shared
@@ -46,6 +48,15 @@ from vantage.core.domain.access import (
     Token,
     User,
 )
+from vantage.core.domain.changes import (
+    RESULT_CHANGES,
+    ChangeRow,
+    change_rank,
+    compare,
+    is_baseline_candidate,
+    ran_to_its_end,
+    wanted_changes,
+)
 from vantage.core.domain.execution import Execution, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projects import DEFAULT_PROJECT, Membership, Project, check_role
@@ -53,6 +64,8 @@ from vantage.core.domain.result import CaseIdentity, CatalogueEntry, Result
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
+    BaselineRef,
+    ChangeEntry,
     ForeignRunError,
     HistoryEntry,
     MetadataEntry,
@@ -62,6 +75,7 @@ from vantage.core.ports.storage import (
     ProjectExistsError,
     ProjectMismatchError,
     ProjectSetting,
+    ResultChange,
     ResultListEntry,
     RunDetail,
     RunKey,
@@ -70,6 +84,7 @@ from vantage.core.ports.storage import (
     UnknownProjectError,
     UnknownUserError,
     UserExistsError,
+    comparison_of,
 )
 
 # Empty VCS context and empty failure evidence become `None` here, on write,
@@ -168,6 +183,17 @@ class InMemoryExecutionStore:
         # Each member's role, keyed by project and user, as the adapters'
         # primary key is.
         self._members: dict[tuple[str, str], str] = {}
+        # The surrogate keys `compare` works with, handed out as the
+        # adapters' identity columns hand them out: a catalogue row's by
+        # project and node id, and a result's by run and node id.
+        self._test_case_ids: dict[tuple[str, str], int] = {}
+        self._test_case_keys: dict[int, tuple[str, str]] = {}
+        self._next_test_case_id = itertools.count(1)
+        self._result_ids: dict[tuple[str, str], int] = {}
+        self._next_result_id = itertools.count(1)
+        # Each compared run's baseline, and the rows its comparison stored.
+        self._baselines: dict[str, str] = {}
+        self._changes: dict[str, list[ChangeRow]] = {}
 
     @_locked
     def record_session(
@@ -226,6 +252,7 @@ class InMemoryExecutionStore:
             key = (identity, result.identity.node_id)
             if key not in self._results:
                 self._results[key] = _normalized_result(result)
+                self._result_ids[key] = next(self._next_result_id)
 
         # Mirrors the SQLite adapter's `ON CONFLICT DO NOTHING`: a metadata
         # file/entry is written once and never updated. A run also stops
@@ -240,7 +267,95 @@ class InMemoryExecutionStore:
                 self._metadata_entries[slot] = metadata_entry
                 held += 1
 
+        # A finished run returned above, so a report with an exit status is
+        # the one that gives the run its own, as in the adapters.
+        if execution.exit_status is not None:
+            self._fix_comparison(identity)
         return created
+
+    def _fix_comparison(self, run_id: str) -> None:
+        """Choose `run_id`'s baseline among the runs stored now and store
+        what `compare` returns, as the adapters' finishing step does."""
+        baseline_id = self._choose_baseline(run_id)
+        if baseline_id is None:
+            return
+        self._baselines[run_id] = baseline_id
+        project = self._project_of[run_id]
+        streaks = {
+            row.test_case_id: row.streak
+            for row in self._changes.get(baseline_id, [])
+            if row.streak is not None
+        }
+        self._changes[run_id] = compare(
+            (
+                (
+                    self._result_ids[(run_id, node_id)],
+                    self._test_case_ids[(project, node_id)],
+                    outcome,
+                )
+                for node_id, outcome in self._stored_outcomes(run_id)
+            ),
+            (
+                (self._test_case_ids[(project, node_id)], outcome)
+                for node_id, outcome in self._stored_outcomes(baseline_id)
+            ),
+            streaks,
+            baseline_id=baseline_id,
+            ran_to_its_end=ran_to_its_end(self._executions[run_id]),
+        )
+
+    def _stored_outcomes(self, run_id: str) -> list[tuple[str, str]]:
+        """`run_id`'s node ids and outcomes in stored order."""
+        return [
+            (node_id, result.outcome)
+            for (result_run_id, node_id), result in self._results.items()
+            if result_run_id == run_id
+        ]
+
+    def _choose_baseline(self, run_id: str) -> str | None:
+        """The latest complete run of `run_id`'s project earlier than it,
+        on its branch if it has one and one is there, else on any branch --
+        the rules `vantage.core.domain.changes` states."""
+        execution = self._executions[run_id]
+        key = (execution.started_at, run_id)
+        candidates = [
+            (other.started_at, other_id)
+            for other_id, other in self._executions.items()
+            if self._project_of[other_id] == self._project_of[run_id]
+            and is_baseline_candidate(other)
+            and (other.started_at, other_id) < key
+        ]
+        branch = None if execution.vcs is None else execution.vcs.branch
+        if branch is not None:
+            on_branch = [
+                candidate for candidate in candidates if self._branch_of(candidate[1]) == branch
+            ]
+            if on_branch:
+                return max(on_branch)[1]
+        return max(candidates)[1] if candidates else None
+
+    def _branch_of(self, run_id: str) -> str | None:
+        vcs = self._executions[run_id].vcs
+        return None if vcs is None else vcs.branch
+
+    def _baseline_ref(self, run_id: str) -> BaselineRef | None:
+        """`run_id`'s stored baseline, as the adapters read it with the run."""
+        baseline_id = self._baselines.get(run_id)
+        if baseline_id is None:
+            return None
+        return BaselineRef(
+            run_id=baseline_id,
+            started_at=self._executions[baseline_id].started_at,
+            branch=self._branch_of(baseline_id),
+        )
+
+    def _change_of(self, run_id: str, node_id: str) -> ChangeRow | None:
+        """The row `run_id`'s comparison stored for `node_id`, if any."""
+        test_case_id = self._test_case_ids.get((self._project_of[run_id], node_id))
+        for row in self._changes.get(run_id, []):
+            if row.test_case_id == test_case_id:
+                return row
+        return None
 
     def _upsert_catalogue_entry(
         self, project: str, execution: Execution, identity: CaseIdentity
@@ -248,6 +363,9 @@ class InMemoryExecutionStore:
         slot = (project, identity.node_id)
         existing = self._catalogue.get(slot)
         if existing is None:
+            test_case_id = next(self._next_test_case_id)
+            self._test_case_ids[slot] = test_case_id
+            self._test_case_keys[test_case_id] = slot
             self._catalogue[slot] = CatalogueEntry(
                 identity=identity,
                 first_seen_at=execution.started_at,
@@ -350,6 +468,7 @@ class InMemoryExecutionStore:
                 execution,
                 last_contact_at=self._last_contact.get(execution.identity.value),
                 recorded_by=self._recorded_by[execution.identity.value],
+                baseline=self._baseline_ref(execution.identity.value),
             )
             for execution in window[:page_limit]
         )
@@ -421,6 +540,7 @@ class InMemoryExecutionStore:
             last_contact_at=self._last_contact.get(execution_id),
             recorded_by=self._recorded_by[execution_id],
             project=self._project_of[execution_id],
+            comparison=comparison_of(execution, self._baseline_ref(execution_id)),
         )
 
     @_locked
@@ -499,6 +619,7 @@ class InMemoryExecutionStore:
                 last_contact_at=self._last_contact.get(run_id),
                 outcome=result.outcome,
                 duration=result.duration,
+                change=self._history_change(run_id, node_id),
             )
             for run_id, result in window[:page_limit]
         )
@@ -565,6 +686,82 @@ class InMemoryExecutionStore:
                 outcomes = counts.setdefault(run_id, {})
                 outcomes[result.outcome] = outcomes.get(result.outcome, 0) + 1
         return counts
+
+    def _history_change(self, run_id: str, node_id: str) -> str | None:
+        row = self._change_of(run_id, node_id)
+        return None if row is None else row.change
+
+    @_locked
+    def count_changes(self, execution_ids: Sequence[str]) -> Mapping[str, Mapping[str, int]]:
+        counts: dict[str, dict[str, int]] = {}
+        for run_id in dict.fromkeys(execution_ids):
+            for row in self._changes.get(run_id, []):
+                changes = counts.setdefault(run_id, {})
+                changes[row.change] = changes.get(row.change, 0) + 1
+        return counts
+
+    @_locked
+    def list_changes(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+        offset: int,
+        changes: Collection[str] | None = None,
+    ) -> Page[ChangeEntry]:
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        wanted = wanted_changes(changes)
+        rows = sorted(
+            (row for row in self._changes.get(execution_id, []) if row.change in wanted),
+            key=lambda row: (change_rank(row.change), row.ordinal),
+        )
+        window = rows[offset : offset + page_limit + 1]
+        return Page(
+            items=tuple(self._change_entry(execution_id, row) for row in window[:page_limit]),
+            has_more=len(window) > page_limit,
+        )
+
+    def _change_entry(self, run_id: str, row: ChangeRow) -> ChangeEntry:
+        """A stored row as `list_changes` returns it, the identity read
+        through the catalogue and the outcome from the run's result."""
+        slot = self._test_case_keys[row.test_case_id]
+        result = self._results.get((run_id, slot[1]))
+        return ChangeEntry(
+            identity=self._catalogue[slot].identity,
+            change=row.change,
+            outcome=None if result is None else result.outcome,
+            was=row.was,
+            duration=None if result is None else result.duration,
+            position=None if result is None else row.ordinal,
+            streak=row.streak,
+        )
+
+    @_locked
+    def get_run_changes(self, execution_id: str) -> Sequence[tuple[int, str]] | None:
+        if execution_id not in self._baselines:
+            return None
+        return tuple(
+            sorted(
+                (row.ordinal, row.change)
+                for row in self._changes.get(execution_id, [])
+                if row.change in RESULT_CHANGES
+            )
+        )
+
+    @_locked
+    def get_result_change(self, execution_id: str, *, node_id: str) -> ResultChange | None:
+        if (execution_id, node_id) not in self._results:
+            return None
+        position = [stored for stored, _outcome in self._stored_outcomes(execution_id)].index(
+            node_id
+        )
+        row = self._change_of(execution_id, node_id)
+        return ResultChange(
+            position=position,
+            change=None if row is None else row.change,
+            was=None if row is None else row.was,
+            streak=None if row is None else row.streak,
+        )
 
     @_locked
     def create_project(self, name: str, *, created_at: datetime) -> Project:

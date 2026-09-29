@@ -13,7 +13,10 @@ at once on one new database create one admin, and a login overlapping a
 password change never leaves a live token made with the old password. And
 members: one member added at once through several stores is added once, a
 set racing a remove ends as whichever committed last, and adding members
-never deadlocks with their users' disables, enables and logins.
+never deadlocks with their users' disables, enables and logins. And
+comparisons: runs finishing at once are each compared once, with a complete
+run that committed before them, and a finish racing its replays is compared
+by one of them.
 
 Every thread is a daemon and is joined with a timeout, as in
 `test_concurrency.py`: a deadlock must fail the test, not hang the suite.
@@ -35,6 +38,7 @@ from vantage.core.domain.access import LOGIN_TOKEN_LIFETIME, Token, User, token_
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projects import DEFAULT_PROJECT, OWNER_ROLE, ROLES, VIEWER_ROLE
+from vantage.core.domain.result import Result
 from vantage.core.domain.sections import MAX_SECTIONS
 from vantage.core.ports.storage import (
     MetadataEntry,
@@ -55,6 +59,8 @@ from vantage_port_contract import (
     _execution,
     _result,
     _start_only_execution,
+    _vcs,
+    check_comparison,
 )
 
 pytest_plugins = ["postgres_fixtures"]
@@ -846,3 +852,91 @@ def test_adding_members_while_their_users_are_disabled_enabled_and_log_in_never_
     for project in projects:
         assert [member.user for member in stores[0].list_members(project=project)] == users
     assert [user.disabled for user in stores[1].list_users()] == [False] * len(users)
+
+
+def _main_run(index: int, *, stopped_early: bool = False) -> Execution:
+    """Run `index` of `main`, a minute after the one before, failing; one
+    stopped early is no one's baseline."""
+    finish = _execution(
+        f"{index + 1:032x}", started=_BASE + timedelta(minutes=index), vcs=_vcs(branch="main")
+    )
+    return replace(
+        finish,
+        exit_status=1,
+        interrupt_reason="stopping after 1 failures" if stopped_early else None,
+    )
+
+
+def _main_results(index: int) -> list[Result]:
+    """Thirty tests, a few failing, which ones moving from run to run, and
+    one test of the run's own."""
+    return [
+        _result(f"t.py::test_{test:02d}", outcome="failed" if (index + test) % 7 == 0 else "passed")
+        for test in range(30)
+    ] + [_result(f"t.py::test_only_in_{index}")]
+
+
+@_DEFAULT_ISOLATIONS
+def test_runs_of_one_branch_finishing_at_once_are_each_compared_with_an_earlier_complete_run(
+    stores: list[PostgresExecutionStore],
+) -> None:
+    """Twenty-four runs of one branch, started in turn, finish at once
+    through three stores, each finish sent twice: no transaction errors or
+    deadlocks, and each run is compared once, with a complete run of the
+    branch started before it that committed first, its changes exactly
+    those against that run. Which run that is depends on the commit order,
+    and every answer stays valid -- whatever isolation the database
+    defaults to, since each session sets its own."""
+    runs = range(24)
+    for index in runs:
+        stores[0].record_session(
+            _start_only_execution(f"{index + 1:032x}", started=_BASE + timedelta(minutes=index)),
+            results=(),
+            received_at=_BASE,
+            project=DEFAULT_PROJECT,
+        )
+    deck = [index for index in runs for _copy in range(2)]
+    deck = [deck[(position * 7) % len(deck)] for position in range(len(deck))]
+
+    def _finish(store: PostgresExecutionStore, hand: list[int]) -> None:
+        for index in hand:
+            store.record_session(
+                _main_run(index, stopped_early=index % 5 == 4),
+                results=_main_results(index),
+                received_at=_BASE,
+                project=DEFAULT_PROJECT,
+            )
+
+    errors = _run_concurrently(
+        [partial(_finish, stores[seat % 3], deck[seat::12]) for seat in range(12)]
+    )
+
+    assert errors == []
+    baselines = [check_comparison(stores[1], f"{index + 1:032x}") for index in runs]
+    assert baselines[0] is None
+    assert not {f"{index + 1:032x}" for index in range(4, 24, 5)} & set(baselines)
+
+
+def test_a_finish_and_its_replays_racing_compare_the_run_once(
+    stores: list[PostgresExecutionStore],
+) -> None:
+    """A run's first report is its finish, sent six times at once through
+    three stores: one creates and compares it, the others wait on its row
+    and find it final, so no comparison row is written twice."""
+    stores[0].record_session(
+        _main_run(0), results=_main_results(0), received_at=_BASE, project=DEFAULT_PROJECT
+    )
+    created: list[bool] = []
+
+    def _send(store: PostgresExecutionStore) -> None:
+        created.append(
+            store.record_session(
+                _main_run(1), results=_main_results(1), received_at=_BASE, project=DEFAULT_PROJECT
+            )
+        )
+
+    errors = _run_concurrently([partial(_send, stores[seat % 3]) for seat in range(6)])
+
+    assert errors == []
+    assert sorted(created) == [False] * 5 + [True]
+    assert check_comparison(stores[2], f"{2:032x}") == f"{1:032x}"

@@ -30,7 +30,11 @@ transaction, without `RETURNING`: it needs SQLite >= 3.35, newer than some
 Python 3.10 builds link against. The catalogue takes `first_seen_at` with
 `MIN` and `last_seen_at` with `MAX`, so a report arriving out of start order
 moves neither the wrong way, and the result insert is `ON CONFLICT(run_id,
-node_id) DO NOTHING`, so a replayed report is a silent no-op.
+node_id) DO NOTHING`, so a replayed report is a silent no-op. The report
+that gives a run its exit status then compares it, last in the same
+transaction (`_fix_comparison`): a finished run returns before anything is
+written, so a run is compared once, and the lock and `BEGIN IMMEDIATE`
+order its choice of baseline against every other writer's commit.
 
 `last_contact_at` is set by the creating report only -- a finished or
 interrupted run is done, not stale -- and advanced by `touch_last_contact`'s
@@ -63,6 +67,16 @@ from vantage.core.domain.access import (
     Token,
     User,
 )
+from vantage.core.domain.changes import (
+    BASELINE_EXIT_STATUSES,
+    CHANGE_ORDER,
+    RESULT_CHANGES,
+    ChangeRow,
+    Streak,
+    compare,
+    ran_to_its_end,
+    wanted_changes,
+)
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
@@ -81,6 +95,8 @@ from vantage.core.domain.result import (
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
+    BaselineRef,
+    ChangeEntry,
     ForeignRunError,
     HistoryEntry,
     MetadataEntry,
@@ -90,6 +106,7 @@ from vantage.core.ports.storage import (
     ProjectExistsError,
     ProjectMismatchError,
     ProjectSetting,
+    ResultChange,
     ResultListEntry,
     RunDetail,
     RunKey,
@@ -98,6 +115,7 @@ from vantage.core.ports.storage import (
     UnknownProjectError,
     UnknownUserError,
     UserExistsError,
+    comparison_of,
 )
 from vantage.storage.connection import isoformat_utc, open_database
 
@@ -198,16 +216,25 @@ _LIST_EXECUTION_COLUMNS = """
 _LIST_SUBJECT_PREFIX_BYTES = 4 * (LIST_COMMIT_SUBJECT_CHARS + 1)
 _LIST_MESSAGE_PREFIX_BYTES = 4 * (LIST_FAILURE_MESSAGE_CHARS + 1)
 
-# `get_execution` and `get_run_detail` share one statement;
-# `last_contact_at`, `recorded_by` and `project` come last so the first
-# twelve values decode as an `Execution`.
+# A run's baseline, read with the run: its id, start and branch, found by
+# primary key through `run.baseline_id`, so a page and its comparisons are
+# one read. `_decode_baseline`'s three columns.
+_BASELINE_COLUMNS = "run.baseline_id, base.started_at, base.vcs_branch"
+
+_WITH_BASELINE = "LEFT JOIN run AS base ON base.id = run.baseline_id"
+
+# `get_execution`, `get_run_detail` and the finishing step share one
+# statement; `last_contact_at`, `recorded_by`, `project` and the baseline
+# come last so the first twelve values decode as an `Execution`.
 _SELECT_RUN = f"""
-    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by, run.project
-    FROM run WHERE run.id = ?
+    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by, run.project,
+           {_BASELINE_COLUMNS}
+    FROM run {_WITH_BASELINE} WHERE run.id = ?
 """  # noqa: S608
 
 _SELECT_RUN_LIST = f"""
-    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by FROM run
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by, {_BASELINE_COLUMNS}
+    FROM run {_WITH_BASELINE}
 """  # noqa: S608
 
 # One project's runs, bound after the subject prefix width, read backwards
@@ -286,6 +313,126 @@ _COUNT_RUNS_PREDATING_KEY = """
         JOIN run ON run.id = rm.run_id
         WHERE rm.key = ? AND +run.project = ?
     ) AS first_seen
+"""
+
+# A run that can be a baseline, restated from `is_baseline_candidate`: it
+# ran to its end with a verdict on its tests. Only the module's constants
+# are interpolated.
+_COMPLETE = f"""
+    run.finished_at IS NOT NULL AND run.interrupted = 0 AND run.interrupt_reason IS NULL
+    AND run.exit_status IN ({", ".join(str(status) for status in sorted(BASELINE_EXIT_STATUSES))})
+"""
+
+# A finishing run's baseline: the latest complete run of its project
+# earlier than it in the run list's order, on its branch, found by one
+# backward seek of `idx_run_project_branch_started_at`. Binds the project,
+# the branch, then the run's `started_at` and id.
+_BRANCH_BASELINE = f"""
+    SELECT run.id FROM run
+    WHERE run.project = ? AND run.vcs_branch = ? AND {_COMPLETE} AND {_AFTER_RUN_KEY}
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT 1
+"""  # noqa: S608
+
+# The same on any branch, a run without one included, along
+# `idx_run_project_started_at`. Binds the project, then the run's
+# `started_at` and id.
+_PROJECT_BASELINE = f"""
+    SELECT run.id FROM run
+    WHERE run.project = ? AND {_COMPLETE} AND {_AFTER_RUN_KEY}
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT 1
+"""  # noqa: S608
+
+_SET_BASELINE = "UPDATE run SET baseline_id = ? WHERE id = ?"
+
+# What `compare` reads of a run, in stored order, along `idx_result_run_id`.
+_SELECT_COMPARED_RESULTS = (
+    "SELECT id, test_case_id, outcome FROM result WHERE run_id = ? ORDER BY id"
+)
+
+# A baseline's own still-failing streaks, which its run's extend.
+_SELECT_STREAKS = """
+    SELECT test_case_id, streak, streak_since FROM result_change
+    WHERE run_id = ? AND change = 'still_failing'
+"""
+
+_INSERT_RESULT_CHANGE = """
+    INSERT INTO result_change (
+        run_id, test_case_id, change, ordinal, result_id, was, streak, streak_since
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+
+def _count_changes(run_count: int) -> str:
+    """How many tests of each change each of `run_count` runs' comparisons
+    record, from `idx_result_change_run` alone. Only the literal `?` marker
+    is interpolated."""
+    placeholders = ",".join("?" * run_count)
+    return f"""
+        SELECT run_id, change, COUNT(*) FROM result_change
+        WHERE run_id IN ({placeholders})
+        GROUP BY run_id, change
+    """  # noqa: S608
+
+
+# `_row_to_change_entry`'s columns: the catalogue's identity, the change,
+# the result's outcome and duration -- NULL for a missing test, whose
+# `result_id` is -- and the stored `was`, ordinal and streak.
+_SELECT_CHANGES = """
+    SELECT tc.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
+           rc.change, r.outcome, rc.was, r.duration, rc.ordinal, rc.streak, rc.streak_since
+    FROM result_change rc
+    JOIN test_case tc ON tc.id = rc.test_case_id
+    LEFT JOIN result r ON r.id = rc.result_id
+    WHERE rc.run_id = ?
+"""
+
+# A change's place in `CHANGE_ORDER`, as SQL. Only the module's constants
+# are interpolated.
+_CHANGE_RANK = (
+    "CASE rc.change "
+    + " ".join(f"WHEN '{change}' THEN {rank}" for rank, change in enumerate(CHANGE_ORDER))
+    + " END"
+)
+
+
+def _list_changes(change_count: int) -> str:
+    """A page of one run's changes of `change_count` kinds, bound after the
+    run id, in `CHANGE_ORDER`, then by ordinal. With one kind the order is
+    the ordinal alone, so `idx_result_change_run` yields the rows in order
+    without a sort. Only the module's constants and the literal `?` marker
+    are interpolated."""
+    placeholders = ",".join("?" * change_count)
+    order = "rc.ordinal" if change_count == 1 else f"{_CHANGE_RANK}, rc.ordinal"
+    return f"""
+        {_SELECT_CHANGES} AND rc.change IN ({placeholders})
+        ORDER BY {order}
+        LIMIT ? OFFSET ?
+    """  # noqa: S608
+
+
+# A run's changed results' positions, bound after the run id; its
+# `baseline_id`, read in the same snapshot, says whether it was compared with
+# another run at all.
+_SELECT_RESULT_CHANGE_POSITIONS = f"""
+    SELECT ordinal, change FROM result_change
+    WHERE run_id = ? AND change IN ({", ".join(f"'{change}'" for change in sorted(RESULT_CHANGES))})
+    ORDER BY ordinal
+"""  # noqa: S608
+
+_SELECT_BASELINE_ID = "SELECT baseline_id FROM run WHERE id = ?"
+
+# One result's position -- how many of its run's results were stored before
+# it, counted along `idx_result_run_id` alone -- and its change, through
+# `result_change`'s primary key.
+_SELECT_RESULT_CHANGE = """
+    SELECT (SELECT COUNT(*) FROM result earlier
+             WHERE earlier.run_id = r.run_id AND earlier.id < r.id),
+           rc.change, rc.was, rc.streak, rc.streak_since
+    FROM result r
+    LEFT JOIN result_change rc ON rc.run_id = r.run_id AND rc.test_case_id = r.test_case_id
+    WHERE r.run_id = ? AND r.node_id = ?
 """
 
 # Conflict target is `(project, node_id)`, the catalogue's identity key, so
@@ -454,22 +601,25 @@ def _list_results_with_outcomes(outcome_count: int) -> str:
 # `list_history`' SELECT: the project and `node_id` resolve through the
 # unique `idx_test_case_project_node_id` to one `test_case.id`, then
 # `idx_result_test_case_id` finds that test's results, then `run` is read by
-# primary key. Same execution columns and total order as `_LIST_RUNS`.
+# primary key, and each result's change by `result_change`'s. Same execution
+# columns and total order as `_LIST_RUNS`.
 _LIST_HISTORY = f"""
-    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration, rc.change
     FROM test_case tc
     JOIN result r ON r.test_case_id = tc.id
     JOIN run ON run.id = r.run_id
+    LEFT JOIN result_change rc ON rc.run_id = r.run_id AND rc.test_case_id = r.test_case_id
     WHERE tc.project = ? AND tc.node_id = ?
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT ? OFFSET ?
 """  # noqa: S608
 
 _LIST_HISTORY_AFTER = f"""
-    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration, rc.change
     FROM test_case tc
     JOIN result r ON r.test_case_id = tc.id
     JOIN run ON run.id = r.run_id
+    LEFT JOIN result_change rc ON rc.run_id = r.run_id AND rc.test_case_id = r.test_case_id
     WHERE tc.project = ? AND tc.node_id = ? AND {_AFTER_RUN_KEY}
     ORDER BY run.started_at DESC, run.id DESC
     LIMIT ? OFFSET ?
@@ -819,22 +969,107 @@ def _decode_execution(row: Sequence[object]) -> Execution:
     )
 
 
+def _decode_baseline(row: Sequence[object]) -> BaselineRef | None:
+    """The three `_BASELINE_COLUMNS`; `None` for a run with no baseline."""
+    baseline_id, started_at, branch = row
+    if baseline_id is None:
+        return None
+    return BaselineRef(
+        run_id=cast(str, baseline_id),
+        started_at=_datetime(started_at),
+        branch=cast("str | None", branch),
+    )
+
+
 def _row_to_run_list_entry(row: tuple[object, ...]) -> RunListEntry:
     return RunListEntry.from_execution(
         _decode_execution(row[:12]),
         last_contact_at=_opt_datetime(row[12]),
         recorded_by=cast("str | None", row[13]),
+        baseline=_decode_baseline(row[14:17]),
     )
 
 
 def _row_to_history_entry(row: tuple[object, ...]) -> HistoryEntry:
-    last_contact_at, outcome, duration = row[12:]
+    last_contact_at, outcome, duration, change = row[12:]
     return HistoryEntry.from_execution(
         _decode_execution(row[:12]),
         last_contact_at=_opt_datetime(last_contact_at),
         outcome=cast(str, outcome),
         duration=cast("float | None", duration),
+        change=cast("str | None", change),
     )
+
+
+def _decode_streak(runs: object, since: object) -> Streak | None:
+    return None if runs is None else Streak(runs=cast(int, runs), since=cast(str, since))
+
+
+def _row_to_change_entry(row: tuple[object, ...]) -> ChangeEntry:
+    """A `_SELECT_CHANGES` row. A missing test has no result, so no
+    position either."""
+    change, outcome, was, duration, ordinal, streak, streak_since = row[5:]
+    return ChangeEntry(
+        identity=_decode_identity(row[:5]),
+        change=cast(str, change),
+        outcome=cast("str | None", outcome),
+        was=cast("str | None", was),
+        duration=cast("float | None", duration),
+        position=None if outcome is None else cast(int, ordinal),
+        streak=_decode_streak(streak, streak_since),
+    )
+
+
+def _change_rows(run_id: str, rows: Sequence[ChangeRow]) -> list[tuple[object, ...]]:
+    """The `_INSERT_RESULT_CHANGE` parameters of a comparison's rows."""
+    return [
+        (
+            run_id,
+            row.test_case_id,
+            row.change,
+            row.ordinal,
+            row.result_id,
+            row.was,
+            None if row.streak is None else row.streak.runs,
+            None if row.streak is None else row.streak.since,
+        )
+        for row in rows
+    ]
+
+
+def _fix_comparison(conn: sqlite3.Connection, run_id: str, project: str) -> None:
+    """Compare the run the report being written gave its exit status with
+    its baseline, inside that report's transaction and after its results:
+    choose the baseline, record it, and store the rows `compare` returns.
+    The report is the only one that ever gives the run an exit status, so
+    this runs once per run."""
+    execution = _decode_execution(conn.execute(_SELECT_RUN, (run_id,)).fetchone()[:12])
+    after = (isoformat_utc(execution.started_at), run_id)
+    branch = None if execution.vcs is None else execution.vcs.branch
+    found = None
+    if branch is not None:
+        found = conn.execute(_BRANCH_BASELINE, (project, branch, *after)).fetchone()
+    if found is None:
+        found = conn.execute(_PROJECT_BASELINE, (project, *after)).fetchone()
+    if found is None:
+        return
+    baseline_id = cast(str, found[0])
+    conn.execute(_SET_BASELINE, (baseline_id, run_id))
+    results = conn.execute(_SELECT_COMPARED_RESULTS, (run_id,)).fetchall()
+    baseline_results = conn.execute(_SELECT_COMPARED_RESULTS, (baseline_id,)).fetchall()
+    streaks = {
+        cast(int, test_case_id): Streak(runs=cast(int, runs), since=cast(str, since))
+        for test_case_id, runs, since in conn.execute(_SELECT_STREAKS, (baseline_id,))
+    }
+    rows = compare(
+        results,
+        ((test_case_id, outcome) for _id, test_case_id, outcome in baseline_results),
+        streaks,
+        baseline_id=baseline_id,
+        ran_to_its_end=ran_to_its_end(execution),
+    )
+    if rows:
+        conn.executemany(_INSERT_RESULT_CHANGE, _change_rows(run_id, rows))
 
 
 def _decode_failure(row: Sequence[object]) -> FailureEvidence | None:
@@ -1256,6 +1491,11 @@ class SqliteExecutionStore:
                 conn.executemany(_INSERT_METADATA_FILE, _metadata_file_rows(run_id, metadata))
             if metadata.entries:
                 conn.executemany(_INSERT_METADATA_ENTRY, _metadata_entry_rows(run_id, metadata))
+
+            # A finished run returned above, so a report with an exit status
+            # is the one that gives the run its own.
+            if execution.exit_status is not None:
+                _fix_comparison(conn, run_id, project)
         return created
 
     def get_execution(self, execution_id: str) -> Execution | None:
@@ -1338,11 +1578,13 @@ class SqliteExecutionStore:
         row = self._fetchone(_SELECT_RUN, (execution_id,))
         if row is None:
             return None
+        execution = _decode_execution(row[:12])
         return RunDetail(
-            execution=_decode_execution(row[:12]),
+            execution=execution,
             last_contact_at=_opt_datetime(row[12]),
             recorded_by=cast("str | None", row[13]),
             project=cast(str, row[14]),
+            comparison=comparison_of(execution, _decode_baseline(row[15:18])),
         )
 
     def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
@@ -1457,6 +1699,55 @@ class SqliteExecutionStore:
                 for run_id, outcome, count in conn.execute(_count_outcomes(len(batch)), batch):
                     counts.setdefault(run_id, {})[outcome] = count
         return counts
+
+    def count_changes(self, execution_ids: Sequence[str]) -> Mapping[str, Mapping[str, int]]:
+        ids = list(dict.fromkeys(execution_ids))
+        counts: dict[str, dict[str, int]] = {}
+        if not ids:
+            return counts
+        with self._read_snapshot() as conn:
+            for start in range(0, len(ids), _MAX_PLACEHOLDERS):
+                batch = ids[start : start + _MAX_PLACEHOLDERS]
+                for run_id, change, count in conn.execute(_count_changes(len(batch)), batch):
+                    counts.setdefault(run_id, {})[change] = count
+        return counts
+
+    def list_changes(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+        offset: int,
+        changes: Collection[str] | None = None,
+    ) -> Page[ChangeEntry]:
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        wanted = wanted_changes(changes)
+        if not wanted:
+            return Page(items=(), has_more=False)
+        rows = self._fetchall(
+            _list_changes(len(wanted)), (execution_id, *wanted, page_limit + 1, offset)
+        )
+        return _page(rows, page_limit, _row_to_change_entry)
+
+    def get_run_changes(self, execution_id: str) -> Sequence[tuple[int, str]] | None:
+        with self._read_snapshot() as conn:
+            found = conn.execute(_SELECT_BASELINE_ID, (execution_id,)).fetchone()
+            if found is None or found[0] is None:
+                return None
+            rows = conn.execute(_SELECT_RESULT_CHANGE_POSITIONS, (execution_id,)).fetchall()
+        return tuple((cast(int, ordinal), cast(str, change)) for ordinal, change in rows)
+
+    def get_result_change(self, execution_id: str, *, node_id: str) -> ResultChange | None:
+        row = self._fetchone(_SELECT_RESULT_CHANGE, (execution_id, node_id))
+        if row is None:
+            return None
+        position, change, was, streak, streak_since = row
+        return ResultChange(
+            position=cast(int, position),
+            change=cast("str | None", change),
+            was=cast("str | None", was),
+            streak=_decode_streak(streak, streak_since),
+        )
 
     def create_project(self, name: str, *, created_at: datetime) -> Project:
         with self._lock:

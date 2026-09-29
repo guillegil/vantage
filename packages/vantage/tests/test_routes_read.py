@@ -75,6 +75,10 @@ _DETAIL_COMMIT = "abad0005" * 5
 # A run's `counts` when it holds no result: every outcome, each zero.
 _NO_COUNTS = {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}
 
+# The comparison of a finished run no earlier run of its project was
+# complete before.
+_COMPARED_WITH_NOTHING = {"state": "none", "baseline": None, "counts": None}
+
 
 def _run_id(seed: int) -> str:
     """A well-formed 32-lowercase-hex identity, unique per `seed`."""
@@ -280,10 +284,12 @@ def test_run_list_returns_items_and_has_more_envelope(
         "vcs",
         "recorded_by",
         "counts",
+        "comparison",
     }
     assert item["id"] == run_id
     assert item["recorded_by"] == "alice"
     assert item["counts"] == _NO_COUNTS
+    assert item["comparison"] == _COMPARED_WITH_NOTHING
     assert _instant(item["started_at"]) == started_at
     assert _instant(item["finished_at"]) == finished_at
     assert item["exit_status"] == 7
@@ -669,6 +675,78 @@ def test_run_detail_response_contains_no_vcs_root(
     assert _KNOWN_ROOT not in response.text
 
 
+def test_each_run_says_what_it_was_compared_with_on_the_list_and_on_its_own(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """A finished run names its baseline and how many tests changed each
+    way against it -- on its own branch's last complete run, or, when its
+    branch has none, the project's -- the first run names nothing, and a
+    running one is not compared yet. The list and the detail agree."""
+    now = datetime.now(timezone.utc)
+    authorization = _reader(store, "alice")
+    first, other_branch, same_branch, running = (_run_id(seed) for seed in range(61, 65))
+    recorded = [
+        (first, 0, "main", {"test_a": "passed", "test_b": "failed"}),
+        (other_branch, 10, "feat/x", {"test_a": "failed", "test_b": "passed", "test_c": "passed"}),
+        (same_branch, 20, "main", {"test_a": "passed", "test_b": "failed"}),
+    ]
+    started = {}
+    for run_id, minutes, branch, outcomes in recorded:
+        started[run_id] = now - timedelta(hours=2) + timedelta(minutes=minutes)
+        store.record_session(
+            _execution(
+                run_id,
+                started_at=started[run_id],
+                finished_at=started[run_id] + timedelta(minutes=1),
+                exit_status=1,
+                vcs=_vcs(branch=branch),
+            ),
+            results=[_result(f"t.py::{name}", outcome=o) for name, o in outcomes.items()],
+            received_at=started[run_id],
+            project=DEFAULT_PROJECT,
+        )
+    store.record_session(
+        _execution(running, started_at=now - timedelta(minutes=5), exit_status=None),
+        results=[_result("t.py::test_a", outcome="failed")],
+        received_at=now,
+        project=DEFAULT_PROJECT,
+    )
+
+    listed = {
+        item["id"]: item["comparison"]
+        for item in client.get(_RUNS, headers=authorization).json()["items"]
+    }
+    detailed = {
+        run_id: client.get(f"/api/v1/runs/{run_id}", headers=authorization).json()["comparison"]
+        for run_id in listed
+    }
+
+    assert listed == detailed
+    baselines = {
+        run_id: _instant(comparison["baseline"].pop("started_at"))
+        for run_id, comparison in listed.items()
+        if comparison["baseline"] is not None
+    }
+    assert baselines == {other_branch: started[first], same_branch: started[first]}
+    unchanged = dict.fromkeys(
+        ("new_failure", "still_failing", "fixed", "new_test", "removed", "not_reached"), 0
+    )
+    assert listed == {
+        first: _COMPARED_WITH_NOTHING,
+        other_branch: {
+            "state": "project",
+            "baseline": {"id": first, "branch": "main"},
+            "counts": {**unchanged, "new_failure": 1, "fixed": 1, "new_test": 1},
+        },
+        same_branch: {
+            "state": "branch",
+            "baseline": {"id": first, "branch": "main"},
+            "counts": {**unchanged, "still_failing": 1},
+        },
+        running: {"state": "pending", "baseline": None, "counts": None},
+    }
+
+
 def test_run_detail_carries_every_stored_field_by_value(
     client: TestClient, store: ExecutionStore
 ) -> None:
@@ -741,8 +819,12 @@ def test_run_detail_carries_every_stored_field_by_value(
         "recorded_by",
         "project",
         "counts",
+        "comparison",
     }
     assert orderly["counts"] == ctrl_c["counts"] == _NO_COUNTS
+    # Neither the first run nor one after a run that ended in pytest's own
+    # trouble has anything to be compared with.
+    assert orderly["comparison"] == ctrl_c["comparison"] == _COMPARED_WITH_NOTHING
     assert orderly["recorded_by"] == "alice"
     assert ctrl_c["recorded_by"] is None
     assert orderly["project"] == ctrl_c["project"] == DEFAULT_PROJECT

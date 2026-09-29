@@ -21,6 +21,7 @@ const RUN = {
   recorded_by: 'alice',
   project: 'default',
   counts: { passed: 1, failed: 1, error: 0, skipped: 0, xfailed: 0, xpassed: 0 },
+  comparison: { state: 'none', baseline: null, counts: null },
 };
 
 function item(node: string, outcome: string, message: string | null) {

@@ -41,6 +41,7 @@ paths:
       operationId: get_run_detail
       tags: [read]
       summary: The full record for one run, with its untruncated commit subject.
+      description: "Each run carries its comparison: the run it was compared with, and how many of its tests changed each way against it. A run is compared once, by the report that gives it its exit status, and never again, so the comparison is pending while the run has none -- running, or abandoned until vantage push delivers its end -- and final from then on. Its baseline is the latest complete run of its project started before it (a tie on started_at settled by id) on its own branch, or failing that, or when it has no branch, on any branch; a run is complete when it finished, was neither interrupted nor stopped early, and exited 0 or 1."
       parameters:
         - $ref: '#/components/parameters/run_id'
       responses:
@@ -187,7 +188,7 @@ paths:
       operationId: list_runs
       tags: [read]
       summary: Page through a project's runs, newest first.
-      description: "Only the project's runs are listed, filtered and counted. metadata_key and metadata_value filter the list by key=value pairs, the n-th value pairing with the n-th key, so each is repeated once per pair -- ?metadata_key=a&metadata_value=1&metadata_key=b&metadata_value=2. A run matches when it holds every pair: a captured value exactly equal, read from a declared file or reported by the session. A run recorded before a key ever appeared has no value for it and is excluded; metadata_horizon in the response reports, for each distinct filtered key in the order first given, how many of the project's runs predate it (null when no metadata filter was given). A pair holding U+0000 matches no run; its key's horizon is that of the key with U+0000 replaced by U+FFFD, the text a report carrying it stored."
+      description: "Only the project's runs are listed, filtered and counted. metadata_key and metadata_value filter the list by key=value pairs, the n-th value pairing with the n-th key, so each is repeated once per pair -- ?metadata_key=a&metadata_value=1&metadata_key=b&metadata_value=2. A run matches when it holds every pair: a captured value exactly equal, read from a declared file or reported by the session. A run recorded before a key ever appeared has no value for it and is excluded; metadata_horizon in the response reports, for each distinct filtered key in the order first given, how many of the project's runs predate it (null when no metadata filter was given). A pair holding U+0000 matches no run; its key's horizon is that of the key with U+0000 replaced by U+FFFD, the text a report carrying it stored. Each run carries its comparison: the run it was compared with, and how many of its tests changed each way against it. A run is compared once, by the report that gives it its exit status, and never again, so the comparison is pending while the run has none -- running, or abandoned until vantage push delivers its end -- and final from then on. Its baseline is the latest complete run of its project started before it (a tie on started_at settled by id) on its own branch, or failing that, or when it has no branch, on any branch; a run is complete when it finished, was neither interrupted nor stopped early, and exited 0 or 1."
       parameters:
         - $ref: '#/components/parameters/project'
         - $ref: '#/components/parameters/limit'
@@ -649,10 +650,27 @@ components:
       type: object
       required: [passed, failed, error, skipped, xfailed, xpassed]
       properties: {passed: {type: integer}, failed: {type: integer}, error: {type: integer}, skipped: {type: integer}, xfailed: {type: integer}, xpassed: {type: integer}}
+    # The run another was compared with.
+    Baseline:
+      type: object
+      required: [id, started_at, branch]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, branch: {type: [string, "null"]}}
+    # Every change is present, zeros included. One of removed and
+    # not_reached is always 0: a run's missing tests are all one or all the
+    # other.
+    ChangeCounts:
+      type: object
+      required: [new_failure, still_failing, fixed, new_test, removed, not_reached]
+      properties: {new_failure: {type: integer}, still_failing: {type: integer}, fixed: {type: integer}, new_test: {type: integer}, removed: {type: integer}, not_reached: {type: integer}}
+    # baseline and counts are non-null exactly for branch and project.
+    Comparison:
+      type: object
+      required: [state, baseline, counts]
+      properties: {state: {type: string, enum: [pending, none, branch, project], description: "pending: the run has no exit status yet, and is compared when it gets one. none: no earlier run of its project was complete. branch: its baseline is the latest complete run of its own branch. project: its baseline is the project's latest complete run, because it has no branch or no earlier run of its branch is complete."}, baseline: {oneOf: [{$ref: '#/components/schemas/Baseline'}, {type: "null"}]}, counts: {oneOf: [{$ref: '#/components/schemas/ChangeCounts'}, {type: "null"}], description: "How many tests changed each way against the baseline: new_failure, a test failing (failed or error) that passed, was skipped, xfailed or xpassed there, or that it lacked; still_failing, failing in both; fixed, failing there and not here; new_test, not failing and absent there; removed, a test there the run lacks, when the run ran to its end (exit 0, 1 or 5); not_reached, the same when it did not."}}
     RunListItem:
       type: object
-      required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs, recorded_by, counts]
-      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}, counts: {$ref: '#/components/schemas/OutcomeCounts'}}
+      required: [id, started_at, finished_at, exit_status, interrupted, presentation, vcs, recorded_by, counts, comparison]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}, counts: {$ref: '#/components/schemas/OutcomeCounts'}, comparison: {$ref: '#/components/schemas/Comparison'}}
     # One per distinct filtered key, in the order first given. `predating`
     # equals the total run count when no run ever carried `key`.
     MetadataHorizon:
@@ -668,8 +686,8 @@ components:
     # reachable.
     RunDetailResponse:
       type: object
-      required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs, recorded_by, project, counts]
-      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}, project: {type: string, description: "The project the run was created in."}, counts: {$ref: '#/components/schemas/OutcomeCounts'}}
+      required: [id, started_at, finished_at, exit_status, interrupted, interrupt_reason, presentation, vcs, recorded_by, project, counts, comparison]
+      properties: {id: {type: string, pattern: '^[0-9a-f]{32}$'}, started_at: {type: string, format: date-time}, finished_at: {type: [string, "null"], format: date-time}, exit_status: {type: [integer, "null"]}, interrupted: {type: boolean}, interrupt_reason: {type: [string, "null"]}, presentation: {type: string, enum: [running, finished, interrupted, abandoned]}, vcs: {oneOf: [{$ref: '#/components/schemas/RunVcs'}, {type: "null"}]}, recorded_by: {type: [string, "null"], description: "The user whose token created the run; null for one recorded without a token."}, project: {type: string, description: "The project the run was created in."}, counts: {$ref: '#/components/schemas/OutcomeCounts'}, comparison: {$ref: '#/components/schemas/Comparison'}}
     # One character per result, in stored order: . F E s x X for passed,
     # failed, error, skipped, xfailed and xpassed.
     RunOutcomesResponse:

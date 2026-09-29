@@ -23,6 +23,7 @@ const RUN = {
   vcs: null,
   recorded_by: 'alice',
   counts: COUNTS,
+  comparison: { state: 'none', baseline: null, counts: null },
 };
 const ALICE = {
   open: false,

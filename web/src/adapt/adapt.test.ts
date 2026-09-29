@@ -46,6 +46,7 @@ const ITEM: RunListItem = {
   },
   recorded_by: 'alice',
   counts: COUNTS,
+  comparison: { state: 'none', baseline: null, counts: null },
 };
 
 describe('runItem', () => {

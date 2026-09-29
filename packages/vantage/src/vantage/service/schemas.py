@@ -72,10 +72,46 @@ class OutcomeCountsResponse(BaseModel):
     xpassed: int
 
 
+class BaselineResponse(BaseModel):
+    """The run another was compared with: its id, its start and its
+    branch."""
+
+    id: str
+    started_at: datetime
+    branch: str | None
+
+
+class ChangeCountsResponse(BaseModel):
+    """How many tests of each change a run's comparison records, every
+    change present and zeros included. One of `removed` and `not_reached`
+    is always zero: a run's missing tests are all one or all the other.
+    Built field by field in `routes/read.py`."""
+
+    new_failure: int
+    still_failing: int
+    fixed: int
+    new_test: int
+    removed: int
+    not_reached: int
+
+
+class ComparisonResponse(BaseModel):
+    """What a run was compared with: `state` is `pending` until the run has
+    an exit status, `none` when no earlier run of its project was complete,
+    `branch` when its baseline is its own branch's latest complete run, and
+    `project` when it is the project's. `baseline` and `counts` are set
+    exactly for `branch` and `project`, and never change once set."""
+
+    state: str
+    baseline: BaselineResponse | None
+    counts: ChangeCountsResponse | None
+
+
 class RunListItemResponse(BaseModel):
     """One entry of `RunListResponse`. `recorded_by` is the user whose token
     created the run, `None` for one recorded without a token. `counts` may
-    include results a running run stored after the page was read."""
+    include results a running run stored after the page was read.
+    `comparison` is final once its state is not `pending`."""
 
     id: str
     started_at: datetime
@@ -86,6 +122,7 @@ class RunListItemResponse(BaseModel):
     vcs: RunVcsResponse | None
     recorded_by: str | None
     counts: OutcomeCountsResponse
+    comparison: ComparisonResponse
 
 
 class MetadataHorizonResponse(BaseModel):
@@ -113,9 +150,10 @@ class RunListResponse(BaseModel):
 class RunDetailResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}`. Carries
     `interrupt_reason`, which the lean list entry omits -- the detail path
-    keeps the full record reachable. `recorded_by` and `counts` are as on
-    `RunListItemResponse`; `project` is the one the run was created in,
-    whose history and sections the run is read against."""
+    keeps the full record reachable. `recorded_by`, `counts` and
+    `comparison` are as on `RunListItemResponse`; `project` is the one the
+    run was created in, whose history and sections the run is read
+    against."""
 
     id: str
     started_at: datetime
@@ -128,6 +166,7 @@ class RunDetailResponse(BaseModel):
     recorded_by: str | None
     project: str
     counts: OutcomeCountsResponse
+    comparison: ComparisonResponse
 
 
 class RunOutcomesResponse(BaseModel):

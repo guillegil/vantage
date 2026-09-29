@@ -1329,7 +1329,7 @@ and restart `vantage`, which, installed editable, serves the source tree's
 
 **`schema.sql` is applied whole, once.** On first open, when the `meta` table
 does not exist, the whole file runs in one `BEGIN IMMEDIATE` transaction that
-also stamps `meta.schema_version` (currently 10) and `meta.origin` (see
+also stamps `meta.schema_version` (currently 11) and `meta.origin` (see
 [Users, tokens and who may do what](#users-tokens-and-who-may-do-what)) and
 writes the `default` project. Reopening issues no DDL. A
 database carrying any other stamp, older, newer, missing or not a number, is
@@ -1345,9 +1345,10 @@ logical schema, and change together.
 | --- | --- |
 | `project` | one row per project, `default` from the database's creation; never renamed or deleted |
 | `project_member` | one row per member of a project, with their role in it (`viewer`, `editor` or `owner`, a `CHECK`), keyed by project and user, with an index on `(account, project)` for a user's memberships; none in `default`, which the adapters refuse in code rather than a `CHECK`, so `DEFAULT_PROJECT` stays the only statement of that name. A disabled user's rows stay |
-| `run` | one row per session: its project, times, exit status, interruption, VCS fields, last contact, the user who recorded it |
+| `run` | one row per session: its project, times, exit status, interruption, VCS fields, last contact, the user who recorded it, and the run it was compared with (`baseline_id`) |
 | `test_case` | the catalogue: one row per node id ever seen in a project, with first and last sighting |
 | `result` | one row per test per run, unique on `(run_id, node_id)` |
+| `result_change` | one row per test whose change a run's comparison records -- its own results that changed against its baseline, and the baseline's tests it lacks -- keyed by run and catalogue row, with the baseline's outcome and a still-failing test's streak; written once, with the run's exit status |
 | `run_metadata_file`, `run_metadata` | each declared file's status; each key's status and value, whether a file or the session gave it, its display name, and whether the declaration named it |
 | `project_setting` | a project's namespaced JSON values; its section definitions live here |
 | `account`, `access_token` | one row per user, never deleted, with their password's scrypt hash or null; one per token made, by its digest, with its scopes (`can_read`, `can_record`, `can_manage`, `can_admin`, at least one set), when it was revoked and, for a login token alone, when it expires. A made token's row is kept for good, a login token's deleted once it has expired, at its user's next login |
@@ -1361,7 +1362,8 @@ never-backwards update, run ordering and the count of runs predating a
 metadata key all rely on. The plugin sends the same format.
 
 **A report is one transaction**, in a fixed order so every foreign key finds
-its row: run, catalogue, results, metadata.
+its row: run, catalogue, results, metadata, and, for the report that gives
+the run its exit status, its comparison.
 
 - The run is an upsert applied only when the stored run has no exit status
   and the incoming report has one: a finish lands over a start, never the
@@ -1381,6 +1383,12 @@ its row: run, catalogue, results, metadata.
   replay changes nothing. A metadata key is inserted only while the run
   holds fewer than 200, counted in the same statement, so the bound holds
   over every report of the run and the metadata route needs no paging.
+- The report that gives the run its exit status then compares it, once:
+  it chooses the baseline by the rules `core/domain/changes.py` states,
+  among the runs committed then, writes `run.baseline_id`, and inserts the
+  rows `compare` returns. A replay returned before this, so nothing
+  compares a run twice, and a run with an exit status always has its
+  comparison.
 
 **A member is set in one transaction** too: the project, the user and the
 member row are probed, then the row is upserted, under the same

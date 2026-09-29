@@ -29,6 +29,7 @@ const RUN = {
   recorded_by: 'alice',
   project: 'firmware',
   counts: { passed: 3, failed: 1, error: 0, skipped: 0, xfailed: 0, xpassed: 0 },
+  comparison: { state: 'none', baseline: null, counts: null },
 };
 
 const TRACEBACK = [

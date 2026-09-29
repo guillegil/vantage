@@ -182,6 +182,38 @@ def test_a_session_stored_locally_is_stored_exactly_as_the_server_stores_it(
     assert stored["run_metadata"]
 
 
+def test_a_second_session_stored_locally_is_compared_as_the_server_compares_it(
+    tmp_path: Path,
+) -> None:
+    """The local store runs the server's ingestion, and its store's finish,
+    so a run is compared with the one before it there too, and stored with
+    the same comparison rows."""
+    local = tmp_path / "local" / "vantage.db"
+    served = tmp_path / "served" / "vantage.db"
+    later = "b" * 32
+
+    store_reports(local, _session())
+    store_reports(local, _session(later))
+    _served(served, [*_session(), *_session(later)])
+
+    stored = _rows(local)
+    assert stored == _rows(served)
+    store = SqliteExecutionStore(local)
+    try:
+        detail = store.get_run_detail(later)
+        changes = store.list_changes(later, limit=10, offset=0).items
+    finally:
+        store.close()
+    assert detail is not None
+    assert detail.comparison.state == "branch"
+    assert detail.comparison.baseline is not None
+    assert detail.comparison.baseline.run_id == _RUN_ID
+    assert [(entry.identity.node_id, entry.change) for entry in changes] == [
+        ("tests/test_\ufffd.py::test_bad", "still_failing")
+    ]
+    assert len(stored["result_change"]) == 1
+
+
 def test_the_stored_run_reads_back_through_the_store(tmp_path: Path) -> None:
     database = tmp_path / "vantage.db"
 

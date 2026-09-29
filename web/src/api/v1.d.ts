@@ -31,7 +31,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The full record for one run, with its untruncated commit subject. */
+        /**
+         * The full record for one run, with its untruncated commit subject.
+         * @description Each run carries its comparison: the run it was compared with, and how many of its tests changed each way against it. A run is compared once, by the report that gives it its exit status, and never again, so the comparison is pending while the run has none -- running, or abandoned until vantage push delivers its end -- and final from then on. Its baseline is the latest complete run of its project started before it (a tie on started_at settled by id) on its own branch, or failing that, or when it has no branch, on any branch; a run is complete when it finished, was neither interrupted nor stopped early, and exited 0 or 1.
+         */
         get: operations["get_run_detail"];
         put?: never;
         post?: never;
@@ -228,7 +231,7 @@ export interface paths {
         };
         /**
          * Page through a project's runs, newest first.
-         * @description Only the project's runs are listed, filtered and counted. metadata_key and metadata_value filter the list by key=value pairs, the n-th value pairing with the n-th key, so each is repeated once per pair -- ?metadata_key=a&metadata_value=1&metadata_key=b&metadata_value=2. A run matches when it holds every pair: a captured value exactly equal, read from a declared file or reported by the session. A run recorded before a key ever appeared has no value for it and is excluded; metadata_horizon in the response reports, for each distinct filtered key in the order first given, how many of the project's runs predate it (null when no metadata filter was given). A pair holding U+0000 matches no run; its key's horizon is that of the key with U+0000 replaced by U+FFFD, the text a report carrying it stored.
+         * @description Only the project's runs are listed, filtered and counted. metadata_key and metadata_value filter the list by key=value pairs, the n-th value pairing with the n-th key, so each is repeated once per pair -- ?metadata_key=a&metadata_value=1&metadata_key=b&metadata_value=2. A run matches when it holds every pair: a captured value exactly equal, read from a declared file or reported by the session. A run recorded before a key ever appeared has no value for it and is excluded; metadata_horizon in the response reports, for each distinct filtered key in the order first given, how many of the project's runs predate it (null when no metadata filter was given). A pair holding U+0000 matches no run; its key's horizon is that of the key with U+0000 replaced by U+FFFD, the text a report carrying it stored. Each run carries its comparison: the run it was compared with, and how many of its tests changed each way against it. A run is compared once, by the report that gives it its exit status, and never again, so the comparison is pending while the run has none -- running, or abandoned until vantage push delivers its end -- and final from then on. Its baseline is the latest complete run of its project started before it (a tie on started_at settled by id) on its own branch, or failing that, or when it has no branch, on any branch; a run is complete when it finished, was neither interrupted nor stopped early, and exited 0 or 1.
          */
         get: operations["list_runs"];
         put?: never;
@@ -653,6 +656,30 @@ export interface components {
             xfailed: number;
             xpassed: number;
         };
+        Baseline: {
+            id: string;
+            /** Format: date-time */
+            started_at: string;
+            branch: string | null;
+        };
+        ChangeCounts: {
+            new_failure: number;
+            still_failing: number;
+            fixed: number;
+            new_test: number;
+            removed: number;
+            not_reached: number;
+        };
+        Comparison: {
+            /**
+             * @description pending: the run has no exit status yet, and is compared when it gets one. none: no earlier run of its project was complete. branch: its baseline is the latest complete run of its own branch. project: its baseline is the project's latest complete run, because it has no branch or no earlier run of its branch is complete.
+             * @enum {string}
+             */
+            state: "pending" | "none" | "branch" | "project";
+            baseline: components["schemas"]["Baseline"] | null;
+            /** @description How many tests changed each way against the baseline: new_failure, a test failing (failed or error) that passed, was skipped, xfailed or xpassed there, or that it lacked; still_failing, failing in both; fixed, failing there and not here; new_test, not failing and absent there; removed, a test there the run lacks, when the run ran to its end (exit 0, 1 or 5); not_reached, the same when it did not. */
+            counts: components["schemas"]["ChangeCounts"] | null;
+        };
         RunListItem: {
             id: string;
             /** Format: date-time */
@@ -667,6 +694,7 @@ export interface components {
             /** @description The user whose token created the run; null for one recorded without a token. */
             recorded_by: string | null;
             counts: components["schemas"]["OutcomeCounts"];
+            comparison: components["schemas"]["Comparison"];
         };
         MetadataHorizon: {
             key: string;
@@ -696,6 +724,7 @@ export interface components {
             /** @description The project the run was created in. */
             project: string;
             counts: components["schemas"]["OutcomeCounts"];
+            comparison: components["schemas"]["Comparison"];
         };
         RunOutcomesResponse: {
             outcomes: string;

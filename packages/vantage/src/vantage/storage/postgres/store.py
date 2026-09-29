@@ -39,6 +39,16 @@ serialised:
   as whichever commits last.
 - `touch_last_contact` is one conditional `UPDATE`, which never moves the
   contact backwards.
+- The report that gives a run its exit status compares it, last in its
+  transaction (`_fix_comparison`), holding the run's row lock; the step from
+  no exit status to one happens once, so one transaction compares a run.
+  The baseline is read at READ COMMITTED with no lock of its own: a complete
+  run commits with its comparison, and whichever of two finishing runs
+  commits first is a valid baseline for the other for good, so there is
+  nothing to serialise. The comparison's foreign keys take `FOR KEY SHARE`
+  on the baseline, its results' catalogue rows and its streak's first run,
+  which conflicts with no lock but a replay's of that finished run, and
+  that holds nothing else.
 - A transaction ended by a serialization failure or a deadlock is run again,
   a bounded number of times; any other error propagates.
 - A read that must see one state -- a run page with its metadata horizons, a
@@ -70,6 +80,16 @@ from vantage.core.domain.access import (
     Token,
     User,
 )
+from vantage.core.domain.changes import (
+    BASELINE_EXIT_STATUSES,
+    CHANGE_ORDER,
+    RESULT_CHANGES,
+    ChangeRow,
+    Streak,
+    compare,
+    ran_to_its_end,
+    wanted_changes,
+)
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
@@ -88,6 +108,8 @@ from vantage.core.domain.result import (
 from vantage.core.ports.storage import (
     EMPTY_RUN_METADATA,
     MAX_PAGE_ITEMS,
+    BaselineRef,
+    ChangeEntry,
     ForeignRunError,
     HistoryEntry,
     MetadataEntry,
@@ -97,6 +119,7 @@ from vantage.core.ports.storage import (
     ProjectExistsError,
     ProjectMismatchError,
     ProjectSetting,
+    ResultChange,
     ResultListEntry,
     RunDetail,
     RunKey,
@@ -105,6 +128,7 @@ from vantage.core.ports.storage import (
     UnknownProjectError,
     UnknownUserError,
     UserExistsError,
+    comparison_of,
 )
 from vantage.storage.postgres.connection import (
     PgConnection,
@@ -199,16 +223,24 @@ _LIST_EXECUTION_COLUMNS = f"""
     run.vcs_commit_subject_truncated, run.vcs_dirty, run.vcs_root
 """
 
-# `last_contact_at`, `recorded_by` and `project` come last, so the first
-# twelve values decode as an `Execution`.
+# A run's baseline, read with the run by primary key through
+# `run.baseline_id`, so a page and its comparisons are one statement.
+# `_decode_baseline`'s three columns.
+_BASELINE_COLUMNS = "run.baseline_id, base.started_at, base.vcs_branch"
+
+_WITH_BASELINE = "LEFT JOIN vantage.run AS base ON base.id = run.baseline_id"
+
+# `last_contact_at`, `recorded_by`, `project` and the baseline come last, so
+# the first twelve values decode as an `Execution`.
 _SELECT_RUN = f"""
-    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by, run.project
-    FROM vantage.run AS run WHERE run.id = %s
+    SELECT {_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by, run.project,
+           {_BASELINE_COLUMNS}
+    FROM vantage.run AS run {_WITH_BASELINE} WHERE run.id = %s
 """  # noqa: S608
 
 _SELECT_RUN_LIST = f"""
-    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by
-    FROM vantage.run AS run
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, run.recorded_by, {_BASELINE_COLUMNS}
+    FROM vantage.run AS run {_WITH_BASELINE}
 """  # noqa: S608
 
 _LIST_RUNS = f"""
@@ -277,6 +309,127 @@ _COUNT_RUNS_PREDATING_KEY = """
 """
 
 _COUNT_PROJECT_RUNS = "SELECT count(*) FROM vantage.run WHERE project = %s"
+
+# A run that can be a baseline, restated from `is_baseline_candidate`: it
+# ran to its end with a verdict on its tests. Only the module's constants
+# are interpolated.
+_COMPLETE = f"""
+    run.finished_at IS NOT NULL AND NOT run.interrupted AND run.interrupt_reason IS NULL
+    AND run.exit_status IN ({", ".join(str(status) for status in sorted(BASELINE_EXIT_STATUSES))})
+"""
+
+# A finishing run's baseline: the latest complete run of its project
+# earlier than it in the run list's order, on its branch, read backwards
+# along `run_project_branch_started_at`; the digest finds the branch and
+# the text keeps the match exact. Binds the project, the branch twice, then
+# the run's `started_at` and id. Plain statements at READ COMMITTED: a
+# complete run and its comparison commit together, so a candidate is seen
+# whole or not at all, and either answer stays a valid baseline.
+_BRANCH_BASELINE = f"""
+    SELECT run.id FROM vantage.run AS run
+    WHERE run.project = %s
+      AND vantage.text_key(run.vcs_branch) = vantage.text_key(%s) AND run.vcs_branch = %s
+      AND {_COMPLETE} AND {_AFTER_RUN_KEY}
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT 1
+"""  # noqa: S608
+
+# The same on any branch, a run without one included, along
+# `run_project_started_at`. Binds the project, then the run's `started_at`
+# and id.
+_PROJECT_BASELINE = f"""
+    SELECT run.id FROM vantage.run AS run
+    WHERE run.project = %s AND {_COMPLETE} AND {_AFTER_RUN_KEY}
+    ORDER BY run.started_at DESC, run.id DESC
+    LIMIT 1
+"""  # noqa: S608
+
+_SET_BASELINE = "UPDATE vantage.run SET baseline_id = %s WHERE id = %s"
+
+# What `compare` reads of a run, in stored order, along `result_run_id`.
+_SELECT_COMPARED_RESULTS = """
+    SELECT id, test_case_id, outcome FROM vantage.result WHERE run_id = %s ORDER BY id
+"""
+
+# A baseline's own still-failing streaks, which its run's extend.
+_SELECT_STREAKS = """
+    SELECT test_case_id, streak, streak_since FROM vantage.result_change
+    WHERE run_id = %s AND change = 'still_failing'
+"""
+
+_INSERT_RESULT_CHANGE = """
+    INSERT INTO vantage.result_change (
+        run_id, test_case_id, change, ordinal, result_id, was, streak, streak_since
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+# Along `result_change_run`, every run of the array at once.
+_COUNT_CHANGES = """
+    SELECT run_id, change, count(*) FROM vantage.result_change
+    WHERE run_id = ANY(%s)
+    GROUP BY run_id, change
+"""
+
+# A change's place in `CHANGE_ORDER`, as SQL. Only the module's constants
+# are interpolated.
+_CHANGE_RANK = (
+    "CASE rc.change "
+    + " ".join(f"WHEN '{change}' THEN {rank}" for rank, change in enumerate(CHANGE_ORDER))
+    + " END"
+)
+
+# `_row_to_change_entry`'s columns, bound as the run id, then the changes:
+# the catalogue's identity, the change, the result's outcome and duration --
+# NULL for a missing test, whose `result_id` is -- and the stored `was`,
+# ordinal and streak.
+_SELECT_CHANGES = """
+    SELECT tc.node_id, tc.file_path, tc.class_name, tc.function_name, tc.param_id,
+           rc.change, r.outcome, rc.was, r.duration, rc.ordinal, rc.streak, rc.streak_since
+    FROM vantage.result_change rc
+    JOIN vantage.test_case tc ON tc.id = rc.test_case_id
+    LEFT JOIN vantage.result r ON r.id = rc.result_id
+    WHERE rc.run_id = %s
+"""
+
+# With one kind, bound as itself, the order is the ordinal alone, which
+# `result_change_run` yields without a sort.
+_LIST_CHANGES_OF_ONE = (
+    f"{_SELECT_CHANGES} AND rc.change = %s ORDER BY rc.ordinal LIMIT %s OFFSET %s"
+)
+
+# Several kinds, bound as one array.
+_LIST_CHANGES = f"""
+    {_SELECT_CHANGES} AND rc.change = ANY(%s)
+    ORDER BY {_CHANGE_RANK}, rc.ordinal
+    LIMIT %s OFFSET %s
+"""  # noqa: S608
+
+# A run's changed results' positions, and whether it was compared with
+# another run at all, in one statement: no row for an unknown run, a NULL
+# change beside a NULL baseline for one compared with nothing.
+_SELECT_RESULT_CHANGE_POSITIONS = f"""
+    SELECT run.baseline_id, rc.ordinal, rc.change
+    FROM vantage.run AS run
+    LEFT JOIN vantage.result_change rc
+      ON rc.run_id = run.id
+     AND rc.change IN ({", ".join(f"'{change}'" for change in sorted(RESULT_CHANGES))})
+    WHERE run.id = %s
+    ORDER BY rc.ordinal
+"""  # noqa: S608
+
+# One result's position -- how many of its run's results were stored before
+# it, counted along `result_run_id` -- and its change, through
+# `result_change`'s primary key.
+_SELECT_RESULT_CHANGE = """
+    SELECT (SELECT count(*) FROM vantage.result earlier
+             WHERE earlier.run_id = r.run_id AND earlier.id < r.id),
+           rc.change, rc.was, rc.streak, rc.streak_since
+    FROM vantage.result r
+    LEFT JOIN vantage.result_change rc
+      ON rc.run_id = r.run_id AND rc.test_case_id = r.test_case_id
+    WHERE r.run_id = %s
+      AND vantage.text_key(r.node_id) = vantage.text_key(%s) AND r.node_id = %s
+"""
 
 _COUNT_RUNS = "SELECT count(*) FROM vantage.run"
 
@@ -430,12 +583,15 @@ _LIST_RESULTS_WITH_OUTCOMES = (
     f"{_SELECT_RESULT_LIST} AND r.outcome = ANY(%s) ORDER BY r.id LIMIT %s OFFSET %s"
 )
 
-# Same execution columns and total order as `_LIST_RUNS`.
+# Same execution columns and total order as `_LIST_RUNS`; each result's
+# change is read through `result_change`'s primary key.
 _LIST_HISTORY = f"""
-    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration, rc.change
     FROM vantage.test_case tc
     JOIN vantage.result r ON r.test_case_id = tc.id
     JOIN vantage.run AS run ON run.id = r.run_id
+    LEFT JOIN vantage.result_change rc
+      ON rc.run_id = r.run_id AND rc.test_case_id = r.test_case_id
     WHERE tc.project = %s
       AND vantage.text_key(tc.node_id) = vantage.text_key(%s) AND tc.node_id = %s
     ORDER BY run.started_at DESC, run.id DESC
@@ -443,10 +599,12 @@ _LIST_HISTORY = f"""
 """  # noqa: S608
 
 _LIST_HISTORY_AFTER = f"""
-    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration
+    SELECT {_LIST_EXECUTION_COLUMNS}, run.last_contact_at, r.outcome, r.duration, rc.change
     FROM vantage.test_case tc
     JOIN vantage.result r ON r.test_case_id = tc.id
     JOIN vantage.run AS run ON run.id = r.run_id
+    LEFT JOIN vantage.result_change rc
+      ON rc.run_id = r.run_id AND rc.test_case_id = r.test_case_id
     WHERE tc.project = %s
       AND vantage.text_key(tc.node_id) = vantage.text_key(%s) AND tc.node_id = %s
       AND {_AFTER_RUN_KEY}
@@ -807,22 +965,120 @@ def _decode_execution(row: Sequence[object]) -> Execution:
     )
 
 
+def _decode_baseline(row: Sequence[object]) -> BaselineRef | None:
+    """The three `_BASELINE_COLUMNS`; `None` for a run with no baseline."""
+    baseline_id, started_at, branch = row
+    if baseline_id is None:
+        return None
+    return BaselineRef(
+        run_id=cast(str, baseline_id),
+        started_at=_utc(started_at),
+        branch=cast("str | None", branch),
+    )
+
+
 def _row_to_run_list_entry(row: Row) -> RunListEntry:
     return RunListEntry.from_execution(
         _decode_execution(row[:12]),
         last_contact_at=_opt_utc(row[12]),
         recorded_by=cast("str | None", row[13]),
+        baseline=_decode_baseline(row[14:17]),
     )
 
 
 def _row_to_history_entry(row: Row) -> HistoryEntry:
-    last_contact_at, outcome, duration = row[12:]
+    last_contact_at, outcome, duration, change = row[12:]
     return HistoryEntry.from_execution(
         _decode_execution(row[:12]),
         last_contact_at=_opt_utc(last_contact_at),
         outcome=cast(str, outcome),
         duration=cast("float | None", duration),
+        change=cast("str | None", change),
     )
+
+
+def _decode_streak(runs: object, since: object) -> Streak | None:
+    return None if runs is None else Streak(runs=int(cast(int, runs)), since=cast(str, since))
+
+
+def _row_to_change_entry(row: Row) -> ChangeEntry:
+    """A `_SELECT_CHANGES` row. A missing test has no result, so no
+    position either."""
+    change, outcome, was, duration, ordinal, streak, streak_since = row[5:]
+    return ChangeEntry(
+        identity=_decode_identity(row[:5]),
+        change=cast(str, change),
+        outcome=cast("str | None", outcome),
+        was=cast("str | None", was),
+        duration=cast("float | None", duration),
+        position=None if outcome is None else int(cast(int, ordinal)),
+        streak=_decode_streak(streak, streak_since),
+    )
+
+
+def _change_rows(run_id: str, rows: Sequence[ChangeRow]) -> list[Row]:
+    """The `_INSERT_RESULT_CHANGE` parameters of a comparison's rows."""
+    return [
+        (
+            run_id,
+            row.test_case_id,
+            row.change,
+            row.ordinal,
+            row.result_id,
+            row.was,
+            None if row.streak is None else row.streak.runs,
+            None if row.streak is None else row.streak.since,
+        )
+        for row in rows
+    ]
+
+
+def _fix_comparison(conn: PgConnection, run_id: str, project: str) -> None:
+    """Compare the run the report being written gave its exit status with
+    its baseline, inside that report's transaction and after its results:
+    choose the baseline, record it, and store the rows `compare` returns.
+
+    The transaction holds the run's row lock and took its exit status from
+    none, which happens once, so no other transaction ever compares it; a
+    replay racing it waits for the lock and finds the run final. The
+    baseline is read at READ COMMITTED: of two runs finishing at once, each
+    sees the other only if it committed first, and either answer is a
+    complete run whose comparison committed with it, so it stays valid."""
+    row = conn.execute(_SELECT_RUN, (run_id,)).fetchone()
+    execution = _decode_execution(cast(Row, row)[:12])
+    after = (execution.started_at, run_id)
+    branch = None if execution.vcs is None else execution.vcs.branch
+    found = None
+    if branch is not None:
+        found = conn.execute(_BRANCH_BASELINE, (project, branch, branch, *after)).fetchone()
+    if found is None:
+        found = conn.execute(_PROJECT_BASELINE, (project, *after)).fetchone()
+    if found is None:
+        return
+    baseline_id = cast(str, found[0])
+    conn.execute(_SET_BASELINE, (baseline_id, run_id))
+    results = conn.execute(_SELECT_COMPARED_RESULTS, (run_id,)).fetchall()
+    baseline_results = conn.execute(_SELECT_COMPARED_RESULTS, (baseline_id,)).fetchall()
+    streaks = {
+        int(cast(int, test_case_id)): Streak(runs=int(cast(int, runs)), since=cast(str, since))
+        for test_case_id, runs, since in conn.execute(_SELECT_STREAKS, (baseline_id,))
+    }
+    rows = compare(
+        (
+            (int(cast(int, result_id)), int(cast(int, test_case_id)), cast(str, outcome))
+            for result_id, test_case_id, outcome in results
+        ),
+        (
+            (int(cast(int, test_case_id)), cast(str, outcome))
+            for _id, test_case_id, outcome in baseline_results
+        ),
+        streaks,
+        baseline_id=baseline_id,
+        ran_to_its_end=ran_to_its_end(execution),
+    )
+    if rows:
+        with conn.cursor() as cursor:
+            cursor.executemany(_INSERT_RESULT_CHANGE, _change_rows(run_id, rows))
 
 
 def _decode_failure(row: Sequence[object]) -> FailureEvidence | None:
@@ -1213,6 +1469,10 @@ class PostgresExecutionStore:
                     cursor.executemany(_INSERT_METADATA_FILE, file_rows)
                 if entry_rows:
                     cursor.executemany(_INSERT_METADATA_ENTRY, entry_rows)
+            # A finished run returned above, so a report with an exit status
+            # is the one that gives the run its own.
+            if execution.exit_status is not None:
+                _fix_comparison(conn, run_id, project)
             return upserted is not None and bool(upserted[0])
 
         return self._transaction(write)
@@ -1303,11 +1563,13 @@ class PostgresExecutionStore:
         row = self._fetchone(_SELECT_RUN, (execution_id,))
         if row is None:
             return None
+        execution = _decode_execution(row[:12])
         return RunDetail(
-            execution=_decode_execution(row[:12]),
+            execution=execution,
             last_contact_at=_opt_utc(row[12]),
             recorded_by=cast("str | None", row[13]),
             project=cast(str, row[14]),
+            comparison=comparison_of(execution, _decode_baseline(row[15:18])),
         )
 
     def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
@@ -1435,6 +1697,63 @@ class PostgresExecutionStore:
         for run_id, outcome, count in self._fetchall(_COUNT_OUTCOMES, (ids,)):
             counts.setdefault(cast(str, run_id), {})[cast(str, outcome)] = int(cast(int, count))
         return counts
+
+    def count_changes(self, execution_ids: Sequence[str]) -> Mapping[str, Mapping[str, int]]:
+        ids = sorted({run_id for run_id in execution_ids if not _unmatchable(run_id)})
+        counts: dict[str, dict[str, int]] = {}
+        if not ids:
+            return counts
+        for run_id, change, count in self._fetchall(_COUNT_CHANGES, (ids,)):
+            counts.setdefault(cast(str, run_id), {})[cast(str, change)] = int(cast(int, count))
+        return counts
+
+    def list_changes(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+        offset: int,
+        changes: Collection[str] | None = None,
+    ) -> Page[ChangeEntry]:
+        page_limit = min(limit, MAX_PAGE_ITEMS)
+        # Only words that are changes are sent, which keeps U+0000 out of
+        # the statement too.
+        wanted = list(wanted_changes(changes))
+        if _unmatchable(execution_id) or not wanted:
+            return Page(items=(), has_more=False)
+        if len(wanted) == 1:
+            rows = self._fetchall(
+                _LIST_CHANGES_OF_ONE, (execution_id, wanted[0], page_limit + 1, offset)
+            )
+        else:
+            rows = self._fetchall(_LIST_CHANGES, (execution_id, wanted, page_limit + 1, offset))
+        return _page(rows, page_limit, _row_to_change_entry)
+
+    def get_run_changes(self, execution_id: str) -> Sequence[tuple[int, str]] | None:
+        if _unmatchable(execution_id):
+            return None
+        rows = self._fetchall(_SELECT_RESULT_CHANGE_POSITIONS, (execution_id,))
+        if not rows or rows[0][0] is None:
+            return None
+        return tuple(
+            (int(cast(int, ordinal)), cast(str, change))
+            for _baseline, ordinal, change in rows
+            if change is not None
+        )
+
+    def get_result_change(self, execution_id: str, *, node_id: str) -> ResultChange | None:
+        if _unmatchable(execution_id, node_id):
+            return None
+        row = self._fetchone(_SELECT_RESULT_CHANGE, (execution_id, node_id, node_id))
+        if row is None:
+            return None
+        position, change, was, streak, streak_since = row
+        return ResultChange(
+            position=int(cast(int, position)),
+            change=cast("str | None", change),
+            was=cast("str | None", was),
+            streak=_decode_streak(streak, streak_since),
+        )
 
     def create_project(self, name: str, *, created_at: datetime) -> Project:
         with live_connection(self._pool) as conn:

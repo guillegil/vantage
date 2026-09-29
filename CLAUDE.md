@@ -137,11 +137,21 @@ its `postgres` extra.
 - **No U+0000 reaches a store.** The body decoder replaces it (and a lone
   surrogate in reports) with U+FFFD; a lookup value holding it matches
   nothing without asking the store.
+- **Comparisons.** A run is compared once, in the transaction of the
+  report that gives it its exit status, after its results: the store
+  chooses its baseline -- the latest complete run (finished, neither
+  interrupted nor stopped early, exit 0 or 1) of its project earlier in
+  `(started_at, id)` order, on its branch first, else on any -- writes
+  `run.baseline_id` and the `result_change` rows `compare` returns, and
+  nothing ever writes either again. `core/domain/changes.py` is the only
+  statement of the rules; the SQL restates them from its constants, and
+  the state (`pending`, `none`, `branch`, `project`) is derived when read,
+  never stored.
 - **Timestamps** are stored as fixed-width UTC text in SQLite
   (`isoformat_utc`), so text order is time order, and as `timestamptz` in
   PostgreSQL, read back as UTC.
 - **Schema:** each adapter applies its whole schema at first use and stamps
-  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 10,
+  `_SCHEMA_VERSION` (`storage/version.py`, the only literal, currently 11,
   one version for both). Any other stamp is refused; there are no
   migrations. Changing either schema means bumping that literal. No table
   or column exists before code writes it.

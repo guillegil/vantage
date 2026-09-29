@@ -115,9 +115,14 @@ def _read_back(address: str, run_id: str) -> dict[str, Any]:
 
 
 def _untimed(read_back: dict[str, Any]) -> dict[str, Any]:
-    """A run's read-back without its id and timings: what two sessions of
-    the same tests must share."""
-    run = {key: value for key, value in read_back["run"].items() if key not in {"id", *_TIMING}}
+    """A run's read-back without its id, its timings and its comparison,
+    which names the run before it: what two sessions of the same tests must
+    share."""
+    run = {
+        key: value
+        for key, value in read_back["run"].items()
+        if key not in {"id", "comparison", *_TIMING}
+    }
     return {
         "run": run,
         "results": [_without_timing(item) for item in read_back["results"]],

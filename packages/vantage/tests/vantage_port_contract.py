@@ -11,9 +11,10 @@ subclasses ``LocalDatabaseContract`` and provides ``local_store``.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 from vantage.core.domain.access import (
@@ -29,6 +30,7 @@ from vantage.core.domain.access import (
     User,
     token_digest,
 )
+from vantage.core.domain.changes import Streak, classify, is_baseline_candidate, ran_to_its_end
 from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.metadata import MAX_METADATA_ENTRIES
 from vantage.core.domain.projection import (
@@ -48,6 +50,9 @@ from vantage.core.domain.projects import (
 from vantage.core.domain.result import CapturedOutput, CaseIdentity, FailureEvidence, Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
+    BaselineRef,
+    ChangeEntry,
+    Comparison,
     ExecutionStore,
     ForeignRunError,
     MetadataEntry,
@@ -56,6 +61,7 @@ from vantage.core.ports.storage import (
     ProjectExistsError,
     ProjectMismatchError,
     ProjectSetting,
+    ResultChange,
     RunKey,
     RunMetadata,
     UnknownProjectError,
@@ -4068,6 +4074,494 @@ class ExecutionStoreContract:
             Membership(project="a", user="root", role=EDITOR_ROLE),
         )
 
+    # -- Comparisons ---------------------------------------------------------
+    #
+    # A run is compared once, by the report that gives it its exit status,
+    # with the latest complete run of its project before it, on its branch
+    # first. `_finish` records a run in one report, which is its finish.
+
+    def test_the_first_finished_run_is_compared_with_nothing(self, store: ExecutionStore) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "failed"})
+
+        detail = store.get_run_detail(_rid(1))
+        (entry,) = store.list_runs(project=DEFAULT_PROJECT, limit=10, offset=0).items
+
+        assert detail is not None
+        assert detail.comparison == entry.comparison == Comparison(state="none", baseline=None)
+        assert store.count_changes([_rid(1)]) == {}
+        assert store.list_changes(_rid(1), limit=10, offset=0).items == ()
+        assert store.get_run_changes(_rid(1)) is None
+
+    def test_a_run_whose_first_report_is_its_finish_is_compared_with_its_branchs_last(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(
+            store,
+            _compared_run(1, 0),
+            {
+                "test_same": "passed",
+                "test_breaks": "passed",
+                "test_heals": "failed",
+                "test_stays": "error",
+                "test_goes": "passed",
+            },
+        )
+        _finish(
+            store,
+            _compared_run(2, 5, exit_status=1),
+            {
+                "test_arrives": "skipped",
+                "test_stays": "failed",
+                "test_heals": "xfailed",
+                "test_breaks": "error",
+                "test_same": "passed",
+            },
+        )
+
+        detail = store.get_run_detail(_rid(2))
+        entries = {
+            entry.execution.identity.value: entry.comparison
+            for entry in store.list_runs(project=DEFAULT_PROJECT, limit=10, offset=0).items
+        }
+        changes = store.list_changes(_rid(2), limit=10, offset=0)
+
+        assert detail is not None
+        baseline = BaselineRef(run_id=_rid(1), started_at=_at(0), branch="main")
+        assert detail.comparison == Comparison(state="branch", baseline=baseline)
+        assert entries[_rid(2)] == detail.comparison
+        assert entries[_rid(1)] == Comparison(state="none", baseline=None)
+        assert changes.has_more is False
+        assert [
+            (
+                entry.identity.node_id,
+                entry.change,
+                entry.outcome,
+                entry.was,
+                entry.position,
+                entry.streak,
+            )
+            for entry in changes.items
+        ] == [
+            ("t.py::test_breaks", "new_failure", "error", "passed", 3, None),
+            ("t.py::test_stays", "still_failing", "failed", "error", 1, Streak(2, _rid(1))),
+            ("t.py::test_heals", "fixed", "xfailed", "failed", 2, None),
+            ("t.py::test_arrives", "new_test", "skipped", None, 0, None),
+            ("t.py::test_goes", "removed", None, "passed", None, None),
+        ]
+        assert changes.items[0].duration == _result("t.py::x").duration
+        assert changes.items[-1].duration is None
+        assert changes.items[-1].identity == _result("t.py::test_goes").identity
+        assert store.count_changes([_rid(1), _rid(2)]) == {
+            _rid(2): {
+                "new_failure": 1,
+                "still_failing": 1,
+                "fixed": 1,
+                "new_test": 1,
+                "removed": 1,
+            }
+        }
+
+    def test_a_run_prefers_its_branch_over_a_newer_run_on_another(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(store, _compared_run(1, 0, branch="main"), {"test_a": "passed"})
+        _finish(store, _compared_run(2, 1, branch="feat/x"), {"test_a": "passed"})
+        _finish(store, _compared_run(3, 2, branch="main"), {"test_a": "passed"})
+
+        assert _comparison_of(store, _rid(3)) == ("branch", _rid(1))
+
+    def test_a_branch_with_no_earlier_complete_run_falls_back_to_the_project(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(store, _compared_run(1, 0, branch="main"), {"test_a": "passed"})
+        # A run of the branch that stopped early is passed over.
+        _finish(
+            store,
+            _compared_run(2, 1, branch="feat/x", exit_status=1, reason="stopped after 1 failure"),
+            {"test_a": "failed"},
+        )
+        _finish(store, _compared_run(3, 2, branch="feat/x"), {"test_a": "passed"})
+
+        detail = store.get_run_detail(_rid(3))
+
+        assert _comparison_of(store, _rid(3)) == ("project", _rid(1))
+        assert detail is not None
+        assert detail.comparison.baseline == BaselineRef(
+            run_id=_rid(1), started_at=_at(0), branch="main"
+        )
+
+    def test_a_run_without_a_branch_is_compared_with_the_projects_latest(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(store, _compared_run(1, 0, branch="main"), {"test_a": "passed"})
+        _finish(store, _compared_run(2, 1, branch=None), {"test_a": "passed"})
+        _finish(store, _compared_run(3, 2, repository=False), {"test_a": "passed"})
+
+        assert _comparison_of(store, _rid(2)) == ("project", _rid(1))
+        assert _comparison_of(store, _rid(3)) == ("project", _rid(2))
+
+    def test_two_runs_without_a_branch_never_share_one(self, store: ExecutionStore) -> None:
+        """Detached checkouts would otherwise compare with each other: a
+        run without a branch takes the project's latest, whatever its
+        branch."""
+        _finish(store, _compared_run(1, 0, branch=None), {"test_a": "passed"})
+        _finish(store, _compared_run(2, 1, branch="main"), {"test_a": "passed"})
+        _finish(store, _compared_run(3, 2, branch=None), {"test_a": "passed"})
+        _finish(store, _compared_run(4, 3, branch=None), {"test_a": "passed"})
+
+        assert _comparison_of(store, _rid(3)) == ("project", _rid(2))
+        assert _comparison_of(store, _rid(4)) == ("project", _rid(3))
+
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "running",
+            "interrupted",
+            "internal-error",
+            "stopped-early",
+            "exit-2-finished",
+            "usage-error",
+            "no-tests",
+            "another-project",
+            "started-later",
+        ],
+    )
+    def test_only_an_earlier_complete_run_of_the_project_is_ever_a_baseline(
+        self, store: ExecutionStore, kind: str
+    ) -> None:
+        """Running and abandoned runs have no exit status; the others ended
+        without a verdict on every test, belong elsewhere, or started after
+        the run compared."""
+        store.create_project("firmware", created_at=_at(0))
+        _finish(store, _compared_run(1, 0), {"test_a": "passed"})
+        project = "firmware" if kind == "another-project" else DEFAULT_PROJECT
+        minutes = 9 if kind == "started-later" else 1
+        passed_over = {
+            "running": _start_of(_compared_run(2, minutes)),
+            "interrupted": _compared_run(
+                2, minutes, exit_status=2, finished=False, interrupted=True, reason="ctrl-c"
+            ),
+            "internal-error": _compared_run(2, minutes, exit_status=3, finished=False),
+            "stopped-early": _compared_run(2, minutes, exit_status=1, reason="-x"),
+            "exit-2-finished": _compared_run(2, minutes, exit_status=2),
+            "usage-error": _compared_run(2, minutes, exit_status=4),
+            "no-tests": _compared_run(2, minutes, exit_status=5),
+            "another-project": _compared_run(2, minutes),
+            "started-later": _compared_run(2, minutes),
+        }[kind]
+        _finish(store, passed_over, {"test_a": "passed"}, project=project)
+
+        _finish(store, _compared_run(3, 5), {"test_a": "passed"})
+
+        assert _comparison_of(store, _rid(3)) == ("branch", _rid(1))
+
+    def test_a_tie_on_started_at_is_settled_by_id(self, store: ExecutionStore) -> None:
+        """The run list's own order: of runs started together, the one with
+        the smaller id is the earlier."""
+        _finish(store, _compared_run(2, 0), {"test_a": "passed"})
+        _finish(store, _compared_run(1, 0), {"test_a": "passed"})
+        _finish(store, _compared_run(3, 0), {"test_a": "passed"})
+
+        assert _comparison_of(store, _rid(1)) == ("none", None)
+        assert _comparison_of(store, _rid(3)) == ("branch", _rid(2))
+
+    def test_reports_that_give_no_exit_status_compare_nothing(self, store: ExecutionStore) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed", "test_b": "passed"})
+        running = _compared_run(2, 1)
+        store.record_session(
+            _start_of(running), results=(), received_at=_at(1), project=DEFAULT_PROJECT
+        )
+        store.record_session(
+            _start_of(running),
+            results=_tests({"test_a": "failed"}),
+            received_at=_at(1),
+            project=DEFAULT_PROJECT,
+        )
+
+        detail = store.get_run_detail(_rid(2))
+
+        assert detail is not None
+        assert detail.comparison == Comparison(state="pending", baseline=None)
+        assert store.count_changes([_rid(2)]) == {}
+        assert store.list_changes(_rid(2), limit=10, offset=0).items == ()
+        assert store.get_run_changes(_rid(2)) is None
+        assert store.get_result_change(_rid(2), node_id="t.py::test_a") == ResultChange(
+            position=0, change=None, was=None, streak=None
+        )
+
+    def test_a_finish_after_slices_compares_every_result_the_run_holds(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed", "test_b": "passed"})
+        run = _compared_run(2, 1, exit_status=1)
+        for outcomes in ({"test_a": "failed"}, {"test_b": "failed"}):
+            store.record_session(
+                _start_of(run),
+                results=_tests(outcomes),
+                received_at=_at(1),
+                project=DEFAULT_PROJECT,
+            )
+        store.record_session(
+            run, results=_tests({"test_c": "passed"}), received_at=_at(2), project=DEFAULT_PROJECT
+        )
+
+        assert _changes(store, _rid(2)) == [
+            ("test_a", "new_failure", 0),
+            ("test_b", "new_failure", 1),
+            ("test_c", "new_test", 2),
+        ]
+
+    def test_an_older_run_finishing_later_never_moves_a_comparison(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed"})
+        older = _compared_run(2, 1)
+        store.record_session(
+            _start_of(older), results=(), received_at=_at(1), project=DEFAULT_PROJECT
+        )
+        _finish(store, _compared_run(3, 2), {"test_a": "failed"})
+        before = _changes(store, _rid(3))
+
+        _finish(store, older, {"test_a": "failed"})
+
+        assert _comparison_of(store, _rid(3)) == ("branch", _rid(1))
+        assert _changes(store, _rid(3)) == before == [("test_a", "new_failure", 0)]
+        assert _comparison_of(store, _rid(2)) == ("branch", _rid(1))
+
+    def test_an_older_run_recorded_late_is_compared_with_the_run_before_it(
+        self, store: ExecutionStore
+    ) -> None:
+        """The order `vantage push` delivers queued runs in: the late run is
+        compared among the runs stored then, and the runs compared meanwhile
+        keep their baselines."""
+        _finish(store, _compared_run(1, 0), {"test_a": "passed"})
+        _finish(store, _compared_run(3, 2), {"test_a": "failed"})
+
+        _finish(store, _compared_run(2, 1), {"test_a": "error"})
+
+        assert _comparison_of(store, _rid(2)) == ("branch", _rid(1))
+        assert _comparison_of(store, _rid(3)) == ("branch", _rid(1))
+        assert _changes(store, _rid(3)) == [("test_a", "new_failure", 0)]
+
+    def test_a_replayed_finish_changes_no_comparison(self, store: ExecutionStore) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed"})
+        _finish(store, _compared_run(2, 1), {"test_a": "failed"})
+
+        replayed = _finish(store, _compared_run(2, 1), {"test_a": "passed", "test_b": "failed"})
+
+        assert replayed is False
+        assert _comparison_of(store, _rid(2)) == ("branch", _rid(1))
+        assert _changes(store, _rid(2)) == [("test_a", "new_failure", 0)]
+
+    @pytest.mark.parametrize(
+        ("ending", "missing"),
+        [
+            ({"exit_status": 0}, "removed"),
+            ({"exit_status": 1}, "removed"),
+            ({"exit_status": 5}, "removed"),
+            ({"exit_status": 1, "reason": "-x"}, "not_reached"),
+            ({"exit_status": 2}, "not_reached"),
+            ({"exit_status": 2, "finished": False, "interrupted": True}, "not_reached"),
+            ({"exit_status": 3, "finished": False}, "not_reached"),
+            ({"exit_status": 4}, "not_reached"),
+        ],
+        ids=["exit-0", "exit-1", "exit-5", "stopped-early", "exit-2", "ctrl-c", "exit-3", "exit-4"],
+    )
+    def test_the_tests_a_run_lacks_are_removed_only_when_it_ran_to_its_end(
+        self, store: ExecutionStore, ending: dict[str, Any], missing: str
+    ) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed", "test_b": "failed"})
+
+        _finish(store, _compared_run(2, 1, **ending), {"test_a": "passed"})
+
+        assert _changes(store, _rid(2)) == [("test_b", missing, None)]
+        assert store.count_changes([_rid(2)]) == {_rid(2): {missing: 1}}
+        (entry,) = store.list_changes(_rid(2), limit=10, offset=0).items
+        assert (entry.outcome, entry.was, entry.position, entry.duration) == (
+            None,
+            "failed",
+            None,
+            None,
+        )
+
+    def test_a_streak_counts_the_failing_runs_along_the_chain_of_baselines(
+        self, store: ExecutionStore
+    ) -> None:
+        """The first run was compared with nothing, so the second's streak
+        starts there; a run on another branch between them is no link of
+        the chain."""
+        for run in range(1, 5):
+            if run == 3:
+                _finish(store, _compared_run(9, 3, branch="feat/x"), {"test_a": "passed"})
+            _finish(store, _compared_run(run, run * 2, exit_status=1), {"test_a": "failed"})
+
+        streaks = [
+            store.get_result_change(_rid(run), node_id="t.py::test_a") for run in range(1, 5)
+        ]
+
+        assert [None if found is None else found.streak for found in streaks] == [
+            None,
+            Streak(2, _rid(1)),
+            Streak(3, _rid(1)),
+            Streak(4, _rid(1)),
+        ]
+        (entry,) = store.list_changes(_rid(4), limit=10, offset=0).items
+        assert entry.streak == Streak(4, _rid(1))
+
+    def test_a_streak_starts_at_the_run_the_test_newly_failed_in(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed"})
+        _finish(store, _compared_run(2, 1, exit_status=1), {"test_a": "failed"})
+        _finish(store, _compared_run(3, 2, exit_status=1), {"test_a": "error"})
+
+        assert _changes(store, _rid(2)) == [("test_a", "new_failure", 0)]
+        found = store.get_result_change(_rid(3), node_id="t.py::test_a")
+        assert found == ResultChange(
+            position=0, change="still_failing", was="failed", streak=Streak(2, _rid(2))
+        )
+
+    def test_a_runs_changes_are_listed_in_queue_order_and_filtered(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(
+            store,
+            _compared_run(1, 0),
+            {f"test_{i}": "failed" if i % 3 == 0 else "passed" for i in range(12)},
+        )
+        # Every third test was failing: 0, 3, 6 and 9 now pass, 1 and 7
+        # newly fail, the rest keep their outcome; 12 and 13 are new.
+        _finish(
+            store,
+            _compared_run(2, 1, exit_status=1),
+            {f"test_{i}": "failed" if i in (1, 7, 12) else "passed" for i in range(14)},
+        )
+
+        everything = store.list_changes(_rid(2), limit=10, offset=0)
+        fixed = store.list_changes(_rid(2), limit=10, offset=0, changes=["fixed"])
+        several = store.list_changes(
+            _rid(2), limit=10, offset=0, changes=["new_test", "fixed", "sideways"]
+        )
+
+        assert _names(everything.items) == [
+            ("test_1", "new_failure"),
+            ("test_7", "new_failure"),
+            ("test_12", "new_failure"),
+            ("test_0", "fixed"),
+            ("test_3", "fixed"),
+            ("test_6", "fixed"),
+            ("test_9", "fixed"),
+            ("test_13", "new_test"),
+        ]
+        assert _names(fixed.items) == [
+            ("test_0", "fixed"),
+            ("test_3", "fixed"),
+            ("test_6", "fixed"),
+            ("test_9", "fixed"),
+        ]
+        assert _names(several.items) == _names(everything.items)[3:]
+        assert store.list_changes(_rid(2), limit=10, offset=0, changes=[]).items == ()
+        assert store.list_changes(_rid(2), limit=10, offset=0, changes=["sideways"]).items == ()
+        paged = store.list_changes(_rid(2), limit=3, offset=2)
+        assert _names(paged.items) == _names(everything.items)[2:5]
+        assert paged.has_more is True
+        last = store.list_changes(_rid(2), limit=3, offset=6, changes=None)
+        assert (_names(last.items), last.has_more) == (_names(everything.items)[6:], False)
+
+    def test_a_page_of_changes_is_clamped(self, store: ExecutionStore) -> None:
+        _finish(store, _compared_run(1, 0), {})
+        _finish(store, _compared_run(2, 1), {f"test_{i:03}": "passed" for i in range(205)})
+
+        first = store.list_changes(_rid(2), limit=MAX_PAGE_ITEMS + 50, offset=0)
+        rest = store.list_changes(_rid(2), limit=MAX_PAGE_ITEMS + 50, offset=MAX_PAGE_ITEMS)
+
+        assert (len(first.items), first.has_more) == (MAX_PAGE_ITEMS, True)
+        assert (len(rest.items), rest.has_more) == (5, False)
+        assert [entry.position for entry in (*first.items, *rest.items)] == list(range(205))
+
+    def test_change_counts_batch_every_run_asked_and_leave_out_the_rest(
+        self, store: ExecutionStore
+    ) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed", "test_b": "passed"})
+        _finish(store, _compared_run(2, 1), {"test_a": "passed", "test_b": "passed"})
+        _finish(store, _compared_run(3, 2, exit_status=1), {"test_a": "failed", "test_c": "passed"})
+        unknown = [_rid(1000 + i) for i in range(600)]
+
+        counts = store.count_changes([*unknown, _rid(1), _rid(2), _rid(3), _rid(3)])
+
+        # The first was compared with nothing, the second changed nothing.
+        assert counts == {_rid(3): {"new_failure": 1, "new_test": 1, "removed": 1}}
+        tallies: dict[str, int] = {}
+        for entry in store.list_changes(_rid(3), limit=10, offset=0).items:
+            tallies[entry.change] = tallies.get(entry.change, 0) + 1
+        assert counts[_rid(3)] == tallies
+        assert store.count_changes([]) == {}
+
+    def test_a_runs_changed_positions_align_with_its_outcomes(self, store: ExecutionStore) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "failed", "test_b": "passed"})
+        _finish(store, _compared_run(2, 1), {"test_a": "passed", "test_b": "passed"})
+        _finish(
+            store,
+            _compared_run(3, 2, exit_status=1),
+            {"test_c": "error", "test_b": "passed", "test_a": "passed", "test_d": "failed"},
+        )
+
+        unchanged = store.get_run_changes(_rid(2))
+        positions = store.get_run_changes(_rid(3))
+        outcomes = store.get_run_case_outcomes(_rid(3))
+
+        assert unchanged == ((0, "fixed"),)
+        assert positions == ((0, "new_failure"), (3, "new_failure"))
+        assert positions is not None
+        assert [outcomes[position][1] for position, _change in positions] == ["error", "failed"]
+        assert store.get_run_changes(_rid(1)) is None
+        assert store.get_run_changes(_rid(99)) is None
+
+    def test_a_results_change_names_its_position_in_the_run(self, store: ExecutionStore) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed", "test_b": "passed"})
+        _finish(
+            store,
+            _compared_run(2, 1, exit_status=1),
+            {"test_c": "passed", "test_b": "passed", "test_a": "failed"},
+        )
+        stored = [result.identity.node_id for result in store.get_results(_rid(2))]
+
+        found = {node_id: store.get_result_change(_rid(2), node_id=node_id) for node_id in stored}
+
+        assert {node_id: change.position for node_id, change in found.items() if change} == {
+            node_id: position for position, node_id in enumerate(stored)
+        }
+        assert found["t.py::test_a"] == ResultChange(
+            position=2, change="new_failure", was="passed", streak=None
+        )
+        assert found["t.py::test_b"] == ResultChange(position=1, change=None, was=None, streak=None)
+        assert found["t.py::test_c"] == ResultChange(
+            position=0, change="new_test", was=None, streak=None
+        )
+        assert store.get_result_change(_rid(2), node_id="t.py::test_gone") is None
+        assert store.get_result_change(_rid(1), node_id="t.py::test_a") == ResultChange(
+            position=0, change=None, was=None, streak=None
+        )
+
+    def test_a_tests_history_carries_each_results_change(self, store: ExecutionStore) -> None:
+        _finish(store, _compared_run(1, 0), {"test_a": "passed"})
+        _finish(store, _compared_run(2, 1, exit_status=1), {"test_a": "failed"})
+        _finish(store, _compared_run(3, 2, exit_status=1), {"test_a": "failed"})
+        _finish(store, _compared_run(4, 3), {"test_a": "passed"})
+        _finish(store, _compared_run(5, 4), {"test_a": "passed"})
+
+        history = store.list_history(
+            project=DEFAULT_PROJECT, node_id="t.py::test_a", limit=10, offset=0
+        )
+
+        assert [(entry.run_id, entry.change) for entry in history.items] == [
+            (_rid(5), None),
+            (_rid(4), "fixed"),
+            (_rid(3), "still_failing"),
+            (_rid(2), "new_failure"),
+            (_rid(1), None),
+        ]
+
 
 class LocalDatabaseContract:
     """The contract of an adapter whose databases pytest-vantage's local
@@ -4201,3 +4695,127 @@ def _logged_in(
     )
     assert login is not None
     return login
+
+
+# The comparisons' runs start a minute apart from here.
+_COMPARED_AT = datetime(2026, 9, 1, 9, 0, 0, tzinfo=timezone.utc)
+
+
+def _rid(number: int) -> str:
+    """A run id, the larger the later a tie on `started_at` puts it."""
+    return f"{number:032x}"
+
+
+def _at(minutes: int) -> datetime:
+    return _COMPARED_AT + timedelta(minutes=minutes)
+
+
+def _compared_run(
+    number: int,
+    minutes: int,
+    *,
+    branch: str | None = "main",
+    repository: bool = True,
+    exit_status: int = 0,
+    finished: bool = True,
+    interrupted: bool = False,
+    reason: str | None = None,
+) -> Execution:
+    """Run `number`'s finish: started `minutes` in, on `branch` -- none on a
+    detached HEAD, and no repository at all without `repository` -- ending
+    as the rest say."""
+    started = _at(minutes)
+    return Execution(
+        identity=Identity(_rid(number)),
+        started_at=started,
+        finished_at=started + timedelta(seconds=30) if finished else None,
+        exit_status=exit_status,
+        interrupted=interrupted,
+        interrupt_reason=reason,
+        vcs=_vcs(branch=branch) if repository else None,
+    )
+
+
+def _start_of(execution: Execution) -> Execution:
+    """The report a session sends before it ends: no exit status."""
+    return replace(
+        execution, finished_at=None, exit_status=None, interrupted=False, interrupt_reason=None
+    )
+
+
+def _tests(outcomes: dict[str, str]) -> tuple[Result, ...]:
+    """A result per test of `t.py`, in the order given."""
+    return tuple(_result(f"t.py::{name}", outcome=outcome) for name, outcome in outcomes.items())
+
+
+def _finish(
+    store: ExecutionStore,
+    execution: Execution,
+    outcomes: dict[str, str],
+    *,
+    project: str = DEFAULT_PROJECT,
+) -> bool:
+    """Record `execution` in one report holding every result."""
+    return store.record_session(
+        execution, results=_tests(outcomes), received_at=execution.started_at, project=project
+    )
+
+
+def _comparison_of(store: ExecutionStore, run_id: str) -> tuple[str, str | None]:
+    """A run's comparison state and its baseline's id."""
+    detail = store.get_run_detail(run_id)
+    assert detail is not None
+    baseline = detail.comparison.baseline
+    return detail.comparison.state, None if baseline is None else baseline.run_id
+
+
+def _names(entries: Sequence[ChangeEntry]) -> list[tuple[str, str]]:
+    return [(entry.identity.function_name, entry.change) for entry in entries]
+
+
+def _changes(store: ExecutionStore, run_id: str) -> list[tuple[str, str, int | None]]:
+    """Every change a run's comparison stored, with its position."""
+    page = store.list_changes(run_id, limit=MAX_PAGE_ITEMS, offset=0)
+    return [(entry.identity.function_name, entry.change, entry.position) for entry in page.items]
+
+
+def check_comparison(store: ExecutionStore, run_id: str) -> str | None:
+    """Assert that `run_id`'s stored comparison is right for the baseline
+    it names -- an earlier complete run of its project, on its own branch
+    when the state says so -- and that its changes are exactly what
+    `classify` makes of the two runs' results; return the baseline's id.
+    For the concurrency tests, where which earlier run a finish sees depends
+    on what committed first."""
+    detail = store.get_run_detail(run_id)
+    assert detail is not None
+    comparison = detail.comparison
+    listed = store.list_changes(run_id, limit=MAX_PAGE_ITEMS, offset=0)
+    assert listed.has_more is False
+    if comparison.baseline is None:
+        assert comparison.state == ("pending" if detail.execution.exit_status is None else "none")
+        assert listed.items == ()
+        return None
+    baseline_id = comparison.baseline.run_id
+    baseline = store.get_execution(baseline_id)
+    assert baseline is not None
+    assert is_baseline_candidate(baseline)
+    assert (baseline.started_at, baseline_id) < (detail.execution.started_at, run_id)
+    assert store.get_run_detail(baseline_id).project == detail.project  # type: ignore[union-attr]
+    if comparison.state == "branch":
+        assert baseline.vcs is not None
+        assert detail.execution.vcs is not None
+        assert baseline.vcs.branch == detail.execution.vcs.branch
+    was = {result.identity.node_id: result.outcome for result in store.get_results(baseline_id)}
+    expected: list[tuple[str, str]] = []
+    held: set[str] = set()
+    for result in store.get_results(run_id):
+        held.add(result.identity.node_id)
+        change = classify(result.outcome, was.get(result.identity.node_id))
+        if change is not None:
+            expected.append((result.identity.node_id, change))
+    missing = "removed" if ran_to_its_end(detail.execution) else "not_reached"
+    expected.extend((node_id, missing) for node_id in was if node_id not in held)
+    assert sorted((entry.identity.node_id, entry.change) for entry in listed.items) == sorted(
+        expected
+    )
+    return baseline_id

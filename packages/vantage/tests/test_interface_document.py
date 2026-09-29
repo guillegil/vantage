@@ -47,6 +47,7 @@ from vantage.core.domain.access import (
     new_token,
     token_digest,
 )
+from vantage.core.domain.changes import COMPARISON_STATES
 from vantage.core.domain.liveness import PRESENTATIONS
 from vantage.core.domain.metadata import (
     FILE_STATUSES,
@@ -84,6 +85,9 @@ from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
 from vantage.service.routes.users import MAX_USERS_BODY_BYTES
 from vantage.service.schemas import (
     Acknowledgement,
+    BaselineResponse,
+    ChangeCountsResponse,
+    ComparisonResponse,
     CreatedTokenResponse,
     FailureProjectionResponse,
     HeartbeatAcknowledgement,
@@ -1557,6 +1561,9 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "HeartbeatAcknowledgement": HeartbeatAcknowledgement,
     "RunVcs": RunVcsResponse,
     "OutcomeCounts": OutcomeCountsResponse,
+    "Baseline": BaselineResponse,
+    "ChangeCounts": ChangeCountsResponse,
+    "Comparison": ComparisonResponse,
     "RunListItem": RunListItemResponse,
     "RunListResponse": RunListResponse,
     "MetadataHorizon": MetadataHorizonResponse,
@@ -1604,6 +1611,7 @@ _DECLARED_ENUMS: dict[tuple[str, str], frozenset[str]] = {
     ("ResultReport", "teardown_outcome"): OUTCOMES,
     ("RunListItem", "presentation"): PRESENTATIONS,
     ("RunDetailResponse", "presentation"): PRESENTATIONS,
+    ("Comparison", "state"): COMPARISON_STATES,
     ("ResultListItem", "outcome"): OUTCOMES,
     ("ResultDetailResponse", "outcome"): OUTCOMES,
     ("HistoryEntry", "outcome"): OUTCOMES,

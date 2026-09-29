@@ -80,10 +80,11 @@ def test_a_fresh_database_is_stamped_with_the_current_schema_version(tmp_path: P
     assert row == (str(_SCHEMA_VERSION),)
 
 
-def test_a_new_database_is_stamped_10_and_holds_the_default_project_alone(
+def test_a_new_database_is_stamped_11_and_holds_the_default_project_alone(
     tmp_path: Path,
 ) -> None:
-    """Version 10 is the schema with project members and the manage scope.
+    """Version 11 is the schema with run comparisons: `run.baseline_id` and
+    `result_change`.
     A report naming no project is recorded in `default`, so a new database
     has that project before anything is written to it -- and no other."""
     conn = open_database(tmp_path / "store" / "vantage.db")
@@ -93,7 +94,7 @@ def test_a_new_database_is_stamped_10_and_holds_the_default_project_alone(
     finally:
         conn.close()
 
-    assert stamp == ("10",)
+    assert stamp == ("11",)
     assert [name for name, _created_at in projects] == [DEFAULT_PROJECT]
     ((_name, created_at),) = projects
     assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}\+00:00", created_at)

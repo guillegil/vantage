@@ -33,7 +33,7 @@ from vantage.core.domain.access import (
     new_token,
     token_digest,
 )
-from vantage.core.domain.execution import Execution, Identity
+from vantage.core.domain.execution import Execution, Identity, VcsContext
 from vantage.core.domain.passwords import hash_password
 from vantage.core.domain.projects import DEFAULT_PROJECT, OWNER_ROLE, Project
 from vantage.core.domain.result import Result
@@ -49,7 +49,7 @@ from vantage.service.app import create_app
 from vantage.service.routes.sections import TEST_SECTIONS_NAMESPACE
 from vantage.storage import connection, sqlite_store
 from vantage.storage.sqlite_store import SqliteExecutionStore
-from vantage_port_contract import _result, _start_only_execution
+from vantage_port_contract import _result, _start_only_execution, check_comparison
 
 # `any_store`, for each adapter in turn.
 pytest_plugins = ["store_fixtures", "password_fixtures"]
@@ -331,6 +331,73 @@ def test_two_stores_on_one_file_both_land_every_session(tmp_path: Path) -> None:
             store.close()
 
 
+def _branch_run(index: int, *, stopped_early: bool = False) -> Execution:
+    """Run `index` of `main`, a minute after the one before; a run stopped
+    early is no one's baseline."""
+    started = datetime(2026, 9, 1, 9, 0, 0, tzinfo=timezone.utc) + timedelta(minutes=index)
+    return Execution(
+        identity=Identity(f"{index + 1:032x}"),
+        started_at=started,
+        finished_at=started + timedelta(seconds=30),
+        exit_status=1,
+        interrupted=False,
+        interrupt_reason="stopping after 1 failures" if stopped_early else None,
+        vcs=VcsContext(
+            commit="a" * 40,
+            branch="main",
+            commit_subject=None,
+            commit_subject_truncated=False,
+            dirty=False,
+            root=None,
+        ),
+    )
+
+
+def _branch_results(index: int) -> list[Result]:
+    """Twenty tests, a few failing, which ones moving from run to run, and
+    one test of the run's own."""
+    return [
+        _result(f"t.py::test_{test}", outcome="failed" if (index + test) % 7 == 0 else "passed")
+        for test in range(20)
+    ] + [_result(f"t.py::test_only_in_{index}")]
+
+
+def test_two_stores_finishing_runs_of_one_branch_at_once_compare_each_run_once(
+    tmp_path: Path,
+) -> None:
+    """Two processes on one file finish runs of one branch in turns: each
+    finish is compared, inside its own write transaction, with a complete
+    run committed before it, and stores exactly the changes against that
+    run."""
+    db_path = tmp_path / "store" / "vantage.db"
+    stores = [SqliteExecutionStore(db_path), SqliteExecutionStore(db_path)]
+    try:
+
+        def _finish(store: SqliteExecutionStore, parity: int) -> None:
+            for index in range(parity, 30, 2):
+                store.record_session(
+                    _branch_run(index, stopped_early=index % 5 == 4),
+                    results=_branch_results(index),
+                    received_at=datetime.now(timezone.utc),
+                    project=DEFAULT_PROJECT,
+                )
+
+        errors = _run_concurrently(
+            [partial(_finish, store, parity) for parity, store in enumerate(stores)]
+        )
+
+        assert errors == []
+        baselines = [check_comparison(stores[0], f"{index + 1:032x}") for index in range(30)]
+        assert baselines[0] is None
+        # A thread's own run two minutes earlier committed first, so from
+        # the third run on every run has a baseline, and none stopped early.
+        assert all(baseline is not None for baseline in baselines[2:])
+        assert not {f"{index + 1:032x}" for index in range(4, 30, 5)} & set(baselines)
+    finally:
+        for store in stores:
+            store.close()
+
+
 def test_stores_opening_one_empty_database_at_once_leave_one_default_project(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -558,6 +625,10 @@ _HELD_NODE = "tests/test_held.py::test_x"
 _HELD_PROJECT = "firmware"
 # A run of `bob`'s in `_HELD_PROJECT`.
 _HELD_MEMBER_RUN = "e" * 32
+# Two finished runs of `default`, the later compared with the earlier, so
+# the routes read its change counts too.
+_HELD_BASELINE = "1" * 32
+_HELD_COMPARED = "2" * 32
 
 # Each route that reaches the store, with the store method it calls after
 # authenticating, keyed by the operation id the document gives it (the
@@ -708,6 +779,8 @@ _ROLE_LOOKUPS: dict[str, tuple[str, str, dict[str, Any], str]] = {
 _ROUTE_READS: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "list_runs-counts": ("GET", "/api/v1/projects/default/runs", {}, "count_outcomes"),
     "get_run_detail-counts": ("GET", f"/api/v1/runs/{_HELD_RUN}", {}, "count_outcomes"),
+    "list_runs-changes": ("GET", "/api/v1/projects/default/runs", {}, "count_changes"),
+    "get_run_detail-changes": ("GET", f"/api/v1/runs/{_HELD_COMPARED}", {}, "count_changes"),
     "get_run_outcomes-outcomes": (
         "GET",
         f"/api/v1/runs/{_HELD_RUN}/outcomes",
@@ -801,6 +874,14 @@ def test_a_held_store_call_holds_up_no_other_request(
         recorded_by="bob",
         project=_HELD_PROJECT,
     )
+    for finished in (_HELD_BASELINE, _HELD_COMPARED):
+        store.record_session(
+            _execution(finished),
+            results=[_result(_HELD_NODE)],
+            received_at=now,
+            recorded_by="alice",
+            project=DEFAULT_PROJECT,
+        )
     store.upsert_setting(
         TEST_SECTIONS_NAMESPACE,
         "Seeded",

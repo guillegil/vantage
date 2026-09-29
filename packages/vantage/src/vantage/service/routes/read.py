@@ -52,6 +52,12 @@ include results stored since. `/runs/{run_id}/outcomes` gives the run's
 outcomes in stored order, one of pytest's characters each, the input a
 client draws the whole run from.
 
+A run also carries its `comparison`: the run it was compared with, read in
+the same statement as the run, and for a run compared with another, how
+many of its tests changed each way, read after the page as `counts` is. The
+store compares a run once, when it gets its exit status, so a comparison
+read as made never changes.
+
 A project's run list filters by pairs of `metadata_key` and `metadata_value`: two
 parameters rather than one `key=value` string because a value may itself
 contain `=`, repeated once per pair, and a run must hold every pair to
@@ -88,6 +94,7 @@ from vantage.core.domain.projects import Project
 from vantage.core.domain.result import OUTCOMES, Result
 from vantage.core.ports.storage import (
     MAX_PAGE_ITEMS,
+    Comparison,
     ExecutionStore,
     HistoryEntry,
     MetadataEntry,
@@ -110,6 +117,9 @@ from vantage.service.errors import (
     UnknownRunError,
 )
 from vantage.service.schemas import (
+    BaselineResponse,
+    ChangeCountsResponse,
+    ComparisonResponse,
     FailureProjectionResponse,
     HistoryEntryResponse,
     HistoryResponse,
@@ -183,8 +193,37 @@ def _outcome_counts(counts: Mapping[str, int]) -> OutcomeCountsResponse:
     )
 
 
+def _comparison(comparison: Comparison, changes: Mapping[str, int] | None) -> ComparisonResponse:
+    """Field by field. `changes` is what `count_changes` read for a run
+    compared with another, which leaves out the changes it has none of; the
+    counts are shown only for such a run, whatever the store was asked."""
+    baseline = comparison.baseline
+    if baseline is None:
+        return ComparisonResponse(state=comparison.state, baseline=None, counts=None)
+    counts = changes or {}
+    return ComparisonResponse(
+        state=comparison.state,
+        baseline=BaselineResponse(
+            id=baseline.run_id, started_at=baseline.started_at, branch=baseline.branch
+        ),
+        counts=ChangeCountsResponse(
+            new_failure=counts.get("new_failure", 0),
+            still_failing=counts.get("still_failing", 0),
+            fixed=counts.get("fixed", 0),
+            new_test=counts.get("new_test", 0),
+            removed=counts.get("removed", 0),
+            not_reached=counts.get("not_reached", 0),
+        ),
+    )
+
+
 def _run_list_item(
-    entry: RunListEntry, *, counts: Mapping[str, int], now: datetime, grace: timedelta
+    entry: RunListEntry,
+    *,
+    counts: Mapping[str, int],
+    changes: Mapping[str, int] | None,
+    now: datetime,
+    grace: timedelta,
 ) -> RunListItemResponse:
     execution = entry.execution
     return RunListItemResponse(
@@ -199,11 +238,17 @@ def _run_list_item(
         vcs=_vcs_response(entry.vcs),
         recorded_by=entry.recorded_by,
         counts=_outcome_counts(counts),
+        comparison=_comparison(entry.comparison, changes),
     )
 
 
 def _run_detail_response(
-    detail: RunDetail, *, counts: Mapping[str, int], now: datetime, grace: timedelta
+    detail: RunDetail,
+    *,
+    counts: Mapping[str, int],
+    changes: Mapping[str, int] | None,
+    now: datetime,
+    grace: timedelta,
 ) -> RunDetailResponse:
     execution = detail.execution
     return RunDetailResponse(
@@ -220,6 +265,7 @@ def _run_detail_response(
         recorded_by=detail.recorded_by,
         project=detail.project,
         counts=_outcome_counts(counts),
+        comparison=_comparison(detail.comparison, changes),
     )
 
 
@@ -386,7 +432,10 @@ def list_runs(
     key with U+0000 replaced by U+FFFD, the text a report carrying the key
     stores, so the store is still asked once, for one snapshot, and never
     with U+0000. Each run's `counts` are read after the page, in one more
-    call for all of them."""
+    call for all of them, and the change counts of the runs the page read as
+    compared in one more: a run read as compared had its changes committed
+    with its exit status, so they are complete, and a run read as pending
+    is never given counts, whatever was stored since."""
     after = _run_key(cursor, offset)
     keys = metadata_key or []
     values = metadata_value or []
@@ -417,11 +466,14 @@ def list_runs(
     else:
         page = store.list_runs(project=project.name, limit=limit, offset=offset, after=after)
     outcome_counts = store.count_outcomes([entry.execution.identity.value for entry in page.items])
+    compared = [entry.execution.identity.value for entry in page.items if entry.comparison.compared]
+    change_counts = store.count_changes(compared) if compared else {}
     now = datetime.now(timezone.utc)
     items = [
         _run_list_item(
             entry,
             counts=outcome_counts.get(entry.execution.identity.value, {}),
+            changes=change_counts.get(entry.execution.identity.value),
             now=now,
             grace=grace,
         )
@@ -445,10 +497,14 @@ def get_run_detail(
     """`GET /api/v1/runs/{run_id}`. An unknown run is the same
     `UnknownRunError` the heartbeat route raises: one rejection shape per
     kind, not one per route. `counts` is read after the run, as the list
-    reads it after its page."""
+    reads it after its page, and so are the change counts of a run read as
+    compared."""
     run_id = detail.execution.identity.value
     counts = store.count_outcomes([run_id]).get(run_id, {})
-    return _run_detail_response(detail, counts=counts, now=datetime.now(timezone.utc), grace=grace)
+    changes = store.count_changes([run_id]).get(run_id) if detail.comparison.compared else None
+    return _run_detail_response(
+        detail, counts=counts, changes=changes, now=datetime.now(timezone.utc), grace=grace
+    )
 
 
 @router.get("/runs/{run_id}/outcomes")

@@ -1,6 +1,6 @@
 """Validation of a session report's `results`, `vcs` and `metadata`
-sections, and the outcome vocabulary the models share with the core and the
-schema.
+sections, and the outcome and change vocabularies the models share with the
+core and the schemas.
 
 `VcsReport.commit` accepts a SHA-256 (64 hex chars), never only a 40-hex
 pattern -- git is migrating away from SHA-1.
@@ -14,6 +14,7 @@ from typing import get_args
 
 import pytest
 from pydantic import ValidationError
+from vantage.core.domain.changes import CHANGES
 from vantage.core.domain.result import OUTCOMES
 from vantage.ingestion.schemas import (
     MetadataFileReport,
@@ -75,6 +76,19 @@ def test_outcome_vocabulary_matches_across_schema_sql_core_and_ingestion() -> No
 
     assert schema_outcomes == OUTCOMES
     assert schema_outcomes == frozenset(get_args(_Outcome))
+
+
+@pytest.mark.parametrize("package", ["vantage.storage", "vantage.storage.postgres"])
+def test_change_vocabulary_matches_across_both_schemas_and_the_core(package: str) -> None:
+    """The six change words live in each schema's CHECK and in `CHANGES`,
+    which `compare` produces: a word one knows and the other refuses would
+    fail every finish that records it."""
+    schema_sql = importlib.resources.files(package).joinpath("schema.sql").read_text("utf-8")
+    match = re.search(r"CHECK \(change IN \(([^)]+)\)\)", schema_sql)
+    assert match is not None
+    schema_changes = frozenset(value.strip(" '\n") for value in match.group(1).split(","))
+
+    assert schema_changes == CHANGES
 
 
 def _well_formed_vcs(**overrides: object) -> dict[str, object]:
