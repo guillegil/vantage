@@ -744,7 +744,29 @@ project you had open last, or of `default`.
   xpassed) with the first line of each failure, every result in order, and
   its metadata. Failure text shows only for runs recorded with
   `--vantage-failure-text`. Under pytest-xdist the workers' results
-  interleave in the line, as they were reported.
+  interleave in the line, as they were reported. Each result opens its own
+  page.
+- **A result**: the test's node id and outcome, with the run's status,
+  commit and who recorded it; everything recorded about why it did not pass,
+  each verbatim in a block of its own -- the traceback (marked with the phase
+  and the line it failed at), the exception's message and `repr`, the skip or
+  xfail reason, and the captured stdout and stderr -- saying where the plugin
+  cut a field to 64 KiB, or dropped it when the session's failure text passed
+  512 KiB, and that this text may hold anything a test printed or asserted,
+  credentials included; how long setup, call and teardown took and which of
+  them failed; the run's metadata; and the test's latest 24 runs in the
+  run's project, oldest first, as a line of marks with its pass rate or
+  failing streak and a line of durations, each run opening its result there.
+  Where a result holds none of this, the page says why: a failure without
+  failure text was recorded without `--vantage-failure-text`; any other
+  result may also have run with output capture off (`-s`).
+  A character that reorders or hides text, such as a right-to-left override,
+  a zero-width space, or the U+FFFD the server stores for U+0000, shows as
+  its code point (`U+202E`) in node ids and failure text, so neither reads as
+  something else.
+- **A test's history** in a project, newest first, fifty at a time: each
+  run's outcome, commit, start and duration, each opening that run's
+  result, under the same line of marks and durations for the runs listed.
 - **A server with no users**, as one serving a local store's database, needs
   no sign-in, and says that anyone who can reach it can read and record.
 - **A server with users** asks you to sign in with a user's name and

@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { type ReactNode, useMemo } from 'react';
 import { useOutletContext, useParams } from 'react-router';
 import {
   dotlineLabel,
@@ -39,6 +39,7 @@ import {
   SummaryLine,
   Time,
   UserChip,
+  visible,
 } from '../ds';
 import { FailureNotice } from './Failure';
 import { NotFoundPage } from './NotFound';
@@ -53,13 +54,13 @@ const COLUMNS: DataTableColumn<ResultRow>[] = [
     width: 88,
     render: (r) => <OutcomeMark outcome={r.outcome} />,
   },
-  { key: 'nodeId', label: 'Test', render: (r) => <NodeId value={r.nodeId} /> },
+  { key: 'nodeId', label: 'Test', render: (r) => <NodeId value={r.nodeId} href={r.href} /> },
   {
     key: 'message',
     label: 'Why',
     render: (r) =>
       r.message ? (
-        <span className="dl-mono">{r.message}</span>
+        <span className="dl-mono">{visible(r.message)}</span>
       ) : (
         <span className="dl-meta__none">—</span>
       ),
@@ -74,6 +75,7 @@ const COLUMNS: DataTableColumn<ResultRow>[] = [
 ];
 
 function ResultsPanel({
+  runId,
   title,
   caption,
   pages,
@@ -83,6 +85,7 @@ function ResultsPanel({
   error,
   retry,
 }: {
+  runId: string;
   title: string;
   caption: string;
   pages: { items: Parameters<typeof resultRow>[0][] }[] | undefined;
@@ -93,8 +96,8 @@ function ResultsPanel({
   retry: () => void;
 }) {
   const rows = useMemo(
-    () => (pages ?? []).flatMap((page) => page.items).map((item, i) => resultRow(item, i)),
-    [pages],
+    () => (pages ?? []).flatMap((page) => page.items).map((item, i) => resultRow(item, i, runId)),
+    [pages, runId],
   );
   return (
     <Panel title={title} flush>
@@ -160,6 +163,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
         </div>
         {notPassingCount > 0 ? (
           <ResultsPanel
+            runId={detail.id}
             title="Not passing"
             caption="Results that failed, errored or passed unexpectedly"
             pages={notPassing.data?.pages}
@@ -171,6 +175,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
           />
         ) : null}
         <ResultsPanel
+          runId={detail.id}
           title="All results"
           caption={`Every result, ${ORDER}`}
           pages={results.data?.pages}
@@ -210,8 +215,13 @@ function RunView({ runId }: { runId: string }) {
       </span>
     </h1>
   );
-  if (run.isError) {
-    let body = null;
+  let crumbs: ReactNode = null;
+  let sub: ReactNode = null;
+  let body: ReactNode = null;
+  let loose = false;
+  // A session that ended keeps what is shown.
+  if (run.isError && !(isApiError(run.error, 401) && detail)) {
+    loose = true;
     if (isApiError(run.error, 404)) {
       body = (
         <EmptyState
@@ -234,26 +244,15 @@ function RunView({ runId }: { runId: string }) {
     } else if (!isApiError(run.error, 401)) {
       body = <FailureNotice error={run.error} retry={() => run.refetch()} busy={run.isFetching} />;
     }
-    return (
-      <div className="dl-stack dl-stack--loose">
-        {title}
-        {body}
-      </div>
+  } else if (!detail) {
+    body = (
+      <p className="dl-caption" role="status">
+        Loading…
+      </p>
     );
-  }
-  if (!detail) {
-    return (
-      <div className="dl-stack">
-        {title}
-        <p className="dl-caption" role="status">
-          Loading…
-        </p>
-      </div>
-    );
-  }
-  const head = runHead(detail);
-  return (
-    <div className="dl-stack">
+  } else {
+    const head = runHead(detail);
+    crumbs = (
       <nav className="dl-crumbs" aria-label="Breadcrumb">
         <a className="dl-link" href={runsHref(detail.project)}>
           Runs
@@ -263,37 +262,44 @@ function RunView({ runId }: { runId: string }) {
           {head.label}
         </span>
       </nav>
+    );
+    sub = (
+      <div className="dl-pagehead__sub">
+        <RunStatus {...head.status} />
+        {head.reason ? <span>{visible(head.reason)}</span> : null}
+        <CommitRef {...head.commit} />
+        {head.recordedBy ? (
+          <UserChip name={head.recordedBy} you={head.recordedBy === session.user?.name} size="sm" />
+        ) : (
+          <span>recorded without a token</span>
+        )}
+        <span>
+          started <Time value={head.startedAt} mode="absolute" />
+        </span>
+        {head.finishedAt ? (
+          <span>
+            finished <Time value={head.finishedAt} mode="absolute" />
+          </span>
+        ) : null}
+        {head.seconds !== undefined ? (
+          <span className="dl-num">{fmtSeconds(head.seconds)}</span>
+        ) : null}
+      </div>
+    );
+    body = <RunBody detail={detail} />;
+  }
+  // One head in every state: the heading focused after a navigation, while the run loads,
+  // is the element that stays once it has, so focus is not dropped to the page's body.
+  return (
+    <div className={loose ? 'dl-stack dl-stack--loose' : 'dl-stack'}>
+      {crumbs}
       <div className="dl-pagehead">
         <div className="dl-pagehead__main">
           {title}
-          <div className="dl-pagehead__sub">
-            <RunStatus {...head.status} />
-            {head.reason ? <span>{head.reason}</span> : null}
-            <CommitRef {...head.commit} />
-            {head.recordedBy ? (
-              <UserChip
-                name={head.recordedBy}
-                you={head.recordedBy === session.user?.name}
-                size="sm"
-              />
-            ) : (
-              <span>recorded without a token</span>
-            )}
-            <span>
-              started <Time value={head.startedAt} mode="absolute" />
-            </span>
-            {head.finishedAt ? (
-              <span>
-                finished <Time value={head.finishedAt} mode="absolute" />
-              </span>
-            ) : null}
-            {head.seconds !== undefined ? (
-              <span className="dl-num">{fmtSeconds(head.seconds)}</span>
-            ) : null}
-          </div>
+          {sub}
         </div>
       </div>
-      <RunBody detail={detail} />
+      {body}
     </div>
   );
 }

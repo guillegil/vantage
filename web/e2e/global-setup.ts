@@ -1,8 +1,8 @@
 // Two real vantage servers, on loopback ports of their own: a closed one,
 // with users alice (an admin) and bob (a viewer of firmware), and an open
-// one serving a local store's database. Each has recorded the suite in
-// suite.ts. Their addresses and the passwords reach the tests through the
-// environment.
+// one serving a local store's database. The closed one has recorded the
+// suite in suite.ts once, the open one twice. Their addresses and the
+// passwords reach the tests through the environment.
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
@@ -48,6 +48,9 @@ function pytest(dir: string, args: string[], env: Record<string, string> = {}): 
         'pytest',
         '-p',
         'no:cacheprovider',
+        // A parameter's id keeps the characters it was given, as the suite's U+202E.
+        '-o',
+        'disable_test_id_escaping_and_forfeit_all_rights_to_community_support=true',
         ...args,
         'suite.py',
       ],
@@ -142,15 +145,18 @@ export default async function globalSetup(): Promise<void> {
     { VANTAGE_TOKEN: token },
   );
 
+  // Recorded twice, so a test there has a history of two runs.
   const open = join(dir, 'open.db');
-  pytest(dir, [
-    '--vantage',
-    '--vantage-mode',
-    'local',
-    '--vantage-local-database',
-    open,
-    '--vantage-failure-text',
-  ]);
+  for (let i = 0; i < 2; i++) {
+    pytest(dir, [
+      '--vantage',
+      '--vantage-mode',
+      'local',
+      '--vantage-local-database',
+      open,
+      '--vantage-failure-text',
+    ]);
+  }
   const openBase = await serve(open, openPort === closedPort ? await freePort() : openPort);
 
   process.env.VANTAGE_E2E_DIR = dir;

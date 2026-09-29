@@ -14,14 +14,14 @@ test('a run shows its counts and one mark per result', async ({ page, watch }) =
   await page.goto(`${OPEN()}/p/default/runs`);
   const row = page.getByRole('listitem').first();
   await expect(row).toContainText('2 failed');
-  await expect(row).toContainText('3 passed');
+  await expect(row).toContainText('4 passed');
   await expect(row).toContainText('1 skipped');
   await expect(row).toContainText('1 xfailed');
   await expect(row).toContainText('1 xpassed');
   await expect(row).toContainText('1 error');
-  // One mark per result once the row's outcomes are read: nine results, the
+  // One mark per result once the row's outcomes are read: ten results, the
   // error's bar broken in two.
-  await expect(row.locator('svg[role="img"] rect:not(.dl-dotline__base)')).toHaveCount(10);
+  await expect(row.locator('svg[role="img"] rect:not(.dl-dotline__base)')).toHaveCount(11);
 });
 
 test('opening a run moves within the page, and the run lists what did not pass', async ({
