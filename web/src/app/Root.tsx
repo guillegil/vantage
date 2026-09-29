@@ -1,14 +1,14 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback } from 'react';
 import { Navigate, Outlet, useLocation, useMatch, useNavigate } from 'react-router';
 import { projectRef, runsHref } from '../adapt';
 import { isApiError } from '../api/client';
 import { type Session, signOut, useProjects, useRun, useSession } from '../api/queries';
 import { AppBar, Button, Notice } from '../ds';
 import { FailureNotice } from '../pages/Failure';
+import { useGo, useGoSignIn } from './go';
 import { useInAppLinks } from './links';
 import { signInHref } from './next';
-import { clearSessionEnded, sessionEndedAt, useSessionEnded } from './sessionEnd';
+import { clearSessionEnded, useSessionEnded } from './sessionEnd';
 
 const RUN_ID = /^[0-9a-f]{32}$/;
 
@@ -18,20 +18,6 @@ export function hhmm(value: Date | string): string {
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
 }
 
-// Sends the browser to sign in, forgetting who it was signed in as, so the
-// sign-in page asks the server afresh.
-export function useGoSignIn() {
-  const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  return useCallback(
-    (next: string) => {
-      queryClient.removeQueries({ queryKey: ['session'] });
-      navigate(signInHref(next));
-    },
-    [queryClient, navigate],
-  );
-}
-
 function here(location: { pathname: string; search: string; hash: string }): string {
   return `${location.pathname}${location.search}${location.hash}`;
 }
@@ -39,7 +25,7 @@ function here(location: { pathname: string; search: string; hash: string }): str
 // The project the page is about: named in its address, or the run's.
 function useCurrentProject(): string | null {
   const runs = useMatch('/p/:project/*');
-  const run = useMatch('/runs/:runId');
+  const run = useMatch('/runs/:runId/*');
   const runId = run?.params.runId ?? '';
   const detail = useRun(runId, RUN_ID.test(runId));
   if (runs?.params.project) return runs.params.project;
@@ -54,14 +40,8 @@ function Shell({ session }: { session: Session }) {
   const ended = useSessionEnded();
   const current = useCurrentProject();
   const projects = useProjects();
-  const go = useCallback(
-    (path: string) => {
-      // Once the session has ended, a link leads to signing in first.
-      if (sessionEndedAt()) goSignIn(path);
-      else navigate(path);
-    },
-    [goSignIn, navigate],
-  );
+  // Once the session has ended, a link leads to signing in first.
+  const go = useGo();
   useInAppLinks(go);
   const items = projects.data?.items ?? [];
   const found = items.find((p) => p.name === current);

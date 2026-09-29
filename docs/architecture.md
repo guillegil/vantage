@@ -1231,7 +1231,8 @@ temporary directory.
 | `src/adapt/` | pure functions from API responses to component props, the only code that knows both names |
 | `src/ds/` | the design system's port |
 | `src/app/` | the router, the layout that asks who is asking first, link handling, the session's end |
-| `src/pages/` | sign-in, a project's runs, a run, not found |
+| `src/testing/` | the stand-in server the page tests render against; nothing imports it but tests |
+| `src/pages/` | sign-in, a project's runs, a run, a result, a test's history, not found |
 | `build/` | the tokens plugin, the Biome rule against HTML sinks, the build check |
 | `e2e/` | Playwright against real servers |
 
@@ -1243,7 +1244,9 @@ markup, classes, words, aria and behaviour, beside its README copied
 verbatim with the port's notes after it; `contract.test-d.ts`, checked by
 `tsc`, assigns each to the type `contract.d.ts` declares, so a prop that
 drifts fails `typecheck`. Only what the screens use is ported, and nothing
-that shows what the server does not store. Components never fetch.
+that shows what the server does not store. Components never fetch. The few
+rules the port adds sit in `port.css`, loaded after `dotline.css`, each
+named in the port notes of the component that uses it.
 
 **The tokens are CSS made on the fly** by `build/dotline-tokens.ts`, a Vite
 plugin that resolves `virtual:dotline-tokens.css` to a name beside
@@ -1256,7 +1259,8 @@ declared.
 
 **State.** Server state lives in TanStack Query alone, view state in the
 address; web storage holds only the last project opened. A finished run's
-detail, outcomes and results never change, so they are never refetched;
+detail, outcomes, results and each result in full never change, so they
+are never refetched;
 lists go stale after 30 seconds. A refusal is not retried; no answer or a
 server error is retried once. `GET /session` decides the layout: a `401`
 there sends the browser to `/sign-in?next=`, where `next` is kept only as a
@@ -1275,6 +1279,12 @@ built files, without a reload.
 `build/no-html-sinks.grit` refuses `innerHTML`, `outerHTML`,
 `insertAdjacentHTML` and `document.write`, `dangerouslySetInnerHTML` is an
 error, and the page policy's Trusted Types make any such sink throw.
+Recorded text is also shown as it is: `NodeId`, `Evidence` and the run
+page's first line of each failure print each bidirectional control,
+invisible format character, C0 or C1 control (tab and line breaks aside)
+and U+FFFD as its code point in a marked box (`ds/lib/visible.tsx`), so a
+right-to-left override can never make a node id or a traceback read as
+something else; *Copy* still copies the text as recorded.
 
 ### Build, packaging and CI
 
@@ -1296,7 +1306,9 @@ which builds the wheels with it and checks the wheel lists the page and a
 script. The `e2e` job builds its own client and runs Playwright in Chromium
 against two servers on loopback, a closed one with users and an open one
 serving a local store's database, each having recorded a real pytest
-session with hostile node ids and failure text. The image builds the client
+session with hostile node ids and failure text, and characters that
+reorder text, in every field a result page shows (the open one twice, so a
+test there has a history). The image builds the client
 in a Node stage from the lock and copies only its output into the package
 before `uv sync`; the image itself holds no Node, and its job checks that
 the published port answers the page and its script.

@@ -9,8 +9,11 @@ import {
   CommitRef,
   DataTable,
   Dotline,
+  DurationSpark,
   EmptyState,
+  Evidence,
   Field,
+  HistoryGrid,
   Icon,
   MenuButton,
   MetaList,
@@ -20,6 +23,7 @@ import {
   OutcomeMark,
   Pager,
   Panel,
+  PhaseTimeline,
   PinButton,
   ProjectSwitcher,
   RecordingGuide,
@@ -43,8 +47,11 @@ export const ported: {
     | 'CommitRef'
     | 'DataTable'
     | 'Dotline'
+    | 'DurationSpark'
     | 'EmptyState'
+    | 'Evidence'
     | 'Field'
+    | 'HistoryGrid'
     | 'Icon'
     | 'MenuButton'
     | 'MetaList'
@@ -54,6 +61,7 @@ export const ported: {
     | 'OutcomeMark'
     | 'Pager'
     | 'Panel'
+    | 'PhaseTimeline'
     | 'PinButton'
     | 'ProjectSwitcher'
     | 'RecordingGuide'
@@ -74,8 +82,11 @@ export const ported: {
   CommitRef,
   DataTable,
   Dotline,
+  DurationSpark,
   EmptyState,
+  Evidence,
   Field,
+  HistoryGrid,
   Icon,
   MenuButton,
   MetaList,
@@ -85,6 +96,7 @@ export const ported: {
   OutcomeMark,
   Pager,
   Panel,
+  PhaseTimeline,
   PinButton,
   ProjectSwitcher,
   RecordingGuide,

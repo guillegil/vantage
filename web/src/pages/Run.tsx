@@ -39,6 +39,7 @@ import {
   SummaryLine,
   Time,
   UserChip,
+  visible,
 } from '../ds';
 import { FailureNotice } from './Failure';
 import { NotFoundPage } from './NotFound';
@@ -53,13 +54,13 @@ const COLUMNS: DataTableColumn<ResultRow>[] = [
     width: 88,
     render: (r) => <OutcomeMark outcome={r.outcome} />,
   },
-  { key: 'nodeId', label: 'Test', render: (r) => <NodeId value={r.nodeId} /> },
+  { key: 'nodeId', label: 'Test', render: (r) => <NodeId value={r.nodeId} href={r.href} /> },
   {
     key: 'message',
     label: 'Why',
     render: (r) =>
       r.message ? (
-        <span className="dl-mono">{r.message}</span>
+        <span className="dl-mono">{visible(r.message)}</span>
       ) : (
         <span className="dl-meta__none">—</span>
       ),
@@ -74,6 +75,7 @@ const COLUMNS: DataTableColumn<ResultRow>[] = [
 ];
 
 function ResultsPanel({
+  runId,
   title,
   caption,
   pages,
@@ -83,6 +85,7 @@ function ResultsPanel({
   error,
   retry,
 }: {
+  runId: string;
   title: string;
   caption: string;
   pages: { items: Parameters<typeof resultRow>[0][] }[] | undefined;
@@ -93,8 +96,8 @@ function ResultsPanel({
   retry: () => void;
 }) {
   const rows = useMemo(
-    () => (pages ?? []).flatMap((page) => page.items).map((item, i) => resultRow(item, i)),
-    [pages],
+    () => (pages ?? []).flatMap((page) => page.items).map((item, i) => resultRow(item, i, runId)),
+    [pages, runId],
   );
   return (
     <Panel title={title} flush>
@@ -160,6 +163,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
         </div>
         {notPassingCount > 0 ? (
           <ResultsPanel
+            runId={detail.id}
             title="Not passing"
             caption="Results that failed, errored or passed unexpectedly"
             pages={notPassing.data?.pages}
@@ -171,6 +175,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
           />
         ) : null}
         <ResultsPanel
+          runId={detail.id}
           title="All results"
           caption={`Every result, ${ORDER}`}
           pages={results.data?.pages}

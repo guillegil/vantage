@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { NodeIdProps } from '../contract';
 import { cx } from '../lib/cx';
+import { visible, visibleText } from '../lib/visible';
 
 // Path, classes, function and [parameters]; "::" inside the brackets stays in the parameters.
 export function parseNodeId(v: string) {
@@ -30,28 +31,28 @@ export function NodeId(p: NodeIdProps) {
   const n = parseNodeId(v);
   const head: ReactNode[] = [];
   const tail: ReactNode[] = [];
-  if (n.dir) head.push(<span key="d">{p.truncate ? '…/' : n.dir}</span>);
+  if (n.dir) head.push(<span key="d">{p.truncate ? '…/' : visible(n.dir)}</span>);
   // Unwrapped, a long id breaks after its directory and before "::" rather than inside a name.
   if (n.dir && !p.truncate) head.push(<wbr key="dw" />);
   head.push(
     <span key="f" className={n.fn ? 'dl-nodeid__file' : 'dl-nodeid__fn'}>
-      {n.file}
+      {visible(n.file)}
     </span>,
   );
   n.mids.forEach((m, i) => {
     // biome-ignore lint/suspicious/noArrayIndexKey: the classes of one node id, in order.
-    head.push(<span key={`m${i}`}>{`::${m}`}</span>);
+    head.push(<span key={`m${i}`}>{visible(`::${m}`)}</span>);
   });
   if (n.fn) {
     if (!p.truncate) tail.push(<wbr key="sw" />);
     tail.push(<span key="s">::</span>);
     tail.push(
       <span key="fn" className="dl-nodeid__fn">
-        {n.fn}
+        {visible(n.fn)}
       </span>,
     );
   }
-  if (n.param) tail.push(<span key="pa">{n.param}</span>);
+  if (n.param) tail.push(<span key="pa">{visible(n.param)}</span>);
   const props = {
     className: cx(
       'dl-nodeid',
@@ -59,7 +60,7 @@ export function NodeId(p: NodeIdProps) {
       p.size === 'lg' && 'dl-nodeid--lg',
       p.className,
     ),
-    title: v,
+    title: visibleText(v),
     translate: 'no' as const,
     dir: 'ltr' as const,
   };

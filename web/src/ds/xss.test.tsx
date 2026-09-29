@@ -10,10 +10,13 @@ import {
   CommitRef,
   DataTable,
   EmptyState,
+  Evidence,
+  HistoryGrid,
   MetaList,
   NodeId,
   Notice,
   Panel,
+  PhaseTimeline,
   RecordingGuide,
   RunList,
   UserChip,
@@ -49,6 +52,17 @@ function cases(s: string): [string, ReactElement][] {
       </Panel>,
     ],
     ['UserChip', <UserChip key="u" name={s} />],
+    ['Evidence', <Evidence key="ev" title={s} meta={s} text={`E   ${s}\n> ${s}`} truncated={s} />],
+    ['Evidence output', <Evidence key="eo" kind="output" text={s} notice={s} />],
+    [
+      'HistoryGrid',
+      <HistoryGrid
+        key="h"
+        runs={[{ id: 'a', label: s, detail: s, href: '/r' }]}
+        rows={[{ nodeid: `t.py::t[${s}]`, outcomes: ['failed'] }]}
+      />,
+    ],
+    ['PhaseTimeline', <PhaseTimeline key="ph" phases={[{ name: s, seconds: 1 }]} />],
     ['RecordingGuide', <RecordingGuide key="r" project={s} server={s} />],
     [
       'DataTable',

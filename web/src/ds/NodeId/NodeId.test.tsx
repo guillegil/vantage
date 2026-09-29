@@ -2,6 +2,9 @@ import { render, screen } from '@testing-library/react';
 import { expect, it } from 'vitest';
 import { NodeId, parseNodeId } from './NodeId';
 
+const ZWSP = String.fromCodePoint(0x200b);
+const RLO = String.fromCodePoint(0x202e);
+
 it('splits a node id into its path, classes, function and parameters', () => {
   expect(parseNodeId('tests/comms/test_uart.py::TestUart::test_dma[a::b]')).toEqual({
     dir: 'tests/comms/',
@@ -32,4 +35,14 @@ it('gives way from the path when truncated, and links when given an address', ()
 it('says nothing was recorded for an empty id', () => {
   render(<NodeId value="" />);
   expect(screen.getByTitle('Not recorded')).toHaveTextContent('—');
+});
+
+it('shows a bidi control or invisible character as its code point, never obeying it', () => {
+  const value = `tests/test_a.py::test_x[${RLO}evil${ZWSP}]`;
+  const { container } = render(<NodeId value={value} />);
+  const id = container.firstChild as HTMLElement;
+  expect(id).toHaveTextContent('tests/test_a.py::test_x[U+202EevilU+200B]');
+  for (const ch of [RLO, ZWSP]) expect(id.textContent).not.toContain(ch);
+  expect(id.querySelectorAll('.dl-hidden-char')).toHaveLength(2);
+  expect(id).toHaveAttribute('title', 'tests/test_a.py::test_x[⟨U+202E⟩evil⟨U+200B⟩]');
 });

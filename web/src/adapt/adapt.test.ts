@@ -1,11 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import type { Project, ResultItem, RunDetail, RunListItem, RunMetadata } from '../api/queries';
+import type {
+  HistoryEntry,
+  Project,
+  ResultDetail,
+  ResultItem,
+  RunDetail,
+  RunListItem,
+  RunMetadata,
+} from '../api/queries';
 import {
   dotlineLabel,
+  failingPhase,
+  historyHref,
+  historyRow,
+  historyStrip,
+  KEPT,
   metaItems,
   NOT_RECORDED,
   outcomesToResults,
   projectRef,
+  resultEvidence,
+  resultHref,
+  resultPhases,
   resultRow,
   runHead,
   runItem,
@@ -206,9 +222,10 @@ describe('resultRow', () => {
   };
 
   it('takes the first line of the failure message', () => {
-    expect(resultRow(RESULT, 0)).toEqual({
+    expect(resultRow(RESULT, 0, ID)).toEqual({
       key: '0:tests/test_a.py::test_one',
       nodeId: 'tests/test_a.py::test_one',
+      href: `/runs/${ID}/result?node_id=tests%2Ftest_a.py%3A%3Atest_one`,
       outcome: 'failed',
       message: 'AssertionError: expected 3.3V',
       seconds: 0.25,
@@ -216,7 +233,7 @@ describe('resultRow', () => {
   });
 
   it('says failure text was not recorded when it was not', () => {
-    const row = resultRow({ ...RESULT, outcome: 'error', failure: null }, 1);
+    const row = resultRow({ ...RESULT, outcome: 'error', failure: null }, 1, ID);
     expect(row.message).toBe(NOT_RECORDED);
   });
 
@@ -232,8 +249,258 @@ describe('resultRow', () => {
         },
       },
       2,
+      ID,
     );
     expect(skipped.message).toBe('no rig');
-    expect(resultRow({ ...RESULT, outcome: 'passed', failure: null }, 3).message).toBeNull();
+    expect(resultRow({ ...RESULT, outcome: 'passed', failure: null }, 3, ID).message).toBeNull();
+  });
+});
+
+describe('addresses', () => {
+  it('carries a node id in the query string, encoded whole', () => {
+    const node = 'tests/a b.py::T::test_x[a/b&c=d#e?]';
+    const href = resultHref(ID, node);
+    expect(href.startsWith(`/runs/${ID}/result?node_id=`)).toBe(true);
+    expect(new URL(href, 'http://h').searchParams.get('node_id')).toBe(node);
+    const history = historyHref('fw/x', node);
+    expect(history.startsWith('/p/fw%2Fx/tests/history?node_id=')).toBe(true);
+    expect(new URL(history, 'http://h').searchParams.get('node_id')).toBe(node);
+  });
+});
+
+const DETAIL: ResultDetail = {
+  node_id: 'tests/test_a.py::test_one',
+  file_path: 'tests/test_a.py',
+  class_name: null,
+  function_name: 'test_one',
+  param_id: null,
+  outcome: 'failed',
+  duration: 7.4,
+  started_at: '2026-09-27T09:00:00Z',
+  finished_at: '2026-09-27T09:00:07.400Z',
+  setup_outcome: 'passed',
+  call_outcome: 'failed',
+  teardown_outcome: 'passed',
+  setup_duration: 0.9,
+  call_duration: 6.2,
+  teardown_duration: 0.3,
+  worker_id: null,
+  failure_type: 'AssertionError',
+  failure_message: 'AssertionError: expected 3.3V',
+  failure_message_truncated: false,
+  failure_path: 'tests/test_a.py',
+  failure_lineno: 12,
+  failure_repr: "AssertionError('expected 3.3V')",
+  failure_repr_truncated: false,
+  traceback: 'E   AssertionError',
+  traceback_truncated: true,
+  skip_reason: null,
+  skip_reason_truncated: false,
+  xfail_reason: null,
+  xfail_reason_truncated: false,
+  captured_stdout: 'hello\n',
+  captured_stdout_truncated: false,
+  captured_stderr: null,
+  captured_stderr_truncated: true,
+};
+
+const NOTHING: Partial<ResultDetail> = {
+  failure_type: null,
+  failure_message: null,
+  failure_path: null,
+  failure_lineno: null,
+  failure_repr: null,
+  traceback: null,
+  traceback_truncated: false,
+  captured_stdout: null,
+  captured_stderr: null,
+  captured_stderr_truncated: false,
+};
+
+describe('resultEvidence', () => {
+  it('lists what was recorded in reading order, with where it failed and what was cut', () => {
+    const ev = resultEvidence(DETAIL);
+    expect(ev.blocks).toEqual([
+      {
+        key: 'traceback',
+        title: 'Traceback',
+        text: 'E   AssertionError',
+        kind: 'traceback',
+        meta: 'call phase · tests/test_a.py:12',
+        truncated: KEPT,
+      },
+      {
+        key: 'message',
+        title: 'Message',
+        text: 'AssertionError: expected 3.3V',
+        kind: 'output',
+        meta: 'AssertionError',
+      },
+      {
+        key: 'repr',
+        title: 'Exception repr',
+        text: "AssertionError('expected 3.3V')",
+        kind: 'output',
+      },
+      {
+        key: 'stdout',
+        title: 'Captured stdout',
+        text: 'hello\n',
+        kind: 'output',
+        meta: 'setup, call and teardown',
+      },
+    ]);
+    expect(ev.dropped).toEqual(['Captured stderr']);
+    expect(ev.recorded).toBe(true);
+    expect(ev.silent).toBe(false);
+  });
+
+  it('gives a skip and an xfail their reasons', () => {
+    const skipped = resultEvidence({
+      ...DETAIL,
+      ...NOTHING,
+      outcome: 'skipped',
+      skip_reason: 'Skipped: no rig',
+    });
+    expect(skipped.blocks.map((b) => [b.title, b.text])).toEqual([
+      ['Skip reason', 'Skipped: no rig'],
+    ]);
+    const xfailed = resultEvidence({
+      ...DETAIL,
+      ...NOTHING,
+      outcome: 'xfailed',
+      xfail_reason: 'known drift',
+      xfail_reason_truncated: true,
+    });
+    expect(xfailed.blocks).toEqual([
+      { key: 'xfail', title: 'Xfail reason', text: 'known drift', kind: 'output', truncated: KEPT },
+    ]);
+  });
+
+  it('knows failure text was not recorded when every field is null', () => {
+    const ev = resultEvidence({ ...DETAIL, ...NOTHING });
+    expect(ev).toEqual({ blocks: [], dropped: [], recorded: false, silent: false });
+  });
+
+  it('knows output was captured and empty', () => {
+    const ev = resultEvidence({
+      ...DETAIL,
+      ...NOTHING,
+      outcome: 'passed',
+      captured_stdout: '',
+      captured_stderr: '',
+    });
+    expect(ev).toEqual({ blocks: [], dropped: [], recorded: true, silent: true });
+  });
+});
+
+describe('phases', () => {
+  it('finds the phase that failed', () => {
+    expect(failingPhase(DETAIL)).toBe('call');
+    expect(failingPhase({ ...DETAIL, setup_outcome: 'failed', call_outcome: null })).toBe('setup');
+    expect(failingPhase({ ...DETAIL, call_outcome: 'passed' })).toBeNull();
+  });
+
+  it('draws each phase that ran, naming what did not pass as the result saw it', () => {
+    expect(resultPhases(DETAIL)).toEqual([
+      { name: 'setup', seconds: 0.9 },
+      { name: 'call', seconds: 6.2, outcome: 'failed' },
+      { name: 'teardown', seconds: 0.3 },
+    ]);
+    expect(
+      resultPhases({
+        ...DETAIL,
+        outcome: 'error',
+        setup_outcome: 'failed',
+        call_outcome: null,
+        call_duration: null,
+      }),
+    ).toEqual([
+      { name: 'setup', seconds: 0.9, outcome: 'error' },
+      { name: 'teardown', seconds: 0.3 },
+    ]);
+    expect(resultPhases({ ...DETAIL, outcome: 'xfailed', call_outcome: 'skipped' })[1]).toEqual({
+      name: 'call',
+      seconds: 6.2,
+      outcome: 'xfailed',
+    });
+    expect(resultPhases({ ...DETAIL, outcome: 'error', teardown_outcome: 'failed' })[2]).toEqual({
+      name: 'teardown',
+      seconds: 0.3,
+      outcome: 'error',
+    });
+    expect(
+      resultPhases({
+        ...DETAIL,
+        setup_duration: null,
+        call_duration: null,
+        teardown_duration: null,
+      }),
+    ).toEqual([]);
+  });
+});
+
+describe('history', () => {
+  const OLD = 'aaaaaaaa'.repeat(4);
+  const NEW = 'bbbbbbbb'.repeat(4);
+  const NODE = 'tests/test_a.py::test_one';
+  const ENTRIES: HistoryEntry[] = [
+    {
+      run_id: NEW,
+      started_at: '2026-09-27T10:00:00Z',
+      finished_at: '2026-09-27T10:01:00Z',
+      outcome: 'failed',
+      duration: 1.5,
+      vcs: {
+        commit: '7aa1c5d9e0',
+        branch: 'main',
+        commit_subject: 'Fix',
+        commit_subject_truncated: false,
+        dirty: true,
+      },
+    },
+    {
+      run_id: OLD,
+      started_at: '2026-09-27T09:00:00Z',
+      finished_at: null,
+      outcome: 'passed',
+      duration: null,
+      vcs: null,
+    },
+  ];
+
+  it('turns a page, newest first, into a strip, oldest first, each run linking its result', () => {
+    expect(historyStrip(ENTRIES, NODE)).toEqual({
+      runs: [
+        { id: OLD, label: 'aaaaaaaa', href: resultHref(OLD, NODE) },
+        { id: NEW, label: 'bbbbbbbb', detail: 'main at 7aa1c5d', href: resultHref(NEW, NODE) },
+      ],
+      outcomes: ['passed', 'failed'],
+      durations: [null, 1.5],
+    });
+  });
+
+  it('names a run by its branch or its commit alone when that is all it has', () => {
+    const vcs = ENTRIES[0]?.vcs as NonNullable<HistoryEntry['vcs']>;
+    const only = (v: Partial<typeof vcs>) =>
+      historyStrip([{ ...(ENTRIES[0] as HistoryEntry), vcs: { ...vcs, ...v } }], NODE).runs[0]
+        ?.detail;
+    expect(only({ commit: null })).toBe('main');
+    expect(only({ branch: null })).toBe('7aa1c5d');
+    expect(only({ branch: null, commit: null })).toBeUndefined();
+  });
+
+  it('maps an entry onto a row of the history table', () => {
+    expect(historyRow(ENTRIES[0] as HistoryEntry, NODE)).toEqual({
+      key: NEW,
+      runId: NEW,
+      label: 'bbbbbbbb',
+      href: resultHref(NEW, NODE),
+      outcome: 'failed',
+      commit: { branch: 'main', sha: '7aa1c5d9e0', dirty: true },
+      startedAt: '2026-09-27T10:00:00Z',
+      seconds: 1.5,
+    });
+    expect(historyRow(ENTRIES[1] as HistoryEntry, NODE).commit).toEqual({});
   });
 });

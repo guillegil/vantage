@@ -17,10 +17,16 @@ export type RunListItem = Schemas['RunListItem'];
 export type RunDetail = Schemas['RunDetailResponse'];
 export type ResultItem = Schemas['ResultListItem'];
 export type RunMetadata = Schemas['RunMetadataResponse'];
+export type ResultDetail = Schemas['ResultDetailResponse'];
+export type HistoryEntry = Schemas['HistoryEntry'];
 export type OutcomeWord = ResultItem['outcome'];
 
 export const RUNS_PAGE = 50;
 export const RESULTS_PAGE = 100;
+export const HISTORY_PAGE = 50;
+// A result page's side column draws this many of the test's latest runs, as
+// the design's result page does.
+export const RECENT_HISTORY = 24;
 const LIST_STALE = 30_000;
 
 export const NOT_PASSING: OutcomeWord[] = ['failed', 'error', 'xpassed'];
@@ -196,6 +202,59 @@ export function useRunMetadata(runId: string, finished: boolean, enabled = true)
       ),
     staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
     enabled,
+  });
+}
+
+// One result of a run, in full. A finished run's results never change.
+export function useResult(runId: string, nodeId: string, finished: boolean) {
+  return useQuery({
+    queryKey: ['run', runId, 'result', nodeId],
+    queryFn: ({ signal }) =>
+      unwrap(
+        api.GET('/runs/{run_id}/result', {
+          params: { path: { run_id: runId }, query: { node_id: nodeId } },
+          signal,
+        }),
+      ),
+    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
+  });
+}
+
+// A test's latest runs in a project, newest first: a result page's side column.
+export function useRecentHistory(project: string, nodeId: string, enabled = true) {
+  return useQuery({
+    queryKey: ['history', project, nodeId, 'recent'],
+    queryFn: ({ signal }) =>
+      unwrap(
+        api.GET('/projects/{project}/tests/history', {
+          params: { path: { project }, query: { node_id: nodeId, limit: RECENT_HISTORY } },
+          signal,
+        }),
+      ),
+    staleTime: LIST_STALE,
+    enabled,
+  });
+}
+
+// A test's whole history in a project, newest first, a page at a time by cursor.
+export function useHistory(project: string, nodeId: string) {
+  return useInfiniteQuery({
+    queryKey: ['history', project, nodeId],
+    queryFn: ({ pageParam, signal }) =>
+      unwrap(
+        api.GET('/projects/{project}/tests/history', {
+          params: {
+            path: { project },
+            query: pageParam
+              ? { node_id: nodeId, limit: HISTORY_PAGE, cursor: pageParam }
+              : { node_id: nodeId, limit: HISTORY_PAGE },
+          },
+          signal,
+        }),
+      ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.has_more ? last.next_cursor : null),
+    staleTime: LIST_STALE,
   });
 }
 
