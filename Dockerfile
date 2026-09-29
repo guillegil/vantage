@@ -13,6 +13,17 @@ ARG PYTHON_IMAGE=python:3.13-slim-trixie
 
 FROM ghcr.io/astral-sh/uv:0.12.13 AS uv
 
+# The web client, built from its lock; only its output reaches the build
+# stage, so the image holds no Node.
+FROM node:22.22-trixie-slim AS web
+RUN npm install --global pnpm@12.4.2
+WORKDIR /src/web
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web ./
+# Written to ../packages/vantage/src/vantage/service/client, as in a checkout.
+RUN pnpm run build
+
 FROM ${PYTHON_IMAGE} AS build
 COPY --from=uv /uv /usr/local/bin/uv
 # The base image's interpreter, never one uv downloads; bytecode compiled
@@ -27,6 +38,8 @@ COPY packages/pytest-vantage/pyproject.toml packages/pytest-vantage/
 COPY packages/pytest-vantage/src packages/pytest-vantage/src
 COPY packages/vantage/pyproject.toml packages/vantage/
 COPY packages/vantage/src packages/vantage/src
+# Into the package, where hatch's `artifacts` put it in the wheel uv builds.
+COPY --from=web /src/packages/vantage/src/vantage/service/client packages/vantage/src/vantage/service/client
 # --locked: exactly what uv.lock pins, hashes checked; a lock that no
 # longer matches the pyproject files fails the build instead of being
 # resolved again. --no-editable: both workspace members are built into

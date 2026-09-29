@@ -255,3 +255,84 @@ def test_the_build_context_is_what_the_build_copies() -> None:
     ]
     assert all(any(fnmatch.fnmatch(path, pattern) for path in copied) for pattern in admitted)
     assert all(any(fnmatch.fnmatch(path, pattern) for pattern in admitted) for path in copied)
+
+
+# --- The web client ----------------------------------------------------------
+
+WEB = WORKSPACE_ROOT / "web"
+CLIENT = "packages/vantage/src/vantage/service/client"
+
+
+def _stage_named(name: str) -> list[Instruction]:
+    (stage,) = [stage for stage in _stages() if stage[0][1].split()[-2:] == ["AS", name]]
+    return stage
+
+
+def test_the_client_is_built_from_its_lock_by_a_node_ci_builds_with() -> None:
+    """The client's stage runs the Node the CI jobs set up, and the pnpm
+    `web/package.json` names, and installs exactly the lock before the
+    sources arrive, so a source change reuses the installed dependencies
+    and a lock that no longer matches fails the build."""
+    stage = _stage_named("web")
+    jobs = yaml.safe_load(CI.read_text(encoding="utf-8"))["jobs"]
+    (node,) = {
+        str(step["with"]["node-version"])
+        for name in ("web", "e2e")
+        for step in jobs[name]["steps"]
+        if str(step.get("uses", "")).startswith("actions/setup-node@")
+    }
+    assert _image(stage) == f"node:{node}-trixie-slim"
+    manager = json.loads((WEB / "package.json").read_text(encoding="utf-8"))["packageManager"]
+    assert manager.startswith("pnpm@")
+    commands = _commands(stage)
+    assert ["npm", "install", "--global", manager] in commands
+
+    steps = [(keyword, arguments) for keyword, arguments in stage if keyword in ("COPY", "RUN")]
+    lock = steps.index(("COPY", "web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./"))
+    install = steps.index(("RUN", "pnpm install --frozen-lockfile"))
+    sources = steps.index(("COPY", "web ./"))
+    build = steps.index(("RUN", "pnpm run build"))
+    assert lock < install < sources < build
+
+
+def test_the_package_is_built_with_the_client_and_the_image_holds_no_node() -> None:
+    """The build stage puts the client where Vite writes it in a checkout,
+    inside the package, before `uv sync` builds the wheel hatch's
+    `artifacts` carry it in; the image itself copies only the environment."""
+    stage = _stage_named("web")
+    (workdir,) = [arguments for keyword, arguments in stage if keyword == "WORKDIR"]
+    config = (WEB / "vite.config.ts").read_text(encoding="utf-8")
+    (out_dir,) = re.findall(r"outDir: '([^']+)'", config)
+    built = str(Path(workdir, out_dir).resolve())
+
+    (build,) = [stage for stage in _stages() if ["uv"] in (c[:1] for c in _commands(stage))]
+    copies = [
+        arguments.split()
+        for keyword, arguments in build
+        if keyword == "COPY" and arguments.startswith("--from=web ")
+    ]
+    assert copies == [["--from=web", built, CLIENT]]
+    order = [
+        "client" if keyword == "COPY" and arguments.startswith("--from=web ") else "sync"
+        for keyword, arguments in build
+        if (keyword == "COPY" and arguments.startswith("--from=web "))
+        or (keyword == "RUN" and "sync" in arguments)
+    ]
+    assert order == ["client", "sync"]
+
+    final = _stages()[-1]
+    sources = re.findall(r"--from=(\S+)", " ".join(a for k, a in final if k == "COPY"))
+    assert sources == ["build"]
+
+
+def test_a_local_build_never_reaches_the_image() -> None:
+    """A checkout's own node_modules, test output and client build are left
+    out of the context, so the image's client is always the one it builds."""
+    patterns = [
+        line.strip()
+        for line in DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    for excluded in ("web/node_modules", "web/test-results", "web/playwright-report", CLIENT):
+        assert excluded in patterns
+        assert patterns.index(excluded) > patterns.index("!web")

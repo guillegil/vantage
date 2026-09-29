@@ -13,8 +13,9 @@ bisecting for.
 
 Early and unreleased (0.1.0). Neither distribution is published yet, so
 install from a checkout; the server's container image is built from one
-too. There is no web interface yet: recorded history is
-read through the server's JSON API. The database has no migrations, so a
+too. The server's web client shows a project's runs and each run; the rest
+of the recorded history, a test's across runs included, is read through
+the server's JSON API. The database has no migrations, so a
 server upgrade that changes the schema refuses the old database and needs a
 new one.
 
@@ -23,7 +24,8 @@ new one.
 ```
 pytest + pytest-vantage  ──HTTP /api/v1──>  vantage server  ──>  SQLite file
         │                                         │              or PostgreSQL
-        │ local modes     any HTTP client  <──────┘  read API (JSON)
+        │ local modes     any HTTP client  <──────┤  read API (JSON)
+        │                 a browser        <──────┘  web client
         └──> local SQLite file  <──  vantage, started on the test machine
 ```
 
@@ -35,7 +37,8 @@ pytest + pytest-vantage  ──HTTP /api/v1──>  vantage server  ──>  SQL
   test machine can keep its runs in a SQLite file of its own, with no server
   (see [Where runs go](#where-runs-go)). The `server` extra adds the HTTP
   server, which stores reports in one SQLite or PostgreSQL database and
-  serves the recorded history, a local file's included.
+  serves the recorded history, a local file's included, through its JSON
+  API and a web client for browsers.
 
 Recording to a server needs one the test machine can reach. The local modes
 need none, and the backup modes keep what a server could not take and send
@@ -346,7 +349,9 @@ vantage                                  # the default local database
 vantage --database ./runs/vantage.db     # one named with --vantage-local-database
 ```
 
-Sessions can keep storing into the file while it serves.
+Sessions can keep storing into the file while it serves, and
+`http://127.0.0.1:8765/` shows its runs in a browser (see
+[Browsing runs](#browsing-runs)).
 
 A database a local-mode session made has no user, so `vantage` serves it
 to anyone who reaches the port, with no token and no login; there is no
@@ -718,6 +723,52 @@ lost power) reads as `abandoned` once the server has heard nothing from it
 for the grace period, provided the server received its start report. One
 whose final report was queued reads the same until the queue is sent, and
 then as finished.
+
+## Browsing runs
+
+`vantage` serves a web client at every address outside `/api`: start it and
+open `http://127.0.0.1:8765/` in a browser. It opens on the runs of the
+project you had open last, or of `default`.
+
+- **A project's runs**, newest first, fifty at a time: each run's status and
+  exit status, its commit, who recorded it, when, how long it took, its
+  counts in pytest's words (`2 failed · 208 passed · 1 error`) and a line of
+  marks, one per result in the order pytest reported them (or one for a few,
+  the most severe, in a long run), where a failure stands up out of the
+  line. The latest finished run's closing line, as
+  pytest printed it, heads the list. A project with no runs yet shows the
+  exact `pytest` command that records one into it on this server.
+- **A run**: its status (and why, when it was interrupted or abandoned), its
+  commit and subject, who recorded it, when it started and finished, pytest's
+  closing line, the line of every result, what did not pass (failed, error,
+  xpassed) with the first line of each failure, every result in order, and
+  its metadata. Failure text shows only for runs recorded with
+  `--vantage-failure-text`. Under pytest-xdist the workers' results
+  interleave in the line, as they were reported.
+- **A server with no users**, as one serving a local store's database, needs
+  no sign-in, and says that anyone who can reach it can read and record.
+- **A server with users** asks you to sign in with a user's name and
+  password; the first start printed `admin`'s (see
+  [Running the server](#running-the-server)). A session lasts 12 hours.
+  Signing out, and any change of that user's password, ends it; a page open
+  when it ends stays as it is and offers to sign in again. A session reads,
+  and never records runs.
+
+### Signing in needs HTTPS or this machine
+
+Browsers keep the session only over HTTPS, or on this machine's own
+address, `http://127.0.0.1` or `http://localhost`. Opened over plain HTTP
+from another machine, the sign-in page says so and sends no password. To
+browse a server from elsewhere, put it behind a TLS reverse proxy that sets
+HSTS, or reach it through an SSH tunnel and open `http://127.0.0.1:8765`:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 vantage-host
+```
+
+Cookies do not separate ports: every service on the same host name
+receives vantage's session cookie, so give vantage a host name of its own
+(see [Signing in from a browser](#signing-in-from-a-browser)).
 
 ## Running the server
 
@@ -1365,6 +1416,10 @@ docker exec -it vantage vantage user password admin  # change it at once
   every second while the server starts and every minute after, one line of
   the access log each time. It shows the server answers, not that its
   database does.
+- The image carries the web client (see [Browsing runs](#browsing-runs)).
+  Browsing it from another machine needs a TLS reverse proxy in front of the
+  container or an SSH tunnel to its host, since a browser signs in only over
+  HTTPS or on its own machine's address.
 - It runs on a read-only root filesystem as well, `--read-only --cap-drop
   ALL --security-opt no-new-privileges`, putting its temporary files in
   `/data`.
@@ -1391,7 +1446,7 @@ uv run --extra dev mypy .                          # strict
 uv run --extra dev deptry .                        # undeclared or unused dependencies
 uv run --extra dev pip-audit                       # known vulnerabilities
 uv build --wheel --all-packages -o dist            # both wheels
-docker build -t vantage .                          # the server image
+docker build -t vantage .                          # the server image (builds the client too)
 
 # The PostgreSQL tests too, against a server you can create databases on:
 VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:secret@127.0.0.1:5432/postgres \
@@ -1409,8 +1464,29 @@ to 3.13, with and without pytest-xdist, and once more against PostgreSQL 17,
 and builds the server image and runs it as [In a container](#in-a-container)
 does.
 
+The web client lives in `web/`, a pnpm project, and needs Node 22.22 or
+later and pnpm 12:
+
+```bash
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web run build        # into vantage/service/client; restart vantage to serve it
+pnpm --dir web run dev          # on http://localhost:5173, asking a vantage on 127.0.0.1:8765
+pnpm --dir web run typecheck && pnpm --dir web run lint && pnpm --dir web run test
+pnpm --dir web exec playwright install chromium && pnpm --dir web run e2e
+pnpm --dir web run api:types    # after changing the API document
+```
+
+Building a wheel needs no Node: it carries whatever client was built into
+the package, and CI builds the wheels it checks after building the client.
+A checkout where the client was never built serves the API as usual, and
+every other address answers a page saying the client is missing and how to
+build it. CI checks, builds and tests the client in Chromium against real
+servers, and checks that the wheel and the image serve it.
+
 How the code is organised, and why: [`docs/architecture.md`](docs/architecture.md).
 
 ## Licence
 
-MIT.
+MIT. The web client ships the Chivo and Chivo Mono fonts, which are under
+the SIL Open Font License 1.1; their licence is served beside them, at
+`/fonts/OFL.txt`.

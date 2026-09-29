@@ -395,13 +395,65 @@ def test_the_push_step_passes_only_when_push_runs_and_creates_nothing(
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
 
 
-# `curl` answers $FAKE_ANSWER with exit status $FAKE_CURL_EXIT once the
-# server has created $FAKE_READY, and until then fails as for a refused
-# connection: the real server answers only after its start's own lines.
+# `curl` answers the capabilities with $FAKE_ANSWER and exit status
+# $FAKE_CURL_EXIT once the server has created $FAKE_READY, and until then
+# fails as for a refused connection: the real server answers only after its
+# start's own lines. Asked for headers (`-fsSI`), it answers the page's or
+# an asset's, and asked for the page, $FAKE_PAGE.
 _FAKE_CURL = """\
 if [ ! -e "$FAKE_READY" ]; then exit 7; fi
-printf '%s' "$FAKE_ANSWER"; exit "$FAKE_CURL_EXIT"
+case "$*" in
+  */capabilities*) printf '%s' "$FAKE_ANSWER"; exit "$FAKE_CURL_EXIT" ;;
+  -fsSI*/assets/*) printf '%s\\n' "$FAKE_ASSET_HEADERS" ;;
+  -fsSI*) printf '%s\\n' "$FAKE_PAGE_HEADERS" ;;
+  *) printf '%s' "$FAKE_PAGE" ;;
+esac
 """
+# The web client as vantage serves it: the page under its policy, naming
+# one script, which is kept for good.
+_CLIENT = {
+    "FAKE_PAGE_HEADERS": (
+        "HTTP/1.1 200 OK\n"
+        "content-security-policy: default-src 'none'; script-src 'self'; style-src 'self'\n"
+        "cache-control: no-cache\n"
+        "content-type: text/html; charset=utf-8"
+    ),
+    "FAKE_PAGE": (
+        '<!doctype html><script type="module" crossorigin src="/assets/index-DKbaw8Ng.js"></script>'
+    ),
+    "FAKE_ASSET_HEADERS": (
+        "HTTP/1.1 200 OK\n"
+        "cache-control: public, max-age=31536000, immutable\n"
+        "content-type: text/javascript; charset=utf-8"
+    ),
+}
+# What each web-client check must refuse.
+_CLIENT_FAULTS = [
+    pytest.param(
+        {"FAKE_PAGE_HEADERS": "HTTP/1.1 404 Not Found\ncontent-type: text/html; charset=utf-8"},
+        id="no-client",
+    ),
+    pytest.param(
+        {
+            "FAKE_PAGE_HEADERS": _CLIENT["FAKE_PAGE_HEADERS"].replace(
+                "default-src 'none'; script-src 'self'; style-src 'self'", "default-src 'none'"
+            )
+        },
+        id="api-policy",
+    ),
+    pytest.param(
+        {"FAKE_PAGE_HEADERS": _CLIENT["FAKE_PAGE_HEADERS"].replace("text/html", "text/plain")},
+        id="not-html",
+    ),
+    pytest.param({"FAKE_PAGE": "<!doctype html><title>vantage</title>"}, id="no-script"),
+    pytest.param(
+        {"FAKE_ASSET_HEADERS": "HTTP/1.1 200 OK\ncache-control: no-cache"}, id="asset-not-kept"
+    ),
+    pytest.param(
+        {"FAKE_ASSET_HEADERS": "HTTP/1.1 404 Not Found\ncache-control: immutable"},
+        id="asset-missing",
+    ),
+]
 _PASSWORD = "Hv3kQ9mNpR7sT2wXyZ4aBc6d"  # noqa: S105
 _ADMIN_CREATED = (
     "vantage: created the user admin; change its password at once "
@@ -476,6 +528,7 @@ def test_the_server_install_step_passes_only_when_it_answers_having_created_the_
         tmp_path,
         {"uv": "exit 0", "curl": _FAKE_CURL},
         {
+            **_CLIENT,
             "SERVER_VENV": str(tmp_path / "server"),
             "FAKE_READY": str(tmp_path / "ready"),
             "FAKE_ANSWER": answer,
@@ -504,6 +557,7 @@ def test_the_server_install_step_shows_the_servers_stderr_without_the_password(
         tmp_path,
         {"uv": "exit 0", "curl": _FAKE_CURL},
         {
+            **_CLIENT,
             "SERVER_VENV": str(tmp_path / "server"),
             "FAKE_READY": str(tmp_path / "ready"),
             "FAKE_ANSWER": answer,
@@ -515,6 +569,159 @@ def test_the_server_install_step_shows_the_servers_stderr_without_the_password(
     assert _ADMIN_CREATED.removesuffix(_PASSWORD) + "<masked>" in shown
     assert _LISTENING in shown
     assert _PASSWORD not in shown
+
+
+@needs_bash
+@pytest.mark.parametrize("fault", [pytest.param({}, id="serves"), *_CLIENT_FAULTS])
+def test_the_server_install_step_passes_only_when_it_serves_the_web_client(
+    tmp_path: Path, fault: dict[str, str]
+) -> None:
+    """The wheel carries the client, so the server it installs answers `/`
+    with the page under its policy, and the script the page names is
+    kept for good; a wheel without the client, or a server that answers
+    the page some other way, fails."""
+    _dist(tmp_path, _BOTH_WHEELS)
+    _fake_vantage(tmp_path / "server", _serving(_ADMIN_CREATED, _LISTENING))
+    script = _step_script(_INSTALLS, "Assert vantage[server] serves")
+
+    result = _run_step(
+        script,
+        tmp_path,
+        {"uv": "exit 0", "curl": _FAKE_CURL},
+        {
+            **_CLIENT,
+            **fault,
+            "SERVER_VENV": str(tmp_path / "server"),
+            "FAKE_READY": str(tmp_path / "ready"),
+            "FAKE_ANSWER": '{"session_lifecycle":true}',
+            "FAKE_CURL_EXIT": "0",
+        },
+    )
+
+    assert (result.returncode == 0) is (not fault), result.stdout + result.stderr
+
+
+# `unzip -Z1` lists $FAKE_LISTING, one name per line.
+_FAKE_UNZIP = """\
+printf '%s\\n' $FAKE_LISTING
+"""
+_CLIENT_FILES = [
+    "vantage/service/client/index.html",
+    "vantage/service/client/assets/index-DKbaw8Ng.js",
+    "vantage/service/client/assets/index-DgdDcd0t.css",
+    "vantage/service/client/fonts/OFL.txt",
+]
+_PACKAGE_FILES = ["vantage/__init__.py", "vantage/service/web.py"]
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("wheels", "listing", "passes"),
+    [
+        pytest.param(_BOTH_WHEELS, [*_PACKAGE_FILES, *_CLIENT_FILES], True, id="client"),
+        pytest.param(_BOTH_WHEELS, _PACKAGE_FILES, False, id="no-client"),
+        pytest.param(
+            _BOTH_WHEELS,
+            [*_PACKAGE_FILES, *_CLIENT_FILES[1:]],
+            False,
+            id="no-page",
+        ),
+        pytest.param(
+            _BOTH_WHEELS,
+            [*_PACKAGE_FILES, _CLIENT_FILES[0], *_CLIENT_FILES[2:]],
+            False,
+            id="no-script",
+        ),
+        pytest.param(
+            _BOTH_WHEELS,
+            [*_PACKAGE_FILES, "vantage/service/client/index.html.orig", _CLIENT_FILES[1]],
+            False,
+            id="page-misnamed",
+        ),
+        pytest.param([_WHEEL], [*_PACKAGE_FILES, *_CLIENT_FILES], False, id="no-vantage-wheel"),
+        pytest.param(
+            [*_BOTH_WHEELS, "vantage-0.2.0-py3-none-any.whl"],
+            [*_PACKAGE_FILES, *_CLIENT_FILES],
+            False,
+            id="two-vantage-wheels",
+        ),
+    ],
+)
+def test_the_wheel_step_passes_only_when_the_vantage_wheel_carries_the_client(
+    tmp_path: Path, wheels: list[str], listing: list[str], passes: bool
+) -> None:
+    """A wheel built without the client builds without a word, so the step
+    after the build is what fails: the page, and a script under assets."""
+    _dist(tmp_path, wheels)
+    script = _step_script(_INSTALLS, "Assert the vantage wheel carries the web client")
+
+    result = _run_step(
+        script, tmp_path, {"unzip": _FAKE_UNZIP}, {"FAKE_LISTING": " ".join(listing)}
+    )
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+def test_the_wheels_are_built_with_the_client_the_web_job_built() -> None:
+    """The installs job waits for the web job and puts its build into the
+    package before building the wheels, where hatch's `artifacts` take it,
+    and checks the wheel after."""
+    job = _jobs(WORKFLOWS / "ci.yml")[_INSTALLS]
+    assert "web" in ([job["needs"]] if isinstance(job["needs"], str) else job["needs"])
+    names = [step.get("name") for step in job["steps"]]
+    (download,) = [
+        step
+        for step in job["steps"]
+        if str(step.get("uses", "")).startswith("actions/download-artifact@")
+    ]
+    assert download["with"] == {
+        "name": "web-client",
+        "path": "packages/vantage/src/vantage/service/client",
+    }
+    assert (
+        names.index(download["name"])
+        < names.index("Build both wheels")
+        < names.index("Assert the vantage wheel carries the web client")
+    )
+    (upload,) = [
+        step
+        for step in _jobs(WORKFLOWS / "ci.yml")["web"]["steps"]
+        if str(step.get("uses", "")).startswith("actions/upload-artifact@")
+    ]
+    assert upload["with"]["name"] == "web-client"
+    assert upload["with"]["path"] == download["with"]["path"]
+    assert upload["with"]["if-no-files-found"] == "error"
+
+
+_GIT = ["git", "-c", "user.name=ci", "-c", "user.email=ci@example.invalid"]
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ("pnpm", "passes"),
+    [
+        pytest.param("exit 0", True, id="unchanged"),
+        pytest.param(
+            "printf 'export interface paths {}\\n' > web/src/api/v1.d.ts", False, id="rewritten"
+        ),
+        pytest.param("echo 'v1.yaml: not valid' >&2; exit 1", False, id="generator-fails"),
+    ],
+)
+def test_the_api_types_step_fails_when_the_generated_types_drift(
+    tmp_path: Path, pnpm: str, passes: bool
+) -> None:
+    """The client's API types are generated from v1.yaml and committed: a
+    contract change the types were not regenerated for fails the step."""
+    types = tmp_path / "web" / "src" / "api" / "v1.d.ts"
+    types.parent.mkdir(parents=True)
+    types.write_text("export interface paths { '/runs': {} }\n", encoding="utf-8")
+    for command in (["init", "-q"], ["add", "web"], ["commit", "-q", "-m", "types"]):
+        subprocess.run([*_GIT, *command], cwd=tmp_path, check=True, capture_output=True)  # noqa: S603
+    script = _step_script("web", "Check the API types match v1.yaml")
+
+    result = _run_step(script, tmp_path, {"pnpm": pnpm}, {})
+
+    assert (result.returncode == 0) is passes, result.stdout + result.stderr
 
 
 # The base install's `python`: `-m pytest` runs $FAKE_SESSION; `-c` prints
@@ -611,6 +818,9 @@ case "$*" in
   */runs*)
     if [[ "$*" != *"Authorization: Bearer $FAKE_TOKEN"* ]]; then exit 22; fi
     printf '%s' "$FAKE_RUNS" ;;
+  -fsSI*/assets/*) printf '%s\\n' "$FAKE_ASSET_HEADERS" ;;
+  -fsSI*) printf '%s\\n' "$FAKE_PAGE_HEADERS" ;;
+  *) printf '%s' "$FAKE_PAGE" ;;
 esac
 """
 _IMAGE_FAKES = {"docker": _FAKE_DOCKER, "curl": _FAKE_IMAGE_CURL, "sleep": "exit 0"}
@@ -628,6 +838,7 @@ _SERVING = {
     "FAKE_CAPABILITIES": '{"session_lifecycle":true}',
     "FAKE_CURL_EXIT": "0",
     "FAKE_RUNS": '{"items":[{"run_id":"r1","recorded_by":"admin"}],"has_more":false}',
+    **_CLIENT,
 }
 _ONE_RUN = _SERVING["FAKE_RUNS"]
 
@@ -671,6 +882,19 @@ def test_the_image_start_passes_only_once_it_is_healthy_and_answers_on_the_port(
     result = _image_step(tmp_path, _STARTED, **fake)
 
     assert (result.returncode == 0) is passes, result.stdout + result.stderr
+
+
+@needs_bash
+@pytest.mark.parametrize("fault", [pytest.param({}, id="serves"), *_CLIENT_FAULTS])
+def test_the_image_client_step_passes_only_when_it_serves_the_web_client(
+    tmp_path: Path, fault: dict[str, str]
+) -> None:
+    """The image builds the client into the package it installs, so its
+    published port answers `/` with the page under its policy, and the
+    script the page names is kept for good."""
+    result = _image_step(tmp_path, "Assert the image serves the web client", **fault)
+
+    assert (result.returncode == 0) is (not fault), result.stdout + result.stderr
 
 
 _BINDING_WARNING = "Binding to 0.0.0.0 with no user in the database, which ..."
@@ -856,6 +1080,7 @@ def test_the_image_log_is_shown_without_the_password(tmp_path: Path) -> None:
 _PUBLISHING_COMMAND = re.compile(
     r"\bdocker\b[^\n|;&]*\b(push|login)\b|--push\b|\bimagetools\s+create\b"
     r"|\buv\s+publish\b|\btwine\s+upload\b|\bpoetry\s+publish\b"
+    r"|\b(npm|pnpm)\b[^\n|;&]*\bpublish\b"
 )
 _PUBLISHING_ACTIONS = (
     "docker/login-action",
@@ -920,6 +1145,9 @@ def _workflow(step: dict[str, Any], permissions: object = None) -> dict[str, Any
         _workflow({"run": "docker buildx imagetools create -t ghcr.io/x:1 ghcr.io/x:a"}),
         _workflow({"run": "uv publish"}),
         _workflow({"run": "twine upload dist/*"}),
+        _workflow({"run": "npm publish"}),
+        _workflow({"run": "pnpm publish --access public"}),
+        _workflow({"run": "pnpm --dir web publish"}),
         _workflow({"uses": "docker/login-action@v3"}),
         _workflow({"uses": "docker/build-push-action@v6", "with": {"push": True}}),
         _workflow({"uses": "docker/build-push-action@v6"}),
@@ -939,6 +1167,9 @@ def _workflow(step: dict[str, Any], permissions: object = None) -> dict[str, Any
         "imagetools",
         "uv-publish",
         "twine",
+        "npm-publish",
+        "pnpm-publish",
+        "pnpm-dir-publish",
         "login-action",
         "build-push-action",
         "build-push-action-bare",
@@ -959,8 +1190,11 @@ def test_the_publishing_guard_catches_every_way_to_publish(document: dict[str, A
         'docker run --rm --volume "$VOLUME:/data" "$IMAGE" user list',
         'docker logs "$CONTAINER" 2>&1 | grep -c pushed || true',
         "git push --dry-run origin HEAD",
+        "pnpm --dir web install --frozen-lockfile",
+        "npm install --global pnpm@12.4.2",
+        "pnpm --dir web run build",
     ],
-    ids=["build", "run", "logs-then-grep", "git"],
+    ids=["build", "run", "logs-then-grep", "git", "pnpm-install", "npm-install", "pnpm-build"],
 )
 def test_the_publishing_guard_passes_what_publishes_nothing(run: str) -> None:
     assert _publishing("ci.yml", _workflow({"run": run})) == []

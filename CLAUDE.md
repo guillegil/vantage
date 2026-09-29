@@ -40,7 +40,7 @@ its `postgres` extra.
 | `vantage.ingestion` | `packages/vantage/src/vantage/ingestion` | stdlib + `vantage.core` + Pydantic + PyYAML; never a web framework or a storage adapter | `test_architecture.py` (walk, and an import with the web framework and the driver blocked) |
 | `vantage.local` | `packages/vantage/src/vantage/local` | stdlib + `vantage.core` + `vantage.ingestion` + the SQLite adapter's modules | `test_architecture.py` |
 | `vantage.service` | `packages/vantage/src/vantage/service` | anything; the only importer of FastAPI, Starlette and uvicorn, and only once it is to serve | `test_architecture.py` (an AST scan), `test_cli.py`, `test_push.py` |
-| the web client | `web/` | its own pnpm dependencies; `/api/v1` only through `src/api`; design-system components (`src/ds`) never fetch; no HTML sinks | `tsc`, Biome and `build/no-html-sinks.grit`, Vitest, Playwright |
+| the web client | `web/` | its own pnpm dependencies; `/api/v1` only through `src/api`; design-system components (`src/ds`) never fetch; no HTML sinks | `tsc`, Biome and `build/no-html-sinks.grit`, Vitest, Playwright, CI's `web` and `e2e` jobs |
 
 - Ports are `typing.Protocol` (`core/ports/storage.py`); adapters satisfy them
   by shape. The server ships two adapters, `SqliteExecutionStore` and
@@ -67,7 +67,8 @@ its `postgres` extra.
   API's field names and the components' props. The build goes to
   `service/client/`, which git ignores and hatch's `artifacts` ship.
 - The root `Dockerfile` and `.dockerignore` build the server image from the
-  lock; `tests/test_dockerfile.py` guards them, CI's `image` job runs it.
+  locks, the client in a Node stage whose output alone reaches the
+  package; `tests/test_dockerfile.py` guards them, CI's `image` job runs it.
 - Test-support modules sit in `packages/*/tests` on the root `pythonpath` and
   never ship. The only pytest config is `[tool.pytest.ini_options]` in the root
   `pyproject.toml`.
@@ -286,9 +287,11 @@ xdist, the suite against a `postgres:17` service (the only job that sets the
 variable), the suite with non-loopback networking blocked, the
 clean-environment installs (the plugin alone; `vantage` without its extra,
 serving refused, `vantage push` and a local-mode session there;
-`vantage[server]` serving, its fresh database given `admin` in one line),
-the server image built and run on a fresh volume (`image`), the Python 3.9
-install refusal and both wheel builds.
+`vantage[server]` serving, its fresh database given `admin` in one line,
+and the web client from the wheel the `web` job's build went into), the
+client's own checks and build (`web`), Playwright in Chromium against real
+servers (`e2e`), the server image built and run on a fresh volume, serving
+the client (`image`), the Python 3.9 install refusal and both wheel builds.
 
 ## Conventions
 

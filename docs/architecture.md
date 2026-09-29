@@ -18,7 +18,9 @@ packages/
     │   ├── ingestion/             a report validated, converted and stored: the one way in
     │   ├── local/                 runs stored on the test machine, through ingestion
     │   └── service/               FastAPI app, `vantage` and `vantage push`, OpenAPI document, web client serving
+    │       └── client/            the web client's build: git-ignored, shipped in the wheel
     └── tests/
+web/                               the web client: a pnpm project, neither a workspace member nor a distribution
 ```
 
 `vantage` depends on `pytest-vantage`, never the reverse: installing
@@ -69,8 +71,10 @@ The checks catch different failures:
   framework; there `vantage` must refuse to serve in one line, `vantage push`
   must run, and a session in local mode must store its run where `vantage`
   serves by default. `vantage[server]` must serve, having given its fresh
-  database the admin `admin` in exactly one line on stderr. It is the only
-  check that sees what reaches a user.
+  database the admin `admin` in exactly one line on stderr, and answer `/`
+  with the web client's page under its policy and one of its scripts kept
+  for good, from the client the `web` job built into the wheel. It is the
+  only check that sees what reaches a user.
 
 Values both sides must agree on (the 1 MiB body cap, the 64 KiB text-field
 cap, the metadata bounds and statuses, the outcome vocabulary, the timestamp
@@ -1212,6 +1216,98 @@ the built files keep their own `Cache-Control`, and the page its own
 policy. The one answer without them is Starlette's plain-text `500` for an
 unexpected exception, made outside every middleware the app adds.
 
+### The client
+
+`web/` is the client's source: TypeScript and React, built by Vite, with
+its own pnpm lock. It sits outside `packages/`, the uv workspace's glob,
+since a member there without a `pyproject.toml` breaks every uv command,
+and it holds no Python file, so the repository's pytest, ruff, mypy and
+deptry never see it; the end-to-end harness writes its pytest suite into a
+temporary directory.
+
+| Path | Holds |
+| --- | --- |
+| `src/api/` | the only code that speaks HTTP: `v1.d.ts`, generated from `v1.yaml` by `api:types` and committed; `client.ts` (openapi-fetch, same-origin credentials, every refusal an `ApiError` from its `Rejection`); `queries.ts`, one TanStack Query hook per read |
+| `src/adapt/` | pure functions from API responses to component props, the only code that knows both names |
+| `src/ds/` | the design system's port |
+| `src/app/` | the router, the layout that asks who is asking first, link handling, the session's end |
+| `src/pages/` | sign-in, a project's runs, a run, not found |
+| `build/` | the tokens plugin, the Biome rule against HTML sinks, the build check |
+| `e2e/` | Playwright against real servers |
+
+**The design system is ported, not rewritten.** `src/ds/` vendors its
+`tokens.json`, its stylesheet (`dotline.css`), its type declarations
+(`contract.d.ts`) and its fonts verbatim, so they diff cleanly against the
+next version. Each component is a typed export with the design system's
+markup, classes, words, aria and behaviour, beside its README copied
+verbatim with the port's notes after it; `contract.test-d.ts`, checked by
+`tsc`, assigns each to the type `contract.d.ts` declares, so a prop that
+drifts fails `typecheck`. Only what the screens use is ported, and nothing
+that shows what the server does not store. Components never fetch.
+
+**The tokens are CSS made on the fly** by `build/dotline-tokens.ts`, a Vite
+plugin that resolves `virtual:dotline-tokens.css` to a name beside
+`tokens.json`, so the CSS pipeline resolves and hashes the fonts' relative
+URLs. It declares every token on `:root`, the dark values under
+`prefers-color-scheme: dark` unless the page forces light and again under
+`[data-theme="dark"]`, and every alias as `var()` of its target in each of
+those blocks, since a custom property's `var()` is resolved where it is
+declared.
+
+**State.** Server state lives in TanStack Query alone, view state in the
+address; web storage holds only the last project opened. A finished run's
+detail, outcomes and results never change, so they are never refetched;
+lists go stale after 30 seconds. A refusal is not retried; no answer or a
+server error is retried once. `GET /session` decides the layout: a `401`
+there sends the browser to `/sign-in?next=`, where `next` is kept only as a
+path on this origin. A `401` on anything else means a session that was
+working ended: the page keeps what it shows under a notice offering to sign
+in again, and a link followed from then on leads to sign-in first. Signing
+in and signing out clear every query, so nothing read as one user stays for
+the next.
+
+**Links** are the design system's plain `<a href>`, which keep middle-click
+and copying the address. One click listener on the document routes a plain
+primary click on one that stays in the client, outside `/api/` and the
+built files, without a reload.
+
+**Text is only ever text.** React escapes what it renders, the Biome rule
+`build/no-html-sinks.grit` refuses `innerHTML`, `outerHTML`,
+`insertAdjacentHTML` and `document.write`, `dangerouslySetInnerHTML` is an
+error, and the page policy's Trusted Types make any such sink throw.
+
+### Build, packaging and CI
+
+`pnpm --dir web run build` writes into
+`packages/vantage/src/vantage/service/client/`, which git ignores. Both of
+hatch's targets name it in `artifacts`, so the wheel, the sdist and the
+wheel built from the sdist carry it whichever way the ignore line is
+spelt; a build without it succeeds, carrying no client. No build hook runs
+Node: `uv sync`, the Python jobs and `uv build` stay Node-free.
+`build/check-build.mjs` fails a build whose page holds inline script or
+style, an event handler attribute or a URL that is not root-relative, that
+holds a source map or a file whose suffix `service/web.py` gives no media
+type, or whose CSS imports or names another host.
+
+CI's `web` job installs from the lock, regenerates the API types and fails
+if they differ from those committed, then typechecks, lints, runs the unit
+tests, builds, checks the build and hands it to `clean-environment-install`,
+which builds the wheels with it and checks the wheel lists the page and a
+script. The `e2e` job builds its own client and runs Playwright in Chromium
+against two servers on loopback, a closed one with users and an open one
+serving a local store's database, each having recorded a real pytest
+session with hostile node ids and failure text. The image builds the client
+in a Node stage from the lock and copies only its output into the package
+before `uv sync`; the image itself holds no Node, and its job checks that
+the published port answers the page and its script.
+
+**The dev loop.** `vantage --database ./dev.db` (it prints `admin`'s
+password once) and `pnpm --dir web run dev`, then
+`http://localhost:5173`: Vite proxies `/api` to `127.0.0.1:8765` leaving
+the browser's own `Sec-Fetch-Site` as it is. Or `pnpm --dir web run build`
+and restart `vantage`, which, installed editable, serves the source tree's
+`client/`.
+
 ## Storage
 
 **`schema.sql` is applied whole, once.** On first open, when the `meta` table
@@ -1446,7 +1542,17 @@ build, where `--frozen` would build an image without whatever the lock
 lacks. The second stage receives `/opt/vantage` alone, owned by root, with
 bytecode compiled at build time, since the server's user cannot write it
 there; it must be the same base, as the environment links to its
-interpreter. `.dockerignore` admits exactly what the first stage copies.
+interpreter.
+
+The web client is built before either, in a stage of its own from a Node
+image named by the version CI sets up: pnpm at the version
+`web/package.json` names, `pnpm install --frozen-lockfile` from the lock
+files alone, then the sources and `pnpm run build`. The build stage copies
+that output into the package before `uv sync`, where hatch's `artifacts`
+put it in the wheel; nothing else of that stage, and no Node, reaches the
+image. `.dockerignore` admits exactly what the stages copy, and leaves out
+a checkout's own `node_modules`, test output and client build, so the
+image's client is always the one it built.
 
 The server runs as uid and gid 10001, fixed so a bind mount can be given
 to them, as PID 1 in exec form, with no init. uvicorn handles the SIGTERM
