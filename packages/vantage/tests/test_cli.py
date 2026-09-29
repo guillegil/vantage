@@ -57,7 +57,7 @@ from vantage.core.domain.access import DEFAULT_SCOPES, User, new_token, token_di
 from vantage.core.domain.passwords import verify_password
 from vantage.core.ports.storage import ExecutionStore
 from vantage.local import store_reports
-from vantage.service import cli
+from vantage.service import cli, web
 from vantage.service.app import create_app
 from vantage.service.cli import (
     DatabaseDirectoryNotWritableError,
@@ -410,6 +410,30 @@ def test_main_carries_the_resolved_grace_period_into_the_app(
     cli.main(["--database", str(tmp_path / "v.db"), "--grace-period", "60"])
 
     assert served["app"].state.grace_period == timedelta(seconds=60)
+
+
+@pytest.mark.usefixtures("listened")
+def test_main_serves_the_web_client_built_into_the_package(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`create_app` serves no client unless given one, so a `main` that
+    dropped `client=` would serve the API alone, with no page saying why.
+    What it is given is the build's place in the package, beside
+    `web.py`, where a wheel carries it."""
+    made: dict[str, Any] = {}
+
+    def _create_app(store: ExecutionStore, **kwargs: Any) -> object:
+        made.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("vantage.service.app.create_app", _create_app)
+    monkeypatch.setattr("vantage.service.cli._serve", lambda *_args: None)
+
+    cli.main(["--database", str(tmp_path / "v.db")])
+
+    assert made["client"] == web.CLIENT_DIRECTORY
+    assert web.CLIENT_DIRECTORY == Path(web.__file__).parent / "client"
+    assert web.CLIENT_DIRECTORY.parts[-3:] == ("vantage", "service", "client")
 
 
 @pytest.mark.usefixtures("listened")

@@ -53,7 +53,7 @@ matches nothing, as it would in a store that never held one.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import TypeVar, cast
@@ -78,6 +78,7 @@ from vantage.core.domain.projection import (
 )
 from vantage.core.domain.projects import DEFAULT_PROJECT, Membership, Project, check_role
 from vantage.core.domain.result import (
+    OUTCOMES,
     CapturedOutput,
     CaseIdentity,
     CatalogueEntry,
@@ -406,7 +407,9 @@ _SELECT_RESULT = f"""
 # `project_failure`. The message is read one character past its display
 # width; `failure_repr` and `traceback` never: `left(x, 0)` is '' for a
 # stored value and NULL for none, all the emptiness rule needs of them.
-_LIST_RESULTS = f"""
+# Binds the run id, then, in `_LIST_RESULTS_WITH_OUTCOMES`, the outcomes
+# as one array.
+_SELECT_RESULT_LIST = f"""
     SELECT {_RESULT_COLUMNS},
            r.failure_type,
            left(r.failure_message, {LIST_FAILURE_MESSAGE_CHARS + 1}),
@@ -419,9 +422,13 @@ _LIST_RESULTS = f"""
     FROM vantage.result r
     JOIN vantage.test_case tc ON tc.id = r.test_case_id
     WHERE r.run_id = %s
-    ORDER BY r.id
-    LIMIT %s OFFSET %s
 """  # noqa: S608
+
+_LIST_RESULTS = f"{_SELECT_RESULT_LIST} ORDER BY r.id LIMIT %s OFFSET %s"
+
+_LIST_RESULTS_WITH_OUTCOMES = (
+    f"{_SELECT_RESULT_LIST} AND r.outcome = ANY(%s) ORDER BY r.id LIMIT %s OFFSET %s"
+)
 
 # Same execution columns and total order as `_LIST_RUNS`.
 _LIST_HISTORY = f"""
@@ -531,6 +538,13 @@ _SELECT_RUN_CASE_OUTCOMES = """
     ORDER BY r.id
 """
 
+# Along `result_run_id`, every run of the array at once.
+_COUNT_OUTCOMES = """
+    SELECT run_id, outcome, COUNT(*) FROM vantage.result
+    WHERE run_id = ANY(%s)
+    GROUP BY run_id, outcome
+"""
+
 
 _PROBE_ANY_USER = "SELECT EXISTS (SELECT 1 FROM vantage.account)"
 
@@ -637,7 +651,8 @@ _REVOKE_TOKEN = """
 """  # noqa: S105
 
 _AUTHENTICATE = """
-    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_manage, t.can_admin
+    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_manage, t.can_admin,
+           t.id, t.expires_at
     FROM vantage.access_token t
     JOIN vantage.account a ON a.name = t.account
     WHERE t.digest = %s AND t.revoked_at IS NULL AND NOT a.disabled
@@ -1311,11 +1326,27 @@ class PostgresExecutionStore:
 
         return self._transaction(read, snapshot=True)
 
-    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
+    def list_results(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+        offset: int,
+        outcomes: Collection[str] | None = None,
+    ) -> Page[ResultListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
         if _unmatchable(execution_id):
             return Page(items=(), has_more=False)
-        rows = self._fetchall(_LIST_RESULTS, (execution_id, page_limit + 1, offset))
+        if outcomes is None:
+            rows = self._fetchall(_LIST_RESULTS, (execution_id, page_limit + 1, offset))
+        else:
+            # A word outside the vocabulary matches no stored row anyway, and
+            # leaving it out keeps U+0000, which no text parameter can hold,
+            # out of the statement.
+            wanted = sorted(OUTCOMES.intersection(outcomes))
+            rows = self._fetchall(
+                _LIST_RESULTS_WITH_OUTCOMES, (execution_id, wanted, page_limit + 1, offset)
+            )
         return _page(rows, page_limit, _row_to_result_list_entry)
 
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
@@ -1395,6 +1426,15 @@ class PostgresExecutionStore:
             return ()
         rows = self._fetchall(_SELECT_RUN_CASE_OUTCOMES, (execution_id,))
         return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
+
+    def count_outcomes(self, execution_ids: Sequence[str]) -> Mapping[str, Mapping[str, int]]:
+        ids = sorted({run_id for run_id in execution_ids if not _unmatchable(run_id)})
+        counts: dict[str, dict[str, int]] = {}
+        if not ids:
+            return counts
+        for run_id, outcome, count in self._fetchall(_COUNT_OUTCOMES, (ids,)):
+            counts.setdefault(cast(str, run_id), {})[cast(str, outcome)] = int(cast(int, count))
+        return counts
 
     def create_project(self, name: str, *, created_at: datetime) -> Project:
         with live_connection(self._pool) as conn:
@@ -1607,11 +1647,13 @@ class PostgresExecutionStore:
         row = self._fetchone(_AUTHENTICATE, (digest, now))
         if row is None:
             return None
-        name, admin, can_read, can_record, can_manage, can_admin = row
+        name, admin, can_read, can_record, can_manage, can_admin, token_id, expires_at = row
         return Grant(
             user=cast(str, name),
             admin=bool(admin),
             scopes=_decode_scopes(can_read, can_record, can_manage, can_admin),
+            token_id=cast(int, token_id),
+            expires_at=_opt_utc(expires_at),
         )
 
     def close(self) -> None:

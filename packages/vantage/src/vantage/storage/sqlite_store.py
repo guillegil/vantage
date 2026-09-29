@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
@@ -71,6 +71,7 @@ from vantage.core.domain.projection import (
 )
 from vantage.core.domain.projects import DEFAULT_PROJECT, Membership, Project, check_role
 from vantage.core.domain.result import (
+    OUTCOMES,
     CapturedOutput,
     CaseIdentity,
     CatalogueEntry,
@@ -421,8 +422,8 @@ _SELECT_RESULT = f"{_SELECT_FULL_RESULT} WHERE r.run_id = ? AND r.node_id = ?"
 # read as in `_LIST_EXECUTION_COLUMNS`. `failure_repr` and `traceback` are never
 # loaded: `substr(x, 1, 0)` is '' for a stored value and NULL for none, which
 # is all the emptiness rule needs of them. No captured-output column is
-# selected. Binds `_LIST_MESSAGE_PREFIX_BYTES`.
-_LIST_RESULTS = f"""
+# selected. Binds `_LIST_MESSAGE_PREFIX_BYTES`, then the run id.
+_SELECT_RESULT_LIST = f"""
     SELECT {_RESULT_COLUMNS},
            r.failure_type,
            CASE WHEN r.failure_message = '' THEN ''
@@ -436,9 +437,19 @@ _LIST_RESULTS = f"""
     FROM result r
     JOIN test_case tc ON tc.id = r.test_case_id
     WHERE r.run_id = ?
-    ORDER BY r.id
-    LIMIT ? OFFSET ?
 """  # noqa: S608
+
+_LIST_RESULTS = f"{_SELECT_RESULT_LIST} ORDER BY r.id LIMIT ? OFFSET ?"
+
+
+def _list_results_with_outcomes(outcome_count: int) -> str:
+    """`_LIST_RESULTS` narrowed to the results holding one of
+    `outcome_count` outcomes, bound after the run id. `idx_result_run_id`
+    still finds the run's results, in `r.id` order, and the outcome is
+    checked on each. Only the literal `?` marker is interpolated."""
+    placeholders = ",".join("?" * outcome_count)
+    return f"{_SELECT_RESULT_LIST} AND r.outcome IN ({placeholders}) ORDER BY r.id LIMIT ? OFFSET ?"
+
 
 # `list_history`' SELECT: the project and `node_id` resolve through the
 # unique `idx_test_case_project_node_id` to one `test_case.id`, then
@@ -527,12 +538,28 @@ _DELETE_MEMBER = "DELETE FROM project_member WHERE project = ? AND account = ?"
 
 # The per-run aggregate read. It filters on `result.run_id` and joins
 # `test_case` by primary key; `file_path` is only read, so it needs no index.
+# Ordered by `r.id`, the order the results were recorded in, rather than
+# whatever order the index the planner picks yields: `UNIQUE (run_id,
+# node_id)`'s would yield node-id order.
 _SELECT_RUN_CASE_OUTCOMES = """
     SELECT tc.file_path, r.outcome
     FROM result r
     JOIN test_case tc ON tc.id = r.test_case_id
     WHERE r.run_id = ?
+    ORDER BY r.id
 """
+
+
+def _count_outcomes(run_count: int) -> str:
+    """How many results of each outcome each of `run_count` runs holds,
+    read along `idx_result_run_id`. Only the literal `?` marker is
+    interpolated."""
+    placeholders = ",".join("?" * run_count)
+    return f"""
+        SELECT run_id, outcome, COUNT(*) FROM result
+        WHERE run_id IN ({placeholders})
+        GROUP BY run_id, outcome
+    """  # noqa: S608
 
 
 # Users and tokens. A user name is its key, and a token is found by its
@@ -627,7 +654,8 @@ _REVOKE_TOKEN = """
 """  # noqa: S105
 
 _AUTHENTICATE = """
-    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_manage, t.can_admin
+    SELECT a.name, a.admin, t.can_read, t.can_record, t.can_manage, t.can_admin,
+           t.id, t.expires_at
     FROM access_token t
     JOIN account a ON a.name = t.account
     WHERE t.digest = ? AND t.revoked_at IS NULL AND a.disabled = 0
@@ -1328,11 +1356,26 @@ class SqliteExecutionStore:
             entries=tuple(_row_to_metadata_entry(row) for row in entry_rows),
         )
 
-    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
+    def list_results(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+        offset: int,
+        outcomes: Collection[str] | None = None,
+    ) -> Page[ResultListEntry]:
         page_limit = min(limit, MAX_PAGE_ITEMS)
+        wanted: tuple[str, ...] = ()
+        if outcomes is None:
+            sql = _LIST_RESULTS
+        else:
+            # A word outside the vocabulary matches no stored row anyway, so
+            # the statement binds at most one marker per outcome.
+            wanted = tuple(sorted(OUTCOMES.intersection(outcomes)))
+            sql = _list_results_with_outcomes(len(wanted))
         rows = self._fetchall(
-            _LIST_RESULTS,
-            (_LIST_MESSAGE_PREFIX_BYTES, execution_id, page_limit + 1, offset),
+            sql,
+            (_LIST_MESSAGE_PREFIX_BYTES, execution_id, *wanted, page_limit + 1, offset),
         )
         return _page(rows, page_limit, _row_to_result_list_entry)
 
@@ -1402,6 +1445,18 @@ class SqliteExecutionStore:
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
         rows = self._fetchall(_SELECT_RUN_CASE_OUTCOMES, (execution_id,))
         return tuple((cast(str, file_path), cast(str, outcome)) for file_path, outcome in rows)
+
+    def count_outcomes(self, execution_ids: Sequence[str]) -> Mapping[str, Mapping[str, int]]:
+        ids = list(dict.fromkeys(execution_ids))
+        counts: dict[str, dict[str, int]] = {}
+        if not ids:
+            return counts
+        with self._read_snapshot() as conn:
+            for start in range(0, len(ids), _MAX_PLACEHOLDERS):
+                batch = ids[start : start + _MAX_PLACEHOLDERS]
+                for run_id, outcome, count in conn.execute(_count_outcomes(len(batch)), batch):
+                    counts.setdefault(run_id, {})[outcome] = count
+        return counts
 
     def create_project(self, name: str, *, created_at: datetime) -> Project:
         with self._lock:
@@ -1590,11 +1645,13 @@ class SqliteExecutionStore:
         row = self._fetchone(_AUTHENTICATE, (digest, isoformat_utc(now)))
         if row is None:
             return None
-        name, admin, can_read, can_record, can_manage, can_admin = row
+        name, admin, can_read, can_record, can_manage, can_admin, token_id, expires_at = row
         return Grant(
             user=cast(str, name),
             admin=bool(admin),
             scopes=_decode_scopes(can_read, can_record, can_manage, can_admin),
+            token_id=cast(int, token_id),
+            expires_at=_opt_datetime(expires_at),
         )
 
     def close(self) -> None:

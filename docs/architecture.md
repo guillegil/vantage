@@ -17,8 +17,10 @@ packages/
     │   ├── storage/               the SQLite adapter, the PostgreSQL one in postgres/
     │   ├── ingestion/             a report validated, converted and stored: the one way in
     │   ├── local/                 runs stored on the test machine, through ingestion
-    │   └── service/               FastAPI app, `vantage` and `vantage push`, OpenAPI document
+    │   └── service/               FastAPI app, `vantage` and `vantage push`, OpenAPI document, web client serving
+    │       └── client/            the web client's build: git-ignored, shipped in the wheel
     └── tests/
+web/                               the web client: a pnpm project, neither a workspace member nor a distribution
 ```
 
 `vantage` depends on `pytest-vantage`, never the reverse: installing
@@ -69,8 +71,10 @@ The checks catch different failures:
   framework; there `vantage` must refuse to serve in one line, `vantage push`
   must run, and a session in local mode must store its run where `vantage`
   serves by default. `vantage[server]` must serve, having given its fresh
-  database the admin `admin` in exactly one line on stderr. It is the only
-  check that sees what reaches a user.
+  database the admin `admin` in exactly one line on stderr, and answer `/`
+  with the web client's page under its policy and one of its scripts kept
+  for good, from the client the `web` job built into the wheel. It is the
+  only check that sees what reaches a user.
 
 Values both sides must agree on (the 1 MiB body cap, the 64 KiB text-field
 cap, the metadata bounds and statuses, the outcome vocabulary, the timestamp
@@ -685,8 +689,9 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   passes every role check.
 - **`service/access.py`** is the dependency every route declares but
   `/capabilities` and `/openapi.yaml`, which a client asks before it can
-  know it needs a token, and `/login` and `/password`, which take a name
-  and a password instead. A route outside any project declares a scope
+  know it needs a token, `/login`, `/password` and `POST /session`, which
+  take a name and a password instead, and `DELETE /session`, which only
+  ends what the cookie holds (see [Browser sessions](#browser-sessions)). A route outside any project declares a scope
   alone: `requires_read` on `GET /projects`, `requires_record` on a
   report, `requires_admin` on adding a project, and `requires_admin_token`
   on the users and tokens routes, `PUT /users/{name}/password` included.
@@ -696,7 +701,8 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   server is open it asks the store whether a user exists on every request,
   because `vantage user add` may run against the database meanwhile; once
   one does, `app.state.access_required` keeps the answer, and the store is
-  not asked again. A token sent to an open server is refused, not ignored.
+  not asked again. A token sent to an open server in the `Authorization`
+  header is refused, not ignored; a session cookie is ignored there.
   A 401, or a `403 insufficient_scope`, carries RFC 6750's
   `WWW-Authenticate` challenge (`ChallengeError`), naming the scope that
   was missing and never the token; a refusal of a role carries none, since
@@ -722,7 +728,7 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
     the `Project`.
   - `_run_access(authorizes, role)` builds the dependency of every route
     with `{run_id}` in its path: `requires_read_run` (viewer: a run's
-    detail, metadata, results, one result and section summary) and
+    detail, metadata, results, outcomes, one result and section summary) and
     `requires_record_run` (editor: the heartbeat). It takes the caller as
     a sub-dependency and the run id as its own path parameter: FastAPI
     resolves sub-dependencies before a dependant's own parameters, so a
@@ -745,7 +751,10 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
     another; an editor of the project still does. `vantage.local` passes
     no `admit`.
 - **Every refusal of who asks comes before every refusal of what is
-  asked.** Within a project path: `401`, `403 insufficient_scope`, on the
+  asked.** A request carrying only a session cookie is first refused
+  `403 cross_site_request` unless it came from vantage's own pages, before
+  the cookie is looked up. Within a project path: `401`,
+  `403 insufficient_scope`, on the
   members routes `409 open_server`, `404 unknown_project`,
   `403 not_a_member`, `403 insufficient_role`, then the route's own checks
   of its body, query and path. Within a run-id path: `401`,
@@ -821,10 +830,11 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   back, since a revocation is never undone. The one row that read can miss
   is an expired login token's, deleted by its user's next login, before
   the revocation or after it: the token is then unknown, `404
-  unknown_token`, as it would be to anyone. The two answers carrying a
-  token, the `201` of `POST /tokens` and of `POST /login`, are
-  `Cache-Control: no-store`, and `CreatedTokenResponse` keeps the token out
-  of its `repr`. The password request models keep passwords out of their
+  unknown_token`, as it would be to anyone. The three answers carrying a
+  token, the `201` of `POST /tokens`, of `POST /login` and of
+  `POST /session` (in its cookie), set `Cache-Control: no-store`
+  themselves, and `CreatedTokenResponse` keeps the token out of its
+  `repr`. The password request models keep passwords out of their
   `repr` and hide their input in validation errors, whose text otherwise
   repeats the whole body of one missing a field, and the routes raise
   their `422` `from None`. A value that cannot be a name matches no user
@@ -875,13 +885,85 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
   project, not the token: the run is kept and the send goes on, passing
   over that project's runs (see [Projects](#projects)).
 
+### Browser sessions
+
+A browser signs in with `POST /session` (`service/routes/session.py`) and
+holds its login token in a cookie, never in page script; the plugin, CI
+and scripts keep sending a token in `Authorization`.
+
+- **The cookie.** `__Host-vantage_session` (`SESSION_COOKIE` in
+  `service/access.py`), set as `HttpOnly; Max-Age=43200; Path=/;
+  SameSite=strict; Secure`. HttpOnly keeps the token from any script the
+  page runs, so an injection into the client cannot carry it off; the
+  `__Host-` prefix makes a browser keep it only when it is Secure, for `/`
+  and with no `Domain`, so no sibling host can set or overwrite it.
+  Browsers keep a Secure cookie over HTTPS and on `http://127.0.0.1` and
+  `http://localhost`, and drop it over plain HTTP to any other host. The
+  answer's body names the user, whether they are an admin and when the
+  session ends, never the token, and is `no-store`. The token is exactly
+  the one `/login` makes: the password work is one coroutine,
+  `log_in_with_password` in `routes/login.py`, which both routes await, so
+  the media type, the bounded body, the slots, the check and every refusal
+  are the same. It is not a flag on `/login`, whose body holds the token.
+- **One credential decides.** `authorize` reads the `Authorization` header
+  first, and when there is one the cookie is never read: a script sending
+  a token acts as that token, whatever cookie its browser holds. Without a
+  header, an open server serves the anonymous caller whatever cookie comes
+  along: the cookie authenticates nobody there, and one left by a server
+  on another port of the same host must not refuse anybody. On a closed
+  server the cookie is then looked up as a Bearer token would be, and
+  `Caller` gains the token's `expires_at`, which `GET /session` answers;
+  `Grant` carries the token's id and expiry for that, and for sign-out.
+- **Same-origin, and why SameSite is not enough.** SameSite=Strict keeps
+  the cookie from other *sites*, but a site is a host, not an origin: a
+  page served on another port of the same host is same-site and gets the
+  cookie on every method. `POST /tokens/{token_id}/revoke` reads no body
+  and an admin's login token holds admin, so without more a neighbouring
+  page could revoke tokens. `require_same_origin` therefore refuses a
+  cookie request, `403 cross_site_request`, before the cookie is looked up,
+  unless the browser marked it `Sec-Fetch-Site: same-origin`; a `GET` or
+  `HEAD` also passes marked `none` (typed or bookmarked) or not marked at
+  all (a script, or a browser too old to send the header, neither of which
+  can read a cross-origin answer). Page script cannot set the header.
+  There is no fallback to `Origin` or `Host`: a proxy that rewrites
+  `Host` would make one refuse legitimate requests, and every browser that
+  keeps a Secure cookie in a secure context sends `Sec-Fetch-Site`. Over
+  plain HTTP to another host a browser sends none, and keeps no cookie
+  either; the detail of the refusal says where sessions work.
+  `POST /session` and `DELETE /session` require it too
+  (`requires_same_origin`), whether or not a cookie is sent, so another
+  port's page can neither sign the browser in as someone else, so that
+  what it does next is theirs, nor sign it out.
+- **Who is asking.** `GET /session` answers for any credential: the
+  user's name, whether they are an admin now, and the token's own
+  `expires_at` -- null for a made token. An open server answers `open:
+  true` with no user, and a closed one asked with no credential answers
+  `401`, which is how the client learns to show its sign-in page.
+- **Signing out and expiry.** `DELETE /session` revokes the token the
+  cookie holds, when it is well formed and still authenticates
+  (`revoke_token(grant.token_id, user=grant.user)`), and always answers
+  `204` with a clearing `Set-Cookie`, on any server; an absent, malformed,
+  expired or revoked cookie is simply cleared. It never reads the
+  `Authorization` header, whose tokens `POST /tokens/{token_id}/revoke`
+  revokes, and sends no `Clear-Site-Data`, which would clear every other
+  service's cookies on the host. A session also ends when its token does:
+  after twelve hours, at any password set for its user, and while the user
+  is disabled; demoting the user takes its admin scope's power at once, as
+  for any token. A `401` never clears the cookie: a stale one is ignored on
+  an open server and overwritten by the next sign-in on a closed one.
+- **Cookies do not separate ports.** Every service on the same host name
+  receives the cookie, so vantage wants a host name of its own.
+
 ## Request handling and concurrency
 
-`create_app(store, grace_period_seconds=900)` builds the app, mounts the
-`runs`, `read`, `capabilities`, `sections`, `users`, `projects`, `members`
-and `login` routers under `/api/v1`, and
-registers the error handlers. The `vantage` command runs it under Uvicorn, in
-one process.
+`create_app(store, grace_period_seconds=900, client=None)` builds the app,
+mounts the `runs`, `read`, `capabilities`, `sections`, `users`, `projects`,
+`members`, `login` and `session` routers under `/api/v1`,
+registers the error handlers, and adds two middlewares, neither of which
+calls the store: `WebClient`, only when given a client directory, and
+`SecurityHeaders`, always (see [The web client](#the-web-client)). The
+`vantage` command runs it under Uvicorn, in one process, with the client
+built into the package.
 
 **No store call runs on the event loop.** A store call blocks, on the disk,
 on the store's lock or on another process's write; made on the loop, it
@@ -895,9 +977,10 @@ would stall every other request, heartbeats included.
   run in the threadpool through `run_in_threadpool`. `POST /projects`, a
   project's `POST .../config/sections` and `PUT .../members/{user}`,
   `POST /users`, `PATCH /users/{name}`,
-  `PUT /users/{name}/password`, `POST /tokens`, `POST /login` and
-  `POST /password` read their bodies the same way, under caps of their
-  own. The three password routes then run their scrypt and store calls in
+  `PUT /users/{name}/password`, `POST /tokens`, `POST /login`,
+  `POST /session` and `POST /password` read their bodies the same way,
+  under caps of their own. The four password routes then run their scrypt
+  and store calls in
   one threadpool call each, once a password slot is free (see
   [Users, tokens and who may do what](#users-tokens-and-who-may-do-what)).
 - **Every other route that reaches the store is a plain `def`**, which
@@ -905,7 +988,8 @@ would stall every other request, heartbeats included.
 - **`GET /capabilities` and `GET /openapi.yaml` are `async`** and never block,
   so they answer even while every worker thread waits on the store. The
   dependencies that only read `app.state` are `async` for the same reason:
-  an attribute read is not worth a thread. Those that authorize a request,
+  an attribute read is not worth a thread; so is `requires_same_origin`,
+  which reads a header alone. Those that authorize a request,
   or refuse one on an open server, read the store, and are plain `def`s.
 
 **The store's lock.** `SqliteExecutionStore` keeps one `sqlite3` connection,
@@ -1037,12 +1121,192 @@ never forwarded, and a client-chosen key name is echoed only if it looks
 like an identifier. The router's own `404` and
 `405` are reshaped the same way; the `405` keeps its `Allow` header. An
 unexpected exception is not a rejection and becomes Starlette's plain-text
-`500`.
+`500`, answered by Starlette's outermost middleware and so without the
+security headers; its body is a fixed sentence.
 
 **Responses are built field by field**, never mapped from an object. List
 responses come from lean projections with no field that could carry a
 traceback, a `repr` or captured output, and no response model has a field for
 the repository root the plugin sends.
+
+## The web client
+
+`service/web.py` serves the web client's files and adds the headers every
+answer carries. Both are pure-ASGI middlewares, typed with
+`starlette.types`, rather than routes: a `GET`-only catch-all route would
+turn an unversioned `POST /runs` from the router's `404` into a `405`, and
+would join the route table the interface document is checked against,
+which stays the API's alone. Starlette's `BaseHTTPMiddleware` is not used,
+since it reads every answer through a stream of its own; `SecurityHeaders`
+wraps `send` and changes only the `http.response.start` message, so
+`POST /runs` still streams its body under its cap.
+
+**`WebClient` answers `GET` and `HEAD` for every path but `/api` and those
+under it**, and passes every other request to the router, so the API's
+`404` and `405` keep the rejection shape. `load_client` reads the whole
+build into memory once, when the app is made, from `CLIENT_DIRECTORY`
+(`service/client/`, inside the package, where a wheel carries it through
+hatch's `artifacts`, as git ignores it); a request never reads the disk.
+Media types come from a fixed map by suffix (`.js`, `.css`, `.woff2`,
+`.svg`, `.txt`), since `mimetypes` varies by platform; any other file is
+`application/octet-stream`, which `nosniff` keeps a browser from running.
+Every file has a strong ETag, its SHA-256.
+
+| Path | Answer | `Cache-Control` |
+| --- | --- | --- |
+| a file under `/assets/` | its bytes | `public, max-age=31536000, immutable` |
+| any other name under `/assets/` | `404`, plain text, never the page | the default below |
+| another built file (`/fonts/OFL.txt`) | its bytes | `no-cache` |
+| any other path | `index.html`, verbatim, under `PAGE_POLICY` | `no-cache` |
+
+Build names under `/assets/` are hashed and never change, so they are kept
+for a year; a page kept from an older build that asks for a name this one
+lacks fails on it visibly instead of loading the page as a script. The
+page is never templated, so nothing a request carries reaches it; every
+address of the client answers it, so the client routes in the browser and
+a reload works. A matching `If-None-Match` answers `304` with the page's
+own policy and caching, since a cache replaces its copy's headers with a
+`304`'s, and the defaults would leave the kept page unable to run. `HEAD`
+answers the headers and the length without the body.
+
+**The page policy** allows the page's own files and nothing else:
+
+```
+default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types 'none'
+```
+
+No inline script or style, no `unsafe-eval`, no `data:` URL and no other
+host. Style set through the CSSOM, as React's `style` props are, is not
+inline style and is allowed. `require-trusted-types-for 'script'`, with
+`trusted-types 'none'` allowing no policy, makes every string handed to a
+script-injection sink (`innerHTML`, `insertAdjacentHTML`, a script's
+`src`) throw. `form-action
+'none'` holds because forms are submitted by script, so a page whose script
+failed to load can never post a password natively. The app sets no HSTS,
+which the TLS proxy in front of it sets; no `upgrade-insecure-requests`,
+which would break `http://localhost`; and no compression, which would put
+answers carrying tokens within reach of BREACH.
+
+**Without a build** -- `CLIENT_DIRECTORY` missing, or holding no
+`index.html`, as in a checkout where the client was never built --
+every `GET` and `HEAD` outside `/api` answers `404 text/html` with a static
+page, with no script and no style, naming the API, its document, and how
+to build the client. The API is served either way. **`create_app` given no
+`client` adds no `WebClient` at all**: the suite's apps route exactly as
+before, whether or not the checkout holds a build; only `cli.py` passes
+`client=CLIENT_DIRECTORY`, importing it with `create_app`, once it is to
+serve.
+
+**`SecurityHeaders`**, added last and so outermost of the app's own
+middlewares, adds each of these to every answer that has not set it:
+
+| Header | Value |
+| --- | --- |
+| `Content-Security-Policy` | `default-src 'none'; frame-ancestors 'none'` |
+| `Cache-Control` | `no-store` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `no-referrer` |
+| `X-Frame-Options` | `DENY` |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
+| `Cross-Origin-Resource-Policy` | `same-origin` |
+
+So no API answer, a token's or a run's failure text included, is kept by a
+browser's cache, framed, or read by a page of another origin; the page and
+the built files keep their own `Cache-Control`, and the page its own
+policy. The one answer without them is Starlette's plain-text `500` for an
+unexpected exception, made outside every middleware the app adds.
+
+### The client
+
+`web/` is the client's source: TypeScript and React, built by Vite, with
+its own pnpm lock. It sits outside `packages/`, the uv workspace's glob,
+since a member there without a `pyproject.toml` breaks every uv command,
+and it holds no Python file, so the repository's pytest, ruff, mypy and
+deptry never see it; the end-to-end harness writes its pytest suite into a
+temporary directory.
+
+| Path | Holds |
+| --- | --- |
+| `src/api/` | the only code that speaks HTTP: `v1.d.ts`, generated from `v1.yaml` by `api:types` and committed; `client.ts` (openapi-fetch, same-origin credentials, every refusal an `ApiError` from its `Rejection`); `queries.ts`, one TanStack Query hook per read |
+| `src/adapt/` | pure functions from API responses to component props, the only code that knows both names |
+| `src/ds/` | the design system's port |
+| `src/app/` | the router, the layout that asks who is asking first, link handling, the session's end |
+| `src/pages/` | sign-in, a project's runs, a run, not found |
+| `build/` | the tokens plugin, the Biome rule against HTML sinks, the build check |
+| `e2e/` | Playwright against real servers |
+
+**The design system is ported, not rewritten.** `src/ds/` vendors its
+`tokens.json`, its stylesheet (`dotline.css`), its type declarations
+(`contract.d.ts`) and its fonts verbatim, so they diff cleanly against the
+next version. Each component is a typed export with the design system's
+markup, classes, words, aria and behaviour, beside its README copied
+verbatim with the port's notes after it; `contract.test-d.ts`, checked by
+`tsc`, assigns each to the type `contract.d.ts` declares, so a prop that
+drifts fails `typecheck`. Only what the screens use is ported, and nothing
+that shows what the server does not store. Components never fetch.
+
+**The tokens are CSS made on the fly** by `build/dotline-tokens.ts`, a Vite
+plugin that resolves `virtual:dotline-tokens.css` to a name beside
+`tokens.json`, so the CSS pipeline resolves and hashes the fonts' relative
+URLs. It declares every token on `:root`, the dark values under
+`prefers-color-scheme: dark` unless the page forces light and again under
+`[data-theme="dark"]`, and every alias as `var()` of its target in each of
+those blocks, since a custom property's `var()` is resolved where it is
+declared.
+
+**State.** Server state lives in TanStack Query alone, view state in the
+address; web storage holds only the last project opened. A finished run's
+detail, outcomes and results never change, so they are never refetched;
+lists go stale after 30 seconds. A refusal is not retried; no answer or a
+server error is retried once. `GET /session` decides the layout: a `401`
+there sends the browser to `/sign-in?next=`, where `next` is kept only as a
+path on this origin. A `401` on anything else means a session that was
+working ended: the page keeps what it shows under a notice offering to sign
+in again, and a link followed from then on leads to sign-in first. Signing
+in and signing out clear every query, so nothing read as one user stays for
+the next.
+
+**Links** are the design system's plain `<a href>`, which keep middle-click
+and copying the address. One click listener on the document routes a plain
+primary click on one that stays in the client, outside `/api/` and the
+built files, without a reload.
+
+**Text is only ever text.** React escapes what it renders, the Biome rule
+`build/no-html-sinks.grit` refuses `innerHTML`, `outerHTML`,
+`insertAdjacentHTML` and `document.write`, `dangerouslySetInnerHTML` is an
+error, and the page policy's Trusted Types make any such sink throw.
+
+### Build, packaging and CI
+
+`pnpm --dir web run build` writes into
+`packages/vantage/src/vantage/service/client/`, which git ignores. Both of
+hatch's targets name it in `artifacts`, so the wheel, the sdist and the
+wheel built from the sdist carry it whichever way the ignore line is
+spelt; a build without it succeeds, carrying no client. No build hook runs
+Node: `uv sync`, the Python jobs and `uv build` stay Node-free.
+`build/check-build.mjs` fails a build whose page holds inline script or
+style, an event handler attribute or a URL that is not root-relative, that
+holds a source map or a file whose suffix `service/web.py` gives no media
+type, or whose CSS imports or names another host.
+
+CI's `web` job installs from the lock, regenerates the API types and fails
+if they differ from those committed, then typechecks, lints, runs the unit
+tests, builds, checks the build and hands it to `clean-environment-install`,
+which builds the wheels with it and checks the wheel lists the page and a
+script. The `e2e` job builds its own client and runs Playwright in Chromium
+against two servers on loopback, a closed one with users and an open one
+serving a local store's database, each having recorded a real pytest
+session with hostile node ids and failure text. The image builds the client
+in a Node stage from the lock and copies only its output into the package
+before `uv sync`; the image itself holds no Node, and its job checks that
+the published port answers the page and its script.
+
+**The dev loop.** `vantage --database ./dev.db` (it prints `admin`'s
+password once) and `pnpm --dir web run dev`, then
+`http://localhost:5173`: Vite proxies `/api` to `127.0.0.1:8765` leaving
+the browser's own `Sec-Fetch-Site` as it is. Or `pnpm --dir web run build`
+and restart `vantage`, which, installed editable, serves the source tree's
+`client/`.
 
 ## Storage
 
@@ -1128,6 +1392,23 @@ which keeps SQLite, with no statistics since nothing runs `ANALYZE`, from
 choosing that index for them: it would scan every run of the project and
 probe the metadata for each, where the key/value index finds the few runs
 that hold a pair. `test_sqlite_store.py` pins the plans.
+
+**A run's results are read in stored order**, by `result.id`: the order
+they were recorded in, which is the order the plugin reported them, and so
+the order they ran in, interleaved across workers under xdist.
+`list_results`, with or without its outcome filter, and
+`get_run_case_outcomes`, which the section summary and
+`/runs/{run_id}/outcomes` read, both order by it; SQLite's
+`UNIQUE (run_id, node_id)` index would otherwise hand back node-id order
+whenever the planner chose it. The filter binds only words in `OUTCOMES`,
+since no stored row holds any other. `count_outcomes` counts a whole page of
+runs in one `GROUP BY run_id, outcome` along `idx_result_run_id`
+(`run_id = ANY(...)` along `result_run_id` in PostgreSQL), and leaves out a
+run with no result, which the route answers with zeros. It is read after
+the page, not in the page's snapshot, which costs nothing: results only
+grow and a finished run takes no more, so a run finished when the page was
+read has its final counts, and a running one's may include results stored
+since.
 
 ### PostgreSQL
 
@@ -1261,7 +1542,17 @@ build, where `--frozen` would build an image without whatever the lock
 lacks. The second stage receives `/opt/vantage` alone, owned by root, with
 bytecode compiled at build time, since the server's user cannot write it
 there; it must be the same base, as the environment links to its
-interpreter. `.dockerignore` admits exactly what the first stage copies.
+interpreter.
+
+The web client is built before either, in a stage of its own from a Node
+image named by the version CI sets up: pnpm at the version
+`web/package.json` names, `pnpm install --frozen-lockfile` from the lock
+files alone, then the sources and `pnpm run build`. The build stage copies
+that output into the package before `uv sync`, where hatch's `artifacts`
+put it in the wheel; nothing else of that stage, and no Node, reaches the
+image. `.dockerignore` admits exactly what the stages copy, and leaves out
+a checkout's own `node_modules`, test output and client build, so the
+image's client is always the one it built.
 
 The server runs as uid and gid 10001, fixed so a bind mount can be given
 to them, as PID 1 in exec form, with no init. uvicorn handles the SIGTERM

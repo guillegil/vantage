@@ -5,9 +5,28 @@ but the capability advertisement and the interface document.
 serves an admin before serving it (`cli.py`), except one pytest-vantage's
 local store made, which holds one person's runs on a test machine: served
 with no user, it serves anyone, so browsing it needs no token. Once a user
-exists every route here needs `Authorization: Bearer <token>`, of a live,
-unexpired token of an enabled user whose grant covers the route's scope
-(`Grant.allows`).
+exists every route here needs `Authorization: Bearer <token>`, or a browser
+session's cookie, holding a live, unexpired token of an enabled user whose
+grant covers the route's scope (`Grant.allows`).
+
+**A browser signs in for a session cookie instead** (`SESSION_COOKIE`,
+`routes/session.py`): HttpOnly, so page script never holds the token, and
+holding a login token. A request is authorized by one credential, never
+two: an `Authorization` header decides alone, whatever the cookie says,
+so the plugin and CI act as their tokens do everywhere; the cookie is read
+only when there is no header, and never on an open server, where it could
+authenticate nobody and a stale one must not refuse anybody. Before the
+cookie is looked up the request must come from vantage's own pages
+(`require_same_origin`): SameSite keeps a cookie from other sites but not
+from another port of the same host, so a page served there could otherwise
+revoke tokens with an admin's session. The browser says where a request
+comes from in `Sec-Fetch-Site`, which page script cannot set; a request a
+browser marks `same-origin` passes, and so does a read it marks `none` (an
+address typed or bookmarked) or does not mark at all (a script, or an old
+browser, which cannot read a cross-origin answer anyway). There is no
+fallback to `Origin` or `Host`, which a proxy may rewrite: every browser
+that keeps a Secure cookie sends the header, over HTTPS and on loopback;
+over plain HTTP to another host it sends none and keeps no cookie either.
 
 **The first user closes a running server.** A user is made with `vantage
 user add`, often against a database a server is already serving, so while
@@ -23,10 +42,11 @@ the one thing it could do here is make the first user, which only the
 store says, so a request racing the first `vantage user add` cannot slip
 through between the two, reads included.
 
-**Logging in and changing a password take a name and a password, not a
-token** (`requires_closed_server`), so they declare no scope: the password
-is the credential, and a stolen login token cannot take it over. On an
-open server nobody has a password, and both answer `409 open_server`.
+**Logging in, signing a browser in and changing a password take a name
+and a password, not a token** (`requires_closed_server`), so they declare
+no scope: the password is the credential, and a stolen login token cannot
+take it over. On an open server nobody has a password, and all three
+answer `409 open_server`.
 
 **Within a project, a request needs a role there as well as its scope**
 (`require_role`): viewer to read, editor to record and to change section
@@ -42,13 +62,15 @@ anything until users exist.
 
 **Every refusal of who asks comes before every refusal of what is asked.**
 A project in a path (`_project_access`) is resolved once the caller is
-authorized -- `401`, `403 insufficient_scope`, then, on the members routes,
-`409 open_server` -- so a caller who may not read learns nothing of which
-projects exist; then `404 unknown_project`, then `403 not_a_member` or
-`403 insufficient_role`, and only then the route's own checks of its body,
-query and path. A name no project can have is answered without asking the
-store; one that can is looked up, and projects are never deleted, so a
-project found stays found for the rest of the request. A run id in a path
+authorized -- `401` for no credential, `403 cross_site_request` for a
+session cookie from elsewhere, `401` for a token that is not valid, `403
+insufficient_scope`, then, on the members routes, `409 open_server` -- so
+a caller who may not read learns nothing of which projects exist; then
+`404 unknown_project`, then `403 not_a_member` or `403 insufficient_role`,
+and only then the route's own checks of its body, query and path. A name
+no project can have is answered without asking the store; one that can is
+looked up, and projects are never deleted, so a project found stays found
+for the rest of the request. A run id in a path
 (`_run_access`) is checked the same way: the caller first, then the id's
 shape (`422`), the run (`404 unknown_run`), the caller's role in the run's
 project, and only then the route's query. A run id the plugin makes is a
@@ -57,10 +79,12 @@ guessable, and neither `403` names the project. A report names its project in it
 so `POST /runs` checks the role after the report is read and validated
 (`ingest`'s `admit`).
 
-**A token is checked wherever it is sent.** On an open server no token
-authenticates, since tokens belong to users; a request carrying one is
-refused rather than served as if it carried none, so a client that means
-to act as a user finds out it is not one.
+**A token in the header is checked wherever it is sent.** On an open
+server no token authenticates, since tokens belong to users; a request
+carrying one is refused rather than served as if it carried none, so a
+client that means to act as a user finds out it is not one. A session
+cookie is not: the browser sends it unasked, and to every port of its
+host, so the one an open server receives may be another vantage's.
 
 **A plain `def`.** Authenticating reads the store, which never happens on
 the event loop, so FastAPI runs the dependency in its threadpool, as it runs
@@ -97,6 +121,7 @@ from vantage.core.domain.projects import (
 )
 from vantage.core.ports.storage import ExecutionStore, RunDetail
 from vantage.service.errors import (
+    CrossSiteRequestError,
     InsufficientRoleError,
     InsufficientScopeError,
     NoSuchProjectError,
@@ -106,14 +131,29 @@ from vantage.service.errors import (
     UnknownRunError,
 )
 
+SESSION_COOKIE = "__Host-vantage_session"
+"""The cookie a browser session's login token travels in. The `__Host-`
+prefix makes browsers keep it only when it is Secure, for `Path=/` and with
+no `Domain`, so no other host -- a sibling under the same domain included
+-- can set or overwrite it."""
+
+# The methods that only read, which a browser may send unmarked or marked
+# `none` and still hold the session cookie.
+_READING_METHODS = frozenset({"GET", "HEAD"})
+
 
 @dataclass(frozen=True, slots=True)
 class Caller:
     """Who a request acts as: the user its token belongs to, or `None` on
-    a server that has no user, and whether that user is an admin now."""
+    a server that has no user, whether that user is an admin now, whether
+    the token may administer now -- it holds the admin scope and its user
+    is an admin -- and when the token stops authenticating, set for a login
+    token alone."""
 
     user: str | None
     admin: bool = False
+    administers: bool = False
+    expires_at: datetime | None = None
 
 
 def _server_open(app: FastAPI, store: ExecutionStore) -> bool:
@@ -125,26 +165,53 @@ def _server_open(app: FastAPI, store: ExecutionStore) -> bool:
     return True
 
 
-def authorize(request: Request, scope: str) -> Caller:
-    """The caller of `request`, if it may act within `scope`; otherwise
-    `UnauthenticatedError` or `InsufficientScopeError`."""
-    store: ExecutionStore = request.app.state.store
-    header = request.headers.get("authorization")
-    if header is None:
-        if _server_open(request.app, store):
-            return Caller(user=None)
-        raise UnauthenticatedError.missing()
-    scheme, _, token = header.strip().partition(" ")
-    token = token.strip()
+def require_same_origin(request: Request) -> None:
+    """Refuse `request` with `CrossSiteRequestError` unless the browser
+    marked it `Sec-Fetch-Site: same-origin`, or it reads and was marked
+    `none` or not marked at all. The header's value is never repeated."""
+    site = request.headers.get("sec-fetch-site")
+    if site == "same-origin":
+        return
+    if request.method in _READING_METHODS and site in (None, "none"):
+        return
+    raise CrossSiteRequestError()
+
+
+def _authorize_token(store: ExecutionStore, token: str, scope: str) -> Caller:
     # A token that could never be one is refused without asking the store.
-    if scheme.lower() != "bearer" or not well_formed_token(token):
+    if not well_formed_token(token):
         raise UnauthenticatedError.invalid()
     grant = store.authenticate(token_digest(token), now=datetime.now(timezone.utc))
     if grant is None:
         raise UnauthenticatedError.invalid()
     if not grant.allows(scope):
         raise InsufficientScopeError(scope)
-    return Caller(user=grant.user, admin=grant.admin)
+    return Caller(
+        user=grant.user,
+        admin=grant.admin,
+        administers=grant.allows(ADMIN_SCOPE),
+        expires_at=grant.expires_at,
+    )
+
+
+def authorize(request: Request, scope: str) -> Caller:
+    """The caller of `request`, if it may act within `scope`; otherwise
+    `UnauthenticatedError`, `CrossSiteRequestError` or
+    `InsufficientScopeError`, in the order the module docstring gives."""
+    store: ExecutionStore = request.app.state.store
+    header = request.headers.get("authorization")
+    if header is not None:
+        scheme, _, token = header.strip().partition(" ")
+        if scheme.lower() != "bearer":
+            raise UnauthenticatedError.invalid()
+        return _authorize_token(store, token.strip(), scope)
+    if _server_open(request.app, store):
+        return Caller(user=None)
+    cookie = request.cookies.get(SESSION_COOKIE)
+    if cookie is None:
+        raise UnauthenticatedError.missing()
+    require_same_origin(request)
+    return _authorize_token(store, cookie, scope)
 
 
 def _requires(scope: str) -> Callable[[Request], Caller]:
@@ -268,20 +335,30 @@ def requires_admin_token(request: Request) -> Caller:
     return caller
 
 
+async def requires_same_origin(request: Request) -> None:
+    """Signing in or out of a browser session: `require_same_origin`, which
+    these routes ask whether or not a cookie is sent, so another port's
+    page can neither sign a browser in as someone else nor sign it out.
+    `async`, since it reads a header alone and is not worth a thread."""
+    require_same_origin(request)
+
+
 def requires_closed_server(request: Request) -> None:
-    """Logging in or changing a password: refused with `OpenServerError`
-    while the database has no user, before the body is read. Any
-    `Authorization` header is ignored, since the body carries the
-    credentials."""
+    """Logging in, signing a browser in or changing a password: refused
+    with `OpenServerError` while the database has no user, before the body
+    is read. Any `Authorization` header is ignored, since the body carries
+    the credentials."""
     store: ExecutionStore = request.app.state.store
     if _server_open(request.app, store):
         raise OpenServerError()
 
 
 __all__ = [
+    "SESSION_COOKIE",
     "Caller",
     "authorize",
     "require_role",
+    "require_same_origin",
     "requires_admin",
     "requires_admin_token",
     "requires_closed_server",
@@ -293,4 +370,5 @@ __all__ = [
     "requires_read_run",
     "requires_record",
     "requires_record_run",
+    "requires_same_origin",
 ]

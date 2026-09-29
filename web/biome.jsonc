@@ -1,0 +1,46 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": { "enabled": true, "clientKind": "git", "root": "..", "useIgnoreFile": true },
+  "files": {
+    "includes": [
+      "**",
+      "!src/api/v1.d.ts",
+      "!src/ds/contract.d.ts",
+      "!src/ds/dotline.css",
+      "!src/ds/tokens.json"
+    ]
+  },
+  "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
+  "javascript": { "formatter": { "quoteStyle": "single" } },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      // RoleBadge's `role` is a project role, not an ARIA one.
+      "a11y": { "useValidAriaRole": { "level": "error", "options": { "ignoreNonDom": true } } },
+      "security": { "noDangerouslySetInnerHtml": "error" }
+    }
+  },
+  "plugins": ["./build/no-html-sinks.grit"],
+  "overrides": [
+    {
+      // The design system's markup is ported as it is, roles and all: a
+      // list of grid rows is role="list", menus hold role="separator", a
+      // scroll area that overflows becomes a named, focusable region, and an
+      // icon beside its word is aria-hidden with no title.
+      "includes": ["src/ds/**"],
+      "linter": {
+        "rules": {
+          "a11y": {
+            "useSemanticElements": "off",
+            "useAriaPropsSupportedByRole": "off",
+            "noNoninteractiveTabindex": "off",
+            "noSvgWithoutTitle": "off",
+            "noStaticElementInteractions": "off"
+          }
+        }
+      }
+    }
+  ],
+  "assist": { "enabled": true, "actions": { "source": { "organizeImports": "on" } } }
+}

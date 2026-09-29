@@ -33,6 +33,8 @@ from vantage.storage.sqlite_store import (
     _LIST_RUNS_AFTER,
     _LIST_SUBJECT_PREFIX_BYTES,
     SqliteExecutionStore,
+    _count_outcomes,
+    _list_results_with_outcomes,
     _list_runs_by_metadata,
 )
 from vantage_port_contract import (
@@ -272,6 +274,29 @@ def test_the_run_list_after_a_key_starts_its_index_scan_at_the_key(tmp_path: Pat
             "SEARCH run USING INDEX idx_run_project_started_at"
             " (project=? AND (started_at,id)<(?,?))" in plan_text
         )
+    finally:
+        store.close()
+
+
+def test_a_runs_outcomes_are_counted_and_filtered_along_its_results_index(
+    tmp_path: Path,
+) -> None:
+    """`_count_outcomes` seeks `idx_result_run_id` once per run of the page,
+    and the outcome filter reads the one run's results through it, so
+    neither costs more as other runs' results pile up."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        plans = [
+            store._conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()  # noqa: SLF001
+            for sql, params in (
+                (_count_outcomes(3), ("a" * 32, "b" * 32, "c" * 32)),
+                (_list_results_with_outcomes(2), (100, "a" * 32, "failed", "error", 21, 0)),
+            )
+        ]
+
+        for plan_rows in plans:
+            plan_text = "\n".join(str(row[-1]) for row in plan_rows)
+            assert "USING INDEX idx_result_run_id (run_id=?)" in plan_text, plan_text
     finally:
         store.close()
 

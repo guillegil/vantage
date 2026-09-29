@@ -187,6 +187,18 @@ class InvalidCursorError(InvalidParameterError):
         )
 
 
+class InvalidOutcomeFilterError(InvalidParameterError):
+    """An `outcome` of `GET /api/v1/runs/{run_id}/results` is not one of
+    the six outcomes a result can have. The sentence names the six, never
+    the word sent."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "outcome must be one of passed, failed, error, skipped, xfailed and xpassed.",
+            ["query.outcome"],
+        )
+
+
 class UnknownRunError(RejectionError):
     """No run matches the `run_id` in a heartbeat or read path.
 
@@ -319,6 +331,26 @@ class InsufficientScopeError(ChallengeError):
         super().__init__(
             f"The token does not grant the {scope} scope.",
             f', error="insufficient_scope", scope="{scope}"',
+        )
+
+
+class CrossSiteRequestError(RejectionError):
+    """A browser session's cookie on a request the browser did not mark
+    `Sec-Fetch-Site: same-origin` -- or, for a read, marked as coming from
+    another site or another port of this one. SameSite keeps the cookie
+    from other sites, not from other ports of the same host, so without
+    this a page served beside vantage could act with its session. A 403
+    without a challenge, since no token of the same user would help; the
+    header's value is never repeated."""
+
+    status_code = 403
+    error = "cross_site_request"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "A browser session is accepted only from vantage's own pages: the browser must mark "
+            "the request Sec-Fetch-Site: same-origin, which browsers do over HTTPS and on this "
+            "machine's loopback address."
         )
 
 
@@ -793,6 +825,7 @@ def register_error_handlers(app: FastAPI) -> None:
 __all__ = [
     "MAX_REPORT_BYTES",
     "ChallengeError",
+    "CrossSiteRequestError",
     "DefaultProjectMembersError",
     "IncompleteBodyError",
     "InsufficientRoleError",
@@ -803,6 +836,7 @@ __all__ = [
     "InvalidLoginRequestError",
     "InvalidMemberRequestError",
     "InvalidMetadataFilterError",
+    "InvalidOutcomeFilterError",
     "InvalidParameterError",
     "InvalidPasswordRequestError",
     "InvalidProjectRequestError",

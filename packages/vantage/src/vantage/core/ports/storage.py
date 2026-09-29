@@ -3,7 +3,7 @@ and the types it reads and writes."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Generic, Protocol, TypeVar
@@ -476,12 +476,21 @@ class ExecutionStore(Protocol):
         and both tables are read from one snapshot."""
         ...
 
-    def list_results(self, execution_id: str, *, limit: int, offset: int) -> Page[ResultListEntry]:
-        """Return a page of one run's results -- the paginated sibling of
-        `get_results`, with the same clamp and `has_more` mechanism as
-        `list_runs`. Each entry's failure data is a lean `FailureProjection`,
-        as `list_runs` does for VCS data; the full record is reachable via
-        `get_result`."""
+    def list_results(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+        offset: int,
+        outcomes: Collection[str] | None = None,
+    ) -> Page[ResultListEntry]:
+        """Return a page of one run's results in stored order -- the
+        paginated sibling of `get_results`, with the same clamp and
+        `has_more` mechanism as `list_runs`. With `outcomes`, only the
+        results whose outcome is one of them, paged over that narrower set;
+        an empty collection keeps none. Each entry's failure data is a lean
+        `FailureProjection`, as `list_runs` does for VCS data; the full
+        record is reachable via `get_result`."""
         ...
 
     def get_result(self, execution_id: str, *, node_id: str) -> Result | None:
@@ -541,10 +550,19 @@ class ExecutionStore(Protocol):
         ...
 
     def get_run_case_outcomes(self, execution_id: str) -> Sequence[tuple[str, str]]:
-        """Return `(file_path, outcome)` for every result of `execution_id`
-        -- the aggregate input `summarize_sections` classifies. Not
-        paginated, like `get_results`: this is an aggregate input, not a
+        """Return `(file_path, outcome)` for every result of `execution_id`,
+        in stored order: the order its results were recorded in, which is
+        the order the plugin reported them -- the aggregate input
+        `summarize_sections` classifies, and the run's outcomes in order.
+        Not paginated, like `get_results`: this is an aggregate input, not a
         response."""
+        ...
+
+    def count_outcomes(self, execution_ids: Sequence[str]) -> Mapping[str, Mapping[str, int]]:
+        """Return, for each of `execution_ids` that has results, how many it
+        holds of each outcome, leaving out the outcomes it has none of. An
+        id with no results, or naming no run, is left out. A page of runs
+        is counted in one statement, not run by run."""
         ...
 
     def create_project(self, name: str, *, created_at: datetime) -> Project:

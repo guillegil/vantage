@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, get_args
 
 import httpx2 as httpx
+import pytest
 import yaml
 from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
@@ -74,6 +75,7 @@ from vantage.ingestion.schemas import (
     SessionReport,
     VcsReport,
 )
+from vantage.service.access import SESSION_COOKIE
 from vantage.service.app import create_app
 from vantage.service.errors import MAX_REPORT_BYTES
 from vantage.service.routes.members import MAX_MEMBERS_BODY_BYTES
@@ -94,6 +96,7 @@ from vantage.service.schemas import (
     MetadataFileResponse,
     MetadataHorizonResponse,
     MetadataItemResponse,
+    OutcomeCountsResponse,
     PasswordChangeRequest,
     PasswordSetRequest,
     ProjectCreateRequest,
@@ -107,12 +110,15 @@ from vantage.service.schemas import (
     RunListItemResponse,
     RunListResponse,
     RunMetadataResponse,
+    RunOutcomesResponse,
     RunSectionSummaryResponse,
     RunVcsResponse,
     SectionListResponse,
     SectionResponse,
     SectionSummaryResponse,
     SectionUpsertRequest,
+    SessionResponse,
+    SessionUserResponse,
     TokenCreateRequest,
     TokenListResponse,
     TokenResponse,
@@ -133,6 +139,8 @@ _HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
 _Call = Callable[[], httpx.Response]
 # A password the rule takes, for the password routes to set and check.
 _PASSWORD = "an interface probe password"
+# What a browser marks every request from vantage's own pages with.
+_SAME_ORIGIN = {"Sec-Fetch-Site": "same-origin"}
 
 
 def _parsed_document() -> dict[str, Any]:
@@ -294,8 +302,10 @@ def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None
     """A binding table maps every `(method, path)` the document declares to
     a callable producing valid parameters, driven against a dedicated
     fixture database with an admin's token holding every scope, since the
-    users and tokens paths answer nothing else. Logging in and changing a
-    password send, instead, the name and password an admin set. Includes
+    users and tokens paths answer nothing else. Logging in, signing a
+    browser in and changing a password send, instead, the name and password
+    an admin set, and signing in and out send what a browser marks a
+    request from vantage's own pages with. Includes
     `GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml` themselves."""
     document = _parsed_document()
     declared = _declared_operations(document)
@@ -354,6 +364,7 @@ def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None
         (("GET", "/runs/{run_id}"), lambda: client.get(run)),
         (("GET", "/runs/{run_id}/metadata"), lambda: client.get(f"{run}/metadata")),
         (("GET", "/runs/{run_id}/results"), lambda: client.get(f"{run}/results")),
+        (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{run}/outcomes")),
         (
             ("GET", "/runs/{run_id}/result"),
             lambda: client.get(f"{run}/result", params={"node_id": node_id}),
@@ -412,6 +423,19 @@ def test_every_documented_path_answers_2xx(tmp_path: Path, cheap_passwords: None
                 "/api/v1/password",
                 json={"name": "probe", "password": _PASSWORD, "new_password": _PASSWORD.upper()},
             ),
+        ),
+        (
+            ("POST", "/session"),
+            lambda: client.post(
+                "/api/v1/session",
+                json={"name": "probe", "password": _PASSWORD.upper()},
+                headers=_SAME_ORIGIN,
+            ),
+        ),
+        (("GET", "/session"), lambda: client.get("/api/v1/session")),
+        (
+            ("DELETE", "/session"),
+            lambda: client.delete("/api/v1/session", headers=_SAME_ORIGIN),
         ),
         (("POST", "/tokens"), mint),
         (("GET", "/tokens"), lambda: client.get("/api/v1/tokens")),
@@ -556,6 +580,8 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
             ("GET", "/runs/{run_id}/results"),
             lambda: client.get(f"{known_shape}/results", params={"limit": 0}),
         ),
+        (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{known_shape}/outcomes")),
+        (("GET", "/runs/{run_id}/outcomes"), lambda: client.get(f"{malformed}/outcomes")),
         (
             ("GET", "/runs/{run_id}/result"),
             lambda: client.get(f"{known_shape}/result", params=node),
@@ -617,6 +643,14 @@ def _probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
         (
             ("POST", "/login"),
             lambda: client.post("/api/v1/login", json={"name": "a", "password": _PASSWORD}),
+        ),
+        (
+            ("POST", "/session"),
+            lambda: client.post(
+                "/api/v1/session",
+                json={"name": "a", "password": _PASSWORD},
+                headers=_SAME_ORIGIN,
+            ),
         ),
         (
             ("POST", "/password"),
@@ -783,6 +817,53 @@ def _members_probes(client: TestClient) -> list[tuple[tuple[str, str], _Call]]:
     ]
 
 
+def _session_probes(client: TestClient, token: str) -> list[tuple[tuple[str, str], _Call]]:
+    """One request per rejection signing a browser in or out can earn, and
+    a credentialed read refused for where it came from, on the server
+    `_users_probes` asks, from a client sending no token: `token` is the
+    admin's, sent as a session cookie from another port of the host."""
+    json_header = {"content-type": "application/json", **_SAME_ORIGIN}
+    too_large = b" " * (MAX_USERS_BODY_BYTES + 1)
+    signing_in = ("POST", "/session")
+    cross_site = {"Cookie": f"{SESSION_COOKIE}={token}", "Sec-Fetch-Site": "same-site"}
+    return [
+        (
+            signing_in,
+            partial(client.post, "/api/v1/session", json={"name": "bob", "password": _PASSWORD}),
+        ),
+        (
+            signing_in,
+            partial(
+                client.post,
+                "/api/v1/session",
+                content=b"{}",
+                headers={"content-type": "x/y", **_SAME_ORIGIN},
+            ),
+        ),
+        (signing_in, partial(client.post, "/api/v1/session", content=b"{", headers=json_header)),
+        (
+            signing_in,
+            partial(client.post, "/api/v1/session", content=too_large, headers=json_header),
+        ),
+        (signing_in, partial(client.post, "/api/v1/session", content=b"[]", headers=json_header)),
+        (
+            signing_in,
+            partial(
+                client.post,
+                "/api/v1/session",
+                json={"name": "bob", "password": _PASSWORD},
+                headers=_SAME_ORIGIN,
+            ),
+        ),
+        (("DELETE", "/session"), partial(client.delete, "/api/v1/session", headers=cross_site)),
+        (("GET", "/session"), partial(client.get, "/api/v1/session", headers=cross_site)),
+        (
+            ("GET", "/projects/{project}/runs"),
+            partial(client.get, f"/api/v1/projects/{DEFAULT_PROJECT}/runs", headers=cross_site),
+        ),
+    ]
+
+
 def test_every_status_the_server_answers_is_documented(cheap_passwords: None) -> None:
     """A generated client decides what to handle from the listed statuses,
     so each rejection the server gives must be listed, and its error named
@@ -798,6 +879,9 @@ def test_every_status_the_server_answers_is_documented(cheap_passwords: None) ->
     admin_client = TestClient(create_app(closed), headers=admin)
     answers += [(key, call()) for key, call in _users_probes(admin_client)]
     answers += [(key, call()) for key, call in _members_probes(admin_client)]
+    browser = TestClient(create_app(closed))
+    admins_token = admin["Authorization"].removeprefix("Bearer ")
+    answers += [(key, call()) for key, call in _session_probes(browser, admins_token)]
     observed = {(*key, response.status_code) for key, response in answers}
     errors = {(*key, response.json()["error"]) for key, response in answers}
     answered = {(*key, response.status_code, response.json()["error"]) for key, response in answers}
@@ -837,6 +921,16 @@ def test_every_status_the_server_answers_is_documented(cheap_passwords: None) ->
         415,
         422,
     }
+    # And every one signing a browser in or out can, but the busy slots.
+    assert {status for _, path, status in observed if path == "/session"} == {
+        400,
+        401,
+        403,
+        409,
+        413,
+        415,
+        422,
+    }
     assert {
         ("POST", "/projects", "project_exists"),
         ("POST", "/projects", "invalid_project_name"),
@@ -847,6 +941,13 @@ def test_every_status_the_server_answers_is_documented(cheap_passwords: None) ->
         ("POST", "/login", "open_server"),
         ("POST", "/login", "invalid_credentials"),
         ("POST", "/login", "invalid_login_request"),
+        ("POST", "/session", "open_server"),
+        ("POST", "/session", "cross_site_request"),
+        ("POST", "/session", "invalid_credentials"),
+        ("POST", "/session", "invalid_login_request"),
+        ("GET", "/session", "cross_site_request"),
+        ("DELETE", "/session", "cross_site_request"),
+        ("GET", "/projects/{project}/runs", "cross_site_request"),
         ("POST", "/password", "open_server"),
         ("POST", "/password", "invalid_credentials"),
         ("POST", "/password", "invalid_password_request"),
@@ -895,7 +996,8 @@ def _access_requests(
     made a viewer of the project before he is removed from it. The users
     bindings add `carol`, demote and mint a token for `bob`, and revoke the
     token `victim`; the password bindings set `bob`'s password to
-    `_PASSWORD`, log him in with it and change it to itself."""
+    `_PASSWORD`, log him in with it and change it to itself, and sign a
+    browser in and out as him, marked as coming from vantage's own pages."""
     run = f"/api/v1/runs/{_ACCESS_RUN}"
     project = f"/api/v1/projects/{_ACCESS_PROJECT}"
     node = {"node_id": "tests/test_a.py::test_one"}
@@ -934,6 +1036,7 @@ def _access_requests(
         ("GET", "/runs/{run_id}"): lambda: client.get(run, headers=headers),
         ("GET", "/runs/{run_id}/metadata"): lambda: client.get(f"{run}/metadata", headers=headers),
         ("GET", "/runs/{run_id}/results"): lambda: client.get(f"{run}/results", headers=headers),
+        ("GET", "/runs/{run_id}/outcomes"): lambda: client.get(f"{run}/outcomes", headers=headers),
         ("GET", "/runs/{run_id}/result"): lambda: client.get(
             f"{run}/result", params=node, headers=headers
         ),
@@ -980,6 +1083,15 @@ def _access_requests(
         ),
         ("POST", "/login"): lambda: client.post(
             "/api/v1/login", json={"name": "bob", "password": _PASSWORD}, headers=headers
+        ),
+        ("POST", "/session"): lambda: client.post(
+            "/api/v1/session",
+            json={"name": "bob", "password": _PASSWORD},
+            headers={**headers, **_SAME_ORIGIN},
+        ),
+        ("GET", "/session"): lambda: client.get("/api/v1/session", headers=headers),
+        ("DELETE", "/session"): lambda: client.delete(
+            "/api/v1/session", headers={**headers, **_SAME_ORIGIN}
         ),
         ("POST", "/password"): lambda: client.post(
             "/api/v1/password",
@@ -1031,14 +1143,35 @@ def _documented_scope(operation: Mapping[str, Any]) -> str | None:
     return str(match.group(1))
 
 
-def test_every_operation_needs_the_scope_its_document_names(cheap_passwords: None) -> None:
+def _as_cookie(headers: dict[str, str]) -> dict[str, str]:
+    """The token `headers` sends as `Authorization: Bearer`, sent instead
+    as a browser session's cookie, from vantage's own pages."""
+    token = headers["Authorization"].removeprefix("Bearer ")
+    return {"Cookie": f"{SESSION_COOKIE}={token}", **_SAME_ORIGIN}
+
+
+# How a credential is sent: as the plugin and CI send one, or as a browser.
+_CREDENTIALS: dict[str, Callable[[dict[str, str]], dict[str, str]]] = {
+    "bearer": lambda headers: headers,
+    "cookie": _as_cookie,
+}
+
+
+@pytest.mark.parametrize("credential", sorted(_CREDENTIALS))
+def test_every_operation_needs_the_scope_its_document_names(
+    cheap_passwords: None, credential: str
+) -> None:
     """On a server with users, driven by the document: an operation whose
     `security` is empty answers without a token, and whatever token is
     sent; every other one refuses a request without one (401) and one
     granting every scope but the one its `403` names (403), and takes an
     admin's granting that scope, since an admin acts as an owner of every
     project. A report or heartbeat of another user's run is 409, even from
-    an editor of its project. Every status is documented, so a route added
+    an editor of its project. Each is asked with the token in the header,
+    and again in the session cookie, which every operation takes as it
+    takes the header; the cookie also answers 403 cross_site_request, which
+    the document names, from anywhere but vantage's own pages, and the 401
+    names the cookie. Every status is documented, so a route added
     without its scope, or a document that names the wrong one, fails
     here."""
     store = InMemoryExecutionStore()
@@ -1048,20 +1181,23 @@ def test_every_operation_needs_the_scope_its_document_names(cheap_passwords: Non
     store.set_password("bob", password_hash=hash_password(_PASSWORD), changed_at=now)
     client = TestClient(create_app(store))
     document = _parsed_document()
-    bobs = _bearer(store, "bob", {RECORD_SCOPE})
+    send = _CREDENTIALS[credential]
+    bobs = send(_bearer(store, "bob", {RECORD_SCOPE}))
     _bearer(store, "bob", {READ_SCOPE})
     victim = store.list_tokens(user="bob")[-1].id
     anonymous = _access_requests(client, {}, victim=victim)
     assert set(anonymous) == _declared_operations(document)
     observed: set[tuple[str, str, int]] = set()
+    refused: set[tuple[str, str, int, str]] = set()
 
     for key, call in anonymous.items():
         method, path = key
-        scope = _documented_scope(document["paths"][path][method.lower()])
+        operation = document["paths"][path][method.lower()]
+        scope = _documented_scope(operation)
         answered = {"none": call().status_code}
         if scope is not None:
-            lacking = _bearer(store, "alice", set(SCOPES) - {scope})
-            holding = _bearer(store, "alice", {scope})
+            lacking = send(_bearer(store, "alice", set(SCOPES) - {scope}))
+            holding = send(_bearer(store, "alice", {scope}))
             answered["lacking"] = _access_requests(client, lacking, victim=victim)[
                 key
             ]().status_code
@@ -1071,8 +1207,15 @@ def test_every_operation_needs_the_scope_its_document_names(cheap_passwords: Non
             assert answered["none"] == 401, (key, answered)
             assert answered["lacking"] == 403, (key, answered)
             assert 200 <= answered["holding"] < 300, (key, answered)
+            if credential == "cookie":
+                assert SESSION_COOKIE in operation["responses"]["401"]["description"], key
+                elsewhere = {**holding, "Sec-Fetch-Site": "cross-site"}
+                response = _access_requests(client, elsewhere, victim=victim)[key]()
+                answered["cross-site"] = response.status_code
+                assert response.status_code == 403, (key, answered)
+                refused.add((*key, 403, response.json()["error"]))
         else:
-            forged = {"Authorization": f"Bearer {new_token()}"}
+            forged = send({"Authorization": f"Bearer {new_token()}"})
             answered["forged"] = _access_requests(client, forged, victim=victim)[key]().status_code
             assert 200 <= answered["none"] < 300, (key, answered)
             assert 200 <= answered["forged"] < 300, (key, answered)
@@ -1086,6 +1229,8 @@ def test_every_operation_needs_the_scope_its_document_names(cheap_passwords: Non
         observed.add((*key, status))
 
     assert _undocumented_statuses(document, observed) == set()
+    assert {error for *_, error in refused} <= {"cross_site_request"}
+    assert _unnamed_errors(document, refused) == set()
 
 
 def test_every_admin_operation_refuses_a_non_admins_token_holding_every_scope() -> None:
@@ -1134,14 +1279,16 @@ def _documented_role(operation: Mapping[str, Any]) -> str | None:
     return VIEWER_ROLE if "(not_a_member)" in description else None
 
 
-def test_every_operation_in_a_project_needs_the_role_its_document_names() -> None:
+@pytest.mark.parametrize("credential", sorted(_CREDENTIALS))
+def test_every_operation_in_a_project_needs_the_role_its_document_names(credential: str) -> None:
     """On a server with users, driven by the document: every operation
     under a project or a run id, and a report, names the role its user
     needs in the project, and a user who is not an admin, with a token
     granting exactly the scope it names, is refused `not_a_member` with no
     role there, `insufficient_role` with the one just below it, and served
     with it -- recording the run the later ones ask about, and keeping it
-    alive, as its own. Neither refusal carries a challenge, since no other
+    alive, as its own -- whether the token is sent in the header or in the
+    session cookie. Neither refusal carries a challenge, since no other
     token of the user's would help. A route that checks the wrong role, or
     a document that names the wrong one, fails here."""
     store = InMemoryExecutionStore()
@@ -1171,7 +1318,8 @@ def test_every_operation_in_a_project_needs_the_role_its_document_names() -> Non
             store.set_member("bob", project=_ACCESS_PROJECT, role=role)
         scope = _documented_scope(document["paths"][key[1]][key[0].lower()])
         assert scope is not None, key
-        return _access_requests(client, _bearer(store, "bob", {scope}))[key]()
+        credentials = _CREDENTIALS[credential](_bearer(store, "bob", {scope}))
+        return _access_requests(client, credentials)[key]()
 
     for key, role in roles.items():
         rank = _RANKED_ROLES.index(role)
@@ -1281,9 +1429,12 @@ def test_every_documented_integer_bound_is_the_one_the_server_enforces(tmp_path:
 def test_every_created_token_is_declared_and_sent_as_not_to_be_stored(
     cheap_passwords: None,
 ) -> None:
-    """The two answers that carry a token, a made one's and a login's, say
-    no cache may keep it, in the document and on the wire, and they are the
-    only ones that do."""
+    """The three answers that carry a token, a made one's, a login's and a
+    browser session's, say no cache may keep it, in the document and on the
+    wire, and they and signing out, which clears the session's cookie, are
+    the only ones whose document declares a header. On the wire every
+    other answer says so too, by the default `service/web.py`'s
+    `SecurityHeaders` adds, once."""
     document = _parsed_document()
     store = InMemoryExecutionStore()
     client = TestClient(create_app(store), headers=_admin(store))
@@ -1296,12 +1447,25 @@ def test_every_created_token_is_declared_and_sent_as_not_to_be_stored(
         "/login": client.post("/api/v1/login", json={"name": "alice", "password": _PASSWORD}),
     }
 
+    signed_in = client.post(
+        "/api/v1/session", json={"name": "alice", "password": _PASSWORD}, headers=_SAME_ORIGIN
+    )
+    signed_out = client.delete("/api/v1/session", headers=_SAME_ORIGIN)
+
     for path, response in answers.items():
         created = document["paths"][path]["post"]["responses"]["201"]
         assert set(created["headers"]) == {"Cache-Control"}, path
         assert response.status_code == 201, path
         assert response.headers["Cache-Control"] == "no-store", path
-    assert "Cache-Control" not in client.get("/api/v1/tokens").headers
+    session = document["paths"]["/session"]
+    assert set(session["post"]["responses"]["201"]["headers"]) == {"Set-Cookie", "Cache-Control"}
+    assert set(session["delete"]["responses"]["204"]["headers"]) == {"Set-Cookie"}
+    assert signed_in.status_code == 201
+    assert signed_in.headers.get_list("Cache-Control") == ["no-store"]
+    assert signed_in.headers["Set-Cookie"].startswith(f"{SESSION_COOKIE}=vantage_")
+    assert signed_out.status_code == 204
+    assert signed_out.headers["Set-Cookie"].startswith(f'{SESSION_COOKIE}="";')
+    assert client.get("/api/v1/tokens").headers.get_list("Cache-Control") == ["no-store"]
     headed = {
         (method, path, status)
         for path, operations in document["paths"].items()
@@ -1309,7 +1473,12 @@ def test_every_created_token_is_declared_and_sent_as_not_to_be_stored(
         for status, answer in operation["responses"].items()
         if "headers" in answer
     }
-    assert headed == {("post", "/tokens", "201"), ("post", "/login", "201")}
+    assert headed == {
+        ("post", "/tokens", "201"),
+        ("post", "/login", "201"),
+        ("post", "/session", "201"),
+        ("delete", "/session", "204"),
+    }
 
 
 def test_the_documented_user_name_pattern_is_the_domains() -> None:
@@ -1387,10 +1556,12 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "Acknowledgement": Acknowledgement,
     "HeartbeatAcknowledgement": HeartbeatAcknowledgement,
     "RunVcs": RunVcsResponse,
+    "OutcomeCounts": OutcomeCountsResponse,
     "RunListItem": RunListItemResponse,
     "RunListResponse": RunListResponse,
     "MetadataHorizon": MetadataHorizonResponse,
     "RunDetailResponse": RunDetailResponse,
+    "RunOutcomesResponse": RunOutcomesResponse,
     "MetadataItem": MetadataItemResponse,
     "MetadataFile": MetadataFileResponse,
     "RunMetadataResponse": RunMetadataResponse,
@@ -1413,6 +1584,8 @@ _RESPONSE_SCHEMAS: dict[str, type[BaseModel]] = {
     "ProjectListResponse": ProjectListResponse,
     "MemberResponse": MemberResponse,
     "MemberListResponse": MemberListResponse,
+    "SessionUserResponse": SessionUserResponse,
+    "SessionResponse": SessionResponse,
 }
 _BOUND_MODELS: dict[str, type[BaseModel]] = {**_REQUEST_SCHEMAS, **_RESPONSE_SCHEMAS}
 

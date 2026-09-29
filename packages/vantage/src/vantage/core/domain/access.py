@@ -175,11 +175,15 @@ class Token:
 class Grant:
     """What a live token of an enabled user lets its bearer do: act as
     `user`, within `scopes`. `admin` is the user's standing now, not when
-    the token was made."""
+    the token was made. `token_id` names the token, so a browser session
+    can revoke the one it holds, and `expires_at` is the token's own: a
+    login token's end, or `None` for a made one."""
 
     user: str
     admin: bool
     scopes: frozenset[str]
+    token_id: int
+    expires_at: datetime | None
 
     def allows(self, scope: str) -> bool:
         """Whether this grant covers `scope`. The admin scope needs an

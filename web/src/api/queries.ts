@@ -1,0 +1,215 @@
+// Server state, through TanStack Query alone. Each hook names one read of
+// /api/v1; pages never call the client directly.
+import {
+  MutationCache,
+  type Query,
+  QueryCache,
+  QueryClient,
+  useInfiniteQuery,
+  useQueries,
+  useQuery,
+} from '@tanstack/react-query';
+import { ApiError, api, isApiError, type Schemas, unwrap } from './client';
+
+export type Session = Schemas['SessionResponse'];
+export type Project = Schemas['ProjectResponse'];
+export type RunListItem = Schemas['RunListItem'];
+export type RunDetail = Schemas['RunDetailResponse'];
+export type ResultItem = Schemas['ResultListItem'];
+export type RunMetadata = Schemas['RunMetadataResponse'];
+export type OutcomeWord = ResultItem['outcome'];
+
+export const RUNS_PAGE = 50;
+export const RESULTS_PAGE = 100;
+const LIST_STALE = 30_000;
+
+export const NOT_PASSING: OutcomeWord[] = ['failed', 'error', 'xpassed'];
+
+// A refusal is final; no answer, or a server error, is tried once more.
+export function retry(failures: number, error: unknown): boolean {
+  if (isApiError(error) && error.status >= 400 && error.status < 500) return false;
+  return failures < 1;
+}
+
+export interface Unauthorized {
+  // A 401 on who is asking: the browser is not signed in.
+  onSignedOut: () => void;
+  // A 401 on anything else: a session that was working has ended.
+  onSessionEnded: () => void;
+}
+
+const SESSION_KEY = ['session'] as const;
+
+function onError(handlers: Unauthorized, error: unknown, key: readonly unknown[] | undefined) {
+  if (!isApiError(error, 401)) return;
+  if (key && key[0] === SESSION_KEY[0]) handlers.onSignedOut();
+  else handlers.onSessionEnded();
+}
+
+export function makeQueryClient(handlers: Unauthorized): QueryClient {
+  return new QueryClient({
+    queryCache: new QueryCache({
+      onError: (error, query: Query<unknown, unknown, unknown>) =>
+        onError(handlers, error, query.queryKey),
+    }),
+    mutationCache: new MutationCache({
+      onError: (error, _v, _c, mutation) => onError(handlers, error, mutation.options.mutationKey),
+    }),
+    defaultOptions: {
+      queries: { retry, refetchOnWindowFocus: false },
+      mutations: { retry: false },
+    },
+  });
+}
+
+// A finished run never changes, so what was read of it stays true.
+function finishedRun(detail: RunDetail | undefined): boolean {
+  return detail !== undefined && detail.presentation !== 'running';
+}
+
+export function useSession() {
+  return useQuery({
+    queryKey: SESSION_KEY,
+    queryFn: ({ signal }) => unwrap(api.GET('/session', { signal })),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+export function useProjects(enabled = true) {
+  return useQuery({
+    queryKey: ['projects'],
+    queryFn: ({ signal }) => unwrap(api.GET('/projects', { signal })),
+    staleTime: LIST_STALE,
+    enabled,
+  });
+}
+
+export function useRuns(project: string) {
+  return useInfiniteQuery({
+    queryKey: ['runs', project],
+    queryFn: ({ pageParam, signal }) =>
+      unwrap(
+        api.GET('/projects/{project}/runs', {
+          params: {
+            path: { project },
+            query: pageParam ? { limit: RUNS_PAGE, cursor: pageParam } : { limit: RUNS_PAGE },
+          },
+          signal,
+        }),
+      ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (last) => (last.has_more ? last.next_cursor : null),
+    staleTime: LIST_STALE,
+  });
+}
+
+export function useRun(runId: string, enabled = true) {
+  return useQuery({
+    enabled,
+    queryKey: ['run', runId],
+    queryFn: ({ signal }) =>
+      unwrap(
+        api.GET('/runs/{run_id}', {
+          params: { path: { run_id: runId } },
+          signal,
+        }),
+      ),
+    staleTime: (query) => (finishedRun(query.state.data) ? Number.POSITIVE_INFINITY : LIST_STALE),
+  });
+}
+
+function outcomesQuery(runId: string, finished: boolean) {
+  return {
+    queryKey: ['run', runId, 'outcomes'],
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      unwrap(
+        api.GET('/runs/{run_id}/outcomes', {
+          params: { path: { run_id: runId } },
+          signal,
+        }),
+      ),
+    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
+  };
+}
+
+export function useRunOutcomes(runId: string, finished: boolean, enabled = true) {
+  return useQuery({ ...outcomesQuery(runId, finished), enabled });
+}
+
+// The outcomes of every listed run in view, by run id.
+export function useOutcomesOf(runs: { id: string; finished: boolean }[]) {
+  return useQueries({
+    queries: runs.map((r) => outcomesQuery(r.id, r.finished)),
+    combine: (answers) => {
+      const byId = new Map<string, string>();
+      answers.forEach((a, i) => {
+        const run = runs[i];
+        if (run && a.data) byId.set(run.id, a.data.outcomes);
+      });
+      return byId;
+    },
+  });
+}
+
+function resultsQuery(runId: string, outcomes: OutcomeWord[] | null, finished: boolean) {
+  return {
+    queryKey: ['run', runId, 'results', outcomes ?? 'all'],
+    queryFn: ({ pageParam, signal }: { pageParam: number; signal: AbortSignal }) =>
+      unwrap(
+        api.GET('/runs/{run_id}/results', {
+          params: {
+            path: { run_id: runId },
+            query: outcomes
+              ? { limit: RESULTS_PAGE, offset: pageParam, outcome: outcomes }
+              : { limit: RESULTS_PAGE, offset: pageParam },
+          },
+          signal,
+        }),
+      ),
+    initialPageParam: 0,
+    getNextPageParam: (last: Schemas['ResultsResponse'], pages: Schemas['ResultsResponse'][]) =>
+      last.has_more ? pages.reduce((n, page) => n + page.items.length, 0) : null,
+    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
+  };
+}
+
+export function useNotPassing(runId: string, finished: boolean, enabled = true) {
+  return useInfiniteQuery({
+    ...resultsQuery(runId, NOT_PASSING, finished),
+    enabled,
+  });
+}
+
+export function useResults(runId: string, finished: boolean, enabled = true) {
+  return useInfiniteQuery({ ...resultsQuery(runId, null, finished), enabled });
+}
+
+export function useRunMetadata(runId: string, finished: boolean, enabled = true) {
+  return useQuery({
+    queryKey: ['run', runId, 'metadata'],
+    queryFn: ({ signal }) =>
+      unwrap(
+        api.GET('/runs/{run_id}/metadata', {
+          params: { path: { run_id: runId } },
+          signal,
+        }),
+      ),
+    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
+    enabled,
+  });
+}
+
+export async function signIn(name: string, password: string): Promise<Session> {
+  return unwrap(
+    api.POST('/session', {
+      body: { name, password },
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  );
+}
+
+export async function signOut(): Promise<void> {
+  await unwrap(api.DELETE('/session'));
+}
+
+export { ApiError };

@@ -14,7 +14,9 @@ It covers three routes:
 The server serves an OpenAPI document for every route, the read API included,
 at `GET /api/v1/openapi.yaml` (source:
 `packages/vantage/src/vantage/service/openapi/v1.yaml`). Every route is under
-`/api/v1`; nothing answers an unversioned path.
+`/api/v1`. No route answers an unversioned path: under `/api`, and for
+any method but `GET` and `HEAD`, it answers `404`; any other `GET` belongs
+to the server's web client, which answers with its page.
 
 ## Authentication
 
@@ -25,13 +27,14 @@ local store made it. So a fresh server needs a token from its first report
 on. Only a database the local store made is served without one, and only
 until it has a user (`vantage user add`): such a server takes every
 request here without a token, checks no role, and only the routes that
-manage who may do so (users, tokens, members, login and password) answer
-`409 open_server`.
+manage who may do so (users, tokens, members, login, sign-in and
+password) answer `409 open_server`.
 
 Every other server needs a token on every route but
-`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml`, and
-`POST /api/v1/login` and `POST /api/v1/password`, which take a name and a
-password instead:
+`GET /api/v1/capabilities` and `GET /api/v1/openapi.yaml`;
+`POST /api/v1/login`, `POST /api/v1/session` and `POST /api/v1/password`,
+which take a name and a password instead; and `DELETE /api/v1/session`,
+which signs a browser out:
 
 ```
 Authorization: Bearer vantage_...
@@ -42,7 +45,11 @@ A token belongs to one user and holds one or more scopes: `read`,
 from an admin's `POST /api/v1/tokens`, and never expires. The two
 ingestion routes need `record`, which is all a token for a test runner
 needs, and which a login token (`POST /api/v1/login`, for people reading,
-expiring after 12 hours) never holds.
+expiring after 12 hours) never holds. A browser holds its login token in
+the session cookie `POST /api/v1/session` sets, which is taken wherever a
+header is, but only without one: a request that sends `Authorization` is
+judged by it alone, whatever cookie comes with it, wherever the request
+comes from.
 
 Recording also needs a role in the project: its user must be an editor of
 the project a report names, or, for a heartbeat, of the project the run
@@ -54,8 +61,9 @@ owner of it or an admin makes a user an editor
 
 The server answers:
 
-- No `Authorization` header, on a server with users: `401 unauthenticated`,
-  with `WWW-Authenticate: Bearer realm="vantage"`.
+- No `Authorization` header and no session cookie, on a server with
+  users: `401 unauthenticated`, with
+  `WWW-Authenticate: Bearer realm="vantage"`.
 - A header that carries no bearer token, or a token that is unknown,
   revoked, expired or of a disabled user, on any server:
   `401 unauthenticated`, the challenge adding `error="invalid_token"`. A
@@ -463,7 +471,7 @@ its run `running`.
 | `403` | `insufficient_role` | The token's user is only a viewer of that project; recording needs the editor role. |
 | `404` | `unknown_run` | A heartbeat for a run never recorded. |
 | `404` | `unknown_project` | A report naming a project the server does not have. |
-| `404` | `not_found` | No route matches the path, unversioned paths included. |
+| `404` | `not_found` | No route matches the path, unversioned `POST`s and paths under `/api` included. |
 | `405` | `method_not_allowed` | The path exists but does not take this method. The `Allow` header lists the ones it takes. |
 | `409` | `foreign_run` | A report or heartbeat of a run another user recorded. |
 | `409` | `project_mismatch` | A report of a run created in another project. |

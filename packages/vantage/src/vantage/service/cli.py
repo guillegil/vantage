@@ -379,7 +379,8 @@ def main(argv: list[str] | None = None) -> None:
     manage users, tokens and projects, and `vantage push ...` sends the
     queued runs. Anything else serves: resolve configuration, refuse
     anything unusable, give a database of the server's own its first admin,
-    warn on a wide bind, serve, then close."""
+    warn on a wide bind, serve, with the web client built into the package,
+    then close."""
     arguments = sys.argv[1:] if argv is None else argv
     if arguments[:1] in (["user"], ["token"], ["project"]):
         from vantage.service import manage
@@ -400,6 +401,7 @@ def main(argv: list[str] | None = None) -> None:
     args = _parse_args(arguments)
     _require_the_server_extra()
     from vantage.service.app import create_app
+    from vantage.service.web import CLIENT_DIRECTORY
 
     try:
         config = resolve_server_config(
@@ -431,7 +433,10 @@ def main(argv: list[str] | None = None) -> None:
         # start makes no bind to warn about.
         warn_if_bound_wide(config.host, access_required=store.access_required())
         app = create_app(
-            store, grace_period_seconds=config.grace_period_seconds, close_store_on_shutdown=True
+            store,
+            grace_period_seconds=config.grace_period_seconds,
+            close_store_on_shutdown=True,
+            client=CLIENT_DIRECTORY,
         )
         _serve(app, listener, config)
     finally:

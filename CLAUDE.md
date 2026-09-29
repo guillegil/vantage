@@ -8,7 +8,9 @@ Vantage records what a pytest suite did, run after run. The pytest plugin
 reports each session over HTTP to a server, which stores it in SQLite or
 PostgreSQL and serves it through a JSON read API; or, in its local modes,
 stores it in a SQLite file on the test machine through `vantage.local`,
-queueing what a server could not take in an outbox to send later.
+queueing what a server could not take in an outbox to send later. The
+server also serves a web client, built from `web/` (TypeScript and React),
+at every path outside `/api`, for reading runs in a browser.
 Pre-release (0.1.0); nothing is published.
 
 ## Ground rules
@@ -38,6 +40,7 @@ its `postgres` extra.
 | `vantage.ingestion` | `packages/vantage/src/vantage/ingestion` | stdlib + `vantage.core` + Pydantic + PyYAML; never a web framework or a storage adapter | `test_architecture.py` (walk, and an import with the web framework and the driver blocked) |
 | `vantage.local` | `packages/vantage/src/vantage/local` | stdlib + `vantage.core` + `vantage.ingestion` + the SQLite adapter's modules | `test_architecture.py` |
 | `vantage.service` | `packages/vantage/src/vantage/service` | anything; the only importer of FastAPI, Starlette and uvicorn, and only once it is to serve | `test_architecture.py` (an AST scan), `test_cli.py`, `test_push.py` |
+| the web client | `web/` | its own pnpm dependencies; `/api/v1` only through `src/api`; design-system components (`src/ds`) never fetch; no HTML sinks | `tsc`, Biome and `build/no-html-sinks.grit`, Vitest, Playwright, CI's `web` and `e2e` jobs |
 
 - Ports are `typing.Protocol` (`core/ports/storage.py`); adapters satisfy them
   by shape. The server ships two adapters, `SqliteExecutionStore` and
@@ -52,8 +55,20 @@ its `postgres` extra.
   to responses.
 - Pydantic lives in `vantage.ingestion` and `vantage.service` only;
   everything else uses stdlib `dataclasses` and hand-written validation.
+- `web/` is a pnpm project, neither a uv workspace member nor a Python
+  package, and holds no Python file (the e2e harness writes its pytest suite
+  into a temporary directory). `src/api/v1.d.ts` is generated from
+  `v1.yaml` by `api:types` and committed, so the client fails `typecheck`
+  when the contract changes shape. `src/ds` is the design system's port:
+  `tokens.json`, `dotline.css`, `contract.d.ts` and the fonts are vendored
+  verbatim, each component is ported one to one (a deviation is written in
+  its README's port notes), and `contract.test-d.ts` checks every port
+  against `contract.d.ts`. `src/adapt` is the only code that knows both the
+  API's field names and the components' props. The build goes to
+  `service/client/`, which git ignores and hatch's `artifacts` ship.
 - The root `Dockerfile` and `.dockerignore` build the server image from the
-  lock; `tests/test_dockerfile.py` guards them, CI's `image` job runs it.
+  locks, the client in a Node stage whose output alone reaches the
+  package; `tests/test_dockerfile.py` guards them, CI's `image` job runs it.
 - Test-support modules sit in `packages/*/tests` on the root `pythonpath` and
   never ship. The only pytest config is `[tool.pytest.ini_options]` in the root
   `pyproject.toml`.
@@ -106,6 +121,19 @@ its `postgres` extra.
   whatever the database defaults to, and a connection the server closed is
   replaced at once (`live_connection`), not through the pool's own
   backing-off check.
+- **The web client is middleware, not routes** (`service/web.py`).
+  `WebClient` answers `GET` and `HEAD` outside `/api` from a build read
+  into memory when the app is made -- the page, `index.html` verbatim,
+  under `PAGE_POLICY` -- and passes everything else to the router, so it
+  never shadows the API nor joins the interface document's route table.
+  `create_app` serves no client unless given `client=`; only `cli.py`
+  passes it (`CLIENT_DIRECTORY`, imported once it is to serve), so the
+  suite's apps route the API alone whether or not a build exists.
+  `SecurityHeaders`, outermost, adds `Cache-Control: no-store`, a
+  `default-src 'none'; frame-ancestors 'none'` policy, `nosniff` and the
+  framing, referrer and cross-origin headers to every answer that does not
+  set its own; it wraps `send` and never touches a body
+  (no `BaseHTTPMiddleware`).
 - **No U+0000 reaches a store.** The body decoder replaces it (and a lone
   surrogate in reports) with U+FFFD; a lookup value holding it matches
   nothing without asking the store.
@@ -134,11 +162,21 @@ its `postgres` extra.
   only a local database is ever served open, until its first
   `vantage user add`; the first user closes a database for good, since
   users are disabled, never deleted. Every route but `/capabilities`,
-  `/openapi.yaml`, `/login` and `/password` declares its scope through
-  `service/access.py` (`read`, `record`, `manage`, `admin`), and
-  `test_interface_document.py` checks each against the document; `/login`
-  and `/password` take a name and a password instead of a token
-  (`requires_closed_server`). A token is stored only as its SHA-256,
+  `/openapi.yaml`, `/login`, `/password` and `POST`/`DELETE /session`
+  declares its scope through `service/access.py` (`read`, `record`,
+  `manage`, `admin`), and `test_interface_document.py` checks each against
+  the document, with the token in the header and in the session cookie;
+  `/login`, `/password` and `POST /session` take a name and a password
+  instead of a token (`requires_closed_server`). A browser holds a login
+  token in the HttpOnly, Secure, SameSite=Strict cookie `SESSION_COOKIE`
+  (`routes/session.py`), never in page script. `authorize` takes one
+  credential: an `Authorization` header decides alone; without one an
+  open server ignores the cookie; otherwise the cookie is looked up only
+  after `require_same_origin` passes -- `Sec-Fetch-Site: same-origin`, or
+  for `GET`/`HEAD` `none` or absent -- else `403 cross_site_request`,
+  since SameSite does not separate ports. `POST` and `DELETE /session`
+  require it whatever they carry (`requires_same_origin`); `DELETE` only
+  revokes the cookie's token and always clears it. A token is stored only as its SHA-256,
   printed once by whatever made it, read by the plugin from
   `VANTAGE_TOKEN` alone, and never written to the outbox, a message or a
   `repr`. A password is stored only as a scrypt PHC string
@@ -152,7 +190,8 @@ its `postgres` extra.
   the user whose token created it (`ForeignRunError`, `409 foreign_run`).
   The users and tokens routes (`routes/users.py`) need an admin's token on
   every server, and they, the members routes (`routes/members.py`),
-  `/login` and `/password` answer `409 open_server` while the database
+  `/login`, `/password` and `POST /session` answer `409 open_server` while
+  the database
   has no user: the first user is the CLI's, or the first start's, alone.
   `POST /projects` needs an admin.
 - **Roles.** Within a project a caller also needs a role there, `viewer`
@@ -168,8 +207,9 @@ its `postgres` extra.
   `requires_manage_members` (`_project_access`), `{run_id}` through
   `requires_read_run` or `requires_record_run` (`_run_access`), and
   `POST /runs` checks the report's project through `ingest`'s `admit`.
-  Who asks is refused before what is asked: `401`,
-  `403 insufficient_scope`, the members routes' `409 open_server`, a run
+  Who asks is refused before what is asked: `401`, a cookie's
+  `403 cross_site_request`, `403 insufficient_scope`, the members routes'
+  `409 open_server`, a run
   id's `422`, `404 unknown_project` or `unknown_run`, then
   `403 not_a_member` or `insufficient_role` (no challenge), and only then
   the route's own body and query checks; `POST /runs` checks the role
@@ -187,6 +227,16 @@ its `postgres` extra.
   --no-editable`, runs `vantage` as PID 1 in exec form as uid 10001, and
   names its database by `VANTAGE_DATABASE=/data/vantage.db`, never a flag.
   Nothing is pushed to any registry.
+- **The client holds no credential and no data beyond the page.** It never
+  sets `Authorization`; the browser sends the session cookie. Server state
+  lives in TanStack Query only, view state in the address, and web storage
+  holds only the last project opened. A `401` on `GET /session` sends the
+  browser to sign in with `next` (a path on this origin, nothing else); a
+  `401` on anything else keeps the page and says the session ended. Signing
+  in and signing out clear every query, so nothing read as one user stays
+  for the next. Text reaches the page only through React: no
+  `dangerouslySetInnerHTML`, `innerHTML` or the like, which the page's
+  Trusted Types policy refuses as well.
 - **Python 3.10 floor:** no `StrEnum`, `datetime.UTC`, `tomllib`. Vocabularies
   are `frozenset`s of `str`, never enums.
 - No domain class name starts with `Test` (pytest would collect it).
@@ -212,6 +262,16 @@ vantage project add firmware                 # a project runs can name
 vantage project member set firmware alice editor  # alice records and edits sections there
 pytest --vantage --vantage-project firmware  # a run of that project
 pytest --vantage --vantage-mode local        # record into the local database
+pnpm --dir web install --frozen-lockfile     # the client's dependencies (Node 22.22+, pnpm 12)
+pnpm --dir web run build                     # the client, into service/client/; restart vantage
+pnpm --dir web run dev                       # the client on :5173, proxying /api to 127.0.0.1:8765
+pnpm --dir web run api:types                 # regenerate src/api/v1.d.ts after changing v1.yaml
+pnpm --dir web run typecheck                 # tsc, the design-system contract check included
+pnpm --dir web run lint                      # Biome, and the HTML-sink rule
+pnpm --dir web run test                      # Vitest
+pnpm --dir web run check:build               # the build runs under the page policy
+pnpm --dir web exec playwright install chromium   # once, for e2e
+pnpm --dir web run e2e                       # Playwright against real servers (build first)
 docker build -t vantage .                    # the server image
 docker run -d -p 8765:8765 -v vantage-data:/data vantage   # admin password in docker logs
 ```
@@ -220,14 +280,18 @@ docker run -d -p 8765:8765 -v vantage-data:/data vantage   # admin password in d
 
 All green: pytest (full suite), once without and once with
 `VANTAGE_TEST_POSTGRES_URL`, `ruff format --check .`, `ruff check .`,
-`mypy .`, `deptry .`. CI additionally runs Python 3.10–3.13 with and without
+`mypy .`, `deptry .`; and for the client `pnpm --dir web install
+--frozen-lockfile`, `api:types` leaving `web/src/api/v1.d.ts` unchanged,
+`typecheck`, `lint`, `test`, `build`, `check:build` and `e2e`. CI additionally runs Python 3.10–3.13 with and without
 xdist, the suite against a `postgres:17` service (the only job that sets the
 variable), the suite with non-loopback networking blocked, the
 clean-environment installs (the plugin alone; `vantage` without its extra,
 serving refused, `vantage push` and a local-mode session there;
-`vantage[server]` serving, its fresh database given `admin` in one line),
-the server image built and run on a fresh volume (`image`), the Python 3.9
-install refusal and both wheel builds.
+`vantage[server]` serving, its fresh database given `admin` in one line,
+and the web client from the wheel the `web` job's build went into), the
+client's own checks and build (`web`), Playwright in Chromium against real
+servers (`e2e`), the server image built and run on a fresh volume, serving
+the client (`image`), the Python 3.9 install refusal and both wheel builds.
 
 ## Conventions
 

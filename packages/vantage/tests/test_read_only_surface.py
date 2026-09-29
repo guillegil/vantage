@@ -251,6 +251,13 @@ def _read_bindings(
             lambda: client.get(f"{run}/results"),
             lambda: client.get(f"{unknown_run}/results"),  # 404 (UnknownRunError)
             lambda: client.get(f"{run}/results", params={"limit": 0}),  # 422
+            # The outcome filter, and its unknown-word rejection branch.
+            lambda: client.get(f"{run}/results", params={"outcome": ["failed", "passed"]}),
+            lambda: client.get(f"{run}/results", params={"outcome": "flaky"}),  # 422
+        ),
+        ("GET", "/runs/{run_id}/outcomes"): (
+            lambda: client.get(f"{run}/outcomes"),
+            lambda: client.get(f"{unknown_run}/outcomes"),  # 404 (UnknownRunError)
         ),
         ("GET", "/runs/{run_id}/result"): (
             lambda: client.get(f"{run}/result", params={"node_id": _NODE_ID}),
@@ -288,6 +295,10 @@ def _read_bindings(
         ("GET", "/users"): (
             lambda: client.get("/api/v1/users"),
             lambda: client.get("/api/v1/users", headers=refused),  # 403, or 409 when open
+        ),
+        ("GET", "/session"): (
+            lambda: client.get("/api/v1/session"),
+            lambda: client.get("/api/v1/session", headers=refused),
         ),
         ("GET", "/tokens"): (
             lambda: client.get("/api/v1/tokens"),

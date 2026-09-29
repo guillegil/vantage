@@ -5,5 +5,15 @@
 !uv.lock
 !packages/*/pyproject.toml
 !packages/*/src
+!web
+!web/package.json
+!web/pnpm-lock.yaml
+!web/pnpm-workspace.yaml
+# A checkout's own dependencies, test output and client build stay out: the
+# image builds the client from the lock.
+web/node_modules
+web/test-results
+web/playwright-report
+packages/vantage/src/vantage/service/client
 **/__pycache__
 **/*.py[cod]

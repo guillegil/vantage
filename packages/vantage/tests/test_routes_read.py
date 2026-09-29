@@ -72,6 +72,9 @@ _HISTORY_OLDER_COMMIT = "dead0003" * 5
 _TRUNCATION_COMMIT = "face0004" * 5
 _DETAIL_COMMIT = "abad0005" * 5
 
+# A run's `counts` when it holds no result: every outcome, each zero.
+_NO_COUNTS = {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}
+
 
 def _run_id(seed: int) -> str:
     """A well-formed 32-lowercase-hex identity, unique per `seed`."""
@@ -276,9 +279,11 @@ def test_run_list_returns_items_and_has_more_envelope(
         "presentation",
         "vcs",
         "recorded_by",
+        "counts",
     }
     assert item["id"] == run_id
     assert item["recorded_by"] == "alice"
+    assert item["counts"] == _NO_COUNTS
     assert _instant(item["started_at"]) == started_at
     assert _instant(item["finished_at"]) == finished_at
     assert item["exit_status"] == 7
@@ -735,7 +740,9 @@ def test_run_detail_carries_every_stored_field_by_value(
         "vcs",
         "recorded_by",
         "project",
+        "counts",
     }
+    assert orderly["counts"] == ctrl_c["counts"] == _NO_COUNTS
     assert orderly["recorded_by"] == "alice"
     assert ctrl_c["recorded_by"] is None
     assert orderly["project"] == ctrl_c["project"] == DEFAULT_PROJECT
@@ -2256,3 +2263,216 @@ def test_run_detail_names_the_project_the_run_was_recorded_in(
     assert default.status_code == other.status_code == 200
     assert default.json()["project"] == DEFAULT_PROJECT
     assert other.json()["project"] == _OTHER_PROJECT
+
+
+# --- A run's outcomes -------------------------------------------------------
+
+# One result of each outcome and one more pass, reported in neither node-id
+# order nor the vocabulary's, so a store or route that sorts either way
+# fails.
+_REPORTED = (
+    ("t.py::test_f", "xpassed"),
+    ("t.py::test_a", "failed"),
+    ("t.py::test_e", "passed"),
+    ("t.py::test_b", "skipped"),
+    ("t.py::test_d", "error"),
+    ("t.py::test_c", "xfailed"),
+    ("t.py::test_g", "passed"),
+)
+# A different number of each outcome, so counts moved from one outcome to
+# another cannot match.
+_COUNTED = {"passed": 6, "failed": 5, "error": 4, "skipped": 3, "xfailed": 2, "xpassed": 1}
+
+
+def _record_reported(
+    store: ExecutionStore,
+    seed: int,
+    *,
+    started_at: datetime,
+    project: str = DEFAULT_PROJECT,
+    metadata: RunMetadata | None = None,
+    reported: tuple[tuple[str, str], ...] = _REPORTED,
+) -> str:
+    """A finished run of `project` holding `reported`, in that order."""
+    run_id = _run_id(seed)
+    store.record_session(
+        _execution(run_id, started_at=started_at, finished_at=started_at),
+        results=[_result(node_id, outcome=outcome) for node_id, outcome in reported],
+        received_at=started_at,
+        metadata=metadata if metadata is not None else RunMetadata(),
+        project=project,
+    )
+    return run_id
+
+
+def _record_counted(
+    store: ExecutionStore, seed: int, *, started_at: datetime, metadata: RunMetadata | None = None
+) -> str:
+    """A finished run of `default` holding `_COUNTED`'s number of results
+    of each outcome."""
+    reported = tuple(
+        (f"t.py::test_{outcome}_{i}", outcome)
+        for outcome, count in _COUNTED.items()
+        for i in range(count)
+    )
+    return _record_reported(
+        store, seed, started_at=started_at, metadata=metadata, reported=reported
+    )
+
+
+def test_each_listed_run_counts_its_own_results_every_outcome_present(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """Three runs on one page, counted together yet kept apart: one holding
+    every outcome, one a single pass, one no result, whose counts are all
+    zero rather than missing."""
+    now = datetime.now(timezone.utc)
+    counted = _record_counted(store, 300, started_at=now - timedelta(hours=3))
+    _record_in(store, 301, project=DEFAULT_PROJECT, started_at=now - timedelta(hours=2))
+    store.record_session(
+        _execution(_run_id(302), started_at=now - timedelta(hours=1)),
+        results=[],
+        received_at=now - timedelta(hours=1),
+        project=DEFAULT_PROJECT,
+    )
+
+    items = client.get(_RUNS).json()["items"]
+
+    assert {item["id"]: item["counts"] for item in items} == {
+        counted: _COUNTED,
+        _run_id(301): {**_NO_COUNTS, "passed": 1},
+        _run_id(302): _NO_COUNTS,
+    }
+
+
+def test_the_metadata_filtered_list_counts_its_runs_too(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    counted = _record_counted(
+        store,
+        310,
+        started_at=now - timedelta(hours=1),
+        metadata=_captured_metadata("rig", "bench-7"),
+    )
+
+    body = client.get(_RUNS, params={"metadata_key": "rig", "metadata_value": "bench-7"}).json()
+
+    assert [(item["id"], item["counts"]) for item in body["items"]] == [(counted, _COUNTED)]
+
+
+def test_run_detail_counts_its_results(client: TestClient, store: ExecutionStore) -> None:
+    now = datetime.now(timezone.utc)
+    counted = _record_counted(store, 320, started_at=now - timedelta(hours=2))
+    _record_in(store, 321, project=DEFAULT_PROJECT, started_at=now - timedelta(hours=1))
+
+    assert client.get(f"/api/v1/runs/{counted}").json()["counts"] == _COUNTED
+    assert client.get(f"/api/v1/runs/{_run_id(321)}").json()["counts"] == {
+        **_NO_COUNTS,
+        "passed": 1,
+    }
+
+
+def test_a_runs_outcomes_are_pytests_characters_in_the_order_reported(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    reported = _record_reported(store, 330, started_at=now)
+
+    response = client.get(f"/api/v1/runs/{reported}/outcomes")
+
+    assert response.status_code == 200
+    assert response.json() == {"outcomes": "XF.sEx."}
+
+
+def test_a_run_with_no_results_has_no_outcomes(client: TestClient, store: ExecutionStore) -> None:
+    now = datetime.now(timezone.utc)
+    store.record_session(
+        _execution(_run_id(340), started_at=now),
+        results=[],
+        received_at=now,
+        project=DEFAULT_PROJECT,
+    )
+
+    assert client.get(f"/api/v1/runs/{_run_id(340)}/outcomes").json() == {"outcomes": ""}
+
+
+def test_the_outcomes_of_an_unknown_run_are_404_unknown_run(client: TestClient) -> None:
+    response = client.get(f"/api/v1/runs/{_run_id(999)}/outcomes")
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_run"
+
+
+def test_the_outcomes_of_a_run_in_a_project_the_reader_is_not_in_are_403(
+    store: ExecutionStore,
+) -> None:
+    now = datetime.now(timezone.utc)
+    _add_project(store)
+    reported = _record_reported(store, 350, started_at=now, project=_OTHER_PROJECT)
+    authorization = _reader(store, "alice")
+    client = TestClient(create_app(store))
+
+    response = client.get(f"/api/v1/runs/{reported}/outcomes", headers=authorization)
+
+    assert response.status_code == 403
+    assert response.json()["error"] == "not_a_member"
+
+
+def test_results_filtered_by_outcome_keep_stored_order_and_page_over_the_filtered_set(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """What did not pass, in the order it was reported, paged over those
+    results alone: the first page of two is full and has more, and the
+    second holds the third, where paging the whole run would reach it only
+    on the fourth."""
+    now = datetime.now(timezone.utc)
+    results = f"/api/v1/runs/{_record_reported(store, 360, started_at=now)}/results"
+    not_passing = {"outcome": ["failed", "error", "xpassed"]}
+
+    first = client.get(results, params={**not_passing, "limit": 2}).json()
+    second = client.get(results, params={**not_passing, "limit": 2, "offset": 2}).json()
+    one = client.get(results, params={"outcome": "skipped"}).json()
+
+    assert [item["node_id"] for item in first["items"]] == ["t.py::test_f", "t.py::test_a"]
+    assert first["has_more"] is True
+    assert [item["node_id"] for item in second["items"]] == ["t.py::test_d"]
+    assert second["has_more"] is False
+    assert [(item["node_id"], item["outcome"]) for item in one["items"]] == [
+        ("t.py::test_b", "skipped")
+    ]
+
+
+def test_results_without_an_outcome_are_every_result_in_stored_order(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    run_id = _record_reported(store, 370, started_at=now)
+
+    body = client.get(f"/api/v1/runs/{run_id}/results").json()
+
+    assert [item["node_id"] for item in body["items"]] == [node_id for node_id, _ in _REPORTED]
+
+
+@pytest.mark.parametrize("word", ["flaky", "Failed", "<img src=x onerror=alert(1)>"])
+def test_an_outcome_that_is_not_one_is_422_naming_the_parameter_never_the_word(
+    client: TestClient, store: ExecutionStore, word: str
+) -> None:
+    """Refused rather than matching nothing, which would read as a run
+    where nothing failed, even beside outcomes that are real."""
+    now = datetime.now(timezone.utc)
+    run_id = _record_reported(store, 380, started_at=now)
+
+    response = client.get(f"/api/v1/runs/{run_id}/results", params={"outcome": ["failed", word]})
+
+    assert response.status_code == 422
+    assert response.json()["error"] == "invalid_parameter"
+    assert response.json()["fields"] == ["query.outcome"]
+    assert word not in response.text
+
+
+def test_an_unknown_run_is_404_before_its_outcome_filter_is_read(client: TestClient) -> None:
+    response = client.get(f"/api/v1/runs/{_run_id(999)}/results", params={"outcome": "flaky"})
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_run"
