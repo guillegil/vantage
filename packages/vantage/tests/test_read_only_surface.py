@@ -255,6 +255,14 @@ def _read_bindings(
             lambda: client.get(f"{run}/results", params={"outcome": ["failed", "passed"]}),
             lambda: client.get(f"{run}/results", params={"outcome": "flaky"}),  # 422
         ),
+        ("GET", "/runs/{run_id}/changes"): (
+            lambda: client.get(f"{run}/changes"),
+            lambda: client.get(f"{unknown_run}/changes"),  # 404 (UnknownRunError)
+            lambda: client.get(f"{run}/changes", params={"limit": 0}),  # 422
+            # The change filter, and its unknown-word rejection branch.
+            lambda: client.get(f"{run}/changes", params={"change": ["new_failure", "fixed"]}),
+            lambda: client.get(f"{run}/changes", params={"change": "flaky"}),  # 422
+        ),
         ("GET", "/runs/{run_id}/outcomes"): (
             lambda: client.get(f"{run}/outcomes"),
             lambda: client.get(f"{unknown_run}/outcomes"),  # 404 (UnknownRunError)

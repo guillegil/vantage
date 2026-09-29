@@ -75,6 +75,10 @@ _DETAIL_COMMIT = "abad0005" * 5
 # A run's `counts` when it holds no result: every outcome, each zero.
 _NO_COUNTS = {"passed": 0, "failed": 0, "error": 0, "skipped": 0, "xfailed": 0, "xpassed": 0}
 
+# The comparison of a finished run no earlier run of its project was
+# complete before.
+_COMPARED_WITH_NOTHING = {"state": "none", "baseline": None, "counts": None}
+
 
 def _run_id(seed: int) -> str:
     """A well-formed 32-lowercase-hex identity, unique per `seed`."""
@@ -280,10 +284,12 @@ def test_run_list_returns_items_and_has_more_envelope(
         "vcs",
         "recorded_by",
         "counts",
+        "comparison",
     }
     assert item["id"] == run_id
     assert item["recorded_by"] == "alice"
     assert item["counts"] == _NO_COUNTS
+    assert item["comparison"] == _COMPARED_WITH_NOTHING
     assert _instant(item["started_at"]) == started_at
     assert _instant(item["finished_at"]) == finished_at
     assert item["exit_status"] == 7
@@ -669,6 +675,125 @@ def test_run_detail_response_contains_no_vcs_root(
     assert _KNOWN_ROOT not in response.text
 
 
+def test_each_run_says_what_it_was_compared_with_on_the_list_and_on_its_own(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """A finished run names its baseline and how many tests changed each
+    way against it -- on its own branch's last complete run, or, when its
+    branch has none, the project's -- the first run names nothing, and a
+    running one is not compared yet. The list and the detail agree."""
+    now = datetime.now(timezone.utc)
+    authorization = _reader(store, "alice")
+    first, other_branch, same_branch, running = (_run_id(seed) for seed in range(61, 65))
+    recorded = [
+        (first, 0, "main", {"test_a": "passed", "test_b": "failed"}),
+        (other_branch, 10, "feat/x", {"test_a": "failed", "test_b": "passed", "test_c": "passed"}),
+        (same_branch, 20, "main", {"test_a": "passed", "test_b": "failed"}),
+    ]
+    started = {}
+    for run_id, minutes, branch, outcomes in recorded:
+        started[run_id] = now - timedelta(hours=2) + timedelta(minutes=minutes)
+        store.record_session(
+            _execution(
+                run_id,
+                started_at=started[run_id],
+                finished_at=started[run_id] + timedelta(minutes=1),
+                exit_status=1,
+                vcs=_vcs(branch=branch),
+            ),
+            results=[_result(f"t.py::{name}", outcome=o) for name, o in outcomes.items()],
+            received_at=started[run_id],
+            project=DEFAULT_PROJECT,
+        )
+    store.record_session(
+        _execution(running, started_at=now - timedelta(minutes=5), exit_status=None),
+        results=[_result("t.py::test_a", outcome="failed")],
+        received_at=now,
+        project=DEFAULT_PROJECT,
+    )
+
+    listed = {
+        item["id"]: item["comparison"]
+        for item in client.get(_RUNS, headers=authorization).json()["items"]
+    }
+    detailed = {
+        run_id: client.get(f"/api/v1/runs/{run_id}", headers=authorization).json()["comparison"]
+        for run_id in listed
+    }
+
+    assert listed == detailed
+    baselines = {
+        run_id: _instant(comparison["baseline"].pop("started_at"))
+        for run_id, comparison in listed.items()
+        if comparison["baseline"] is not None
+    }
+    assert baselines == {other_branch: started[first], same_branch: started[first]}
+    unchanged = dict.fromkeys(
+        ("new_failure", "still_failing", "fixed", "new_test", "removed", "not_reached"), 0
+    )
+    assert listed == {
+        first: _COMPARED_WITH_NOTHING,
+        other_branch: {
+            "state": "project",
+            "baseline": {"id": first, "branch": "main"},
+            "counts": {**unchanged, "new_failure": 1, "fixed": 1, "new_test": 1},
+        },
+        same_branch: {
+            "state": "branch",
+            "baseline": {"id": first, "branch": "main"},
+            "counts": {**unchanged, "still_failing": 1},
+        },
+        running: {"state": "pending", "baseline": None, "counts": None},
+    }
+
+
+def test_a_run_that_changed_nothing_still_names_its_baseline_with_every_count_zero(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """The most common finished run stores no change at all, and is still
+    compared: it names its baseline, counts nothing, marks every result
+    unchanged and lists no change -- not "nothing to compare with"."""
+    now = datetime.now(timezone.utc)
+    first, second = _run_id(71), _run_id(72)
+    started = {first: now - timedelta(hours=2), second: now - timedelta(hours=1)}
+    for run_id, started_at in started.items():
+        store.record_session(
+            _execution(
+                run_id,
+                started_at=started_at,
+                finished_at=started_at + timedelta(minutes=1),
+                vcs=_vcs(branch="main"),
+            ),
+            results=[
+                _result("t.py::test_a", outcome="passed"),
+                _result("t.py::test_b", outcome="skipped"),
+            ],
+            received_at=started_at,
+            project=DEFAULT_PROJECT,
+        )
+
+    listed = {item["id"]: item["comparison"] for item in client.get(_RUNS).json()["items"]}
+    detailed = client.get(f"/api/v1/runs/{second}").json()["comparison"]
+
+    assert listed[second] == detailed
+    assert _instant(detailed["baseline"].pop("started_at")) == started[first]
+    assert detailed == {
+        "state": "branch",
+        "baseline": {"id": first, "branch": "main"},
+        "counts": dict.fromkeys(
+            ("new_failure", "still_failing", "fixed", "new_test", "removed", "not_reached"), 0
+        ),
+    }
+    assert client.get(f"/api/v1/runs/{second}/outcomes").json() == {
+        "outcomes": ".s",
+        "changes": "--",
+    }
+    assert client.get(f"/api/v1/runs/{second}/changes").json() == {
+        "items": [],
+        "has_more": False,
+    }
+
+
 def test_run_detail_carries_every_stored_field_by_value(
     client: TestClient, store: ExecutionStore
 ) -> None:
@@ -741,8 +866,12 @@ def test_run_detail_carries_every_stored_field_by_value(
         "recorded_by",
         "project",
         "counts",
+        "comparison",
     }
     assert orderly["counts"] == ctrl_c["counts"] == _NO_COUNTS
+    # Neither the first run nor one after a run that ended in pytest's own
+    # trouble has anything to be compared with.
+    assert orderly["comparison"] == ctrl_c["comparison"] == _COMPARED_WITH_NOTHING
     assert orderly["recorded_by"] == "alice"
     assert ctrl_c["recorded_by"] is None
     assert orderly["project"] == ctrl_c["project"] == DEFAULT_PROJECT
@@ -2382,7 +2511,7 @@ def test_a_runs_outcomes_are_pytests_characters_in_the_order_reported(
     response = client.get(f"/api/v1/runs/{reported}/outcomes")
 
     assert response.status_code == 200
-    assert response.json() == {"outcomes": "XF.sEx."}
+    assert response.json() == {"outcomes": "XF.sEx.", "changes": None}
 
 
 def test_a_run_with_no_results_has_no_outcomes(client: TestClient, store: ExecutionStore) -> None:
@@ -2394,7 +2523,10 @@ def test_a_run_with_no_results_has_no_outcomes(client: TestClient, store: Execut
         project=DEFAULT_PROJECT,
     )
 
-    assert client.get(f"/api/v1/runs/{_run_id(340)}/outcomes").json() == {"outcomes": ""}
+    assert client.get(f"/api/v1/runs/{_run_id(340)}/outcomes").json() == {
+        "outcomes": "",
+        "changes": None,
+    }
 
 
 def test_the_outcomes_of_an_unknown_run_are_404_unknown_run(client: TestClient) -> None:
@@ -2476,3 +2608,296 @@ def test_an_unknown_run_is_404_before_its_outcome_filter_is_read(client: TestCli
 
     assert response.status_code == 404
     assert response.json()["error"] == "unknown_run"
+
+
+# --- What changed in a run --------------------------------------------------
+
+# Three finished runs of `default` on `main`, an hour apart: the baseline,
+# the run compared with it, and a third compared with the second. Each
+# holds its results in the order listed, which is neither node-id order nor
+# queue order, so a route or store that sorts either way fails.
+_BEFORE = (
+    ("t.py::test_breaks", "passed"),
+    ("t.py::test_stays", "failed"),
+    ("t.py::test_fixed", "error"),
+    ("t.py::test_gone", "passed"),
+    ("t.py::test_same", "passed"),
+)
+_AFTER = (
+    ("t.py::test_stays", "failed"),
+    ("t.py::test_new", "passed"),
+    ("t.py::test_breaks", "failed"),
+    ("t.py::test_same", "passed"),
+    ("t.py::test_fixed", "xfailed"),
+    ("t.py::test_arrives", "error"),
+)
+
+
+def _record_compared(store: ExecutionStore) -> tuple[str, str, str]:
+    """The baseline, the run compared with it, and the run compared with
+    that one, which holds the same results again."""
+    now = datetime.now(timezone.utc)
+    run_ids = (_run_id(401), _run_id(402), _run_id(403))
+    for hours, run_id, reported in zip((3, 2, 1), run_ids, (_BEFORE, _AFTER, _AFTER)):
+        started_at = now - timedelta(hours=hours)
+        store.record_session(
+            _execution(
+                run_id,
+                started_at=started_at,
+                finished_at=started_at + timedelta(minutes=1),
+                exit_status=1,
+                vcs=_vcs(),
+            ),
+            results=[_result(node_id, outcome=outcome) for node_id, outcome in reported],
+            received_at=started_at,
+            project=DEFAULT_PROJECT,
+        )
+    return run_ids
+
+
+def _change_item(
+    node_id: str,
+    change: str,
+    *,
+    outcome: str | None,
+    was: str | None,
+    position: int | None,
+    streak: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "node_id": node_id,
+        "file_path": "t.py",
+        "class_name": None,
+        "function_name": node_id.rsplit("::", 1)[-1],
+        "param_id": None,
+        "change": change,
+        "outcome": outcome,
+        "was": was,
+        "duration": None if outcome is None else 0.003,
+        "position": position,
+        "streak": streak,
+    }
+
+
+def test_a_runs_changes_come_new_failures_first_each_field_by_value(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """New failures, still failing, fixed, new tests, then the tests the
+    run lacks, each change in the run's stored order; an unchanged test is
+    not listed, and a test the run lacks has no outcome, duration or
+    position."""
+    baseline, compared, _later = _record_compared(store)
+
+    response = client.get(f"/api/v1/runs/{compared}/changes")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [
+            _change_item(
+                "t.py::test_breaks", "new_failure", outcome="failed", was="passed", position=2
+            ),
+            _change_item(
+                "t.py::test_arrives", "new_failure", outcome="error", was=None, position=5
+            ),
+            _change_item(
+                "t.py::test_stays",
+                "still_failing",
+                outcome="failed",
+                was="failed",
+                position=0,
+                streak={"runs": 2, "since": baseline},
+            ),
+            _change_item("t.py::test_fixed", "fixed", outcome="xfailed", was="error", position=4),
+            _change_item("t.py::test_new", "new_test", outcome="passed", was=None, position=1),
+            _change_item("t.py::test_gone", "removed", outcome=None, was="passed", position=None),
+        ],
+        "has_more": False,
+    }
+
+
+def test_a_still_failing_tests_streak_runs_along_the_chain_of_baselines(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    baseline, compared, later = _record_compared(store)
+
+    items = client.get(f"/api/v1/runs/{later}/changes").json()["items"]
+
+    assert [(item["node_id"], item["change"], item["streak"]) for item in items] == [
+        ("t.py::test_stays", "still_failing", {"runs": 3, "since": baseline}),
+        ("t.py::test_breaks", "still_failing", {"runs": 2, "since": compared}),
+        ("t.py::test_arrives", "still_failing", {"runs": 2, "since": compared}),
+    ]
+
+
+def test_changes_filtered_by_change_page_over_the_filtered_set(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    _baseline, compared, _later = _record_compared(store)
+    changes = f"/api/v1/runs/{compared}/changes"
+
+    def listed(**params: str | int | list[str]) -> tuple[list[str], bool]:
+        body = client.get(changes, params=params).json()
+        return [item["node_id"] for item in body["items"]], body["has_more"]
+
+    assert listed(change="fixed") == (["t.py::test_fixed"], False)
+    assert listed(change=["removed", "new_failure"]) == (
+        ["t.py::test_breaks", "t.py::test_arrives", "t.py::test_gone"],
+        False,
+    )
+    assert listed(change="new_failure", limit=1) == (["t.py::test_breaks"], True)
+    assert listed(change="new_failure", limit=1, offset=1) == (["t.py::test_arrives"], False)
+    assert listed(limit=2, offset=2) == (["t.py::test_stays", "t.py::test_fixed"], True)
+    assert listed(change="not_reached") == ([], False)
+
+
+def test_a_run_not_compared_with_another_has_no_changes(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """The first run of a project was compared with nothing, and a running
+    one is not compared yet: both answer an empty page, not an error."""
+    baseline, _compared, _later = _record_compared(store)
+    running = _run_id(404)
+    now = datetime.now(timezone.utc)
+    store.record_session(
+        _execution(running, started_at=now, exit_status=None),
+        results=[_result("t.py::test_breaks", outcome="failed")],
+        received_at=now,
+        project=DEFAULT_PROJECT,
+    )
+
+    for run_id in (baseline, running):
+        response = client.get(f"/api/v1/runs/{run_id}/changes")
+        assert response.status_code == 200
+        assert response.json() == {"items": [], "has_more": False}
+
+
+@pytest.mark.parametrize(
+    "word", ["flaky", "New_failure", "new-failure", "fixed\x00", "<img src=x onerror=alert(1)>"]
+)
+def test_a_change_that_is_not_one_is_422_naming_the_parameter_never_the_word(
+    client: TestClient, store: ExecutionStore, word: str
+) -> None:
+    """Refused rather than matching nothing, which would read as a run
+    where nothing changed, even beside changes that are real."""
+    _baseline, compared, _later = _record_compared(store)
+
+    response = client.get(f"/api/v1/runs/{compared}/changes", params={"change": ["fixed", word]})
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "error": "invalid_parameter",
+        "detail": "change must be one of new_failure, still_failing, fixed, new_test, removed"
+        " and not_reached.",
+        "fields": ["query.change"],
+    }
+    assert word not in response.text
+
+
+def test_an_unknown_run_is_404_before_its_change_filter_is_read(client: TestClient) -> None:
+    response = client.get(f"/api/v1/runs/{_run_id(999)}/changes", params={"change": "flaky"})
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_run"
+
+
+def test_a_runs_changes_are_one_character_per_result_aligned_with_its_outcomes(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """A test the run lacks has no character; a run not compared with
+    another has no changes string at all."""
+    baseline, compared, later = _record_compared(store)
+
+    outcomes = {
+        run_id: client.get(f"/api/v1/runs/{run_id}/outcomes").json()
+        for run_id in (baseline, compared, later)
+    }
+
+    assert outcomes == {
+        baseline: {"outcomes": ".FE..", "changes": None},
+        compared: {"outcomes": "F.F.xE", "changes": "stn-fn"},
+        later: {"outcomes": "F.F.xE", "changes": "s-s--s"},
+    }
+
+
+def test_a_run_that_changed_nothing_has_a_changes_string_of_dashes(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    now = datetime.now(timezone.utc)
+    first = _record_reported(store, 410, started_at=now - timedelta(hours=1), reported=_BEFORE)
+    second = _record_reported(store, 411, started_at=now, reported=_BEFORE[:2])
+
+    body = client.get(f"/api/v1/runs/{second}/outcomes").json()
+    listed = client.get(f"/api/v1/runs/{second}/changes").json()["items"]
+
+    assert body == {"outcomes": ".F", "changes": "-s"}
+    assert [(item["node_id"], item["change"]) for item in listed] == [
+        ("t.py::test_stays", "still_failing"),
+        ("t.py::test_fixed", "removed"),
+        ("t.py::test_gone", "removed"),
+        ("t.py::test_same", "removed"),
+    ]
+    assert client.get(f"/api/v1/runs/{first}/outcomes").json()["changes"] is None
+
+
+def test_a_result_says_where_it_is_in_its_run_and_how_it_changed(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    """`position` is the result's index in stored order; `change`, `was`
+    and `streak` are as `/changes` gives them, and all null for a result
+    that did not change or a run compared with nothing."""
+    baseline, compared, later = _record_compared(store)
+
+    def changed(run_id: str, node_id: str) -> tuple[object, ...]:
+        response = client.get(f"/api/v1/runs/{run_id}/result", params={"node_id": node_id})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        return body["position"], body["change"], body["was"], body["streak"]
+
+    assert changed(compared, "t.py::test_stays") == (
+        0,
+        "still_failing",
+        "failed",
+        {"runs": 2, "since": baseline},
+    )
+    assert changed(compared, "t.py::test_breaks") == (2, "new_failure", "passed", None)
+    assert changed(compared, "t.py::test_arrives") == (5, "new_failure", None, None)
+    assert changed(compared, "t.py::test_fixed") == (4, "fixed", "error", None)
+    assert changed(compared, "t.py::test_new") == (1, "new_test", None, None)
+    assert changed(compared, "t.py::test_same") == (3, None, None, None)
+    assert changed(later, "t.py::test_stays") == (
+        0,
+        "still_failing",
+        "failed",
+        {"runs": 3, "since": baseline},
+    )
+    assert changed(baseline, "t.py::test_same") == (4, None, None, None)
+
+
+def test_a_result_a_run_lacks_is_404_though_its_baseline_had_it(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    _baseline, compared, _later = _record_compared(store)
+
+    response = client.get(f"/api/v1/runs/{compared}/result", params={"node_id": "t.py::test_gone"})
+
+    assert response.status_code == 404
+    assert response.json()["error"] == "unknown_result"
+
+
+def test_each_history_entry_says_how_its_result_changed_in_its_own_run(
+    client: TestClient, store: ExecutionStore
+) -> None:
+    baseline, compared, later = _record_compared(store)
+
+    def history(node_id: str) -> list[tuple[str, str | None]]:
+        items = client.get(_HISTORY, params={"node_id": node_id}).json()["items"]
+        return [(item["run_id"], item["change"]) for item in items]
+
+    assert history("t.py::test_breaks") == [
+        (later, "still_failing"),
+        (compared, "new_failure"),
+        (baseline, None),
+    ]
+    assert history("t.py::test_fixed") == [(later, None), (compared, "fixed"), (baseline, None)]
+    assert history("t.py::test_new") == [(later, None), (compared, "new_test")]
+    assert history("t.py::test_gone") == [(baseline, None)]

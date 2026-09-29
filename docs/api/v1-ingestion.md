@@ -393,6 +393,12 @@ any of them.
   status stores nothing: no results, no metadata, no change to the run. A
   client sends the finishing report last, so anything after it is a retry
   or a replay. It still answers `200`.
+- **The finishing report fixes the run's comparison.** The report that
+  gives a run its exit status also compares it with the latest complete
+  run of its project started before it, on its branch first, among the
+  runs stored when it arrives. No later report, of that run or another,
+  changes the comparison: a run pushed late from an outbox is compared on
+  arrival, and the runs compared meanwhile keep theirs.
 - **`200` does not mean nothing changed.** It means the run already existed.
   A finishing report after a start report answers `200` and stores the
   finish and its results.

@@ -99,7 +99,8 @@ CREATE TABLE vantage.run (
     vcs_commit_subject_truncated  boolean NOT NULL DEFAULT false,
     vcs_dirty                     boolean NULL,
     vcs_root                      text NULL,
-    recorded_by                   text COLLATE "C" NULL REFERENCES vantage.account (name)
+    recorded_by                   text COLLATE "C" NULL REFERENCES vantage.account (name),
+    baseline_id                   text COLLATE "C" NULL REFERENCES vantage.run (id)
 );
 
 -- The catalogue. `(project, node_id)` is unique through
@@ -154,6 +155,28 @@ CREATE TABLE vantage.result (
     captured_stderr_truncated   boolean NOT NULL DEFAULT false
 );
 
+-- A run's comparison: written once, in the transaction that gives the run
+-- its exit status. Keyed by `test_case_id`, which needs no `text_key`.
+CREATE TABLE vantage.result_change (
+    run_id        text COLLATE "C" NOT NULL REFERENCES vantage.run (id),
+    test_case_id  bigint NOT NULL REFERENCES vantage.test_case (id),
+    change        text NOT NULL CHECK (change IN (
+                      'new_failure', 'still_failing', 'fixed', 'new_test',
+                      'removed', 'not_reached')),
+    ordinal       bigint NOT NULL,
+    result_id     bigint NULL REFERENCES vantage.result (id),
+    was           text NULL
+        CHECK (was IN ('passed', 'failed', 'error', 'skipped', 'xfailed', 'xpassed')),
+    streak        bigint NULL CHECK (streak >= 2),
+    streak_since  text COLLATE "C" NULL REFERENCES vantage.run (id),
+    PRIMARY KEY (run_id, test_case_id),
+    CHECK ((result_id IS NULL) = (change IN ('removed', 'not_reached'))),
+    CHECK ((streak IS NULL) = (change <> 'still_failing')),
+    CHECK ((streak_since IS NULL) = (streak IS NULL)),
+    CHECK (was IS NOT NULL OR change IN ('new_failure', 'new_test')),
+    CHECK (was IS NULL OR change <> 'new_test')
+);
+
 -- `value` is text, never `jsonb`, so it reads back byte for byte as
 -- written. A section name is at most 120 characters, so the key is
 -- indexed as it is, which keeps it ordered.
@@ -195,6 +218,18 @@ CREATE TABLE vantage.run_metadata (
 -- `run(project, started_at, id)`: a project's run list and history order,
 -- read backwards, and the metadata horizon count; every read of the run
 -- list is within one project.
+-- `run(project, text_key(vcs_branch), started_at, id)` and `run(project,
+-- started_at, id)`, both of complete runs alone: a finishing run's
+-- baseline, on its branch and on any, read backwards from its own key. Each
+-- holds only the runs that can be a baseline, so the scan never passes over
+-- one that cannot, however many of a project's runs stopped early; their
+-- WHERE is `_COMPLETE`'s, which the statements repeat so the planner can
+-- prove it. A branch is unbounded, so it goes through `text_key`, and the
+-- lookup compares the text as well.
+-- `result_change(run_id, change, ordinal)`: a page of runs' change counts, a
+-- run's changes of one kind in order, and its changed results' positions.
+-- `result_change`'s primary key: a result's change, and each entry of a
+-- test's history.
 -- `result(run_id, id)`: one run's results in insertion order, and every
 -- other per-run read.
 -- `result(test_case_id)`: one test's history.
@@ -207,6 +242,14 @@ CREATE TABLE vantage.run_metadata (
 -- role. `project_member(account, project)`: a user's memberships, which the
 -- project list is filtered by.
 CREATE INDEX run_project_started_at ON vantage.run (project, started_at, id);
+CREATE INDEX run_baseline_branch
+    ON vantage.run (project, vantage.text_key(vcs_branch), started_at, id)
+    WHERE finished_at IS NOT NULL AND NOT interrupted AND interrupt_reason IS NULL
+      AND exit_status IN (0, 1);
+CREATE INDEX run_baseline
+    ON vantage.run (project, started_at, id)
+    WHERE finished_at IS NOT NULL AND NOT interrupted AND interrupt_reason IS NULL
+      AND exit_status IN (0, 1);
 CREATE INDEX result_run_id ON vantage.result (run_id, id);
 CREATE INDEX result_test_case_id ON vantage.result (test_case_id);
 CREATE UNIQUE INDEX test_case_node_key
@@ -218,3 +261,4 @@ CREATE UNIQUE INDEX run_metadata_key ON vantage.run_metadata (run_id, vantage.te
 CREATE INDEX run_metadata_key_value
     ON vantage.run_metadata (vantage.text_key(key), vantage.text_key(value));
 CREATE INDEX project_member_account ON vantage.project_member (account, project);
+CREATE INDEX result_change_run ON vantage.result_change (run_id, change, ordinal);

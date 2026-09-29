@@ -9,6 +9,13 @@ from datetime import datetime
 from typing import Generic, Protocol, TypeVar
 
 from vantage.core.domain.access import Grant, Token, User
+from vantage.core.domain.changes import (
+    CHANGES,
+    COMPARISON_STATES,
+    RESULT_CHANGES,
+    Streak,
+    comparison_state,
+)
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.metadata import (
     FILE_STATUSES,
@@ -69,6 +76,61 @@ class RunKey:
 
 
 @dataclass(frozen=True, slots=True)
+class BaselineRef:
+    """The run another was compared with: its id, its start, which says how
+    much earlier it ran, and its branch, which says whether it is the
+    compared run's own."""
+
+    run_id: str
+    started_at: datetime
+    branch: str | None
+
+
+# The states in which a run was compared with another run.
+_COMPARED_STATES = frozenset({"branch", "project"})
+
+
+@dataclass(frozen=True, slots=True)
+class Comparison:
+    """What a run was compared with (`comparison_state`): `pending` until it
+    has an exit status, `none` when no earlier run of its project was
+    complete, `branch` when its baseline is the latest complete run of its
+    own branch, `project` when it is the project's latest complete run.
+    `baseline` is set exactly for `branch` and `project`."""
+
+    state: str
+    baseline: BaselineRef | None
+
+    def __post_init__(self) -> None:
+        if self.state not in COMPARISON_STATES:
+            raise ValueError(
+                f"state must be one of {sorted(COMPARISON_STATES)}, got {self.state!r}"
+            )
+        if (self.baseline is not None) != (self.state in _COMPARED_STATES):
+            raise ValueError("baseline must be set exactly for a run compared with another")
+
+    @classmethod
+    def of(
+        cls, *, exit_status: int | None, branch: str | None, baseline: BaselineRef | None
+    ) -> Comparison:
+        """The comparison of a run with `exit_status` and `branch` whose
+        stored baseline is `baseline`, derived by `comparison_state`."""
+        state = comparison_state(
+            exit_status=exit_status,
+            branch=branch,
+            baseline_id=None if baseline is None else baseline.run_id,
+            baseline_branch=None if baseline is None else baseline.branch,
+        )
+        return cls(state=state, baseline=baseline if state in _COMPARED_STATES else None)
+
+    @property
+    def compared(self) -> bool:
+        """Whether the run was compared with another run, so its changes
+        are stored and final."""
+        return self.state in _COMPARED_STATES
+
+
+@dataclass(frozen=True, slots=True)
 class RunListEntry:
     """One row of `list_runs`.
 
@@ -77,12 +139,14 @@ class RunListEntry:
     entry's VCS data can be read from. A list entry carrying both a
     populated `execution.vcs` and this field would be two answers to one
     question. `recorded_by` is the user whose token created the run, `None`
-    for one recorded without a token.
+    for one recorded without a token. `comparison` is read with the run, in
+    the same statement.
     """
 
     execution: Execution
     last_contact_at: datetime | None
     vcs: VcsProjection | None
+    comparison: Comparison
     recorded_by: str | None = None
 
     @classmethod
@@ -91,16 +155,28 @@ class RunListEntry:
         execution: Execution,
         *,
         last_contact_at: datetime | None,
+        baseline: BaselineRef | None,
         recorded_by: str | None = None,
     ) -> RunListEntry:
         """The list entry for a stored run, its VCS context moved into the
-        lean projection."""
+        lean projection, and its comparison derived from its stored
+        baseline."""
         return cls(
             execution=replace(execution, vcs=None),
             last_contact_at=last_contact_at,
             vcs=project_vcs(execution.vcs),
+            comparison=comparison_of(execution, baseline),
             recorded_by=recorded_by,
         )
+
+
+def comparison_of(execution: Execution, baseline: BaselineRef | None) -> Comparison:
+    """The comparison of a stored run whose stored baseline is `baseline`."""
+    return Comparison.of(
+        exit_status=execution.exit_status,
+        branch=None if execution.vcs is None else execution.vcs.branch,
+        baseline=baseline,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,19 +186,23 @@ class RunDetail:
     `execution.vcs` is the whole, unbounded `VcsContext` -- the detail path
     keeps the full record reachable, which is the other half of the
     lean-list rule. `project` is the one the run was created in.
-    `recorded_by` is as on `RunListEntry`.
+    `recorded_by` and `comparison` are as on `RunListEntry`.
     """
 
     execution: Execution
     last_contact_at: datetime | None
     project: str
+    comparison: Comparison
     recorded_by: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class HistoryEntry:
     """One row of `list_history` -- a test's execution in one run. `vcs` is
-    a lean `VcsProjection`, the same display bound `RunListEntry` applies."""
+    a lean `VcsProjection`, the same display bound `RunListEntry` applies.
+    `change` is the result's change against its own run's baseline, one of
+    `RESULT_CHANGES`, `None` when it did not change or the run was compared
+    with nothing."""
 
     run_id: str
     started_at: datetime
@@ -131,6 +211,11 @@ class HistoryEntry:
     outcome: str
     duration: float | None
     vcs: VcsProjection | None
+    change: str | None
+
+    def __post_init__(self) -> None:
+        if self.change is not None:
+            _check_vocabulary("change", self.change, RESULT_CHANGES)
 
     @classmethod
     def from_execution(
@@ -140,6 +225,7 @@ class HistoryEntry:
         last_contact_at: datetime | None,
         outcome: str,
         duration: float | None,
+        change: str | None,
     ) -> HistoryEntry:
         """The history entry for one test's result in a stored run."""
         return cls(
@@ -150,6 +236,7 @@ class HistoryEntry:
             outcome=outcome,
             duration=duration,
             vcs=project_vcs(execution.vcs),
+            change=change,
         )
 
 
@@ -195,6 +282,44 @@ class ResultListEntry:
             worker_id=result.worker_id,
             failure=project_failure(result.failure),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ChangeEntry:
+    """One row of `list_changes`: a test whose change a run's comparison
+    records. `outcome`, `duration` and `position` -- the result's index in
+    the run's stored order -- are `None` for a test the run lacks; `was` is
+    the baseline's outcome, `None` when the baseline lacks the test; `streak`
+    is set exactly for a still-failing test. The identity is the catalogue's,
+    as every result's is."""
+
+    identity: CaseIdentity
+    change: str
+    outcome: str | None
+    was: str | None
+    duration: float | None
+    position: int | None
+    streak: Streak | None
+
+    def __post_init__(self) -> None:
+        _check_vocabulary("change", self.change, CHANGES)
+
+
+@dataclass(frozen=True, slots=True)
+class ResultChange:
+    """What `get_result_change` says of one result: its index in its run's
+    stored order, and its change against the run's baseline, with the
+    baseline's outcome and the streak as on `ChangeEntry` -- all three
+    `None` when it did not change or the run was compared with nothing."""
+
+    position: int
+    change: str | None
+    was: str | None
+    streak: Streak | None
+
+    def __post_init__(self) -> None:
+        if self.change is not None:
+            _check_vocabulary("change", self.change, RESULT_CHANGES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -381,7 +506,15 @@ class ExecutionStore(Protocol):
         stores nothing; and name the run's own project, or it raises
         `ProjectMismatchError` and stores nothing. Both are checked, in that
         order, before whether the run is finished, so a replay naming
-        another project is refused rather than answered as a duplicate."""
+        another project is refused rather than answered as a duplicate.
+
+        The report that gives a run its exit status also compares it, in
+        the same transaction, after its results and metadata are written
+        and against the runs committed at that moment: it chooses the
+        run's baseline by the rules `vantage.core.domain.changes` states,
+        and stores the rows `compare` returns for the two runs. Nothing
+        else ever writes either, so a comparison never moves, and a run
+        with an exit status has always been compared."""
         ...
 
     def get_execution(self, execution_id: str) -> Execution | None:
@@ -426,7 +559,8 @@ class ExecutionStore(Protocol):
         `MAX_PAGE_ITEMS`, never rejected; `has_more` is true when more rows
         exist beyond the returned page. Each entry's VCS data is a lean
         `VcsProjection` -- the entry's own `execution.vcs` is always
-        `None`."""
+        `None` -- and its comparison is read in the same statement as the
+        run."""
         ...
 
     def list_runs_with_metadata_horizon(
@@ -464,7 +598,8 @@ class ExecutionStore(Protocol):
     def get_run_detail(self, execution_id: str) -> RunDetail | None:
         """Return the full record for one run, or None if `execution_id` is
         unknown. The whole stored commit subject is reachable here -- the
-        complement of `list_runs`' bounded projection."""
+        complement of `list_runs`' bounded projection -- and the comparison
+        is read in the same statement as the run."""
         ...
 
     def get_run_metadata(self, execution_id: str) -> RunMetadata | None:
@@ -512,7 +647,8 @@ class ExecutionStore(Protocol):
         """Return a page of one test's execution history in `project`,
         newest first, in `list_runs`' order and taking `after` as it does. An unknown
         `node_id` yields an empty page, never an error. Each entry's VCS
-        data is a lean `VcsProjection`, same as `list_runs`."""
+        data is a lean `VcsProjection`, same as `list_runs`, and its
+        `change` the one its run's comparison stored for the test."""
         ...
 
     def list_settings(self, namespace: str, *, project: str) -> Sequence[ProjectSetting]:
@@ -563,6 +699,46 @@ class ExecutionStore(Protocol):
         holds of each outcome, leaving out the outcomes it has none of. An
         id with no results, or naming no run, is left out. A page of runs
         is counted in one statement, not run by run."""
+        ...
+
+    def count_changes(self, execution_ids: Sequence[str]) -> Mapping[str, Mapping[str, int]]:
+        """Return, for each of `execution_ids` whose comparison stored any
+        change, how many tests it records of each change, leaving out the
+        changes it has none of. A run that is not compared, was compared
+        with nothing, or changed nothing, and an id naming no run, are left
+        out. A page of runs is counted in one statement, as
+        `count_outcomes` counts it."""
+        ...
+
+    def list_changes(
+        self,
+        execution_id: str,
+        *,
+        limit: int,
+        offset: int,
+        changes: Collection[str] | None = None,
+    ) -> Page[ChangeEntry]:
+        """Return a page of the changes one run's comparison stored, in
+        `CHANGE_ORDER`, and within one change in the run's stored order --
+        a missing test in the baseline's -- with the clamp and `has_more`
+        of `list_results`. With `changes`, only the tests holding one of
+        them, paged over that narrower set; an empty collection keeps none,
+        and a word that is not a change matches nothing. A run not compared
+        with another run has none."""
+        ...
+
+    def get_run_changes(self, execution_id: str) -> Sequence[tuple[int, str]] | None:
+        """Return `(position, change)` for every result of `execution_id`
+        that changed against its baseline, by position -- its index in the
+        run's stored order, as `get_run_case_outcomes` lists them -- or
+        None when the run was not compared with another run, or is
+        unknown. Read from one snapshot."""
+        ...
+
+    def get_result_change(self, execution_id: str, *, node_id: str) -> ResultChange | None:
+        """Return the position of one result in its run's stored order and
+        its change against the run's baseline, or None if no result with
+        that `node_id` is stored for `execution_id`."""
         ...
 
     def create_project(self, name: str, *, created_at: datetime) -> Project:

@@ -72,10 +72,46 @@ class OutcomeCountsResponse(BaseModel):
     xpassed: int
 
 
+class BaselineResponse(BaseModel):
+    """The run another was compared with: its id, its start and its
+    branch."""
+
+    id: str
+    started_at: datetime
+    branch: str | None
+
+
+class ChangeCountsResponse(BaseModel):
+    """How many tests of each change a run's comparison records, every
+    change present and zeros included. One of `removed` and `not_reached`
+    is always zero: a run's missing tests are all one or all the other.
+    Built field by field in `routes/read.py`."""
+
+    new_failure: int
+    still_failing: int
+    fixed: int
+    new_test: int
+    removed: int
+    not_reached: int
+
+
+class ComparisonResponse(BaseModel):
+    """What a run was compared with: `state` is `pending` until the run has
+    an exit status, `none` when no earlier run of its project was complete,
+    `branch` when its baseline is its own branch's latest complete run, and
+    `project` when it is the project's. `baseline` and `counts` are set
+    exactly for `branch` and `project`, and never change once set."""
+
+    state: str
+    baseline: BaselineResponse | None
+    counts: ChangeCountsResponse | None
+
+
 class RunListItemResponse(BaseModel):
     """One entry of `RunListResponse`. `recorded_by` is the user whose token
     created the run, `None` for one recorded without a token. `counts` may
-    include results a running run stored after the page was read."""
+    include results a running run stored after the page was read.
+    `comparison` is final once its state is not `pending`."""
 
     id: str
     started_at: datetime
@@ -86,6 +122,7 @@ class RunListItemResponse(BaseModel):
     vcs: RunVcsResponse | None
     recorded_by: str | None
     counts: OutcomeCountsResponse
+    comparison: ComparisonResponse
 
 
 class MetadataHorizonResponse(BaseModel):
@@ -113,9 +150,10 @@ class RunListResponse(BaseModel):
 class RunDetailResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}`. Carries
     `interrupt_reason`, which the lean list entry omits -- the detail path
-    keeps the full record reachable. `recorded_by` and `counts` are as on
-    `RunListItemResponse`; `project` is the one the run was created in,
-    whose history and sections the run is read against."""
+    keeps the full record reachable. `recorded_by`, `counts` and
+    `comparison` are as on `RunListItemResponse`; `project` is the one the
+    run was created in, whose history and sections the run is read
+    against."""
 
     id: str
     started_at: datetime
@@ -128,6 +166,7 @@ class RunDetailResponse(BaseModel):
     recorded_by: str | None
     project: str
     counts: OutcomeCountsResponse
+    comparison: ComparisonResponse
 
 
 class RunOutcomesResponse(BaseModel):
@@ -135,9 +174,13 @@ class RunOutcomesResponse(BaseModel):
     pytest's own characters per result -- `.` passed, `F` failed, `E`
     error, `s` skipped, `x` xfailed, `X` xpassed -- in stored order, the
     order the plugin reported them. Not paged: about a byte a result, the
-    whole run's shape at once."""
+    whole run's shape at once. `changes` is aligned with `outcomes`, one
+    character per result -- `-` unchanged, `n` new failure, `s` still
+    failing, `f` fixed, `t` new test -- and `None` unless the run was
+    compared with another run."""
 
     outcomes: str
+    changes: str | None
 
 
 class MetadataItemResponse(BaseModel):
@@ -216,6 +259,44 @@ class ResultListItemResponse(BaseModel):
     failure: FailureProjectionResponse | None
 
 
+class StreakResponse(BaseModel):
+    """How many consecutive runs failed a still-failing test along its
+    run's chain of baselines, the run itself included, and the first of
+    them."""
+
+    runs: int
+    since: str
+
+
+class ChangeItemResponse(BaseModel):
+    """One entry of `ChangesResponse`: a test whose change a run's
+    comparison records. `outcome`, `duration` and `position` -- the
+    result's index in the run's stored order, its mark in the run's
+    outcomes -- are `None` for a test the run lacks (`removed`,
+    `not_reached`); `was` is the baseline's outcome, `None` when the
+    baseline lacks the test; `streak` is set exactly for `still_failing`.
+    Built field by field in `routes/read.py`."""
+
+    node_id: str
+    file_path: str
+    class_name: str | None
+    function_name: str
+    param_id: str | None
+    change: str
+    outcome: str | None
+    was: str | None
+    duration: float | None
+    position: int | None
+    streak: StreakResponse | None
+
+
+class ChangesResponse(BaseModel):
+    """The response body for `GET /api/v1/runs/{run_id}/changes`."""
+
+    items: list[ChangeItemResponse]
+    has_more: bool
+
+
 class ResultsResponse(BaseModel):
     """The response body for `GET /api/v1/runs/{run_id}/results`."""
 
@@ -229,7 +310,10 @@ class ResultDetailResponse(BaseModel):
     display width. Flat, matching `ResultReport`'s own wire shape for the
     same fields, rather than nesting `failure`/`captured` sub-objects. Built
     field by field in `routes/read.py`, never
-    `model_validate(..., from_attributes=True)`."""
+    `model_validate(..., from_attributes=True)`. `position` is the result's
+    index in its run's stored order; `change`, `was` and `streak` are as on
+    `ChangeItemResponse`, all `None` when the result did not change or the
+    run was not compared with another run."""
 
     node_id: str
     file_path: str
@@ -264,12 +348,18 @@ class ResultDetailResponse(BaseModel):
     captured_stdout_truncated: bool
     captured_stderr: str | None
     captured_stderr_truncated: bool
+    position: int
+    change: str | None
+    was: str | None
+    streak: StreakResponse | None
 
 
 class HistoryEntryResponse(BaseModel):
     """One entry of `HistoryResponse`. `vcs` is a lean `RunVcsResponse`
     built from `HistoryEntry.vcs`, a `VcsProjection` with no `root` field --
-    the same exclusion as the run list."""
+    the same exclusion as the run list. `change` is the result's change
+    against its own run's baseline, `None` when it did not change or that
+    run was not compared with another run."""
 
     run_id: str
     started_at: datetime
@@ -277,6 +367,7 @@ class HistoryEntryResponse(BaseModel):
     outcome: str
     duration: float | None
     vcs: RunVcsResponse | None
+    change: str | None
 
 
 class HistoryResponse(BaseModel):

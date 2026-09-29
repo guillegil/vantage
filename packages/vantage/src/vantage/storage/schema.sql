@@ -106,6 +106,9 @@ CREATE TABLE IF NOT EXISTS project_member (
 -- run -- one row per recorded session. `project` is the one the report that
 -- created the run named, and never changes. `recorded_by` is the user whose
 -- token created the run, NULL when it was recorded without one.
+-- `baseline_id` is the run this one was compared with, written by the report
+-- that gave it its exit status and never changed; NULL while it has none,
+-- and when no earlier run of its project was complete.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS run (
     id                            TEXT PRIMARY KEY,
@@ -123,7 +126,8 @@ CREATE TABLE IF NOT EXISTS run (
     vcs_commit_subject_truncated  INTEGER NOT NULL DEFAULT 0,
     vcs_dirty                     INTEGER NULL,
     vcs_root                      TEXT NULL,
-    recorded_by                   TEXT NULL REFERENCES account (name)
+    recorded_by                   TEXT NULL REFERENCES account (name),
+    baseline_id                   TEXT NULL REFERENCES run (id)
 );
 
 -- ---------------------------------------------------------------------------
@@ -192,6 +196,39 @@ CREATE TABLE IF NOT EXISTS result (
 );
 
 -- ---------------------------------------------------------------------------
+-- result_change -- one row per test whose change a run's comparison records
+-- (`core/domain/changes.py`): its own results that changed against its
+-- baseline, and the baseline's tests it lacks. Written once, in the
+-- transaction that gives the run its exit status; a run with no baseline
+-- has none, and an unchanged test has none. Keyed by `test_case_id`: a run
+-- and its baseline are in one project, so one catalogue row names the test
+-- in both. `ordinal` is the result's index in the run's stored order, or,
+-- for `removed` and `not_reached`, the test's index in the baseline's.
+-- `was` is the baseline's outcome, NULL when it lacks the test. `streak` and
+-- `streak_since` are how many consecutive runs failed a still-failing test
+-- along the chain of baselines, and the first of them.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS result_change (
+    run_id        TEXT NOT NULL REFERENCES run (id),
+    test_case_id  INTEGER NOT NULL REFERENCES test_case (id),
+    change        TEXT NOT NULL CHECK (change IN (
+                      'new_failure', 'still_failing', 'fixed', 'new_test',
+                      'removed', 'not_reached')),
+    ordinal       INTEGER NOT NULL,
+    result_id     INTEGER NULL REFERENCES result (id),
+    was           TEXT NULL
+        CHECK (was IN ('passed', 'failed', 'error', 'skipped', 'xfailed', 'xpassed')),
+    streak        INTEGER NULL CHECK (streak >= 2),
+    streak_since  TEXT NULL REFERENCES run (id),
+    PRIMARY KEY (run_id, test_case_id),
+    CHECK ((result_id IS NULL) = (change IN ('removed', 'not_reached'))),
+    CHECK ((streak IS NULL) = (change <> 'still_failing')),
+    CHECK ((streak_since IS NULL) = (streak IS NULL)),
+    CHECK (was IS NOT NULL OR change IN ('new_failure', 'new_test')),
+    CHECK (was IS NULL OR change <> 'new_test')
+);
+
+-- ---------------------------------------------------------------------------
 -- project_setting -- a project's namespaced, server-persisted settings, such
 -- as its section definitions. Generic storage, specific validation: `value`
 -- is JSON text this schema does not describe and this adapter never parses;
@@ -254,6 +291,18 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 -- `run(project, started_at, id)`: a project's run list in its order, the
 -- cursor's range, and the metadata horizon count. It leads with the
 -- project because every read of the run list is within one.
+-- `run(project, vcs_branch, started_at, id)` and `run(project, started_at,
+-- id)`, both of complete runs alone: a finishing run's baseline, on its
+-- branch and on any, found by one backward seek. Each holds only the runs
+-- that can be a baseline, so the seek never passes over one that cannot:
+-- without them, a new branch's first run, or a project whose runs all stop
+-- early, would read back through its history inside the write lock. Their
+-- WHERE is `_COMPLETE`'s, term for term, since SQLite uses a partial index
+-- only for a statement that repeats its terms.
+-- `result_change(run_id, change, ordinal)`: a page of runs' change counts,
+-- from the index alone, a run's changes of one kind in order, and its
+-- changed results' positions. `result_change`'s primary key: a result's
+-- change, and each entry of a test's history.
 -- `result(run_id)`: one run's results in insertion order, without the
 -- temporary sort the `(run_id, node_id)` unique index would need.
 -- `result(test_case_id)`: one test's history.
@@ -269,6 +318,14 @@ CREATE TABLE IF NOT EXISTS run_metadata (
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_run_project_started_at
     ON run (project, started_at, id);
+CREATE INDEX IF NOT EXISTS idx_run_baseline_branch
+    ON run (project, vcs_branch, started_at, id)
+    WHERE finished_at IS NOT NULL AND interrupted = 0 AND interrupt_reason IS NULL
+      AND exit_status IN (0, 1);
+CREATE INDEX IF NOT EXISTS idx_run_baseline
+    ON run (project, started_at, id)
+    WHERE finished_at IS NOT NULL AND interrupted = 0 AND interrupt_reason IS NULL
+      AND exit_status IN (0, 1);
 CREATE INDEX IF NOT EXISTS idx_result_run_id
     ON result (run_id);
 CREATE INDEX IF NOT EXISTS idx_result_test_case_id
@@ -279,3 +336,5 @@ CREATE INDEX IF NOT EXISTS idx_run_metadata_key_value
     ON run_metadata (key, value);
 CREATE INDEX IF NOT EXISTS idx_project_member_account
     ON project_member (account, project);
+CREATE INDEX IF NOT EXISTS idx_result_change_run
+    ON result_change (run_id, change, ordinal);

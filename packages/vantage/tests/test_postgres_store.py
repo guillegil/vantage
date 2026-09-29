@@ -105,16 +105,17 @@ def test_a_fresh_database_gets_the_vantage_schema_stamped_with_the_current_versi
     assert datetime.fromisoformat(str(stamped["created_at"])).tzinfo is not None
 
 
-def test_a_new_database_is_stamped_10_and_holds_the_default_project_alone(
+def test_a_new_database_is_stamped_11_and_holds_the_default_project_alone(
     postgres_url: str,
 ) -> None:
-    """Version 10 is the schema with project members and the manage scope.
+    """Version 11 is the schema with run comparisons: `run.baseline_id` and
+    `result_change`.
     A report naming no project is recorded in `default`, so a new database
     has that project before anything is written to it -- and no other."""
     PostgresExecutionStore(postgres_url).close()
 
     assert _query(postgres_url, "SELECT value FROM vantage.meta WHERE key = 'schema_version'") == [
-        ("10",)
+        ("11",)
     ]
     assert _query(postgres_url, "SELECT name FROM vantage.project") == [(DEFAULT_PROJECT,)]
 
@@ -452,7 +453,7 @@ def _any_flag_checks(package: str) -> list[tuple[str, ...]]:
 def test_the_check_constraints_accept_what_the_sqlite_schemas_accept() -> None:
     postgres = _vocabularies("vantage.storage.postgres")
 
-    assert len(postgres) == 6
+    assert len(postgres) == 8
     assert postgres == _vocabularies("vantage.storage")
     assert _any_flag_checks("vantage.storage.postgres") == [
         ("can_admin", "can_manage", "can_read", "can_record")
@@ -1198,3 +1199,118 @@ def test_durations_read_back_exactly_whatever_the_databases_float_output(
         assert (result.duration, result.call_duration) == (duration, duration)
     finally:
         store.close()
+
+
+def test_a_branch_past_what_one_index_entry_holds_is_stored_and_compared(
+    postgres_store: PostgresExecutionStore,
+) -> None:
+    """A branch name has no bound, so the baseline seek finds it through its
+    digest and compares the text as well: two branches differing only past
+    what an index entry would hold are two branches."""
+    branch = _unrepeating(0x4E00, 10_000)
+    runs = [("1" * 32, branch), ("2" * 32, f"{branch}x"), ("3" * 32, branch)]
+    for minutes, (run_id, run_branch) in enumerate(runs):
+        postgres_store.record_session(
+            _execution(
+                run_id,
+                started=datetime(2026, 9, 1, 9, minutes, tzinfo=timezone.utc),
+                vcs=_vcs(branch=run_branch),
+            ),
+            results=(_result("t.py::test_a"),),
+            received_at=datetime.now(timezone.utc),
+            project=DEFAULT_PROJECT,
+        )
+
+    detail = postgres_store.get_run_detail("3" * 32)
+
+    assert detail is not None
+    assert detail.comparison.state == "branch"
+    assert detail.comparison.baseline is not None
+    assert detail.comparison.baseline.run_id == "1" * 32
+    assert detail.comparison.baseline.branch == branch
+
+
+def test_a_finish_whose_comparison_fails_stores_nothing_of_the_finish(
+    postgres_store: PostgresExecutionStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The comparison is written in the transaction of the report that
+    finishes the run, so a finish is stored compared or not at all: a run
+    never reads as final without its comparison."""
+    started = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+    postgres_store.record_session(
+        _execution("1" * 32, started=started),
+        results=(_result("t.py::test_a"),),
+        received_at=started,
+        project=DEFAULT_PROJECT,
+    )
+    postgres_store.record_session(
+        _start_only_execution("2" * 32, started=started + timedelta(minutes=1)),
+        results=(),
+        received_at=started,
+        project=DEFAULT_PROJECT,
+    )
+
+    def _failing(*_args: object, **_kwargs: object) -> list[object]:
+        raise RuntimeError("compare failed")
+
+    monkeypatch.setattr(postgres_store_module, "compare", _failing)
+    with pytest.raises(RuntimeError, match="compare failed"):
+        postgres_store.record_session(
+            _execution("2" * 32, started=started + timedelta(minutes=1)),
+            results=(_result("t.py::test_a", outcome="failed"),),
+            received_at=started,
+            project=DEFAULT_PROJECT,
+        )
+
+    stored = postgres_store.get_run_detail("2" * 32)
+    assert stored is not None
+    assert stored.execution.exit_status is None
+    assert stored.comparison.state == "pending"
+    assert postgres_store.get_results("2" * 32) == []
+    monkeypatch.undo()
+    postgres_store.record_session(
+        _execution("2" * 32, started=started + timedelta(minutes=1)),
+        results=(_result("t.py::test_a", outcome="failed"),),
+        received_at=started,
+        project=DEFAULT_PROJECT,
+    )
+    assert [
+        entry.change for entry in postgres_store.list_changes("2" * 32, limit=10, offset=0).items
+    ] == ["new_failure"]
+
+
+def test_changes_are_read_along_their_own_indexes(
+    postgres_store: PostgresExecutionStore, postgres_url: str
+) -> None:
+    """A finishing run's baseline is found by one backward index scan from
+    its own key, inside its transaction, on its branch or on any, of an
+    index holding complete runs alone, so no run that cannot be a baseline
+    is read and filtered out on the way; and one kind of a run's changes is
+    read in order from `result_change_run`, without a sort."""
+    started = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+    with psycopg.connect(postgres_url, autocommit=True) as conn:
+        plans = [
+            "\n".join(str(row[0]) for row in conn.execute(f"EXPLAIN {statement}", params))
+            for statement, params in (
+                (
+                    postgres_store_module._BRANCH_BASELINE,  # noqa: SLF001
+                    (DEFAULT_PROJECT, "main", "main", started, "a" * 32),
+                ),
+                (
+                    postgres_store_module._PROJECT_BASELINE,  # noqa: SLF001
+                    (DEFAULT_PROJECT, started, "a" * 32),
+                ),
+                (
+                    postgres_store_module._LIST_CHANGES_OF_ONE,  # noqa: SLF001
+                    ("a" * 32, "fixed", 21, 0),
+                ),
+            )
+        ]
+
+    branch, project, one_kind = plans
+    assert "Index Scan Backward using run_baseline_branch on run" in branch
+    assert "Index Only Scan Backward using run_baseline on run" in project
+    assert "interrupt" not in branch
+    assert "interrupt" not in project
+    assert "Index Scan using result_change_run on result_change rc" in one_kind
+    assert "Sort" not in one_kind

@@ -294,6 +294,15 @@ when a finish report arrived without one, `abandoned` when nothing was heard
 for the grace period (900 seconds by default, thirty heartbeat intervals),
 otherwise `running`.
 
+**The finish fixes the run's comparison.** The report that gives a run its
+exit status, and only that one, compares the run with its baseline in the
+same transaction, after its results (see [Storage](#storage)). A running
+run therefore has nothing to compare, and its comparison reads `pending`:
+results reach the server only in the finish reports, so there is no partial
+comparison to show while a session runs. An abandoned run stays `pending`
+unless `vantage push` later delivers its finish, which compares it then,
+against the runs stored at that moment.
+
 **xdist.** Only the controller builds a `Recorder`; a `Recorder` per worker
 would record one session as several runs. The exception behind a failure
 exists only in the process that ran the test, so each worker registers an
@@ -728,9 +737,10 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
     the `Project`.
   - `_run_access(authorizes, role)` builds the dependency of every route
     with `{run_id}` in its path: `requires_read_run` (viewer: a run's
-    detail, metadata, results, outcomes, one result and section summary) and
-    `requires_record_run` (editor: the heartbeat). It takes the caller as
-    a sub-dependency and the run id as its own path parameter: FastAPI
+    detail, metadata, results, changes, outcomes, one result and section
+    summary) and `requires_record_run` (editor: the heartbeat). It takes
+    the caller as a sub-dependency and the run id as its own path
+    parameter: FastAPI
     resolves sub-dependencies before a dependant's own parameters, so a
     caller refused for who they are is never told the id is malformed,
     whereas authorizing inside its body would answer the `422` first. It reads
@@ -1001,8 +1011,13 @@ running inside another thread's open transaction on the shared connection,
 where it would see rows not yet committed. Multi-statement writes open with
 `BEGIN IMMEDIATE`, and so do the first admin's insert, a password set and a
 login's token, so those serialise with each other in one process and
-across processes on one file. WAL mode and a five-second busy timeout cover a second
-process on the same file, which no in-process lock can reach: the pytest
+across processes on one file. A finishing report's comparison runs inside
+its transaction and so under both, for about 30 ms at 20,000 results and
+170 ms at 100,000 (more when the run and its baseline hold different
+tests, as under "Storage" below), while every other store call in the
+process waits.
+WAL mode and a five-second busy timeout cover a second process on the same
+file, which no in-process lock can reach: the pytest
 sessions storing into a local database, and a `vantage` serving it. Opening
 switches a new file to WAL, which needs the file to itself for an instant;
 SQLite answers a second connection switching at the same moment "database is
@@ -1048,6 +1063,23 @@ another process by construction, never by a check first:
   rows are upserted in sorted node id order, one report having one project,
   so two reports lock them in the same order and cannot deadlock; results and metadata insert with `ON CONFLICT DO
   NOTHING`.
+  The report that gives the run its exit status then compares it, holding
+  that row lock. The step from no exit status to one happens once, so one
+  transaction ever compares a run, and a replay racing it waits for the
+  lock, finds the run final and returns before comparing. The baseline and
+  its results are read with plain statements at `READ COMMITTED` and no
+  lock of their own: a complete run commits together with its comparison,
+  so a candidate is seen whole or not at all, and of two runs finishing at
+  once each sees the other only if that one committed first -- either
+  answer is a complete run started before it, valid for good, so there is
+  no check-then-act to guard and no advisory lock serialising a project's
+  finishes. The comparison's foreign keys take `FOR KEY SHARE` on the
+  baseline, its catalogue rows, its results and the streak's first run,
+  which conflicts neither with the catalogue upsert's `FOR NO KEY UPDATE`
+  nor with `touch_last_contact`, and waits only on a replay of the
+  baseline's own finish, which holds nothing else: no new lock order, no
+  new deadlock. A serialization failure or deadlock reruns the whole
+  report, and the comparison is deterministic.
 - `upsert_setting` counts and inserts under a transaction-scoped advisory
   lock keyed on the project and the namespace, so the section bound holds
   per project across servers.
@@ -1329,7 +1361,7 @@ and restart `vantage`, which, installed editable, serves the source tree's
 
 **`schema.sql` is applied whole, once.** On first open, when the `meta` table
 does not exist, the whole file runs in one `BEGIN IMMEDIATE` transaction that
-also stamps `meta.schema_version` (currently 10) and `meta.origin` (see
+also stamps `meta.schema_version` (currently 11) and `meta.origin` (see
 [Users, tokens and who may do what](#users-tokens-and-who-may-do-what)) and
 writes the `default` project. Reopening issues no DDL. A
 database carrying any other stamp, older, newer, missing or not a number, is
@@ -1345,9 +1377,10 @@ logical schema, and change together.
 | --- | --- |
 | `project` | one row per project, `default` from the database's creation; never renamed or deleted |
 | `project_member` | one row per member of a project, with their role in it (`viewer`, `editor` or `owner`, a `CHECK`), keyed by project and user, with an index on `(account, project)` for a user's memberships; none in `default`, which the adapters refuse in code rather than a `CHECK`, so `DEFAULT_PROJECT` stays the only statement of that name. A disabled user's rows stay |
-| `run` | one row per session: its project, times, exit status, interruption, VCS fields, last contact, the user who recorded it |
+| `run` | one row per session: its project, times, exit status, interruption, VCS fields, last contact, the user who recorded it, and the run it was compared with (`baseline_id`) |
 | `test_case` | the catalogue: one row per node id ever seen in a project, with first and last sighting |
 | `result` | one row per test per run, unique on `(run_id, node_id)` |
+| `result_change` | one row per test whose change a run's comparison records -- its own results that changed against its baseline, and the baseline's tests it lacks -- keyed by run and catalogue row, with the baseline's outcome and a still-failing test's streak; written once, with the run's exit status |
 | `run_metadata_file`, `run_metadata` | each declared file's status; each key's status and value, whether a file or the session gave it, its display name, and whether the declaration named it |
 | `project_setting` | a project's namespaced JSON values; its section definitions live here |
 | `account`, `access_token` | one row per user, never deleted, with their password's scrypt hash or null; one per token made, by its digest, with its scopes (`can_read`, `can_record`, `can_manage`, `can_admin`, at least one set), when it was revoked and, for a login token alone, when it expires. A made token's row is kept for good, a login token's deleted once it has expired, at its user's next login |
@@ -1361,7 +1394,8 @@ never-backwards update, run ordering and the count of runs predating a
 metadata key all rely on. The plugin sends the same format.
 
 **A report is one transaction**, in a fixed order so every foreign key finds
-its row: run, catalogue, results, metadata.
+its row: run, catalogue, results, metadata, and, for the report that gives
+the run its exit status, its comparison.
 
 - The run is an upsert applied only when the stored run has no exit status
   and the incoming report has one: a finish lands over a start, never the
@@ -1381,6 +1415,22 @@ its row: run, catalogue, results, metadata.
   replay changes nothing. A metadata key is inserted only while the run
   holds fewer than 200, counted in the same statement, so the bound holds
   over every report of the run and the metadata route needs no paging.
+- The report that gives the run its exit status then compares it, once:
+  it chooses the baseline by the rules `core/domain/changes.py` states,
+  among the runs committed then, writes `run.baseline_id`, and inserts the
+  rows `compare` returns. A replay returned before this, so nothing
+  compares a run twice, and a run with an exit status always has its
+  comparison. It reads the run back first, for its stored start and its
+  branch as the upsert merged them; seeks the baseline on the branch, then
+  on the project (`_BRANCH_BASELINE`, `_PROJECT_BASELINE`, restating
+  `BASELINE_EXIT_STATUSES` and `ran_to_its_end` in SQL); then reads both
+  runs' `(result id, catalogue row, outcome)` in stored order and the
+  baseline's still-failing streaks, and inserts the rows in one
+  `executemany`. A still-failing test's streak extends the baseline's row
+  for it, or starts at the baseline when that row is a new failure or the
+  baseline was compared with nothing: one lookup per test, exact because
+  every link in the chain of baselines is final. A failure anywhere in it rolls the whole report back, the
+  finish included, so "final" and "compared" are one fact.
 
 **A member is set in one transaction** too: the project, the user and the
 member row are probed, then the row is upserted, under the same
@@ -1427,6 +1477,64 @@ grow and a finished run takes no more, so a run finished when the page was
 read has its final counts, and a running one's may include results stored
 since.
 
+**A run's comparison is stored, not computed when read.** Only the tests
+that changed get a `result_change` row, and the baseline's tests the run
+lacks: a few in a hundred when about 1% of a suite fails. The comparison's
+state (`pending`, `none`, `branch`, `project`) is derived from
+`run.baseline_id` and the two runs' branches by `comparison_state`, and
+the counts from the rows; neither is stored. Comparing at the finish costs
+one pass over both runs' results: about 30 ms for 20,000 results on SQLite
+and 80 ms on PostgreSQL, once per run, well inside the plugin's 10-second
+report timeout. Those figures hold for runs of the same tests. The rows
+follow the tests the two runs do not share as well as those that changed,
+so a subset of the suite (`-k`, a path, `--lf`, one CI shard) compared
+with a full run, or a full run with a subset, writes a row for every test
+only one of them holds. At 20,000 tests that is tenths of a second on
+SQLite, under its write lock, and seconds on PostgreSQL, where each row's
+foreign keys are checked; shards of one branch that alternate halves of a
+suite pay it on every finish. The README tells such runs to record into a
+project of their own. Computing the same when read would cost every run-list
+page a comparison of each of its runs with its baseline: measured at
+0.3 s for a 40-run page of 20,000 results each on SQLite and 0.9 s on
+PostgreSQL, where counting the stored rows takes a few milliseconds. A
+comparison computed when read would also move whenever a late run landed
+between two others, where a stored one, once shown, never does. The
+result rows stay write-once: the comparison is a table of its own rather
+than columns on `result`, so no wide row is updated.
+
+- `run(project, vcs_branch, started_at, id)` serves the branch seek and
+  `run(project, started_at, id)` the project seek, each one backward step
+  from the finishing run's key. Both are partial, holding complete runs
+  alone, with `_COMPLETE`'s terms as their `WHERE` (SQLite uses a partial
+  index only for a statement that repeats its terms): an index of every
+  run would make the seek read back past each run that cannot be a
+  baseline, so a project whose runs all stop early (a failing suite run
+  with `-x`) would read its whole history on every finish, inside
+  SQLite's write lock. Without the branch index the first run of a new
+  branch would scan its project's history.
+- `result_change(run_id, change, ordinal)` serves a page of runs' change
+  counts (`count_changes`, one `GROUP BY run_id, change` from the index
+  alone, batched as `count_outcomes` is), a run's changes of one kind in
+  order (`list_changes` with one filter walks it as it stands; several sort
+  by `CHANGE_ORDER`'s rank, then `ordinal`), and its changed results'
+  positions (`get_run_changes`). Its primary key, `(run_id, test_case_id)`,
+  serves a result's change and each entry of a test's history, a left join
+  from `result` on both columns.
+- A run's comparison is read in the same statement as the run, a left join
+  on `run.baseline_id` by primary key, so a page and its comparisons are
+  one read. The change counts are read after the page, as `count_outcomes`
+  is, and only for the runs the page read as compared: such a run's rows
+  committed with its exit status, so they are complete, and a run read as
+  `pending` is given none, whatever was stored since.
+- `/outcomes` reads the run's changes before its outcomes, in two calls
+  with no shared snapshot: a run is compared only once it is final, so a
+  run whose changes were read takes no result after, and the outcomes read
+  next are the ones it was compared by. A result's position, which
+  `/result` gives, is a count of the run's results stored before it along
+  `result(run_id)`.
+
+`test_sqlite_store.py` pins every one of these plans without statistics.
+
 ### PostgreSQL
 
 `vantage.storage.postgres` keeps the same tables, columns, constraints and
@@ -1462,6 +1570,10 @@ and speaks UTF-8 on the wire whatever `PGCLIENTENCODING` says.
   database set to 0 would cut to 15; paging, `has_more` and where a page
   after a cursor starts (a row comparison on `started_at` and `id`, which
   both adapters' indexes serve) are computed the same way.
+- **The branch seek goes through `text_key`.** A branch has no bound, so
+  its index is `run(project, text_key(vcs_branch), started_at, id)`, and
+  the seek compares the branch's text as well as its key, like every other
+  unbounded lookup.
 - **U+0000 never reaches it** from the service (see *Request handling and
   concurrency*). The adapter still replaces it with U+FFFD in anything it
   writes, and treats a lookup value holding it as matching nothing, so a

@@ -46,6 +46,7 @@ const ITEM: RunListItem = {
   },
   recorded_by: 'alice',
   counts: COUNTS,
+  comparison: { state: 'none', baseline: null, counts: null },
 };
 
 describe('runItem', () => {
@@ -302,6 +303,10 @@ const DETAIL: ResultDetail = {
   captured_stdout_truncated: false,
   captured_stderr: null,
   captured_stderr_truncated: true,
+  position: 0,
+  change: null,
+  was: null,
+  streak: null,
 };
 
 const NOTHING: Partial<ResultDetail> = {
@@ -480,6 +485,7 @@ describe('history', () => {
         commit_subject_truncated: false,
         dirty: true,
       },
+      change: null,
     },
     {
       run_id: OLD,
@@ -488,6 +494,7 @@ describe('history', () => {
       outcome: 'passed',
       duration: null,
       vcs: null,
+      change: null,
     },
   ];
 

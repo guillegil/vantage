@@ -21,6 +21,7 @@ const RUN = {
   recorded_by: 'alice',
   project: 'default',
   counts: { passed: 1, failed: 1, error: 0, skipped: 0, xfailed: 0, xpassed: 0 },
+  comparison: { state: 'none', baseline: null, counts: null },
 };
 
 function item(node: string, outcome: string, message: string | null) {
@@ -63,7 +64,7 @@ const OTHER = '9876fedc9876fedc9876fedc9876fedc';
 // A finished run of default, `id`, with one failing and one passing result.
 function answer(id: string, path: string, query: URLSearchParams) {
   if (path === `/runs/${id}`) return json(200, { ...RUN, id });
-  if (path === `/runs/${id}/outcomes`) return json(200, { outcomes: 'F.' });
+  if (path === `/runs/${id}/outcomes`) return json(200, { outcomes: 'F.', changes: null });
   if (path === `/runs/${id}/metadata`) return json(200, { items: [], files: [] });
   if (path === `/runs/${id}/results`) {
     const failing = item(FAILING, 'failed', 'AssertionError: boom');
@@ -86,7 +87,7 @@ afterEach(() => {
 it('links every result in both tables to its page, and shows hidden characters', async () => {
   stubServer((_m, path, query) => {
     if (path === `/runs/${ID}`) return json(200, RUN);
-    if (path === `/runs/${ID}/outcomes`) return json(200, { outcomes: 'F.' });
+    if (path === `/runs/${ID}/outcomes`) return json(200, { outcomes: 'F.', changes: null });
     if (path === `/runs/${ID}/metadata`) return json(200, { items: [], files: [] });
     if (path === `/runs/${ID}/results`) {
       const failing = item(FAILING, 'failed', `AssertionError: ${RLO}evil`);
@@ -126,7 +127,7 @@ it('shows a hidden character in why the run was interrupted as its code point', 
         presentation: 'interrupted',
       });
     }
-    if (path === `/runs/${ID}/outcomes`) return json(200, { outcomes: 'F.' });
+    if (path === `/runs/${ID}/outcomes`) return json(200, { outcomes: 'F.', changes: null });
     if (path === `/runs/${ID}/metadata`) return json(200, { items: [], files: [] });
     if (path === `/runs/${ID}/results`) return json(200, { items: [], has_more: false });
     return undefined;

@@ -189,6 +189,8 @@ _WITHIN_A_PROJECT: dict[str, tuple[str, str, dict[str, Any], str]] = {
     "get_run_detail": ("GET", f"/api/v1/runs/{_RUN}", {}, VIEWER_ROLE),
     "get_run_metadata": ("GET", f"/api/v1/runs/{_RUN}/metadata", {}, VIEWER_ROLE),
     "list_results": ("GET", f"/api/v1/runs/{_RUN}/results", {}, VIEWER_ROLE),
+    "list_changes": ("GET", f"/api/v1/runs/{_RUN}/changes", {}, VIEWER_ROLE),
+    "get_run_outcomes": ("GET", f"/api/v1/runs/{_RUN}/outcomes", {}, VIEWER_ROLE),
     "get_result": (
         "GET",
         f"/api/v1/runs/{_RUN}/result",
@@ -379,6 +381,12 @@ _MALFORMED: dict[str, tuple[str, str, dict[str, Any], str]] = {
         "GET",
         f"/api/v1/runs/{_RUN}/results",
         {"params": {"offset": "-1"}},
+        VIEWER_ROLE,
+    ),
+    "list_changes": (
+        "GET",
+        f"/api/v1/runs/{_RUN}/changes",
+        {"params": {"change": "flaky"}},
         VIEWER_ROLE,
     ),
     "get_result": ("GET", f"/api/v1/runs/{_RUN}/result", {}, VIEWER_ROLE),

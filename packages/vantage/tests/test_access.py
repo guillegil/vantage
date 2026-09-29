@@ -317,11 +317,12 @@ def test_a_token_without_the_routes_scope_is_forbidden(
         ("GET", "", READ_SCOPE),
         ("GET", "/metadata", READ_SCOPE),
         ("GET", "/results", READ_SCOPE),
+        ("GET", "/changes", READ_SCOPE),
         ("GET", "/result", READ_SCOPE),
         ("GET", "/sections", READ_SCOPE),
         ("POST", "/heartbeat", RECORD_SCOPE),
     ],
-    ids=["detail", "metadata", "results", "result", "sections", "heartbeat"],
+    ids=["detail", "metadata", "results", "changes", "result", "sections", "heartbeat"],
 )
 def test_a_malformed_run_id_is_refused_for_who_asks_before_its_shape(
     any_store: ExecutionStore, method: str, suffix: str, scope: str

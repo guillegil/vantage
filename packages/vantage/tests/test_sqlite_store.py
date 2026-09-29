@@ -28,12 +28,22 @@ from vantage.core.ports.storage import (
     MetadataFile,
     RunMetadata,
 )
+from vantage.storage import sqlite_store
+from vantage.storage.connection import isoformat_utc
 from vantage.storage.sqlite_store import (
+    _BRANCH_BASELINE,
     _COUNT_RUNS_PREDATING_KEY,
+    _LIST_HISTORY,
+    _LIST_RUNS,
     _LIST_RUNS_AFTER,
     _LIST_SUBJECT_PREFIX_BYTES,
+    _PROJECT_BASELINE,
+    _SELECT_RESULT_CHANGE,
+    _SELECT_RUN,
     SqliteExecutionStore,
+    _count_changes,
     _count_outcomes,
+    _list_changes,
     _list_results_with_outcomes,
     _list_runs_by_metadata,
 )
@@ -42,7 +52,9 @@ from vantage_port_contract import (
     ExecutionStoreContract,
     LocalDatabaseContract,
     StoredMetadata,
+    _at,
     _captured,
+    _compared_run,
     _execution,
     _failure,
     _result,
@@ -712,7 +724,14 @@ _SESSION_ENTRY = MetadataEntry(
 )
 
 # Every table `record_session` writes.
-_SESSION_TABLES = ("run", "test_case", "result", "run_metadata_file", "run_metadata")
+_SESSION_TABLES = (
+    "run",
+    "test_case",
+    "result",
+    "run_metadata_file",
+    "run_metadata",
+    "result_change",
+)
 
 
 @pytest.mark.parametrize(
@@ -941,3 +960,176 @@ def test_reordered_start_write_never_nulls_a_recorded_finish(tmp_path: Path) -> 
         assert adapter.count_results() == 1
     finally:
         adapter.close()
+
+
+def _plan(store: SqliteExecutionStore, sql: str, params: Sequence[object]) -> str:
+    """The plan SQLite picks for `sql`, without statistics, as production
+    never runs `ANALYZE`."""
+    rows = store._conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()  # noqa: SLF001
+    return "\n".join(str(row[-1]) for row in rows)
+
+
+def test_a_finishing_runs_baseline_is_found_by_one_backward_seek(tmp_path: Path) -> None:
+    """Both baseline statements run inside the write lock, so each must
+    start at the finishing run's key, in an index of complete runs alone: a
+    plan that scanned the project's history -- or, for a new branch, all of
+    it -- or one that passed over every run stopped early on the way would
+    hold every writer for as long."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    key = ("2026-08-15T09:00:00.000000+00:00", "a" * 32)
+    try:
+        branch = _plan(store, _BRANCH_BASELINE, (DEFAULT_PROJECT, "main", *key))
+        project = _plan(store, _PROJECT_BASELINE, (DEFAULT_PROJECT, *key))
+    finally:
+        store.close()
+
+    assert branch == (
+        "SEARCH run USING INDEX idx_run_baseline_branch"
+        " (project=? AND vcs_branch=? AND (started_at,id)<(?,?))"
+    )
+    assert project == (
+        "SEARCH run USING INDEX idx_run_baseline (project=? AND (started_at,id)<(?,?))"
+    )
+
+
+def test_a_baseline_seek_passes_over_no_run_that_cannot_be_one(tmp_path: Path) -> None:
+    """A suite run with `-x` that keeps failing stops early every time, so
+    none of its runs is ever complete. Finding that no baseline exists must
+    still cost one step, not a read back through every such run inside the
+    write lock: the work the seeks do is the same for 5 such runs as for
+    300."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    key = (isoformat_utc(_at(10_000)), "f" * 32)
+
+    def steps(sql: str, params: Sequence[object]) -> int:
+        """The virtual machine instructions `sql` runs."""
+        counted = [0]
+
+        def count() -> int:
+            counted[0] += 1
+            return 0
+
+        store._conn.set_progress_handler(count, 1)  # noqa: SLF001
+        try:
+            assert store._conn.execute(sql, params).fetchall() == []  # noqa: SLF001
+        finally:
+            store._conn.set_progress_handler(None, 1)  # noqa: SLF001
+        return counted[0]
+
+    def both() -> tuple[int, int]:
+        return (
+            steps(_BRANCH_BASELINE, (DEFAULT_PROJECT, "main", *key)),
+            steps(_PROJECT_BASELINE, (DEFAULT_PROJECT, *key)),
+        )
+
+    def stopped_early(numbers: range) -> None:
+        for number in numbers:
+            store.record_session(
+                _compared_run(number, number, exit_status=1, reason="stopped after 1 failure"),
+                results=(),
+                received_at=_at(number),
+                project=DEFAULT_PROJECT,
+            )
+
+    try:
+        stopped_early(range(1, 6))
+        few = both()
+        stopped_early(range(6, 301))
+        many = both()
+    finally:
+        store.close()
+
+    assert many == few
+
+
+def test_changes_are_read_along_their_own_indexes(tmp_path: Path) -> None:
+    """A page's change counts come from `idx_result_change_run` alone; one
+    kind of change is read in order from it, without a sort; a history
+    entry's change and a result's are found by `result_change`'s primary
+    key; and a result's position is counted along `idx_result_run_id`
+    alone. None of them costs more as other runs pile up."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    try:
+        counts = _plan(store, _count_changes(3), ("a" * 32, "b" * 32, "c" * 32))
+        one_kind = _plan(store, _list_changes(1), ("a" * 32, "fixed", 21, 0))
+        history = _plan(
+            store, _LIST_HISTORY, (_LIST_SUBJECT_PREFIX_BYTES, DEFAULT_PROJECT, "t.py::x", 21, 0)
+        )
+        result = _plan(store, _SELECT_RESULT_CHANGE, ("a" * 32, "t.py::x"))
+    finally:
+        store.close()
+
+    assert counts == "SEARCH result_change USING COVERING INDEX idx_result_change_run (run_id=?)"
+    assert "SEARCH rc USING INDEX idx_result_change_run (run_id=? AND change=?)" in one_kind
+    assert "TEMP B-TREE" not in one_kind
+    assert (
+        "SEARCH rc USING INDEX sqlite_autoindex_result_change_1 (run_id=? AND test_case_id=?)"
+        in history
+    )
+    assert (
+        "SEARCH rc USING INDEX sqlite_autoindex_result_change_1 (run_id=? AND test_case_id=?)"
+        in result
+    )
+    assert "SEARCH earlier USING COVERING INDEX idx_result_run_id (run_id=? AND rowid<?)" in result
+
+
+def test_a_run_list_reads_each_baseline_by_primary_key(tmp_path: Path) -> None:
+    """A page and its comparisons are one statement: each run's baseline is
+    looked up by id, and the run list keeps its own index."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    key = ("2026-08-15T09:00:00.000000+00:00", "a" * 32)
+    try:
+        plans = [
+            _plan(store, _LIST_RUNS, (_LIST_SUBJECT_PREFIX_BYTES, DEFAULT_PROJECT, 21, 0)),
+            _plan(
+                store, _LIST_RUNS_AFTER, (_LIST_SUBJECT_PREFIX_BYTES, DEFAULT_PROJECT, *key, 21, 0)
+            ),
+            _plan(
+                store,
+                _list_runs_by_metadata(1),
+                (_LIST_SUBJECT_PREFIX_BYTES, "k", "v", DEFAULT_PROJECT, 21, 0),
+            ),
+            _plan(store, _SELECT_RUN, ("a" * 32,)),
+        ]
+    finally:
+        store.close()
+
+    for plan in plans:
+        assert "SEARCH base USING INDEX sqlite_autoindex_run_1 (id=?) LEFT-JOIN" in plan, plan
+    assert "SEARCH run USING INDEX idx_run_project_started_at (project=?)" in plans[0]
+
+
+def test_a_finish_whose_comparison_fails_stores_nothing_of_the_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The comparison is written in the transaction of the report that
+    finishes the run, so a finish is stored compared or not at all: a run
+    never reads as final without its comparison."""
+    store = SqliteExecutionStore(tmp_path / "store" / "vantage.db")
+    started = datetime(2026, 9, 1, 9, 0, tzinfo=timezone.utc)
+    try:
+        store.record_session(
+            _execution("1" * 32, started=started),
+            results=(_result("t.py::test_a"),),
+            received_at=started,
+            project=DEFAULT_PROJECT,
+        )
+
+        def _failing(*_args: object, **_kwargs: object) -> list[object]:
+            raise RuntimeError("compare failed")
+
+        monkeypatch.setattr(sqlite_store, "compare", _failing)
+        with pytest.raises(RuntimeError, match="compare failed"):
+            store.record_session(
+                _execution("2" * 32, started=started + timedelta(minutes=1)),
+                results=(_result("t.py::test_a", outcome="failed"),),
+                received_at=started,
+                project=DEFAULT_PROJECT,
+            )
+
+        assert store.get_execution("2" * 32) is None
+        assert store.count_results() == 1
+        monkeypatch.undo()
+        assert _write_run(store, "3" * 32) is True
+    finally:
+        store.close()

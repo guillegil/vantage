@@ -23,6 +23,7 @@ const RUN = {
   vcs: null,
   recorded_by: 'alice',
   counts: COUNTS,
+  comparison: { state: 'none', baseline: null, counts: null },
 };
 const ALICE = {
   open: false,
@@ -62,7 +63,7 @@ function server(overrides: Handler = () => undefined) {
         metadata_horizon: null,
       });
     }
-    if (path === `/runs/${ID}/outcomes`) return json(200, { outcomes: '..F.' });
+    if (path === `/runs/${ID}/outcomes`) return json(200, { outcomes: '..F.', changes: null });
     return refuse(404, 'not_found');
   });
   vi.stubGlobal('fetch', fetch);

@@ -26,6 +26,7 @@ function entry(runId: string, outcome: string, startedAt: string) {
       commit_subject_truncated: false,
       dirty: false,
     },
+    change: null,
   };
 }
 

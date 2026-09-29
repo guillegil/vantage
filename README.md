@@ -13,8 +13,9 @@ bisecting for.
 
 Early and unreleased (0.1.0). Neither distribution is published yet, so
 install from a checkout; the server's container image is built from one
-too. The server's web client shows a project's runs and each run; the rest
-of the recorded history, a test's across runs included, is read through
+too. The server's web client shows a project's runs, each run, each
+result and a test's history; the rest of what is recorded, what each run
+changed against the run it was compared with included, is read through
 the server's JSON API. The database has no migrations, so a
 server upgrade that changes the schema refuses the old database and needs a
 new one.
@@ -776,6 +777,84 @@ project you had open last, or of `default`.
   when it ends stays as it is and offers to sign in again. A session reads,
   and never records runs.
 
+### What a run is compared with
+
+When a run gets its exit status, the server compares it once with an
+earlier run of its project, its *baseline*, and records which tests
+changed. A local database compares the runs stored into it the same way.
+The API serves the comparison: each run's `comparison`, its changes at
+`/runs/{run_id}/changes`, a change beside each outcome at
+`/runs/{run_id}/outcomes`, and a change on each result and on each entry
+of a test's history (see [Running the server](#running-the-server)).
+
+**The baseline** is the latest *complete* run of the project started
+before this one on the same branch. When this run has no branch recorded,
+or no earlier run on its branch is complete, it is the latest complete run
+of the project started before this one, on any branch or none, and the
+comparison says it fell back (`state: project` rather than `branch`). A
+run is **complete** when it finished and ran every test it collected --
+it was not interrupted (Ctrl-C, `pytest.exit()`, pytest's internal error)
+nor stopped early (`-x`, `--maxfail`, `--stepwise`, a collection error) --
+with exit status 0 or 1. Any other run -- one still running or
+abandoned, one that collected nothing (exit status 5), one that ended with
+any other status -- is never a baseline: comparing with it would make the
+tests it did not run read as new in the next. "Before" is the run list's
+order: the start time, with the run id settling a tie.
+
+`comparison.state` is `pending` while the run has no exit status (running,
+or abandoned without a finish), `none` when no earlier run of its project
+is complete, and `branch` or `project` when it was compared; only then do
+`baseline` (the run's id, start and branch) and `counts` say what with and
+how many tests changed each way.
+
+| Change | The test in this run | In the baseline |
+| --- | --- | --- |
+| `new_failure` | failed or error | passed, skipped, xfailed, xpassed, or absent |
+| `still_failing` | failed or error | failed or error |
+| `fixed` | passed, skipped, xfailed or xpassed | failed or error |
+| `new_test` | passed, skipped, xfailed or xpassed | absent |
+| `removed` | absent, in a run that ran to its end | present |
+| `not_reached` | absent, in a run that stopped before its end | present |
+
+Failing means `failed` or `error`, as it does to pytest: a non-strict
+xpass never fails a session, and a strict one is reported as `failed`. A
+test that neither starts nor stops failing (passed, then skipped) has not
+changed. A still-failing test also says how many consecutive runs have
+failed it, counted along each run's baseline in turn, this run included,
+and since which run. A run that ran to its end (exit status 0, 1 or 5)
+calls the tests it lacks removed; one interrupted or stopped early calls
+them not reached, never removed.
+
+**A run is never compared again.** Its comparison is fixed by the report
+that gives it its exit status, among the runs stored at that moment, and
+nothing changes it afterwards: not an earlier run finishing later, and not
+one recorded later. A run that `vantage push` delivers late from the
+outbox is compared when it arrives, with the latest complete run started
+before it among the runs stored then; the runs compared in the meantime
+keep their baselines, even where the late run would have been one. An
+abandoned run whose finish arrives later is compared then.
+
+**Limits.**
+
+- **A detached HEAD records no branch**, as in most CI checkouts of a pull
+  request, so such a run is compared with the project's latest complete
+  run on any branch. Two runs without a branch are never taken as the same
+  branch, so pull-request checkouts do not compare with each other.
+- **A subset of the suite** (`-k`, `-m`, a path, `--lf`, one shard of a
+  suite split across CI jobs) is complete by these rules, since nothing
+  records the selection: the tests outside it read as `removed`, and the
+  next full run shows them again as `new_test`. Each of those is a stored
+  change, so such a comparison also costs in proportion to the suite
+  rather than to what changed: seconds, on a large suite in PostgreSQL.
+  Record partial runs into a project of their own
+  (`--vantage-project`) to keep them out of the full runs' comparisons.
+- **"Before" follows each machine's clock**, the start time the plugin
+  sent, as the run list does, so runs recorded on machines whose clocks
+  disagree may be compared out of the order they really ran in.
+- **Rerunning a run's new failures from a file** of their node ids, as
+  `/changes?change=new_failure` lists them, with `pytest @new-failures.txt`
+  needs pytest 8.2 or later; the plugin itself supports pytest 8.0.
+
 ### Signing in needs HTTPS or this machine
 
 Browsers keep the session only over HTTPS, or on this machine's own
@@ -875,16 +954,17 @@ side:
 | `GET /api/v1/runs/{run_id}` | One run, and the project it belongs to |
 | `GET /api/v1/runs/{run_id}/metadata` | One run's metadata, from declared files and from the session, and each declared file's status |
 | `GET /api/v1/runs/{run_id}/results` | One run's results in the order reported, with a short failure summary; `?outcome=failed&outcome=error` keeps only those |
-| `GET /api/v1/runs/{run_id}/outcomes` | Every outcome of one run in the order reported, one of pytest's characters each (`.` `F` `E` `s` `x` `X`), unpaged |
-| `GET /api/v1/runs/{run_id}/result?node_id=...` | One result in full, failure text included |
-| `GET /api/v1/projects/{project}/tests/history?node_id=...` | One test across the project's runs, newest first |
+| `GET /api/v1/runs/{run_id}/changes` | The tests that changed against the run it was compared with, new failures first, then still failing, fixed, new and missing tests; `?change=new_failure` keeps only those |
+| `GET /api/v1/runs/{run_id}/outcomes` | Every outcome of one run in the order reported, one of pytest's characters each (`.` `F` `E` `s` `x` `X`), unpaged, and beside it each result's change (`-` unchanged, `n` new failure, `s` still failing, `f` fixed, `t` new test) |
+| `GET /api/v1/runs/{run_id}/result?node_id=...` | One result in full, failure text included, with its place in the run and its change |
+| `GET /api/v1/projects/{project}/tests/history?node_id=...` | One test across the project's runs, newest first, each result with its change in its own run |
 | `GET`, `POST`, `DELETE /api/v1/projects/{project}/config/sections` | The project's named file-path prefixes that group results |
 | `GET /api/v1/runs/{run_id}/sections` | One run's pass rate per section of its project |
 
-The run list, a run's results and a test's history are paged: they take
-`limit` (at most 200 per page) and `offset`, and say in `has_more` whether
-more items exist. The section lists and a run's metadata are returned
-whole.
+The run list, a run's results and changes, and a test's history are
+paged: they take `limit` (at most 200 per page) and `offset`, and say in
+`has_more` whether more items exist. The section lists and a run's
+metadata are returned whole.
 
 An offset counts from the newest run, so a run recorded while you page
 through the run list or a test's history pushes one you have already seen
@@ -901,8 +981,10 @@ GET /api/v1/projects/default/runs?limit=50&cursor=MjAyNi0wOS0yN1QwODowMDowMC4...
 The run list also filters by metadata values; see
 [Reading it back](#reading-it-back). Each run, in the list and on its own,
 says in `recorded_by` which user's token recorded it, or `null` when none
-did, and in `counts` how many of its results passed, failed, errored,
-were skipped, xfailed and xpassed, every one present, zeros included.
+did, in `counts` how many of its results passed, failed, errored,
+were skipped, xfailed and xpassed, every one present, zeros included, and
+in `comparison` what it was compared with (see
+[What a run is compared with](#what-a-run-is-compared-with)).
 The plugin reports results as the session finishes, so a running run
 counts none, or only some, until then; a finished run's counts are final.
 

@@ -114,14 +114,27 @@ def _read_back(address: str, run_id: str) -> dict[str, Any]:
     }
 
 
+# What a result's detail says of its change against its run's baseline.
+_CHANGE_FIELDS = frozenset({"change", "was", "streak"})
+
+
 def _untimed(read_back: dict[str, Any]) -> dict[str, Any]:
-    """A run's read-back without its id and timings: what two sessions of
-    the same tests must share."""
-    run = {key: value for key, value in read_back["run"].items() if key not in {"id", *_TIMING}}
+    """A run's read-back without its id, its timings, and its comparison and
+    each result's change, which depend on the run before it: what two
+    sessions of the same tests must share."""
+    run = {
+        key: value
+        for key, value in read_back["run"].items()
+        if key not in {"id", "comparison", *_TIMING}
+    }
+    details = [
+        {key: value for key, value in item.items() if key not in _CHANGE_FIELDS}
+        for item in read_back["details"]
+    ]
     return {
         "run": run,
         "results": [_without_timing(item) for item in read_back["results"]],
-        "details": [_without_timing(item) for item in read_back["details"]],
+        "details": [_without_timing(item) for item in details],
         "metadata": read_back["metadata"],
     }
 
