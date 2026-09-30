@@ -169,20 +169,29 @@ def test_anything_but_a_host_name_is_refused(value: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "bind", ["127.0.0.1", "127.8.9.10", "::1", "localhost", "LOCALHOST", "::ffff:127.0.0.1"]
+    "bind", ["127.0.0.1", "127.0.1.1", "127.8.9.10", "::1", "::ffff:127.0.0.1"]
 )
 def test_a_loopback_bind_has_a_rule_with_no_name_given(bind: str) -> None:
     assert is_loopback(bind)
     assert host_rule(bind, frozenset()) == HostRule(frozenset())
 
 
-@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "192.168.1.20", "vantage.example.com"])  # noqa: S104
+@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "192.168.1.20", "fe80::1%eth0"])  # noqa: S104
 def test_a_wide_bind_checks_names_only_when_some_are_given(bind: str) -> None:
     """Reached by names nobody here can list, it answers them all, unless
     its operator names the ones it is reached by."""
     assert not is_loopback(bind)
     assert host_rule(bind, frozenset()) is None
     assert host_rule(bind, frozenset({"vantage.example.com"})) == _PROXIED
+
+
+@pytest.mark.parametrize("given", ["localhost", "127.1", "2130706433", "ip6-localhost", "agentbox"])
+def test_only_a_bound_address_is_judged_never_the_text_that_named_it(given: str) -> None:
+    """Each of these binds wherever the resolver puts it, loopback on most
+    machines, so the rule is built from the address the socket then holds
+    (`cli.main`); judged as text, a loopback bind would read as wide and
+    answer every name."""
+    assert not is_loopback(given)
 
 
 def test_a_loopback_bind_answers_the_names_given_as_well() -> None:

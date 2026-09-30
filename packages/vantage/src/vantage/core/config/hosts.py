@@ -18,10 +18,14 @@ proxy's public name. A name is compared in any case, with one trailing dot
 dropped; the port is ignored, since the port a browser names is the one it
 connected to.
 
-**When there is a rule** (`host_rule`): always on a loopback bind -- an
-address in 127.0.0.0/8, ::1, or `localhost` -- which is where a rebinding
-page reaches; on any other bind only when names are allowed, since a
-server bound wide is reached by names nobody here can list.
+**When there is a rule** (`host_rule`): always on a loopback bind -- a
+socket holding an address in 127.0.0.0/8 or ::1 -- which is where a
+rebinding page reaches; on any other bind only when names are allowed,
+since a server bound wide is reached by names nobody here can list. The
+address judged is the one the listening socket holds, never the text the
+server was told to bind: `127.1`, `2130706433`, `ip6-localhost` or the
+machine's own name, which Debian's /etc/hosts maps to 127.0.1.1, all bind
+loopback without reading as it.
 
 Pure: standard library only, no name is ever resolved.
 """
@@ -77,22 +81,22 @@ class HostRule:
         return name == LOCALHOST or name in self.names or _is_ip_literal(name)
 
 
-def host_rule(bind: str, allowed: frozenset[str]) -> HostRule | None:
-    """The rule a server bound to `bind`, allowing the names `allowed`,
-    answers by; `None` for a wide bind allowing none, which answers every
-    name."""
-    if not allowed and not is_loopback(bind):
+def host_rule(bound: str, allowed: frozenset[str]) -> HostRule | None:
+    """The rule a server whose listening socket holds the address `bound`,
+    allowing the names `allowed`, answers by; `None` for a wide bind
+    allowing none, which answers every name."""
+    if not allowed and not is_loopback(bound):
         return None
     return HostRule(frozenset(allowed))
 
 
-def is_loopback(bind: str) -> bool:
-    """Whether `bind` is a loopback address: in 127.0.0.0/8, ::1 (an
-    IPv4-mapped loopback address too), or `localhost`."""
-    if bind.lower().rstrip(".") == LOCALHOST:
-        return True
+def is_loopback(bound: str) -> bool:
+    """Whether `bound`, an address as a socket reports the one it holds, is
+    a loopback address: in 127.0.0.0/8, or ::1 (an IPv4-mapped loopback
+    address too). A name is none, since what it binds is only known once
+    bound."""
     try:
-        address = ipaddress.ip_address(bind)
+        address = ipaddress.ip_address(bound)
     except ValueError:
         return False
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:

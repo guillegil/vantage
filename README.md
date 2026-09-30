@@ -1037,9 +1037,10 @@ on your machine, with the page's name in the `Host` header, and lets the
 page read the answers. Against a database the local store made, which has
 no user, that is every run in it, read and changed from a stranger's page.
 
-So a server bound to a loopback address -- the default `127.0.0.1`, any of
-127.0.0.0/8, `::1` or `localhost` -- answers only requests whose `Host`
-names:
+So a server listening on a loopback address -- the default `127.0.0.1`,
+any of 127.0.0.0/8, or `::1`, however `--host` named it: `localhost`,
+`127.1`, or the machine's own name, which Debian and Ubuntu map to
+127.0.1.1 -- answers only requests whose `Host` names:
 
 - `localhost`, in any case, with or without one trailing dot;
 - an IP literal, `127.0.0.1` or `[::1]` or any other: a page cannot make
@@ -1069,10 +1070,15 @@ it answers those, `localhost` and IP literals alone. The container binds
 a host name alone, lower-cased as given: no scheme, port, path or
 wildcard, or the server refuses to start, in one line.
 
-Behind a reverse proxy on the same machine that forwards to
-`127.0.0.1:8765`, allow the name the proxy is reached by, unless it sends
-`Host: 127.0.0.1:8765` itself. `pnpm --dir web run dev` needs nothing: its
-proxy passes on `localhost:5173`, the name the browser used.
+Behind a reverse proxy that forwards to `127.0.0.1:8765`, have it pass on
+the name the browser used (nginx: `proxy_set_header Host $host;`) and allow
+that name with `--allowed-host`. A proxy that sends `Host: 127.0.0.1:8765`
+instead, as nginx does by default, is always answered, since that is an IP
+literal: the server then cannot tell a rebound name from yours, so the
+proxy must answer only its own name itself (in nginx, a `server_name`, and
+a default server that refuses every other name). `pnpm --dir web run dev`
+needs nothing: its proxy passes on `localhost:5173`, the name the browser
+used.
 
 ### Projects
 

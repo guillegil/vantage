@@ -1195,16 +1195,22 @@ operator's name: letters, digits, hyphens and underscores in dot-separated
 labels of at most 63 characters, 253 in all, lower-cased -- no scheme,
 port, path, wildcard or IP literal in brackets -- or `HostNameError`.
 
-**When there is one** (`host_rule`): on a loopback bind -- 127.0.0.0/8,
-`::1` (or its IPv4-mapped form) or `localhost` -- always, since that is
-the address a rebinding page reaches; on any other bind only when names
-are allowed, since a server bound wide is reached by names nobody here can
-list, and refusing them would break every deployment that names none.
-Resolution (`resolve_server_config`) computes it into `ServerConfig.hosts`
-from the bind address, every `--allowed-host`, or else the comma-separated
-`VANTAGE_ALLOWED_HOSTS`, whose empty entries are skipped; a flag replaces
-the variable whole, as `--database` replaces `VANTAGE_DATABASE`, and a bad
-name is a one-line refusal before anything is bound.
+**When there is one** (`host_rule`): on a loopback bind -- a socket
+holding an address in 127.0.0.0/8 or `::1` (or its IPv4-mapped form) --
+always, since that is the address a rebinding page reaches; on any other
+bind only when names are allowed, since a server bound wide is reached by
+names nobody here can list, and refusing them would break every deployment
+that names none. Resolution (`resolve_server_config`) resolves the allowed
+names into `ServerConfig.allowed_hosts`, from every `--allowed-host`, or
+else the comma-separated `VANTAGE_ALLOWED_HOSTS`, whose empty entries are
+skipped; a flag replaces the variable whole, as `--database` replaces
+`VANTAGE_DATABASE`, and a bad name is a one-line refusal before anything
+is bound. `cli.py` builds the rule once the listening socket is bound,
+from the address it reports holding (`getsockname`), never from the
+`--host` text: the socket binds whatever the resolver makes of that text,
+so `localhost`, `127.1`, `2130706433` or the machine's own name (127.0.1.1
+on Debian) bind loopback without reading as it, and judged as text they
+would get no check.
 
 **The middleware** (`service/hosts.py`, `KnownHosts`) is pure ASGI, like
 `service/web.py`'s. For an `http` scope whose single `Host` the rule does
@@ -1216,7 +1222,7 @@ sits inside `SecurityHeaders`, so the refusal carries every header, and
 outside `WebClient` and the router, so neither the page nor any route --
 not even `/capabilities` -- runs for a refused name, and the refusal comes
 before every refusal of who asks. `create_app` adds it only when given
-`hosts`; `cli.py` passes the resolved rule, so the suite's apps, and
+`hosts`; `cli.py` passes the rule it built, so the suite's apps, and
 `TestClient`'s `testserver`, are untouched unless a test gives one.
 
 The plugin reads `421 misdirected_request` from any exchange as a

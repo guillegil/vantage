@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 from fastapi.testclient import TestClient
 from vantage.core.config.database import SqliteTarget
+from vantage.core.config.hosts import host_rule
 from vantage.core.config.resolution import ServerConfig, resolve_server_config
 from vantage.service import cli
 from vantage.service.app import create_app
@@ -251,12 +252,15 @@ def test_the_image_answers_every_name_until_its_operator_names_some() -> None:
     (url,) = re.findall(r"http://[^'\"]+", json.loads(probe)[2])
     health = urllib.parse.urlsplit(url).netloc
 
-    assert _served().hosts is None
-    rule = _served("vantage.example.com")
-    assert rule.hosts is not None
-    assert rule.hosts.answers("vantage.example.com")
-    assert not rule.hosts.answers("rebound.example.net")
-    assert rule.hosts.answers(health)
+    served = _served()
+    # The address given is an IP literal, which is what its socket holds.
+    assert host_rule(served.host, served.allowed_hosts) is None
+    named = _served("vantage.example.com")
+    rule = host_rule(named.host, named.allowed_hosts)
+    assert rule is not None
+    assert rule.answers("vantage.example.com")
+    assert not rule.answers("rebound.example.net")
+    assert rule.answers(health)
 
 
 def test_the_build_context_is_what_the_build_copies() -> None:

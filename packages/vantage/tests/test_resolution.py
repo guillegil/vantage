@@ -20,7 +20,6 @@ from vantage.core.config.database import (
     redact_message,
     redacted,
 )
-from vantage.core.config.hosts import HostRule
 from vantage.core.config.resolution import (
     ServerConfig,
     ServerConfigError,
@@ -270,15 +269,12 @@ def test_both_ends_of_the_port_range_are_accepted(port: int) -> None:
     assert _resolve(cli_port=port).port == port
 
 
-def test_a_loopback_default_answers_localhost_and_ip_literals_alone() -> None:
-    assert _resolve().hosts == HostRule(frozenset())
-
-
-def test_a_wide_bind_answers_every_name_unless_some_are_allowed() -> None:
-    assert _resolve(cli_host="0.0.0.0").hosts is None  # noqa: S104
-    assert _resolve(cli_host="0.0.0.0", env_allowed_hosts="vantage.example.com").hosts == (  # noqa: S104
-        HostRule(frozenset({"vantage.example.com"}))
-    )
+def test_no_name_is_allowed_unless_one_is_given() -> None:
+    """Whether the server checks names at all is decided once it is bound,
+    from the address its socket holds (`cli.main`), so the bind address
+    changes nothing here."""
+    assert _resolve().allowed_hosts == frozenset()
+    assert _resolve(cli_host="0.0.0.0").allowed_hosts == frozenset()  # noqa: S104
 
 
 def test_allowed_host_flags_replace_the_environment() -> None:
@@ -290,7 +286,7 @@ def test_allowed_host_flags_replace_the_environment() -> None:
         env_allowed_hosts="three.example.com",
     )
 
-    assert config.hosts == HostRule(frozenset({"one.example.com", "two.example.com"}))
+    assert config.allowed_hosts == frozenset({"one.example.com", "two.example.com"})
 
 
 @pytest.mark.parametrize(
@@ -304,7 +300,7 @@ def test_allowed_host_flags_replace_the_environment() -> None:
     ],
 )
 def test_the_environment_names_hosts_comma_separated(value: str, names: set[str]) -> None:
-    assert _resolve(env_allowed_hosts=value).hosts == HostRule(frozenset(names))
+    assert _resolve(env_allowed_hosts=value).allowed_hosts == frozenset(names)
 
 
 @pytest.mark.parametrize(

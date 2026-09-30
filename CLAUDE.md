@@ -143,8 +143,9 @@ its `postgres` extra.
   pure) answers `localhost`, every IP literal (a rebinding page cannot
   have one as its address) and the names allowed by `--allowed-host`, or
   else `VANTAGE_ALLOWED_HOSTS`, comma-separated; the port is ignored. It
-  exists on a loopback bind (127.0.0.0/8, `::1`, `localhost`) always, and
-  on a wider bind only when names are allowed. `create_app` adds the
+  exists on a loopback bind (a socket holding 127.0.0.0/8 or `::1`,
+  judged by `getsockname` once bound, never by the `--host` text) always,
+  and on a wider bind only when names are allowed. `create_app` adds the
   middleware only when given `hosts=`, which only `cli.py` passes, so the
   suite's apps answer `testserver`. The plugin reads the 421 as
   `MisdirectedRequestError`, and the outbox keeps the run and stops.

@@ -21,7 +21,7 @@ from vantage.core.config.database import (
     UnsupportedDatabaseURLError,
     database_target,
 )
-from vantage.core.config.hosts import HostNameError, HostRule, allowed_host_name, host_rule
+from vantage.core.config.hosts import HostNameError, allowed_host_name
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
@@ -47,9 +47,12 @@ class ServerConfig:
     host: str
     port: int
     grace_period_seconds: float
-    hosts: HostRule | None
-    """The host names the server answers, or `None` for every name
-    (`core/config/hosts.py`)."""
+    allowed_hosts: frozenset[str]
+    """The host names the server answers besides `localhost` and IP
+    literals. Whether it checks names at all depends on the address its
+    socket holds once bound (`core/config/hosts.py`'s `host_rule`), which
+    `host` alone does not say: a name, or a short form such as `127.1`,
+    binds wherever the resolver puts it."""
 
 
 def resolve_server_config(
@@ -87,13 +90,12 @@ def resolve_server_config(
     where they name its database. A value the server cannot run with
     raises `ServerConfigError` here, before anything is created.
     """
-    host = _resolve_host(cli_host)
     return ServerConfig(
         database=_resolve_database(cli_database, env_database, home, xdg_data_home),
-        host=host,
+        host=_resolve_host(cli_host),
         port=_resolve_port(cli_port),
         grace_period_seconds=_resolve_grace_period(cli_grace_period),
-        hosts=host_rule(host, _resolve_allowed_hosts(cli_allowed_hosts, env_allowed_hosts)),
+        allowed_hosts=_resolve_allowed_hosts(cli_allowed_hosts, env_allowed_hosts),
     )
 
 

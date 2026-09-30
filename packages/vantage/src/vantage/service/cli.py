@@ -59,7 +59,9 @@ the log.
 `VANTAGE_ALLOWED_HOSTS` add, refusing any other with 421, so a web page
 that points its own name at this machine cannot use it; one bound wider
 checks names only when some are allowed (`core/config/hosts.py`,
-`service/hosts.py`).
+`service/hosts.py`). Which it is, the address the listening socket holds
+decides, not the `--host` text: a name or a short form such as `127.1`
+binds wherever the resolver puts it.
 
 **Network exposure.** Binding wider than the loopback default, to a
 database with no user, warns that nothing authenticates the requests. The
@@ -88,6 +90,7 @@ from vantage.core.config.database import (
     redact_message,
     redacted,
 )
+from vantage.core.config.hosts import host_rule
 from vantage.core.config.resolution import (
     ServerConfig,
     ServerConfigError,
@@ -450,6 +453,9 @@ def main(argv: list[str] | None = None) -> None:
         raise
 
     try:
+        # The address the socket holds, since `--host` may be a name or a
+        # short form that binds loopback without reading as it.
+        hosts = host_rule(listener.getsockname()[0], config.allowed_hosts)
         create_first_admin(store, config.database)
         # Warn only once the port and the database are both held: a refused
         # start makes no bind to warn about.
@@ -459,7 +465,7 @@ def main(argv: list[str] | None = None) -> None:
             grace_period_seconds=config.grace_period_seconds,
             close_store_on_shutdown=True,
             client=CLIENT_DIRECTORY,
-            hosts=config.hosts,
+            hosts=hosts,
         )
         _serve(app, listener, config)
     finally:
