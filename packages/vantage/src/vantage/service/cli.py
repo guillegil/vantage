@@ -54,6 +54,15 @@ admin nobody knows the password of, which `vantage user password admin`
 recovers; a user made before the first start keeps any password out of
 the log.
 
+**Host names.** A server bound to a loopback address answers only
+`localhost`, IP literals and the names `--allowed-host` or
+`VANTAGE_ALLOWED_HOSTS` add, refusing any other with 421, so a web page
+that points its own name at this machine cannot use it; one bound wider
+checks names only when some are allowed (`core/config/hosts.py`,
+`service/hosts.py`). Which it is, the address the listening socket holds
+decides, not the `--host` text: a name or a short form such as `127.1`
+binds wherever the resolver puts it.
+
 **Network exposure.** Binding wider than the loopback default, to a
 database with no user, warns that nothing authenticates the requests. The
 default warns about nothing, and neither does a database with users, whose
@@ -81,6 +90,7 @@ from vantage.core.config.database import (
     redact_message,
     redacted,
 )
+from vantage.core.config.hosts import host_rule
 from vantage.core.config.resolution import (
     ServerConfig,
     ServerConfigError,
@@ -205,6 +215,19 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--host", default=None, help=f"Bind address (default {_LOOPBACK}).")
     parser.add_argument("--port", type=int, default=None, help="Bind port (default 8765).")
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help=(
+            "A host name this server answers besides localhost and IP literals, such as a "
+            "reverse proxy's public name; repeat it for more. Bound to a loopback address, "
+            "the server refuses any other name with 421, so a web page that points its own "
+            "name at this machine cannot use it; bound wider, it checks names only when some "
+            "are given. Replaces VANTAGE_ALLOWED_HOSTS, comma-separated names."
+        ),
+    )
     parser.add_argument(
         "--grace-period",
         type=float,
@@ -410,6 +433,8 @@ def main(argv: list[str] | None = None) -> None:
             cli_host=args.host,
             cli_port=args.port,
             cli_grace_period=args.grace_period,
+            cli_allowed_hosts=args.allowed_host,
+            env_allowed_hosts=os.environ.get("VANTAGE_ALLOWED_HOSTS"),
             home=home_directory(),
             xdg_data_home=os.environ.get("XDG_DATA_HOME"),
         )
@@ -428,6 +453,9 @@ def main(argv: list[str] | None = None) -> None:
         raise
 
     try:
+        # The address the socket holds, since `--host` may be a name or a
+        # short form that binds loopback without reading as it.
+        hosts = host_rule(listener.getsockname()[0], config.allowed_hosts)
         create_first_admin(store, config.database)
         # Warn only once the port and the database are both held: a refused
         # start makes no bind to warn about.
@@ -437,6 +465,7 @@ def main(argv: list[str] | None = None) -> None:
             grace_period_seconds=config.grace_period_seconds,
             close_store_on_shutdown=True,
             client=CLIENT_DIRECTORY,
+            hosts=hosts,
         )
         _serve(app, listener, config)
     finally:

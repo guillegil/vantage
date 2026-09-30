@@ -20,7 +20,7 @@ from pytest_vantage import budget, capture, config, metadata, recorder, transpor
 from pytest_vantage.boundary import VantageWarning
 from pytest_vantage.metadata import CapturedFile, DeclaredKey, MetadataSection, session_value
 from pytest_vantage.session_metadata import plan_values
-from vantage.core.config import resolution
+from vantage.core.config import hosts, resolution
 from vantage.core.domain import access, projects
 from vantage.core.domain import metadata as core_metadata
 from vantage.core.domain.result import OUTCOMES
@@ -476,3 +476,29 @@ def test_the_membership_refusals_the_plugin_keeps_are_the_ones_the_server_gives(
     assert {
         (transport._MEMBERSHIP_REFUSAL_STATUS, error) for error in transport._MEMBERSHIP_REFUSALS
     } == refusals
+
+
+def test_the_host_name_refusal_the_plugin_explains_is_the_one_the_server_gives(
+    tmp_path: Path,
+) -> None:
+    """The plugin says what to fix only for the pair a vantage server
+    answers when it does not answer to the name in the address; reading
+    another would leave a user with a bare 421 and no word of
+    --allowed-host. The server's is read from an app refusing a name, so
+    a refusal shaped anywhere but `MisdirectedRequestError` is caught."""
+    store = SqliteExecutionStore(tmp_path / "vantage.db")
+    try:
+        app = create_app(store, hosts=hosts.HostRule(frozenset()))
+        answer = TestClient(app, base_url="http://rebound.example").get("/api/v1/capabilities")
+    finally:
+        store.close()
+
+    assert transport._MISDIRECTED == (answer.status_code, answer.json()["error"])
+    assert transport._MISDIRECTED == (
+        errors.MisdirectedRequestError.status_code,
+        errors.MisdirectedRequestError.error,
+    )
+    assert transport._MISDIRECTED[0] in transport._EXPLAINED_STATUSES
+    # What the plugin's reason names is the flag the server reads.
+    assert "--allowed-host NAME" in transport._MISDIRECTED_REASON
+    assert "--allowed-host" in errors.MisdirectedRequestError().detail

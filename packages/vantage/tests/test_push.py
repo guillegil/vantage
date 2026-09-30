@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 import vantage.service
 from vantage.service import cli
+from vantage_test_server import VantageTestServer
 
 _OUTBOX_MODULE = "pytest_vantage.outbox"
 _PUSH_MODULE = "vantage.service.push"
@@ -668,3 +669,40 @@ def test_push_help_needs_no_server_extra() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.startswith("usage: vantage push")
+
+
+def test_a_server_that_refuses_the_host_name_keeps_its_queue_and_says_what_to_fix(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    misdirected_server: VantageTestServer,
+) -> None:
+    """With the plugin's own outbox and sender, against a real server that
+    does not answer to the name in the address: the run stays queued for
+    that address, and the line says what to fix."""
+    from pytest_vantage.outbox import Outbox, outbox_path
+
+    monkeypatch.delenv("VANTAGE_TOKEN", raising=False)
+    database = tmp_path / "vantage.db"
+    address = misdirected_server.address
+    run_id = "e" * 32
+    run = {
+        "id": run_id,
+        "started_at": "2026-09-30T12:00:00+00:00",
+        "finished_at": None,
+        "exit_status": None,
+        "interrupted": False,
+        "interrupt_reason": None,
+    }
+    with Outbox(outbox_path(database)) as box:
+        box.enqueue(address, run_id, [{"run": run}])
+
+    code, lines, _err = _push(capsys, "--database", str(database))
+
+    assert code == 1
+    assert lines == [
+        f"vantage: sent 0 queued runs to {address}, then stopped: {address} did not take run "
+        f"{run_id} (HTTP 421: the server does not answer to the host name in the address: "
+        "use the address it serves at, such as http://127.0.0.1:PORT, or have its operator "
+        "allow the name with --allowed-host NAME) (1 waiting)"
+    ]

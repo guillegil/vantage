@@ -653,7 +653,9 @@ class Recorder:
 
         Only a failure a retry can fix is queued: no answer, a 5xx, a 408
         or 429 asking for the report again later, a 401 or 403 refusing the
-        token, which `vantage push` with another one can deliver, a 404
+        token, which `vantage push` with another one can deliver, a 421
+        refusing the host name in the address, which the server's operator
+        fixes by allowing it, a 404
         `unknown_project`, which an admin fixes by adding the project, or a
         403 `not_a_member` or `insufficient_role`, which an owner of the
         project or an admin fixes by making the token's user an editor of

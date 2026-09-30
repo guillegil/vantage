@@ -363,7 +363,8 @@ tests run.
 **What is queued.** Sending stops at the first failed report. A failure a
 later attempt can fix -- no connection, a broken one, a timeout, a 5xx, a
 408 or 429 asking for the request again later, a 401 or 403 refusing the
-token, a `404 unknown_project` an admin can fix by adding the project, a
+token, a 421 refusing the host name in the address, which the server's
+operator can fix with `--allowed-host`, a `404 unknown_project` an admin can fix by adding the project, a
 `403 not_a_member` or `insufficient_role` an owner of the project or an
 admin can fix by making the token's user an editor of it
 (`outbox.worth_retrying`; the transport raises `ProjectRefusedError` for
@@ -393,10 +394,10 @@ order as JSON text, when it was queued, attempts and the last error.
   sessions, or a session and `vantage push` -- take different runs, and a
   claim left by a killed sender lapses; one interrupted with Ctrl-C gives
   its run back at once. An acknowledged run is deleted; one refused with a
-  4xx other than 408 or 429 is deleted and named in the summary, and so is
+  4xx other than 401, 403, 408, 421 or 429 is deleted and named in the summary, and so is
   one whose reports no longer decode as a list of objects; a 5xx
   releases it with its attempt counted and moves on, since it may be that
-  run's own problem; no answer, a 408 or 429, a redirect or a stranger's
+  run's own problem; no answer, a 408, 421 or 429, a redirect or a stranger's
   answer releases it and stops, and so does a spent budget, without counting
   an attempt. A duplicate send is harmless: the server's writes are
   idempotent.
@@ -761,7 +762,10 @@ stays true, and every `run.recorded_by` keeps naming an existing user.
     another; an editor of the project still does. `vantage.local` passes
     no `admit`.
 - **Every refusal of who asks comes before every refusal of what is
-  asked.** A request carrying only a session cookie is first refused
+  asked,** and a refusal of the host name before both: a server with a
+  host rule answers a name it does not know `421 misdirected_request`
+  before anything else runs (see [Host names](#host-names)). A request
+  carrying only a session cookie is first refused
   `403 cross_site_request` unless it came from vantage's own pages, before
   the cookie is looked up. Within a project path: `401`,
   `403 insufficient_scope`, on the
@@ -966,14 +970,16 @@ and scripts keep sending a token in `Authorization`.
 
 ## Request handling and concurrency
 
-`create_app(store, grace_period_seconds=900, client=None)` builds the app,
-mounts the `runs`, `read`, `capabilities`, `sections`, `users`, `projects`,
-`members`, `login` and `session` routers under `/api/v1`,
-registers the error handlers, and adds two middlewares, neither of which
-calls the store: `WebClient`, only when given a client directory, and
-`SecurityHeaders`, always (see [The web client](#the-web-client)). The
-`vantage` command runs it under Uvicorn, in one process, with the client
-built into the package.
+`create_app(store, grace_period_seconds=900, client=None, hosts=None)`
+builds the app, mounts the `runs`, `read`, `capabilities`, `sections`,
+`users`, `projects`, `members`, `login` and `session` routers under
+`/api/v1`, registers the error handlers, and adds up to three middlewares,
+none of which calls the store. From the outside in: `SecurityHeaders`,
+always; `KnownHosts`, only when given a host rule (see
+[Host names](#host-names)); and `WebClient`, only when given a client
+directory (see [The web client](#the-web-client)). The `vantage` command
+runs it under Uvicorn, in one process, with the client built into the
+package and the rule it resolved.
 
 **No store call runs on the event loop.** A store call blocks, on the disk,
 on the store's lock or on another process's write; made on the loop, it
@@ -1160,6 +1166,74 @@ security headers; its body is a fixed sentence.
 responses come from lean projections with no field that could carry a
 traceback, a `repr` or captured output, and no response model has a field for
 the repository root the plugin sends.
+
+## Host names
+
+A browser grants a page whatever answers at the page's own name, and never
+asks what address the name resolved to. So a page on any domain can point
+its name at 127.0.0.1 after it has loaded (DNS rebinding) and have the
+browser send its requests to a vantage on the visitor's loopback, with the
+page's name in `Host`, and hand it the answers as same-origin. On a
+server with no user -- a local store's database, served open -- that is
+every run, read and written from someone else's page; on a closed one,
+the page still reaches the sign-in routes. The cookie does not help (it is
+not sent to the page's name), and neither does `Sec-Fetch-Site`, which is
+`same-origin` for such a page. The name is the one thing the page cannot
+choose, so the server checks it.
+
+**The rule** (`core/config/hosts.py`, pure, standard library only). A
+`HostRule` answers a `Host` that names `localhost`, an IP literal, or one
+of its `names`, compared in any case, with one trailing dot dropped and the
+port ignored. `request_host` takes the name out of the header: a bracketed
+IPv6 literal, or a name with an optional all-digit port; anything else --
+no header, an empty one, a bare IPv6 address, a port that is not digits --
+names nothing and is refused. IP literals are safe to answer because a page
+reaches an IP literal only by having it as its own address, and no DNS
+answer can change where that address goes; `localhost` because browsers
+resolve it to loopback themselves. `allowed_host_name` validates an
+operator's name: letters, digits, hyphens and underscores in dot-separated
+labels of at most 63 characters, 253 in all, lower-cased -- no scheme,
+port, path, wildcard or IP literal in brackets -- or `HostNameError`.
+
+**When there is one** (`host_rule`): on a loopback bind -- a socket
+holding an address in 127.0.0.0/8 or `::1` (or its IPv4-mapped form) --
+always, since that is the address a rebinding page reaches; on any other
+bind only when names are allowed, since a server bound wide is reached by
+names nobody here can list, and refusing them would break every deployment
+that names none. Resolution (`resolve_server_config`) resolves the allowed
+names into `ServerConfig.allowed_hosts`, from every `--allowed-host`, or
+else the comma-separated `VANTAGE_ALLOWED_HOSTS`, whose empty entries are
+skipped; a flag replaces the variable whole, as `--database` replaces
+`VANTAGE_DATABASE`, and a bad name is a one-line refusal before anything
+is bound. `cli.py` builds the rule once the listening socket is bound,
+from the address it reports holding (`getsockname`), never from the
+`--host` text: the socket binds whatever the resolver makes of that text,
+so `localhost`, `127.1`, `2130706433` or the machine's own name (127.0.1.1
+on Debian) bind loopback without reading as it, and judged as text they
+would get no check.
+
+**The middleware** (`service/hosts.py`, `KnownHosts`) is pure ASGI, like
+`service/web.py`'s. For an `http` scope whose single `Host` the rule does
+not answer -- none, or several, count as not answered -- it answers
+`MisdirectedRequestError` (`421 misdirected_request`, a fixed sentence
+naming `--allowed-host` and `VANTAGE_ALLOWED_HOSTS`, never the name sent)
+through `rejection_response`, so the body has the one rejection shape. It
+sits inside `SecurityHeaders`, so the refusal carries every header, and
+outside `WebClient` and the router, so neither the page nor any route --
+not even `/capabilities` -- runs for a refused name, and the refusal comes
+before every refusal of who asks. `create_app` adds it only when given
+`hosts`; `cli.py` passes the rule it built, so the suite's apps, and
+`TestClient`'s `testserver`, are untouched unless a test gives one.
+
+The plugin reads `421 misdirected_request` from any exchange as a
+`MisdirectedRequestError` (`transport.py`) that says to use the address
+the server serves at or have the name allowed; the outbox keeps the run
+and stops sending (421 is in `_KEPT_FOR_LATER`), since every run to that
+address would be refused alike until the operator allows the name. The
+Vite dev server's proxy sends the browser's `Host`, `localhost:5173`,
+which a loopback server answers; the Docker image binds `0.0.0.0` and so
+checks nothing until `VANTAGE_ALLOWED_HOSTS` names its public names, while
+its health check asks `127.0.0.1`, an IP literal.
 
 ## The web client
 
@@ -1614,6 +1688,7 @@ and speaks UTF-8 on the wire whatever `PGCLIENTENCODING` says.
 | Database: a SQLite path or a PostgreSQL URL | `--database` | `VANTAGE_DATABASE` | `$XDG_DATA_HOME/vantage/vantage.db`, else `~/.local/share/vantage/vantage.db` |
 | Host | `--host` | none | `127.0.0.1` |
 | Port | `--port` | none | `8765` |
+| Host names answered besides `localhost` and IP literals | `--allowed-host`, repeated | `VANTAGE_ALLOWED_HOSTS`, comma-separated | none |
 | Grace period | `--grace-period` | none | 900 seconds |
 
 A flag beats the environment, which beats the default. An empty
@@ -1623,8 +1698,8 @@ the event loop would bind `""` as every interface. Resolution
 (`core/config/resolution.py`) is a pure function with no filesystem or
 network access, so asking where the database would go never creates it, and
 it rejects an unusable value (an empty host, a port outside 1 to 65535, a
-grace period that is not positive or exceeds 365 days) before anything
-opens. A port or grace period that is not a number never reaches it:
+grace period that is not positive or exceeds 365 days, an allowed host
+that is not a host name alone) before anything opens. A port or grace period that is not a number never reaches it:
 `argparse` refuses it with its usage message and exit status 2. The default
 path comes from `default_sqlite_path`, which `vantage.local` calls too, with
 `VANTAGE_DATABASE` left out: the plugin's local modes store by default where
@@ -1730,7 +1805,9 @@ inherits it and so manages the database being served. `/data` is created
 new named volume copies, and it is the working directory, where SQLite and
 Python put their temporary files when the root filesystem is read-only.
 `--host 0.0.0.0` warns about nothing, since `create_first_admin` runs
-before `warn_if_bound_wide`. The health check asks `/capabilities`, which
+before `warn_if_bound_wide`, and checks no host name, since the names a
+container is reached by are its operator's to give, in
+`VANTAGE_ALLOWED_HOSTS`. The health check asks `/capabilities`, which
 needs no token and never waits on the store, with the image's own Python,
 as the image has no curl.
 

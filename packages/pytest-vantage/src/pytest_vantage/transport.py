@@ -45,6 +45,12 @@ that has the project but does not let the token's user record there answers
 is made an editor of it, and `send_heartbeat`, when it carried a token, into an
 `AccessRefusedError`.
 Any other 403 -- a proxy's page -- stays a plain one.
+
+A server that does not answer to the host name in the address -- one bound
+to its loopback, asked by a name its operator has not allowed -- refuses
+every request with `421 misdirected_request`, which any exchange turns into
+a `MisdirectedRequestError`, still an `HTTPError` 421, saying to use the
+address the server serves at or have the name allowed.
 """
 
 from __future__ import annotations
@@ -94,9 +100,18 @@ _NOT_A_MEMBER = "not_a_member"
 _INSUFFICIENT_ROLE = "insufficient_role"
 _MEMBERSHIP_REFUSALS = frozenset({_NOT_A_MEMBER, _INSUFFICIENT_ROLE})
 
+# A server's refusal of the host name in the address, whatever the request.
+# `test_server_contract.py` pins it to the server's `MisdirectedRequestError`.
+_MISDIRECTED = (421, "misdirected_request")
+_MISDIRECTED_REASON = (
+    "the server does not answer to the host name in the address: use the address it serves "
+    "at, such as http://127.0.0.1:PORT, or have its operator allow the name with "
+    "--allowed-host NAME"
+)
+
 # The statuses whose rejection body the plugin reads, for the error it names.
 _EXPLAINED_STATUSES = frozenset(
-    {*_ACCESS_REFUSALS, _UNKNOWN_PROJECT[0], _MEMBERSHIP_REFUSAL_STATUS}
+    {*_ACCESS_REFUSALS, _UNKNOWN_PROJECT[0], _MEMBERSHIP_REFUSAL_STATUS, _MISDIRECTED[0]}
 )
 
 # The shape of a token the server could accept: printable ASCII with no
@@ -138,6 +153,20 @@ class AccessRefusedError(urllib_error.HTTPError):
     def __init__(self, refused: urllib_error.HTTPError, reason: str) -> None:
         super().__init__(refused.url, refused.code, refused.msg, refused.headers, None)
         self.reason_text = reason
+
+    def __str__(self) -> str:
+        return f"HTTP {self.code}: {self.reason_text}"
+
+
+class MisdirectedRequestError(urllib_error.HTTPError):
+    """A vantage server refused the host name in the address: a mistake in
+    where the plugin is pointed, or in what the server allows, which the
+    same request fixed on either side is taken for. Its status and headers
+    are the refusal's."""
+
+    def __init__(self, refused: urllib_error.HTTPError) -> None:
+        super().__init__(refused.url, refused.code, refused.msg, refused.headers, None)
+        self.reason_text = _MISDIRECTED_REASON
 
     def __str__(self) -> str:
         return f"HTTP {self.code}: {self.reason_text}"
@@ -251,7 +280,9 @@ def _exchange(
     answer, all within ``timeout`` seconds. A non-2xx status, 3xx included,
     raises `urllib.error.HTTPError`, as an `AccessRefusedError` when a
     vantage server refused who sent it; ``token`` is what was sent, if
-    anything, which the reason depends on. With ``project``, the report's,
+    anything, which the reason depends on. A server's
+    `421 misdirected_request` raises `MisdirectedRequestError`, whatever
+    was sent. With ``project``, the report's,
     a server's `404 unknown_project`, `403 not_a_member` or
     `403 insufficient_role` raises `ProjectRefusedError` naming it and
     ``address``; without one, as for a heartbeat, either 403 raises
@@ -269,6 +300,8 @@ def _exchange(
                 error = _rejection_error(exc) if exc.code in _EXPLAINED_STATUSES else None
             finally:
                 exc.close()
+            if (exc.code, error) == _MISDIRECTED:
+                raise MisdirectedRequestError(exc) from None
             reason = _refusal_reason(exc.code, error, token=token)
             if reason is not None:
                 raise AccessRefusedError(exc, reason) from None
@@ -437,6 +470,7 @@ __all__ = [
     "MAX_RESPONSE_BYTES",
     "AccessRefusedError",
     "Capabilities",
+    "MisdirectedRequestError",
     "ProjectRefusedError",
     "fetch_capabilities",
     "run_within",

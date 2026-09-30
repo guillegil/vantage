@@ -248,7 +248,13 @@ export default async function globalSetup(): Promise<void> {
   vantage(['project', 'member', 'set', 'firmware', 'bob', 'viewer', '--database', closed]);
   const token = vantage(['token', 'create', 'alice', '--label', 'e2e', '--database', closed]);
   const [closedPort, openPort] = [await freePort(), await freePort()];
-  const closedBase = await serve(closed, closedPort, ['--grace-period', String(GRACE_SECONDS)]);
+  // insecure.spec.ts reaches it as vantage.test too, a name only its operator can allow.
+  const closedBase = await serve(closed, closedPort, [
+    '--grace-period',
+    String(GRACE_SECONDS),
+    '--allowed-host',
+    'vantage.test',
+  ]);
   const triage = await recordTriage(dir, closedBase, token);
   pytest(
     dir,

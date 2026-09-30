@@ -15,7 +15,9 @@ does for the plugin, and goes with every run sent; the queue never holds
 one. A 401 or 403 leaves the server's runs queued, for a push with a token
 the server accepts; a 403 saying the token's user may not record in one
 project leaves only that project's runs queued, for once an owner of it or
-an admin makes them an editor there.
+an admin makes them an editor there. A 421 refusing the host name in the
+address leaves the server's runs queued too, for once its operator allows
+the name with `--allowed-host`, and says so.
 
 Nothing here imports FastAPI or uvicorn: a test machine with `vantage` and
 no `server` extra sends its queue.

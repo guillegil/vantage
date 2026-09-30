@@ -721,6 +721,8 @@ def test_the_default_database_is_the_one_vantage_serves_without_options(
         cli_host=None,
         cli_port=None,
         cli_grace_period=None,
+        cli_allowed_hosts=(),
+        env_allowed_hosts=None,
         home=Path.home(),
         xdg_data_home=os.environ.get("XDG_DATA_HOME"),
     ).database
