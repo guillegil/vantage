@@ -14,6 +14,7 @@ import {
 } from '../adapt';
 import { isApiError } from '../api/client';
 import {
+  isFinal,
   type ResultDetail,
   type RunDetail,
   type Session,
@@ -124,7 +125,7 @@ function HistoryPanel({ project, nodeId }: { project: string; nodeId: string }) 
         <HistoryGrid
           stacked
           runs={strip.runs}
-          rows={[{ nodeid: nodeId, outcomes: strip.outcomes }]}
+          rows={[{ nodeid: nodeId, outcomes: strip.outcomes, changes: strip.changes }]}
           onOpen={go}
         />
         <DurationSpark values={strip.durations} width={150} />
@@ -191,7 +192,7 @@ function ResultBody({
   nodeId: string;
   result: ReturnType<typeof useResult>;
 }) {
-  const finished = detail.presentation !== 'running';
+  const finished = isFinal(detail);
   let main: ReactNode;
   if (result.isError && !(isApiError(result.error, 401) && result.data)) {
     main = isApiError(result.error, 401) ? null : (
@@ -218,11 +219,7 @@ function ResultView({ runId, nodeId }: { runId: string; nodeId: string }) {
   const session = useOutletContext<Session>();
   const run = useRun(runId);
   const detail = run.data;
-  const result = useResult(
-    runId,
-    nodeId,
-    detail !== undefined && detail.presentation !== 'running',
-  );
+  const result = useResult(runId, nodeId, isFinal(detail));
   const label = runLabel(runId);
   // A string sink: a bidi control in the node id would reorder the rest of the tab's title.
   const shown = visibleText(nodeId);

@@ -3,6 +3,7 @@ import { useOutletContext, useParams } from 'react-router';
 import { runItem, runLabel } from '../adapt';
 import { isApiError } from '../api/client';
 import {
+  isFinal,
   RUNS_PAGE,
   type RunListItem,
   type Session,
@@ -74,10 +75,7 @@ export function RunsPage() {
   const items = useMemo(() => runs.data?.pages.flatMap((page) => page.items) ?? [], [runs.data]);
   const inView = useRowsInView(list, items.length);
   const wanted = useMemo(
-    () =>
-      items
-        .filter((r) => inView.has(r.id))
-        .map((r) => ({ id: r.id, finished: r.presentation !== 'running' })),
+    () => items.filter((r) => inView.has(r.id)).map((r) => ({ id: r.id, finished: isFinal(r) })),
     [items, inView],
   );
   const outcomes = useOutcomesOf(wanted);

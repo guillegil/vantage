@@ -1,6 +1,7 @@
 // Server state, through TanStack Query alone. Each hook names one read of
 // /api/v1; pages never call the client directly.
 import {
+  type InfiniteData,
   MutationCache,
   type Query,
   QueryCache,
@@ -8,6 +9,7 @@ import {
   useInfiniteQuery,
   useQueries,
   useQuery,
+  useQueryClient,
 } from '@tanstack/react-query';
 import { ApiError, api, isApiError, type Schemas, unwrap } from './client';
 
@@ -19,6 +21,8 @@ export type ResultItem = Schemas['ResultListItem'];
 export type RunMetadata = Schemas['RunMetadataResponse'];
 export type ResultDetail = Schemas['ResultDetailResponse'];
 export type HistoryEntry = Schemas['HistoryEntry'];
+export type RunOutcomes = Schemas['RunOutcomesResponse'];
+export type ChangeWord = Schemas['ChangeItem']['change'];
 export type OutcomeWord = ResultItem['outcome'];
 
 export const RUNS_PAGE = 50;
@@ -68,9 +72,31 @@ export function makeQueryClient(handlers: Unauthorized): QueryClient {
   });
 }
 
-// A finished run never changes, so what was read of it stays true.
-function finishedRun(detail: RunDetail | undefined): boolean {
-  return detail !== undefined && detail.presentation !== 'running';
+// A run is final once it has an exit status: nothing it holds changes after
+// that, its comparison included. An abandoned run is not final, since vantage
+// push may still deliver its end.
+export function isFinal(run: { exit_status: number | null } | undefined): boolean {
+  return run !== undefined && run.exit_status !== null;
+}
+
+// What a run holds -- its outcomes, results, metadata, a result -- is kept for
+// good only when it was read once the run was known to be final: a read made
+// while it ran, or while it was abandoned, may lack what its end brought, its
+// changes and last results among them. So each such read is keyed by whether
+// the run was final when it was asked for, and a run seen final is read again,
+// showing what was read of it before until the new answer arrives.
+function runRead<T>(
+  client: QueryClient,
+  runId: string,
+  what: readonly unknown[],
+  finished: boolean,
+) {
+  return {
+    queryKey: ['run', runId, ...what, finished ? 'final' : 'pending'],
+    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
+    placeholderData: (_previous: T | undefined): T | undefined =>
+      finished ? client.getQueryData<T>(['run', runId, ...what, 'pending']) : undefined,
+  };
 }
 
 export function useSession() {
@@ -120,13 +146,13 @@ export function useRun(runId: string, enabled = true) {
           signal,
         }),
       ),
-    staleTime: (query) => (finishedRun(query.state.data) ? Number.POSITIVE_INFINITY : LIST_STALE),
+    staleTime: (query) => (isFinal(query.state.data) ? Number.POSITIVE_INFINITY : LIST_STALE),
   });
 }
 
-function outcomesQuery(runId: string, finished: boolean) {
+function outcomesQuery(client: QueryClient, runId: string, finished: boolean) {
   return {
-    queryKey: ['run', runId, 'outcomes'],
+    ...runRead<RunOutcomes>(client, runId, ['outcomes'], finished),
     queryFn: ({ signal }: { signal: AbortSignal }) =>
       unwrap(
         api.GET('/runs/{run_id}/outcomes', {
@@ -134,32 +160,40 @@ function outcomesQuery(runId: string, finished: boolean) {
           signal,
         }),
       ),
-    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
   };
 }
 
 export function useRunOutcomes(runId: string, finished: boolean, enabled = true) {
-  return useQuery({ ...outcomesQuery(runId, finished), enabled });
+  const client = useQueryClient();
+  return useQuery({ ...outcomesQuery(client, runId, finished), enabled });
 }
 
-// The outcomes of every listed run in view, by run id.
+// The outcomes of every listed run in view, and their changes, by run id.
 export function useOutcomesOf(runs: { id: string; finished: boolean }[]) {
+  const client = useQueryClient();
   return useQueries({
-    queries: runs.map((r) => outcomesQuery(r.id, r.finished)),
+    queries: runs.map((r) => outcomesQuery(client, r.id, r.finished)),
     combine: (answers) => {
-      const byId = new Map<string, string>();
+      const byId = new Map<string, RunOutcomes>();
       answers.forEach((a, i) => {
         const run = runs[i];
-        if (run && a.data) byId.set(run.id, a.data.outcomes);
+        if (run && a.data) byId.set(run.id, a.data);
       });
       return byId;
     },
   });
 }
 
-function resultsQuery(runId: string, outcomes: OutcomeWord[] | null, finished: boolean) {
+type ResultsPages = InfiniteData<Schemas['ResultsResponse'], number>;
+
+function resultsQuery(
+  client: QueryClient,
+  runId: string,
+  outcomes: OutcomeWord[] | null,
+  finished: boolean,
+) {
   return {
-    queryKey: ['run', runId, 'results', outcomes ?? 'all'],
+    ...runRead<ResultsPages>(client, runId, ['results', outcomes ?? 'all'], finished),
     queryFn: ({ pageParam, signal }: { pageParam: number; signal: AbortSignal }) =>
       unwrap(
         api.GET('/runs/{run_id}/results', {
@@ -175,24 +209,26 @@ function resultsQuery(runId: string, outcomes: OutcomeWord[] | null, finished: b
     initialPageParam: 0,
     getNextPageParam: (last: Schemas['ResultsResponse'], pages: Schemas['ResultsResponse'][]) =>
       last.has_more ? pages.reduce((n, page) => n + page.items.length, 0) : null,
-    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
   };
 }
 
 export function useNotPassing(runId: string, finished: boolean, enabled = true) {
+  const client = useQueryClient();
   return useInfiniteQuery({
-    ...resultsQuery(runId, NOT_PASSING, finished),
+    ...resultsQuery(client, runId, NOT_PASSING, finished),
     enabled,
   });
 }
 
 export function useResults(runId: string, finished: boolean, enabled = true) {
-  return useInfiniteQuery({ ...resultsQuery(runId, null, finished), enabled });
+  const client = useQueryClient();
+  return useInfiniteQuery({ ...resultsQuery(client, runId, null, finished), enabled });
 }
 
 export function useRunMetadata(runId: string, finished: boolean, enabled = true) {
-  return useQuery({
-    queryKey: ['run', runId, 'metadata'],
+  const client = useQueryClient();
+  return useQuery<RunMetadata>({
+    ...runRead<RunMetadata>(client, runId, ['metadata'], finished),
     queryFn: ({ signal }) =>
       unwrap(
         api.GET('/runs/{run_id}/metadata', {
@@ -200,15 +236,15 @@ export function useRunMetadata(runId: string, finished: boolean, enabled = true)
           signal,
         }),
       ),
-    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
     enabled,
   });
 }
 
-// One result of a run, in full. A finished run's results never change.
+// One result of a run, in full. A final run's results never change.
 export function useResult(runId: string, nodeId: string, finished: boolean) {
-  return useQuery({
-    queryKey: ['run', runId, 'result', nodeId],
+  const client = useQueryClient();
+  return useQuery<ResultDetail>({
+    ...runRead<ResultDetail>(client, runId, ['result', nodeId], finished),
     queryFn: ({ signal }) =>
       unwrap(
         api.GET('/runs/{run_id}/result', {
@@ -216,7 +252,6 @@ export function useResult(runId: string, nodeId: string, finished: boolean) {
           signal,
         }),
       ),
-    staleTime: finished ? Number.POSITIVE_INFINITY : LIST_STALE,
   });
 }
 

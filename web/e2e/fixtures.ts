@@ -2,11 +2,15 @@
 // violation, a script error, or a request to anywhere but the server under
 // test. Each is asserted after the test.
 import { test as base, expect, type Page } from '@playwright/test';
+import type { TriageRuns } from './global-setup.ts';
 
 export const CLOSED = () => process.env.VANTAGE_E2E_CLOSED as string;
 export const OPEN = () => process.env.VANTAGE_E2E_OPEN as string;
 export const ALICE = () => process.env.VANTAGE_E2E_ALICE as string;
 export const BOB = () => process.env.VANTAGE_E2E_BOB as string;
+// alice's made token, which records: the triage tests send a heartbeat with it.
+export const TOKEN = () => process.env.VANTAGE_E2E_TOKEN as string;
+export const TRIAGE = () => JSON.parse(process.env.VANTAGE_E2E_TRIAGE as string) as TriageRuns;
 
 // A refused request is logged by the browser as a console error; that is the
 // API answering, not the page failing.

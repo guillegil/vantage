@@ -173,7 +173,7 @@ function HistoryView({ project, nodeId }: { project: string; nodeId: string }) {
           <HistoryGrid
             stacked
             runs={strip.runs}
-            rows={[{ nodeid: nodeId, outcomes: strip.outcomes }]}
+            rows={[{ nodeid: nodeId, outcomes: strip.outcomes, changes: strip.changes }]}
             onOpen={go}
           />
           <DurationSpark values={strip.durations} width={150} />

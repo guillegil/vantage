@@ -9,12 +9,17 @@ import type {
   RunMetadata,
 } from '../api/queries';
 import {
+  type BaselineWords,
+  baselineLine,
+  CHANGE,
   dotlineLabel,
+  earlier,
   failingPhase,
   historyHref,
   historyRow,
   historyStrip,
   KEPT,
+  lineResults,
   metaItems,
   NOT_RECORDED,
   outcomesToResults,
@@ -29,6 +34,17 @@ import {
 
 const ID = '0123abcd0123abcd0123abcd0123abcd';
 const COUNTS = { passed: 208, failed: 2, error: 1, skipped: 3, xfailed: 0, xpassed: 0 };
+
+const BASE = '1adf29af1adf29af1adf29af1adf29af';
+const OTHER_BASE = '0b77e4f20b77e4f20b77e4f20b77e4f2';
+const CHANGE_COUNTS = {
+  new_failure: 2,
+  still_failing: 3,
+  fixed: 1,
+  new_test: 4,
+  removed: 1,
+  not_reached: 0,
+};
 
 const ITEM: RunListItem = {
   id: ID,
@@ -89,11 +105,193 @@ describe('runItem', () => {
   });
 
   it('carries the results once the outcomes are read', () => {
-    expect(runItem(ITEM, { sessionUser: null, outcomes: '.FE' }).results).toEqual([
-      'passed',
+    expect(
+      runItem(ITEM, { sessionUser: null, outcomes: { outcomes: '.FE', changes: null } }).results,
+    ).toEqual(['passed', 'failed', 'error']);
+  });
+
+  it('carries each result’s change once a compared run’s outcomes are read', () => {
+    expect(
+      runItem(ITEM, { sessionUser: null, outcomes: { outcomes: '.FE', changes: 'f-n' } }).results,
+    ).toEqual([
+      { outcome: 'passed', change: 'fixed' },
       'failed',
-      'error',
+      { outcome: 'error', change: 'new-failure' },
     ]);
+  });
+
+  it('counts new failures and fixes against the baseline, by its label, once compared', () => {
+    const compared: RunListItem = {
+      ...ITEM,
+      comparison: {
+        state: 'branch',
+        baseline: { id: BASE, started_at: '2026-09-27T08:18:00Z', branch: 'main' },
+        counts: CHANGE_COUNTS,
+      },
+    };
+    expect(runItem(compared, { sessionUser: null }).changes).toEqual({
+      newFailures: 2,
+      fixed: 1,
+      baseline: '1adf29af',
+    });
+    expect(
+      runItem(
+        { ...compared, comparison: { ...compared.comparison, state: 'project' } },
+        {
+          sessionUser: null,
+        },
+      ).changes,
+    ).toEqual({ newFailures: 2, fixed: 1, baseline: '1adf29af' });
+  });
+
+  it('has no changes for a run pending its comparison or with nothing to compare with', () => {
+    expect(runItem(ITEM, { sessionUser: null })).not.toHaveProperty('changes');
+    const pending: RunListItem = {
+      ...ITEM,
+      exit_status: null,
+      finished_at: null,
+      presentation: 'running',
+      comparison: { state: 'pending', baseline: null, counts: null },
+    };
+    expect(runItem(pending, { sessionUser: null })).not.toHaveProperty('changes');
+  });
+});
+
+describe('changes', () => {
+  it('spells each of the API’s change words as the design system does', () => {
+    expect(CHANGE).toEqual({
+      new_failure: 'new-failure',
+      still_failing: 'still-failing',
+      fixed: 'fixed',
+      new_test: 'new-test',
+      removed: 'removed',
+      not_reached: 'not-reached',
+    });
+  });
+
+  it('lines each outcome up with its change character, leaving unchanged results plain', () => {
+    expect(lineResults('F.FsX', 'ns-tf')).toEqual([
+      { outcome: 'failed', change: 'new-failure' },
+      { outcome: 'passed', change: 'still-failing' },
+      'failed',
+      { outcome: 'skipped', change: 'new-test' },
+      { outcome: 'xpassed', change: 'fixed' },
+    ]);
+  });
+
+  it('draws plain outcomes for a run that was not compared', () => {
+    expect(lineResults('.F', null)).toEqual(['passed', 'failed']);
+    expect(lineResults('', null)).toEqual([]);
+    expect(lineResults('', '')).toEqual([]);
+  });
+
+  it('keeps a change on its own result past a character it does not know', () => {
+    expect(lineResults('.?F', '--n')).toEqual([
+      'passed',
+      { outcome: 'failed', change: 'new-failure' },
+    ]);
+  });
+});
+
+describe('baselineLine', () => {
+  const RUN: RunDetail = {
+    ...ITEM,
+    started_at: '2026-09-27T09:00:00Z',
+    interrupt_reason: null,
+    project: 'firmware',
+    comparison: {
+      state: 'branch',
+      baseline: { id: BASE, started_at: '2026-09-27T08:18:00Z', branch: 'main' },
+      counts: CHANGE_COUNTS,
+    },
+  };
+  const VCS = ITEM.vcs as NonNullable<RunListItem['vcs']>;
+  const project = (vcs: RunDetail['vcs'], branch: string | null = 'main') => ({
+    ...RUN,
+    vcs,
+    comparison: {
+      state: 'project' as const,
+      baseline: { id: OTHER_BASE, started_at: '2026-09-27T06:00:00Z', branch },
+      counts: CHANGE_COUNTS,
+    },
+  });
+  // Each recorded name in braces, the baseline's label in brackets.
+  const words = (w: BaselineWords) =>
+    w.map((p) => (typeof p === 'string' ? p : `{${p.recorded}}`)).join('');
+  const said = (line: ReturnType<typeof baselineLine>) =>
+    `${words(line.lead)}${line.baseline ? `[${line.baseline.label}]` : ''}${words(line.tail)}`;
+
+  it('names the baseline on the run’s own branch, and how much earlier it started', () => {
+    const line = baselineLine(RUN);
+    expect(line.baseline).toEqual({ id: BASE, label: '1adf29af', href: `/runs/${BASE}` });
+    expect(said(line)).toBe('Compared with [1adf29af] on {main}, 42 min earlier');
+  });
+
+  it('says why it fell back to the project’s latest complete run', () => {
+    expect(said(baselineLine(project({ ...VCS, branch: 'feat/uart-dma' })))).toBe(
+      'No earlier complete run on {feat/uart-dma}; compared with [0b77e4f2] on {main}, 3 h earlier',
+    );
+    expect(said(baselineLine(project({ ...VCS, branch: null, commit: '4b8f6a3c2d' })))).toBe(
+      'No branch recorded (detached HEAD at {4b8f6a3}); compared with [0b77e4f2] on {main}, 3 h earlier',
+    );
+    expect(said(baselineLine(project(null)))).toBe(
+      'Recorded outside a git repository; compared with [0b77e4f2] on {main}, 3 h earlier',
+    );
+    expect(said(baselineLine(project({ ...VCS, branch: null, commit: null })))).toBe(
+      'No branch recorded; compared with [0b77e4f2] on {main}, 3 h earlier',
+    );
+  });
+
+  it('names no branch for a baseline that recorded none', () => {
+    expect(said(baselineLine(project({ ...VCS, branch: 'feat/uart-dma' }, null)))).toBe(
+      'No earlier complete run on {feat/uart-dma}; compared with [0b77e4f2], 3 h earlier',
+    );
+  });
+
+  it('keeps each recorded branch and commit apart from the words, as recorded', () => {
+    const rlo = String.fromCodePoint(0x202e);
+    expect(said(baselineLine(project({ ...VCS, branch: `x${rlo}` }, `y${rlo}`)))).toBe(
+      `No earlier complete run on {x${rlo}}; compared with [0b77e4f2] on {y${rlo}}, 3 h earlier`,
+    );
+    expect(said(baselineLine(project({ ...VCS, branch: null, commit: `${rlo}ab12cd99` })))).toBe(
+      `No branch recorded (detached HEAD at {${rlo}ab12cd}); compared with [0b77e4f2] on {main}, 3 h earlier`,
+    );
+  });
+
+  it('shortens a recorded commit by character, never splitting one', () => {
+    const face = String.fromCodePoint(0x1f600);
+    const line = baselineLine(project({ ...VCS, branch: null, commit: `abcdef${face}99` }));
+    expect(line.lead).toContainEqual({ recorded: `abcdef${face}` });
+  });
+
+  it('says there is nothing to compare with, or when a pending run is compared', () => {
+    const none = { ...RUN, comparison: { state: 'none' as const, baseline: null, counts: null } };
+    expect(baselineLine(none)).toEqual({
+      lead: ['Nothing to compare with yet.'],
+      baseline: null,
+      tail: [],
+    });
+    const pending = {
+      ...RUN,
+      exit_status: null,
+      finished_at: null,
+      comparison: { state: 'pending' as const, baseline: null, counts: null },
+    };
+    expect(said(baselineLine({ ...pending, presentation: 'running' }))).toBe(
+      'Compared with its baseline once the session ends.',
+    );
+    expect(said(baselineLine({ ...pending, presentation: 'abandoned' }))).toBe(
+      'Not compared: no end was recorded.',
+    );
+  });
+
+  it('measures how much earlier from the two start times', () => {
+    expect(earlier('2026-09-27T09:00:00Z', '2026-09-27T09:00:00Z')).toBe('under 1 s');
+    expect(earlier('2026-09-27T09:00:00Z', '2026-09-27T09:00:00.900Z')).toBe('under 1 s');
+    expect(earlier('2026-09-27T09:00:00Z', '2026-09-27T09:00:12.600Z')).toBe('12 s');
+    expect(earlier('2026-09-27T09:00:00Z', '2026-09-27T09:42:59Z')).toBe('42 min');
+    expect(earlier('2026-09-27T06:00:00Z', '2026-09-27T09:59:00Z')).toBe('3 h');
+    expect(earlier('2026-09-25T09:00:00Z', '2026-09-27T09:00:00Z')).toBe('2 d');
   });
 });
 
@@ -115,6 +313,18 @@ it('labels the line by the order pytest reported the results', () => {
   );
   expect(dotlineLabel({ passed: 0 }, true)).toBe(
     'Results in the order pytest reported them: no tests ran, still running',
+  );
+});
+
+it('counts in the line’s label the changes its marks show', () => {
+  expect(dotlineLabel(COUNTS, false, CHANGE_COUNTS)).toBe(
+    'Results in the order pytest reported them: 2 failed, 208 passed, 3 skipped, 1 error; 2 new failures, 1 fixed',
+  );
+  expect(dotlineLabel(COUNTS, false, { ...CHANGE_COUNTS, new_failure: 0 })).toBe(
+    'Results in the order pytest reported them: 2 failed, 208 passed, 3 skipped, 1 error; 1 fixed',
+  );
+  expect(dotlineLabel(COUNTS, false, { ...CHANGE_COUNTS, new_failure: 0, fixed: 0 })).toBe(
+    'Results in the order pytest reported them: 2 failed, 208 passed, 3 skipped, 1 error',
   );
 });
 
@@ -485,7 +695,7 @@ describe('history', () => {
         commit_subject_truncated: false,
         dirty: true,
       },
-      change: null,
+      change: 'new_failure',
     },
     {
       run_id: OLD,
@@ -505,6 +715,7 @@ describe('history', () => {
         { id: NEW, label: 'bbbbbbbb', detail: 'main at 7aa1c5d', href: resultHref(NEW, NODE) },
       ],
       outcomes: ['passed', 'failed'],
+      changes: [null, 'new-failure'],
       durations: [null, 1.5],
     });
   });

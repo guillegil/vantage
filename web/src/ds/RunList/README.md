@@ -18,4 +18,5 @@ A project's runs as rows: pin, state and id, who and when, the dotline and count
 
 ## Port notes
 
-- Ported one to one. The client passes no `onPin`, `retention` or `changes`, which the server does not store, and prints each run by its `label`, the first 8 characters of its id.
+- Ported one to one. The client passes no `onPin` or `retention`, which the server does not store, and prints each run by its `label`, the first 8 characters of its id.
+- The server serves each run's comparison, so a compared run's row carries `changes`, its new failures and fixes and its baseline's label, and its `results` carry each result's change from `/runs/{id}/outcomes`. A run pending its comparison, or with nothing to compare with, has neither.

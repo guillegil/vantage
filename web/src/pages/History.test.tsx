@@ -103,6 +103,38 @@ describe('a test’s history', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe(`/runs/${OLD}/result`));
   });
 
+  it('marks how the test changed in each run it lists', async () => {
+    server((_m, path) =>
+      path === '/projects/firmware/tests/history'
+        ? json(200, {
+            ...FIRST,
+            items: [
+              { ...FIRST.items[0], change: 'still_failing' },
+              { ...SECOND.items[0], outcome: 'failed', change: 'new_failure' },
+            ],
+            has_more: false,
+          })
+        : undefined,
+    );
+    renderAt(HERE);
+    const slider = await screen.findByRole('slider', { name: `History of ${NODE}` });
+    expect(slider).toHaveAttribute(
+      'aria-valuetext',
+      '0123abcd (main at 7aa1c5d): failed, still failing',
+    );
+    fireEvent.focus(slider);
+    fireEvent.keyDown(slider, { key: 'Home' });
+    expect(slider).toHaveAttribute(
+      'aria-valuetext',
+      '9876fedc (main at 7aa1c5d): failed, new failure',
+    );
+    // Only the new failure stands above the track.
+    const lifted = [...slider.querySelectorAll('.dl-m--failed')].filter(
+      (r) => Number(r.getAttribute('y')) < 0,
+    );
+    expect(lifted).toHaveLength(1);
+  });
+
   it('opens a run’s result from its row within the page', async () => {
     server();
     const { router } = renderAt(HERE);
