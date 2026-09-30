@@ -18,6 +18,25 @@ at `GET /api/v1/openapi.yaml` (source:
 any method but `GET` and `HEAD`, it answers `404`; any other `GET` belongs
 to the server's web client, which answers with its page.
 
+## Host names
+
+A server bound to a loopback address answers only requests whose `Host`
+names `localhost`, an IP literal (`127.0.0.1`, `[::1]`, any other), or a
+name its operator allowed with `--allowed-host` or `VANTAGE_ALLOWED_HOSTS`;
+the port does not count. One bound wider answers every name until its
+operator allows some, then those, `localhost` and IP literals alone. Any
+other request, and one with no `Host`, is refused on every route here with
+`421 misdirected_request` before anything else is checked, token and body
+included; the detail never repeats the name. It keeps a web page that
+points its own name at the server's address from using it.
+
+A runner pointed at a server by a name that server does not answer to
+gets that 421 for every request, capabilities included. `pytest-vantage`
+says so in words -- use the address the server serves at, or have its
+operator allow the name with `--allowed-host NAME` -- and, in its backup
+modes, keeps the run queued for that address, to be sent once the name is
+allowed; `vantage push` stops at it the same way and keeps the queue.
+
 ## Authentication
 
 A server needs a token once its database has a user, and a server's own
@@ -128,7 +147,8 @@ the original U+0000 finds nothing.
 Nothing is stored unless the whole report is accepted, and an accepted report
 is stored in one transaction.
 
-A report is refused at the first check it fails, in this order: `401` and
+A report is refused at the first check it fails, in this order:
+`421 misdirected_request` (see [Host names](#host-names)); `401` and
 `403 insufficient_scope` (see [Authentication](#authentication)), before
 any of the body is read; then `415`, `413` (or `400 incomplete_body`),
 `400 invalid_json` and `422 invalid_report` from the table above; then
@@ -411,7 +431,8 @@ is: a start report (in progress, no results), heartbeats, any in-progress
 reports with results, and the finishing report. Without the
 `session_lifecycle` capability it sends only the last two. In its backup
 modes, a report that got no answer, a `5xx`, a `408`, a `429`, a `401`
-or `403` refusing its token, a `404 unknown_project`, or a
+or `403` refusing its token, a `421` refusing the host name in the
+address, a `404 unknown_project`, or a
 `403 not_a_member` or `insufficient_role` refusing its user the project,
 is sent again later, unchanged, with the reports after it: by a later
 session or by `vantage push`, from another process, possibly days later,
@@ -449,7 +470,8 @@ ignored; `pytest-vantage` sends `{}` as `application/json`.
 - A `run_id` that is not 32 lowercase hex characters answers
   `422 invalid_parameter` with `fields: ["path.run_id"]`.
 
-A heartbeat is refused at the first check it fails, in this order: `401`,
+A heartbeat is refused at the first check it fails, in this order:
+`421 misdirected_request`, `401`,
 `403 insufficient_scope`, `422 invalid_parameter`, `404 unknown_run`,
 `403 not_a_member` or `insufficient_role`, `409 foreign_run`.
 
@@ -483,6 +505,7 @@ its run `running`.
 | `409` | `project_mismatch` | A report of a run created in another project. |
 | `413` | `payload_too_large` | The body passed 1,048,576 bytes. |
 | `415` | `unsupported_media_type` | `Content-Type` is absent or not `application/json`. |
+| `421` | `misdirected_request` | The `Host` names nothing the server answers to, or is missing: on every route, before any other check (see [Host names](#host-names)). |
 | `422` | `invalid_report` | The body does not match the shape above. |
 | `422` | `invalid_parameter` | A heartbeat's `run_id` is not 32 lowercase hex characters. |
 | `500` | | The server failed while handling the request (the database was unavailable, for example). The body is plain text, not a rejection. |

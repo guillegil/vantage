@@ -38,6 +38,7 @@ from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from memory_store import InMemoryExecutionStore
 from pydantic import BaseModel
+from vantage.core.config.hosts import HostRule
 from vantage.core.domain.access import (
     ADMIN_SCOPE,
     READ_SCOPE,
@@ -78,7 +79,7 @@ from vantage.ingestion.schemas import (
 )
 from vantage.service.access import SESSION_COOKIE
 from vantage.service.app import create_app
-from vantage.service.errors import MAX_REPORT_BYTES
+from vantage.service.errors import MAX_REPORT_BYTES, MisdirectedRequestError
 from vantage.service.routes.members import MAX_MEMBERS_BODY_BYTES
 from vantage.service.routes.projects import MAX_PROJECTS_BODY_BYTES
 from vantage.service.routes.sections import MAX_SECTION_BODY_BYTES
@@ -995,6 +996,31 @@ def test_every_status_the_server_answers_is_documented(cheap_passwords: None) ->
     assert _unnamed_errors(tainted, answered) == {
         ("DELETE", "/projects/{project}/members/{user}", 409, "default_project")
     }
+
+
+def test_the_refusal_of_a_host_name_is_documented_first_and_given_on_every_path() -> None:
+    """No operation lists it, since every path answers it the same way, so
+    the document's description says so, before every refusal of who asks;
+    and a server with a rule refuses every documented operation with it,
+    before the credential it carries is looked at."""
+    description = _parsed_document()["info"]["description"]
+    refusal = f"{MisdirectedRequestError.status_code} {MisdirectedRequestError.error}"
+    assert f"{refusal}, then 401 for no credential" in description
+    assert "--allowed-host" in description
+    assert "VANTAGE_ALLOWED_HOSTS" in description
+
+    store = InMemoryExecutionStore()
+    admin = _admin(store)
+    client = TestClient(
+        create_app(store, hosts=HostRule(frozenset())),
+        base_url="http://rebound.example.net",
+        headers=admin,
+    )
+    for method, path in sorted(_declared_operations(_parsed_document())):
+        concrete = re.sub(r"\{[^}]+\}", "x", path)
+        response = client.request(method, f"/api/v1{concrete}")
+        assert response.status_code == MisdirectedRequestError.status_code, (method, path)
+        assert response.json()["error"] == MisdirectedRequestError.error, (method, path)
 
 
 _ACCESS_RUN = "5" * 32

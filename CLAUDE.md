@@ -88,7 +88,8 @@ its `postgres` extra.
   compared exactly; senders claim an entry before sending it; bounds are
   1,000 runs and 256 MiB. A run a server refused for its token (401/403)
   or its project (`404 unknown_project`, or `403 not_a_member` or
-  `insufficient_role` for the token's user) is kept; the rest of a refused
+  `insufficient_role` for the token's user), or for the host name in its
+  address (421), is kept; the rest of a refused
   project's runs are passed over within one send (`missing_projects`,
   `forbidden_projects`), and a refused project never stops the send.
   `vantage push` sends it with the plugin's own code and never needs the
@@ -134,6 +135,19 @@ its `postgres` extra.
   framing, referrer and cross-origin headers to every answer that does not
   set its own; it wraps `send` and never touches a body
   (no `BaseHTTPMiddleware`).
+- **A loopback-bound server answers only the names it is known by.**
+  `KnownHosts` (`service/hosts.py`), inside `SecurityHeaders` and outside
+  `WebClient` and the router, refuses a request whose single `Host` names
+  nothing the rule answers with `421 misdirected_request` on every path
+  and method, never echoing the name. The rule (`core/config/hosts.py`,
+  pure) answers `localhost`, every IP literal (a rebinding page cannot
+  have one as its address) and the names allowed by `--allowed-host`, or
+  else `VANTAGE_ALLOWED_HOSTS`, comma-separated; the port is ignored. It
+  exists on a loopback bind (127.0.0.0/8, `::1`, `localhost`) always, and
+  on a wider bind only when names are allowed. `create_app` adds the
+  middleware only when given `hosts=`, which only `cli.py` passes, so the
+  suite's apps answer `testserver`. The plugin reads the 421 as
+  `MisdirectedRequestError`, and the outbox keeps the run and stops.
 - **No U+0000 reaches a store.** The body decoder replaces it (and a lone
   surrogate in reports) with U+FFFD; a lookup value holding it matches
   nothing without asking the store.
@@ -269,6 +283,7 @@ VANTAGE_TEST_POSTGRES_URL=postgresql://postgres:PASSWORD@127.0.0.1:5432/postgres
   uv run --extra dev pytest                  # PostgreSQL tests too (skipped when unset)
 vantage --database ./vantage.db              # server on 127.0.0.1:8765
 vantage --database postgresql://user@host/db # the same, storing in PostgreSQL
+vantage --allowed-host vantage.example.com   # also answer a proxy's name (else 421)
 vantage push                                 # send the runs the plugin queued
 vantage user add alice --admin               # the first user closes a local store's database
 vantage user password alice                  # asks twice on the terminal; to log in with

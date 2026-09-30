@@ -20,6 +20,7 @@ from vantage.core.config.database import (
     redact_message,
     redacted,
 )
+from vantage.core.config.hosts import HostRule
 from vantage.core.config.resolution import (
     ServerConfig,
     ServerConfigError,
@@ -34,6 +35,8 @@ def _resolve(
     cli_host: str | None = None,
     cli_port: int | None = None,
     cli_grace_period: float | None = None,
+    cli_allowed_hosts: tuple[str, ...] = (),
+    env_allowed_hosts: str | None = None,
     home: Path | None = Path("/home/nobody"),
     xdg_data_home: str | None = None,
 ) -> ServerConfig:
@@ -43,6 +46,8 @@ def _resolve(
         cli_host=cli_host,
         cli_port=cli_port,
         cli_grace_period=cli_grace_period,
+        cli_allowed_hosts=cli_allowed_hosts,
+        env_allowed_hosts=env_allowed_hosts,
         home=home,
         xdg_data_home=xdg_data_home,
     )
@@ -265,6 +270,60 @@ def test_both_ends_of_the_port_range_are_accepted(port: int) -> None:
     assert _resolve(cli_port=port).port == port
 
 
+def test_a_loopback_default_answers_localhost_and_ip_literals_alone() -> None:
+    assert _resolve().hosts == HostRule(frozenset())
+
+
+def test_a_wide_bind_answers_every_name_unless_some_are_allowed() -> None:
+    assert _resolve(cli_host="0.0.0.0").hosts is None  # noqa: S104
+    assert _resolve(cli_host="0.0.0.0", env_allowed_hosts="vantage.example.com").hosts == (  # noqa: S104
+        HostRule(frozenset({"vantage.example.com"}))
+    )
+
+
+def test_allowed_host_flags_replace_the_environment() -> None:
+    """As the database flag replaces its variable: the command line is the
+    most specific source, and a variable set for the container is not
+    added to what a flag names."""
+    config = _resolve(
+        cli_allowed_hosts=("One.example.com", "two.example.com."),
+        env_allowed_hosts="three.example.com",
+    )
+
+    assert config.hosts == HostRule(frozenset({"one.example.com", "two.example.com"}))
+
+
+@pytest.mark.parametrize(
+    ("value", "names"),
+    [
+        ("one.example.com", {"one.example.com"}),
+        ("one.example.com, Two.example.com", {"one.example.com", "two.example.com"}),
+        ("one.example.com,", {"one.example.com"}),
+        (",,", set()),
+        ("", set()),
+    ],
+)
+def test_the_environment_names_hosts_comma_separated(value: str, names: set[str]) -> None:
+    assert _resolve(env_allowed_hosts=value).hosts == HostRule(frozenset(names))
+
+
+@pytest.mark.parametrize(
+    ("setting", "source"),
+    [
+        ({"cli_allowed_hosts": ("vantage.example.com:8765",)}, "--allowed-host"),
+        ({"cli_allowed_hosts": ("",)}, "--allowed-host"),
+        ({"cli_allowed_hosts": ("https://vantage.example.com",)}, "--allowed-host"),
+        ({"env_allowed_hosts": "ok.example.com,*.example.com"}, "VANTAGE_ALLOWED_HOSTS"),
+    ],
+    ids=["port", "empty-flag", "scheme", "wildcard"],
+)
+def test_an_allowed_host_that_is_not_a_host_name_is_refused_naming_its_source(
+    setting: dict[str, object], source: str
+) -> None:
+    with pytest.raises(ServerConfigError, match=f"^{source}: .* is not a host name"):
+        _resolve(**setting)  # type: ignore[arg-type]
+
+
 def test_default_grace_period_is_900_seconds() -> None:
     """900.0 seconds, expressed in source as `30 * 30.0` -- a multiple of the
     default heartbeat interval, not an invented round number. CLI-only, like
@@ -322,6 +381,8 @@ def test_resolution_creates_no_directory(tmp_path: Path) -> None:
         cli_host=None,
         cli_port=None,
         cli_grace_period=None,
+        cli_allowed_hosts=(),
+        env_allowed_hosts=None,
         home=tmp_path,
         xdg_data_home=str(xdg_data_home),
     )

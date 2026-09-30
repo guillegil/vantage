@@ -163,8 +163,11 @@ def serving(
         seen.said = _said(capsys.readouterr().err)
         seen.users = tuple(store.list_users())
         seen.admin_hash = store.get_password_hash(cli.FIRST_ADMIN)
-        # Without `with`, so the app is not shut down, and its store stays open.
-        answer = TestClient(app).post("/api/v1/runs", json=_start_report("d" * 32))
+        # Without `with`, so the app is not shut down, and its store stays
+        # open; by the loopback address, a name every start answers.
+        answer = TestClient(app, base_url="http://127.0.0.1:8765").post(
+            "/api/v1/runs", json=_start_report("d" * 32)
+        )
         seen.anonymous_report = answer.status_code
 
     monkeypatch.setattr("uvicorn.Server.run", _run)
@@ -226,8 +229,9 @@ def test_a_database_url_of_another_scheme_is_refused_and_creates_nothing(
         (["--grace-period", "1e-7"], "--grace-period"),
         (["--port", "70000"], "--port"),
         (["--host", ""], "--host"),
+        (["--allowed-host", "vantage.example.com:8765"], "--allowed-host"),
     ],
-    ids=["grace-period", "grace-period-below-a-microsecond", "port", "empty-host"],
+    ids=["grace-period", "grace-period-below-a-microsecond", "port", "empty-host", "allowed-host"],
 )
 def test_an_unusable_setting_is_refused_before_anything_is_created(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], setting: list[str], flag: str
@@ -410,6 +414,53 @@ def test_main_carries_the_resolved_grace_period_into_the_app(
     cli.main(["--database", str(tmp_path / "v.db"), "--grace-period", "60"])
 
     assert served["app"].state.grace_period == timedelta(seconds=60)
+
+
+def _answers(app: Any, name: str) -> int:
+    """The status `app` answers the capability advertisement with, asked
+    by `name`; without `with`, so the app is not shut down."""
+    return TestClient(app, base_url=f"http://{name}:8765").get("/api/v1/capabilities").status_code
+
+
+def test_main_serves_a_loopback_bind_to_the_names_it_is_known_by(
+    tmp_path: Path, served: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam between the resolved rule and the app: a `main` that
+    dropped `hosts=` would answer a page that pointed its own name at this
+    machine. The names come from the flag, else the environment."""
+    monkeypatch.delenv("VANTAGE_ALLOWED_HOSTS", raising=False)
+    cli.main(["--database", str(tmp_path / "v.db")])
+    app = served["app"]
+    assert [_answers(app, name) for name in ("localhost", "127.0.0.1", "rebound.example")] == [
+        200,
+        200,
+        421,
+    ]
+
+    monkeypatch.setenv("VANTAGE_ALLOWED_HOSTS", "vantage.example.com")
+    cli.main(["--database", str(tmp_path / "v.db")])
+    assert _answers(served["app"], "vantage.example.com") == 200
+
+    cli.main(["--database", str(tmp_path / "v.db"), "--allowed-host", "proxy.example.com"])
+    app = served["app"]
+    assert [_answers(app, name) for name in ("proxy.example.com", "vantage.example.com")] == [
+        200,
+        421,
+    ]
+
+
+def test_main_serves_a_wide_bind_every_name_unless_some_are_allowed(
+    tmp_path: Path, served: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VANTAGE_ALLOWED_HOSTS", raising=False)
+    wide = ["--database", str(tmp_path / "v.db"), "--host", "0.0.0.0"]  # noqa: S104
+
+    cli.main(wide)
+    assert _answers(served["app"], "rebound.example") == 200
+
+    cli.main([*wide, "--allowed-host", "vantage.example.com"])
+    assert _answers(served["app"], "vantage.example.com") == 200
+    assert _answers(served["app"], "rebound.example") == 421
 
 
 @pytest.mark.usefixtures("listened")

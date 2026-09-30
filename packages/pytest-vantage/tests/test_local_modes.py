@@ -906,6 +906,45 @@ def test_a_run_its_user_may_not_record_is_queued_until_they_are_an_editor_of_its
     assert vantage_server.recorded_by(queued_id) == "bob"
 
 
+_MISDIRECTED = (
+    "HTTP 421: the server does not answer to the host name in the address: use the address it "
+    "serves at, such as http://127.0.0.1:PORT, or have its operator allow the name with "
+    "--allowed-host NAME"
+)
+
+
+def test_a_run_a_server_refuses_by_host_name_is_stored_queued_and_says_what_to_fix(
+    pytester: pytest.Pytester, misdirected_server: VantageTestServer
+) -> None:
+    """A server bound to its loopback, reached by a name its operator has
+    not allowed, refuses every request with 421: a mistake in the address
+    or in the server's names, which either side can fix, so in
+    `server+backup` the run is stored and queued for that address, and the
+    session says why in words, its tests passing still."""
+    database = _stand_in(pytester)
+    pytester.makepyfile(test_sample=_PASSING_TEST)
+
+    result = pytester.runpytest_subprocess(
+        "--vantage",
+        "--vantage-mode=server+backup",
+        f"--vantage-server={misdirected_server.address}",
+    )
+
+    assert result.ret == 0
+    output = _output(result)
+    assert (
+        f"vantage: {misdirected_server.address} did not take this run ({_MISDIRECTED}); "
+        f"this run was stored in {database} and queued (1 run waiting to be sent)"
+    ) in output
+    probe = f"{misdirected_server.address}/api/v1/capabilities"
+    assert f"capability probe to {probe} failed ({_MISDIRECTED})" in output
+    assert "rebound.example" not in output
+    (stored,) = _stored_sessions(database)
+    ((server, run_id, _reports),) = _queued(database)
+    assert (server, run_id) == (misdirected_server.address, _run_id_of(stored))
+    assert misdirected_server.executions() == []
+
+
 def test_server_plus_backup_stores_nothing_locally_when_the_server_takes_the_run(
     pytester: pytest.Pytester, vantage_server: VantageTestServer
 ) -> None:

@@ -25,6 +25,10 @@ server address they were meant for.
   that answers `403 not_a_member` or `insufficient_role` once an owner of
   the project or an admin makes the token's user an editor of it. Either
   way the entry stays, and a sender moves on to runs of other projects.
+- **A host name the server refuses keeps every run.** A server that
+  answers `421 misdirected_request` does not answer to the name in the
+  address the runs were queued for; they stay, for once its operator
+  allows the name, and sending to that server stops.
 """
 
 from __future__ import annotations
@@ -72,7 +76,13 @@ _RETRY_LATER = frozenset({408, 429})
 # token's user a project is a `ProjectRefusedError`, which stops nothing.
 _RETRY_WITH_ANOTHER_TOKEN = frozenset({401, 403})
 
-_KEPT_FOR_LATER = _RETRY_LATER | _RETRY_WITH_ANOTHER_TOKEN
+# Misdirected Request: a server that does not answer to the host name in
+# the address it was queued for. Every run would be refused the same way,
+# so sending stops rather than drop them; once its operator allows the
+# name they can be taken, and an entry is only ever sent to that address.
+_RETRY_ONCE_THE_NAME_IS_ALLOWED = frozenset({421})
+
+_KEPT_FOR_LATER = _RETRY_LATER | _RETRY_WITH_ANOTHER_TOKEN | _RETRY_ONCE_THE_NAME_IS_ALLOWED
 
 # The error of a `ProjectRefusedError` for a project the server does not
 # have; any other is one the token's user may not record in.
@@ -121,7 +131,9 @@ def unreachable(exc: BaseException) -> bool:
 def worth_retrying(exc: BaseException) -> bool:
     """Whether sending the same report later could succeed: the server was
     unreachable, answered 5xx, asked for the request again later, refused
-    the token, which a sender with another one can fix, or refused the
+    the token, which a sender with another one can fix, refused the host
+    name in the address (421), which the server's operator can allow, or
+    refused the
     report's project, which an admin or an owner of it can fix: it has no
     project of that name yet, or does not let the token's user record
     there. Any other 4xx, a redirect or an answer that does not acknowledge
@@ -161,8 +173,8 @@ class SendSummary:
     sent: int
     """Entries acknowledged and deleted."""
     dropped: tuple[str, ...]
-    """Run ids of the entries the server rejected with a 4xx other than 408
-    or 429, now deleted."""
+    """Run ids of the entries the server rejected with a 4xx other than 401,
+    403, 408, 421 or 429, now deleted."""
     waiting: int
     """Entries still queued for `server`."""
     stopped: str | None
@@ -400,7 +412,7 @@ def send_queued(
     seconds (`math.inf` for none).
 
     An acknowledged run is deleted. One the server rejects with a 4xx other
-    than 401, 403, 408 or 429 could never succeed, and is deleted too, its
+    than 401, 403, 408, 421 or 429 could never succeed, and is deleted too, its
     run id in `dropped`; so is one whose reports no longer read back from
     the file, in `unreadable`. A 5xx leaves the run queued and goes on to
     the next, since it may be that run's own problem; so does a project
@@ -410,8 +422,8 @@ def send_queued(
     in `forbidden_projects`, since the same token may still record
     elsewhere. Anything else leaves the run queued and stops: an
     unreachable server, a 408 or 429 asking for it again later, a 401 or
-    another 403 refusing the token, or an answer that is not a vantage
-    server's.
+    another 403 refusing the token, a 421 refusing the host name in the
+    address, or an answer that is not a vantage server's.
     """
     deadline = time.monotonic() + budget
     ran_out = f"the {budget:g}s allowed for sending ran out"
