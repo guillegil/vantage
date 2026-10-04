@@ -20,6 +20,7 @@ from pathlib import Path
 import yaml
 from fastapi.testclient import TestClient
 from vantage.core.config.database import SqliteTarget
+from vantage.core.config.hosts import host_rule
 from vantage.core.config.resolution import ServerConfig, resolve_server_config
 from vantage.service import cli
 from vantage.service.app import create_app
@@ -106,17 +107,23 @@ def _environment() -> dict[str, str]:
     }
 
 
-def _served() -> ServerConfig:
+def _served(allowed_hosts: str | None = None) -> ServerConfig:
     """What the image's command serves, parsed by `vantage`'s own parser and
     resolved as `vantage` resolves it, with no home directory: a uid given
-    with `--user` has none."""
+    with `--user` has none; with `allowed_hosts`, as `docker run -e
+    VANTAGE_ALLOWED_HOSTS=...` would set it."""
     args = cli._parse_args(json.loads(_last("CMD")))
+    environment = _environment()
+    if allowed_hosts is not None:
+        environment["VANTAGE_ALLOWED_HOSTS"] = allowed_hosts
     return resolve_server_config(
         cli_database=args.database,
-        env_database=_environment().get("VANTAGE_DATABASE"),
+        env_database=environment.get("VANTAGE_DATABASE"),
         cli_host=args.host,
         cli_port=args.port,
         cli_grace_period=args.grace_period,
+        cli_allowed_hosts=args.allowed_host,
+        env_allowed_hosts=environment.get("VANTAGE_ALLOWED_HOSTS"),
         home=None,
         xdg_data_home=None,
     )
@@ -234,6 +241,26 @@ def test_the_health_check_asks_the_served_port_a_route_that_needs_no_token(
         assert client.get(address.path).status_code == 200
     finally:
         store.close()
+
+
+def test_the_image_answers_every_name_until_its_operator_names_some() -> None:
+    """Bound to every interface inside the container, the server cannot
+    know the names it is reached by, so it checks none; given some in
+    VANTAGE_ALLOWED_HOSTS, it answers those alone, and the health check
+    still, by the IP literal it asks."""
+    _, _, probe = _last("HEALTHCHECK").partition(" CMD ")
+    (url,) = re.findall(r"http://[^'\"]+", json.loads(probe)[2])
+    health = urllib.parse.urlsplit(url).netloc
+
+    served = _served()
+    # The address given is an IP literal, which is what its socket holds.
+    assert host_rule(served.host, served.allowed_hosts) is None
+    named = _served("vantage.example.com")
+    rule = host_rule(named.host, named.allowed_hosts)
+    assert rule is not None
+    assert rule.answers("vantage.example.com")
+    assert not rule.answers("rebound.example.net")
+    assert rule.answers(health)
 
 
 def test_the_build_context_is_what_the_build_copies() -> None:

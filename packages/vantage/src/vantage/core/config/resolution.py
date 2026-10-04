@@ -1,4 +1,4 @@
-"""Where the server's own database and bind address come from.
+"""Where the server's own database, bind address and host names come from.
 
 **Pure -- no filesystem or network access, ever.** Resolution only computes
 a path, or takes a URL as given; it never stats, creates, opens or connects
@@ -10,6 +10,7 @@ anything belongs to whoever acts on the resolved target (`service/cli.py`).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -20,6 +21,7 @@ from vantage.core.config.database import (
     UnsupportedDatabaseURLError,
     database_target,
 )
+from vantage.core.config.hosts import HostNameError, allowed_host_name
 
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 8765
@@ -45,6 +47,12 @@ class ServerConfig:
     host: str
     port: int
     grace_period_seconds: float
+    allowed_hosts: frozenset[str]
+    """The host names the server answers besides `localhost` and IP
+    literals. Whether it checks names at all depends on the address its
+    socket holds once bound (`core/config/hosts.py`'s `host_rule`), which
+    `host` alone does not say: a name, or a short form such as `127.1`,
+    binds wherever the resolver puts it."""
 
 
 def resolve_server_config(
@@ -54,10 +62,13 @@ def resolve_server_config(
     cli_host: str | None,
     cli_port: int | None,
     cli_grace_period: float | None,
+    cli_allowed_hosts: Sequence[str],
+    env_allowed_hosts: str | None,
     home: Path | None,
     xdg_data_home: str | None,
 ) -> ServerConfig:
-    """Resolve the server's database, bind address, and grace period.
+    """Resolve the server's database, bind address, grace period and the
+    host names it answers.
 
     Database precedence: ``--database`` > ``VANTAGE_DATABASE`` >
     ``$XDG_DATA_HOME/vantage/vantage.db``, default
@@ -72,14 +83,19 @@ def resolve_server_config(
     server is started deliberately by whoever runs it.
 
     Host, port and the grace period each take only a CLI value or a fixed
-    default; none has an environment variable. A value the server cannot run
-    with raises `ServerConfigError` here, before anything is created.
+    default; none has an environment variable. The names allowed beyond
+    `localhost` and IP literals come from every ``--allowed-host``, else
+    from ``VANTAGE_ALLOWED_HOSTS``, comma-separated, else none: a container
+    binds wide inside, and its operator names the proxy in front of it
+    where they name its database. A value the server cannot run with
+    raises `ServerConfigError` here, before anything is created.
     """
     return ServerConfig(
         database=_resolve_database(cli_database, env_database, home, xdg_data_home),
         host=_resolve_host(cli_host),
         port=_resolve_port(cli_port),
         grace_period_seconds=_resolve_grace_period(cli_grace_period),
+        allowed_hosts=_resolve_allowed_hosts(cli_allowed_hosts, env_allowed_hosts),
     )
 
 
@@ -105,6 +121,23 @@ def _resolve_host(cli_host: str | None) -> str:
             f"--host must name a bind address, got {cli_host!r}; omit it to bind {_DEFAULT_HOST}"
         )
     return host
+
+
+def _resolve_allowed_hosts(cli: Sequence[str], env: str | None) -> frozenset[str]:
+    if cli:
+        return frozenset(_allowed("--allowed-host", value) for value in cli)
+    # Empty entries are dropped, so a trailing comma, or an empty variable,
+    # allows nothing rather than refusing the start. An empty flag is still
+    # refused: `--allowed-host "$VAR"` with the variable unset is a mistake.
+    entries = [entry for entry in (env or "").split(",") if entry.strip()]
+    return frozenset(_allowed("VANTAGE_ALLOWED_HOSTS", entry) for entry in entries)
+
+
+def _allowed(source: str, value: str) -> str:
+    try:
+        return allowed_host_name(value)
+    except HostNameError as exc:
+        raise ServerConfigError(f"{source}: {exc}") from None
 
 
 def _resolve_port(cli_port: int | None) -> int:

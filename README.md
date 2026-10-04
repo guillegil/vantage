@@ -250,6 +250,13 @@ vantage: http://ci-vantage:8765 is unreachable; this run was stored in /home/u/.
   is stored and queued in the same way, since `vantage push` with a token
   the server accepts can deliver it. The queue never holds a token; whoever
   sends it sends their own.
+- **The server does not answer to the host name in the address**
+  (`421 misdirected_request`; see
+  [Which host names it answers](#which-host-names-it-answers)): the run is
+  stored and queued too, and the warning says to use the address the
+  server serves at or have its operator allow the name with
+  `--allowed-host`. Once the name is allowed, the queue delivers the run;
+  a run queued for one address is never sent to another.
 - **The server has no project of the run's name** (`404 unknown_project`):
   the run is stored and queued too, and the warning names the command an
   admin adds it with. Once the project exists, the queue delivers the run
@@ -269,7 +276,8 @@ plugin sends the runs queued for that server, oldest first, within the
 report timeout, and prints one line with the test summary:
 `vantage: sent 3 queued runs to http://ci-vantage:8765 (0 waiting)`. It stops
 when the server is unreachable again, answers a 408 or 429, refuses the
-token with a 401 or 403 (but for the two below), or the time is spent, and says why. A run the server answers with a 5xx stays queued and
+token with a 401 or 403 (but for the two below), refuses the host name
+with a 421, or the time is spent, and says why. A run the server answers with a 5xx stays queued and
 the next is sent; one it refuses with any other 4xx can never succeed, and
 is dropped with a warning naming its run id. Each run is only ever sent to
 the address it was queued for, compared exactly as written, so
@@ -893,7 +901,8 @@ receives vantage's session cookie, so give vantage a host name of its own
 ## Running the server
 
 ```
-vantage [--database PATH-OR-URL] [--host HOST] [--port PORT] [--grace-period SECONDS]
+vantage [--database PATH-OR-URL] [--host HOST] [--port PORT] [--allowed-host NAME ...]
+        [--grace-period SECONDS]
 ```
 
 Serving needs the `server` extra. Without it, `vantage` refuses in one line,
@@ -906,12 +915,15 @@ with exit status 1 and nothing created; `vantage push`, `vantage project`,
 | Database: a SQLite file, or a PostgreSQL URL | `--database` | `VANTAGE_DATABASE` | `$XDG_DATA_HOME/vantage/vantage.db`, or `~/.local/share/vantage/vantage.db` |
 | Bind address | `--host` | none | `127.0.0.1` |
 | Port | `--port` | none | `8765` |
+| Host names answered besides `localhost` and IP literals | `--allowed-host`, repeated | `VANTAGE_ALLOWED_HOSTS`, comma-separated | none |
 | Grace period before an unfinished run reads as abandoned | `--grace-period` | none | `900` seconds |
 
 - A flag beats the environment variable, which beats the default. An empty
   `--database`, `VANTAGE_DATABASE` or `XDG_DATA_HOME` counts as unset, and a
   relative `XDG_DATA_HOME` is ignored. An empty `--host` is refused rather
-  than taken to mean every interface.
+  than taken to mean every interface. Any `--allowed-host` replaces
+  `VANTAGE_ALLOWED_HOSTS` whole (see
+  [Which host names it answers](#which-host-names-it-answers)).
 - The default database is also where the plugin's local modes store by
   default, so on a test machine `vantage` with no options serves what the
   tests stored.
@@ -953,7 +965,8 @@ with exit status 1 and nothing created; `vantage push`, `vantage project`,
   and move the file aside.
 - The server refuses to start, with one `vantage: ...` line on stderr and
   exit status 1, when a setting is unusable (an empty host, a port outside 1
-  to 65535, a grace period that is not positive or exceeds 365 days), the
+  to 65535, a grace period that is not positive or exceeds 365 days, an
+  allowed host that is not a host name alone), the
   database cannot be created, opened or connected to, or the database was
   made by a build with a different schema. There are no migrations: move the
   old file aside and start again.
@@ -1014,6 +1027,58 @@ saying the client is missing and how to build it. The API is served either
 way. Every answer, the API's included, tells browsers not to cache it
 (`Cache-Control: no-store`), not to frame it and not to let another site
 read it, unless it sets its own caching, as the client's files do.
+
+### Which host names it answers
+
+A browser trusts a page with whatever answers at the page's own name.
+A page on any web site can point its name at 127.0.0.1 once it has loaded
+(DNS rebinding); your browser then sends that page's requests to a vantage
+on your machine, with the page's name in the `Host` header, and lets the
+page read the answers. Against a database the local store made, which has
+no user, that is every run in it, read and changed from a stranger's page.
+
+So a server listening on a loopback address -- the default `127.0.0.1`,
+any of 127.0.0.0/8, or `::1`, however `--host` named it: `localhost`,
+`127.1`, or the machine's own name, which Debian and Ubuntu map to
+127.0.1.1 -- answers only requests whose `Host` names:
+
+- `localhost`, in any case, with or without one trailing dot;
+- an IP literal, `127.0.0.1` or `[::1]` or any other: a page cannot make
+  its own address an IP literal while pointing a name somewhere else, and
+  a page whose address is one is served from that address alone;
+- a name you allow with `--allowed-host NAME` (repeat it for more) or
+  `VANTAGE_ALLOWED_HOSTS=name,other` -- for instance the public name of a
+  reverse proxy that forwards to it, when the proxy passes the name on.
+
+The port does not matter. Any other request, and one with no `Host`, is
+refused on every path, the web client's and the API's alike, with
+`421 misdirected_request`, before anything else is checked:
+
+```
+{"error": "misdirected_request", "detail": "This server does not answer to the host name this request was sent to. Use the address it serves at, or have its operator allow the name with --allowed-host NAME or VANTAGE_ALLOWED_HOSTS.", "fields": []}
+```
+
+The plugin says what to fix and, in the backup modes, keeps the run in its
+outbox for once the name is allowed (see
+[When the server cannot take the run](#when-the-server-cannot-take-the-run)).
+
+A server bound wider (`--host 0.0.0.0`, `::` or a LAN address) is reached by
+names it cannot know, so it answers every name until you name some; then
+it answers those, `localhost` and IP literals alone. The container binds
+`0.0.0.0` inside, so it checks no name unless you set
+`VANTAGE_ALLOWED_HOSTS` (see [In a container](#in-a-container)). A name is
+a host name alone, lower-cased as given: no scheme, port, path or
+wildcard, or the server refuses to start, in one line.
+
+Behind a reverse proxy that forwards to `127.0.0.1:8765`, have it pass on
+the name the browser used (nginx: `proxy_set_header Host $host;`) and allow
+that name with `--allowed-host`. A proxy that sends `Host: 127.0.0.1:8765`
+instead, as nginx does by default, is always answered, since that is an IP
+literal: the server then cannot tell a rebound name from yours, so the
+proxy must answer only its own name itself (in nginx, a `server_name`, and
+a default server that refuses every other name). `pnpm --dir web run dev`
+needs nothing: its proxy passes on `localhost:5173`, the name the browser
+used.
 
 ### Projects
 
@@ -1483,6 +1548,15 @@ docker exec -it vantage vantage user password admin  # change it at once
   reaches it, and still reports itself healthy. Publish another port with
   `-p 9000:8765` rather than `--port`, which the health check does not
   follow.
+- **The server checks no host name unless told some.** It binds
+  `0.0.0.0` inside the container, so it cannot know the names it is
+  reached by. A container published on the host's loopback alone
+  (`-p 127.0.0.1:8765:8765`) is reached by a browser on that host, which a
+  page pointing its own name at 127.0.0.1 can use: name the ones it is
+  reached by, `-e VANTAGE_ALLOWED_HOSTS=vantage.example.com`, and every
+  other is refused with 421 (see
+  [Which host names it answers](#which-host-names-it-answers)). The health
+  check asks `127.0.0.1`, an IP literal, which is always answered.
 - A bind mount must be writable by uid 10001: `sudo install -d -o 10001 -g
   10001 -m 0700 /srv/vantage`, then `-v /srv/vantage:/data`. Or run the
   container as the directory's owner, `--user "$(id -u):$(id -g)"`, and

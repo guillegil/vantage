@@ -28,6 +28,7 @@ import pytest
 from loopback_server import LoopbackServer
 from sqlite_rows import read_metadata
 from starlette.types import Receive, Scope, Send
+from vantage.core.config.hosts import HostRule
 from vantage.core.domain.access import READ_SCOPE, RECORD_SCOPE, new_token, token_digest
 from vantage.core.domain.execution import Execution
 from vantage.core.domain.projects import DEFAULT_PROJECT
@@ -45,12 +46,18 @@ class VantageTestServer(LoopbackServer):
 
     The inspection helpers read through the store's port, and through plain
     SQL for a run's metadata, whose file rows no port method returns.
+
+    With `reached_as`, the server answers only the names a loopback bind
+    does, and every request arrives with `reached_as` in its `Host`, as if
+    the plugin had been given an address with that name, resolving to this
+    machine, which the server's operator never allowed.
     """
 
-    def __init__(self, directory: Path) -> None:
+    def __init__(self, directory: Path, *, reached_as: str | None = None) -> None:
         self._database = directory / "vantage.db"
         self.store = SqliteExecutionStore(self._database)
-        app = create_app(self.store)
+        hosts = None if reached_as is None else HostRule(frozenset())
+        app = create_app(self.store, hosts=hosts)
         # Every HTTP request, in arrival order, so a test can assert what the
         # plugin sent even when it left nothing in the store.
         self.requests: list[tuple[str, str]] = []
@@ -58,6 +65,10 @@ class VantageTestServer(LoopbackServer):
         async def _log_requests(scope: Scope, receive: Receive, send: Send) -> None:
             if scope["type"] == "http":
                 self.requests.append((scope["method"], scope["path"]))
+                if reached_as is not None:
+                    host = f"{reached_as}:{self.port}".encode()
+                    headers = [(k, v) for k, v in scope["headers"] if k.lower() != b"host"]
+                    scope = {**scope, "headers": [*headers, (b"host", host)]}
             await app(scope, receive, send)
 
         super().__init__(_log_requests)
@@ -194,6 +205,20 @@ def vantage_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Vantage
     try:
         # Inside the `try`: a server that fails to start still closes its
         # store's connection.
+        server.start()
+        yield server
+    finally:
+        server.close()
+
+
+@pytest.fixture
+def misdirected_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[VantageTestServer]:
+    """A real server bound to loopback, reached by a name it does not
+    answer: it refuses every request with `421 misdirected_request`."""
+    server = VantageTestServer(
+        tmp_path_factory.mktemp("vantage-server"), reached_as="rebound.example"
+    )
+    try:
         server.start()
         yield server
     finally:

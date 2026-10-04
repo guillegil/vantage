@@ -18,7 +18,9 @@ export default defineConfig({
   },
   server: {
     // The browser's own Sec-Fetch-Site: same-origin reaches vantage, so
-    // the Host header is left as the browser sent it.
+    // the Host header is left as the browser sent it: localhost:5173, a
+    // name vantage answers on loopback. A dev server reached by any other
+    // name needs vantage started with --allowed-host for it.
     proxy: { '/api': { target: 'http://127.0.0.1:8765' } },
   },
   test: {

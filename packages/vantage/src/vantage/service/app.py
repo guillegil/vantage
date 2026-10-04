@@ -13,6 +13,12 @@ interface document is checked against holds the API alone. Every answer
 carries the security headers `SecurityHeaders` adds, outermost of the
 middlewares the app adds.
 
+**Answers only the host names it is given, when given them**
+(`service/hosts.py`). With a rule, a request whose `Host` it does not
+answer is refused with `421 misdirected_request` inside `SecurityHeaders`
+and before the web client and the router; `cli.py` passes the one it
+resolves, and an app given none answers every name.
+
 **No store call runs on the event loop.** A store call blocks -- on the
 disk, on the store's own lock, on another process's write -- and one made on
 the loop would stall every other request until it returned, heartbeats
@@ -77,9 +83,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
 
+from vantage.core.config.hosts import HostRule
 from vantage.core.config.resolution import DEFAULT_GRACE_PERIOD_SECONDS
 from vantage.core.ports.storage import ExecutionStore
 from vantage.service.errors import register_error_handlers
+from vantage.service.hosts import KnownHosts
 from vantage.service.routes.capabilities import router as capabilities_router
 from vantage.service.routes.login import router as login_router
 from vantage.service.routes.members import router as members_router
@@ -105,6 +113,7 @@ def create_app(
     grace_period_seconds: float = DEFAULT_GRACE_PERIOD_SECONDS,
     close_store_on_shutdown: bool = False,
     client: Path | None = None,
+    hosts: HostRule | None = None,
 ) -> FastAPI:
     """Build the ASGI app, wired to `store` for every write.
 
@@ -123,6 +132,9 @@ def create_app(
     here; one that holds no build serves a page saying so. Without it the
     app serves no client at all, as every test that builds an app for the
     API expects, whether or not the client has been built in the checkout.
+
+    `hosts` is the rule saying which `Host` headers the app answers; without
+    one it answers them all, `TestClient`'s `testserver` included.
     """
     grace_period = timedelta(seconds=grace_period_seconds)
     if grace_period <= timedelta(0):
@@ -153,6 +165,10 @@ def create_app(
     register_error_handlers(app)
     if client is not None:
         app.add_middleware(WebClient, files=load_client(client))
+    if hosts is not None:
+        # Outside the client and the router, so a refused name reaches
+        # neither, and inside `SecurityHeaders`, so the refusal has them too.
+        app.add_middleware(KnownHosts, rule=hosts)
     # Added last, so it is outermost and sees every answer the others make.
     app.add_middleware(SecurityHeaders)
     return app

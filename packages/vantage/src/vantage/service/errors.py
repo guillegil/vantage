@@ -367,6 +367,24 @@ class CrossSiteRequestError(RejectionError):
         )
 
 
+class MisdirectedRequestError(RejectionError):
+    """A request whose `Host` names nothing this server answers to, or that
+    carried none (`service/hosts.py`): what a page that pointed its own
+    name at this machine sends. Refused before any route or the web client
+    sees it, and the header is never repeated, so the page learns nothing
+    but the refusal."""
+
+    status_code = 421
+    error = "misdirected_request"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This server does not answer to the host name this request was sent to. Use the "
+            "address it serves at, or have its operator allow the name with --allowed-host "
+            "NAME or VANTAGE_ALLOWED_HOSTS."
+        )
+
+
 class OpenServerError(RejectionError):
     """A users, tokens, login, password or members route asked of a
     database with no user, which only a database pytest-vantage's local
@@ -767,7 +785,9 @@ class UnreadableSettingError(RejectionError):
         )
 
 
-def _rejection_response(exc: RejectionError) -> JSONResponse:
+def rejection_response(exc: RejectionError) -> JSONResponse:
+    """`exc` as its answer; an ASGI app, so a middleware can answer with it
+    before any route runs."""
     return JSONResponse(
         status_code=exc.status_code,
         content=_rejection_body(exc.error, exc.detail, exc.fields),
@@ -809,7 +829,7 @@ def register_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(RejectionError)
     async def _handle_rejection(request: Request, exc: RejectionError) -> JSONResponse:
         del request
-        return _rejection_response(exc)
+        return rejection_response(exc)
 
     @app.exception_handler(RequestValidationError)
     async def _handle_request_validation_error(
@@ -821,8 +841,8 @@ def register_error_handlers(app: FastAPI) -> None:
             len(error["loc"]) >= 2 and error["loc"][0] == "query" and error["loc"][1] == "node_id"
             for error in errors
         ):
-            return _rejection_response(InvalidIdentityError.from_errors(errors))
-        return _rejection_response(InvalidParameterError.from_errors(errors))
+            return rejection_response(InvalidIdentityError.from_errors(errors))
+        return rejection_response(InvalidParameterError.from_errors(errors))
 
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http_exception(request: Request, exc: StarletteHTTPException) -> Response:
@@ -860,6 +880,7 @@ __all__ = [
     "InvalidSectionPrefixError",
     "InvalidTokenRequestError",
     "InvalidUserRequestError",
+    "MisdirectedRequestError",
     "NoSuchMemberError",
     "NoSuchProjectError",
     "NoSuchUserError",
@@ -890,5 +911,6 @@ __all__ = [
     "UserNameRefusedError",
     "UserNameTakenError",
     "register_error_handlers",
+    "rejection_response",
     "safe_segment",
 ]

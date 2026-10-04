@@ -8,7 +8,8 @@ writable-directory check, the wide-bind warning, and the grace period
 `uvicorn.Server.run` is replaced in every test that calls `main` in
 process -- these tests are about what `main` does around serving -- and so
 is `_listen`, by a stand-in that records the address asked for and binds an
-ephemeral loopback port instead, so no test holds 8765 or a wide address.
+ephemeral loopback port instead, so no test holds 8765 or a wide address;
+its socket reports holding the address asked for, as one bound there would.
 Both are patched by dotted path, `uvicorn.Server.run` on uvicorn itself,
 since `cli.py` imports uvicorn only once it serves. Some tests run the real
 command in a subprocess: to stop it the way a service manager does, and to
@@ -83,15 +84,33 @@ _needs_enforced_mode_bits = pytest.mark.skipif(
 _REAL_LISTEN = cli._listen
 
 
+class _ReportedSocket(socket.socket):
+    """A listening socket on an ephemeral loopback port that reports
+    holding `address` instead, as a socket bound there would."""
+
+    address: str
+
+    def getsockname(self) -> Any:
+        return (self.address, super().getsockname()[1])
+
+
+def _bound_as(address: str) -> socket.socket:
+    sock = _REAL_LISTEN("127.0.0.1", 0)
+    reported = _ReportedSocket(sock.family, sock.type, sock.proto, fileno=sock.detach())
+    reported.address = address
+    return reported
+
+
 @pytest.fixture
 def listened(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int, socket.socket]]:
     """Stands in for `_listen`: records each `(host, port)` `main` asked to
     listen on, and binds an ephemeral loopback port instead, recording the
-    socket it returned."""
+    socket it returned, which reports holding the address asked for (every
+    test here asks for an IP literal)."""
     requested: list[tuple[str, int, socket.socket]] = []
 
     def _listen(host: str, port: int) -> socket.socket:
-        sock = _REAL_LISTEN("127.0.0.1", 0)
+        sock = _bound_as(host)
         requested.append((host, port, sock))
         return sock
 
@@ -163,8 +182,11 @@ def serving(
         seen.said = _said(capsys.readouterr().err)
         seen.users = tuple(store.list_users())
         seen.admin_hash = store.get_password_hash(cli.FIRST_ADMIN)
-        # Without `with`, so the app is not shut down, and its store stays open.
-        answer = TestClient(app).post("/api/v1/runs", json=_start_report("d" * 32))
+        # Without `with`, so the app is not shut down, and its store stays
+        # open; by the loopback address, a name every start answers.
+        answer = TestClient(app, base_url="http://127.0.0.1:8765").post(
+            "/api/v1/runs", json=_start_report("d" * 32)
+        )
         seen.anonymous_report = answer.status_code
 
     monkeypatch.setattr("uvicorn.Server.run", _run)
@@ -226,8 +248,9 @@ def test_a_database_url_of_another_scheme_is_refused_and_creates_nothing(
         (["--grace-period", "1e-7"], "--grace-period"),
         (["--port", "70000"], "--port"),
         (["--host", ""], "--host"),
+        (["--allowed-host", "vantage.example.com:8765"], "--allowed-host"),
     ],
-    ids=["grace-period", "grace-period-below-a-microsecond", "port", "empty-host"],
+    ids=["grace-period", "grace-period-below-a-microsecond", "port", "empty-host", "allowed-host"],
 )
 def test_an_unusable_setting_is_refused_before_anything_is_created(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], setting: list[str], flag: str
@@ -410,6 +433,93 @@ def test_main_carries_the_resolved_grace_period_into_the_app(
     cli.main(["--database", str(tmp_path / "v.db"), "--grace-period", "60"])
 
     assert served["app"].state.grace_period == timedelta(seconds=60)
+
+
+def _answers(app: Any, name: str) -> int:
+    """The status `app` answers the capability advertisement with, asked
+    by `name`; without `with`, so the app is not shut down."""
+    return TestClient(app, base_url=f"http://{name}:8765").get("/api/v1/capabilities").status_code
+
+
+def test_main_serves_a_loopback_bind_to_the_names_it_is_known_by(
+    tmp_path: Path, served: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The seam between the resolved rule and the app: a `main` that
+    dropped `hosts=` would answer a page that pointed its own name at this
+    machine. The names come from the flag, else the environment."""
+    monkeypatch.delenv("VANTAGE_ALLOWED_HOSTS", raising=False)
+    cli.main(["--database", str(tmp_path / "v.db")])
+    app = served["app"]
+    assert [_answers(app, name) for name in ("localhost", "127.0.0.1", "rebound.example")] == [
+        200,
+        200,
+        421,
+    ]
+
+    monkeypatch.setenv("VANTAGE_ALLOWED_HOSTS", "vantage.example.com")
+    cli.main(["--database", str(tmp_path / "v.db")])
+    assert _answers(served["app"], "vantage.example.com") == 200
+
+    cli.main(["--database", str(tmp_path / "v.db"), "--allowed-host", "proxy.example.com"])
+    app = served["app"]
+    assert [_answers(app, name) for name in ("proxy.example.com", "vantage.example.com")] == [
+        200,
+        421,
+    ]
+
+
+def test_main_serves_a_wide_bind_every_name_unless_some_are_allowed(
+    tmp_path: Path, served: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VANTAGE_ALLOWED_HOSTS", raising=False)
+    wide = ["--database", str(tmp_path / "v.db"), "--host", "0.0.0.0"]  # noqa: S104
+
+    cli.main(wide)
+    assert _answers(served["app"], "rebound.example") == 200
+
+    cli.main([*wide, "--allowed-host", "vantage.example.com"])
+    assert _answers(served["app"], "vantage.example.com") == 200
+    assert _answers(served["app"], "rebound.example") == 421
+
+
+@pytest.mark.parametrize("given", ["127.1", "2130706433"])
+def test_main_checks_names_on_a_loopback_bind_written_in_a_short_form(
+    tmp_path: Path, served: dict[str, Any], monkeypatch: pytest.MonkeyPatch, given: str
+) -> None:
+    """Short forms the resolver binds as 127.0.0.1: judged as text, neither
+    reads as loopback, and the server would answer a page that pointed its
+    own name at this machine. Bound for real, on a port the OS assigns."""
+    monkeypatch.delenv("VANTAGE_ALLOWED_HOSTS", raising=False)
+    bound: list[str] = []
+
+    def _listen(host: str, _port: int) -> socket.socket:
+        sock = _REAL_LISTEN(host, 0)
+        bound.append(sock.getsockname()[0])
+        return sock
+
+    monkeypatch.setattr("vantage.service.cli._listen", _listen)
+
+    cli.main(["--database", str(tmp_path / "v.db"), "--host", given])
+
+    assert bound == ["127.0.0.1"]
+    assert _answers(served["app"], "rebound.example") == 421
+    assert _answers(served["app"], "localhost") == 200
+
+
+def test_main_checks_names_on_a_loopback_bind_given_by_a_name(
+    tmp_path: Path, served: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Debian's /etc/hosts maps the machine's own name to 127.0.1.1: a
+    server bound by that name is on loopback, and checks names as one."""
+    monkeypatch.delenv("VANTAGE_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setattr(
+        "vantage.service.cli._listen",
+        lambda host, _port: _bound_as("127.0.1.1" if host == "box" else host),
+    )
+
+    cli.main(["--database", str(tmp_path / "v.db"), "--host", "box"])
+
+    assert _answers(served["app"], "rebound.example") == 421
 
 
 @pytest.mark.usefixtures("listened")
