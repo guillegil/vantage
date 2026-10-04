@@ -7,6 +7,7 @@ import {
   BaselineNote,
   Button,
   ChangeBadge,
+  ChangeQueue,
   Command,
   CommitRef,
   DataTable,
@@ -50,6 +51,7 @@ export const ported: {
     | 'BaselineNote'
     | 'Button'
     | 'ChangeBadge'
+    | 'ChangeQueue'
     | 'Command'
     | 'CommitRef'
     | 'DataTable'
@@ -90,6 +92,7 @@ export const ported: {
   BaselineNote,
   Button,
   ChangeBadge,
+  ChangeQueue,
   Command,
   CommitRef,
   DataTable,

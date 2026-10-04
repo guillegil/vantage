@@ -7,6 +7,7 @@ export { AppBar } from './AppBar/AppBar';
 export { BaselineNote } from './BaselineNote/BaselineNote';
 export { Button } from './Button/Button';
 export { ChangeBadge } from './ChangeBadge/ChangeBadge';
+export { ChangeQueue } from './ChangeQueue/ChangeQueue';
 export { Command } from './Command/Command';
 export { CommitRef } from './CommitRef/CommitRef';
 export type * from './contract';

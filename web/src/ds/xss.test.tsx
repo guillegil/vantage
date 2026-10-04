@@ -8,6 +8,7 @@ import {
   AppBar,
   BaselineNote,
   ChangeBadge,
+  ChangeQueue,
   Command,
   CommitRef,
   DataTable,
@@ -87,6 +88,33 @@ function cases(s: string): [string, ReactElement][] {
     [
       'ChangeBadge',
       <ChangeBadge key="cb" change="still-failing" streak={{ runs: 2, since: s }} detail />,
+    ],
+    [
+      'ChangeQueue',
+      <ChangeQueue
+        key="cq"
+        results={[
+          {
+            nodeid: `t.py::t[${s}]`,
+            outcome: 'failed',
+            change: 'still-failing',
+            streak: { runs: 2, since: s },
+          },
+        ]}
+        missing={[{ nodeid: `t.py::gone[${s}]`, was: 'passed' }]}
+        interrupted
+        baseline={{ label: s }}
+        renderDetail={(r) => r.nodeid}
+      />,
+    ],
+    [
+      'ChangeQueue with no baseline',
+      <ChangeQueue
+        key="cqn"
+        results={[{ nodeid: `t.py::t[${s}]`, outcome: 'failed' }]}
+        baseline={null}
+        baselineNote={s}
+      />,
     ],
     ['RerunButton', <RerunButton key="rb" nodeids={[`t.py::t[${s}]`]} />],
     ['RerunButton command', <RerunButton key="rc" nodeids={['t.py::t']} command={s} />],
