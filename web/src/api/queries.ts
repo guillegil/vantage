@@ -11,6 +11,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
+import { useCallback } from 'react';
 import { ApiError, api, isApiError, type Schemas, unwrap } from './client';
 
 export type Session = Schemas['SessionResponse'];
@@ -22,18 +23,23 @@ export type RunMetadata = Schemas['RunMetadataResponse'];
 export type ResultDetail = Schemas['ResultDetailResponse'];
 export type HistoryEntry = Schemas['HistoryEntry'];
 export type RunOutcomes = Schemas['RunOutcomesResponse'];
-export type ChangeWord = Schemas['ChangeItem']['change'];
+export type ChangeItem = Schemas['ChangeItem'];
+export type ChangeWord = ChangeItem['change'];
 export type OutcomeWord = ResultItem['outcome'];
 
 export const RUNS_PAGE = 50;
-export const RESULTS_PAGE = 100;
+// The run page's queue reads changes and results 200 at a time, the most the API answers at once,
+// and the page the queue's own Show more asks for.
+export const QUEUE_PAGE = 200;
 export const HISTORY_PAGE = 50;
 // A result page's side column draws this many of the test's latest runs, as
 // the design's result page does.
 export const RECENT_HISTORY = 24;
 const LIST_STALE = 30_000;
 
-export const NOT_PASSING: OutcomeWord[] = ['failed', 'error', 'xpassed'];
+// A run with nothing to compare with lists its failures: failed or error, as the design system's
+// isFailing has it.
+export const FAILING: OutcomeWord[] = ['failed', 'error'];
 
 // A refusal is final; no answer, or a server error, is tried once more.
 export function retry(failures: number, error: unknown): boolean {
@@ -150,6 +156,15 @@ export function useRun(runId: string, enabled = true) {
   });
 }
 
+// Reads a run's detail again, alone: a list of a run still recording can hold results that arrived
+// after its detail was read, and its counts then catch up.
+export function useRereadRun(runId: string): () => void {
+  const client = useQueryClient();
+  return useCallback(() => {
+    void client.invalidateQueries({ queryKey: ['run', runId], exact: true });
+  }, [client, runId]);
+}
+
 function outcomesQuery(client: QueryClient, runId: string, finished: boolean) {
   return {
     ...runRead<RunOutcomes>(client, runId, ['outcomes'], finished),
@@ -184,7 +199,13 @@ export function useOutcomesOf(runs: { id: string; finished: boolean }[]) {
   });
 }
 
+// A list the API pages by offset: the next page starts past every item read so far.
+function nextOffset(last: { has_more: boolean }, pages: { items: unknown[] }[]): number | null {
+  return last.has_more ? pages.reduce((n, page) => n + page.items.length, 0) : null;
+}
+
 type ResultsPages = InfiniteData<Schemas['ResultsResponse'], number>;
+type ChangesPages = InfiniteData<Schemas['ChangesResponse'], number>;
 
 function resultsQuery(
   client: QueryClient,
@@ -200,29 +221,57 @@ function resultsQuery(
           params: {
             path: { run_id: runId },
             query: outcomes
-              ? { limit: RESULTS_PAGE, offset: pageParam, outcome: outcomes }
-              : { limit: RESULTS_PAGE, offset: pageParam },
+              ? { limit: QUEUE_PAGE, offset: pageParam, outcome: outcomes }
+              : { limit: QUEUE_PAGE, offset: pageParam },
           },
           signal,
         }),
       ),
     initialPageParam: 0,
-    getNextPageParam: (last: Schemas['ResultsResponse'], pages: Schemas['ResultsResponse'][]) =>
-      last.has_more ? pages.reduce((n, page) => n + page.items.length, 0) : null,
+    getNextPageParam: nextOffset,
   };
 }
 
-export function useNotPassing(runId: string, finished: boolean, enabled = true) {
+// One group of a compared run's changed tests, in queue order, a page at a time. Only a run with
+// an exit status is compared, so what it reads is kept for good.
+export function useChanges(runId: string, change: ChangeWord, finished: boolean, enabled: boolean) {
   const client = useQueryClient();
   return useInfiniteQuery({
-    ...resultsQuery(client, runId, NOT_PASSING, finished),
+    ...runRead<ChangesPages>(client, runId, ['changes', change], finished),
+    queryFn: ({ pageParam, signal }: { pageParam: number; signal: AbortSignal }) =>
+      unwrap(
+        api.GET('/runs/{run_id}/changes', {
+          params: {
+            path: { run_id: runId },
+            query: { change: [change], limit: QUEUE_PAGE, offset: pageParam },
+          },
+          signal,
+        }),
+      ),
+    initialPageParam: 0,
+    getNextPageParam: nextOffset,
     enabled,
   });
 }
 
-export function useResults(runId: string, finished: boolean, enabled = true) {
+// The failures of a run with no baseline, for its queue's one group.
+export function useFailures(runId: string, finished: boolean, enabled: boolean) {
   const client = useQueryClient();
-  return useInfiniteQuery({ ...resultsQuery(client, runId, null, finished), enabled });
+  return useInfiniteQuery({ ...resultsQuery(client, runId, FAILING, finished), enabled });
+}
+
+// The whole run in stored order for the queue's whole-run view, filtered by one outcome or none.
+export function useQueueResults(
+  runId: string,
+  outcome: OutcomeWord | null,
+  finished: boolean,
+  enabled: boolean,
+) {
+  const client = useQueryClient();
+  return useInfiniteQuery({
+    ...resultsQuery(client, runId, outcome ? [outcome] : null, finished),
+    enabled,
+  });
 }
 
 export function useRunMetadata(runId: string, finished: boolean, enabled = true) {
@@ -241,9 +290,10 @@ export function useRunMetadata(runId: string, finished: boolean, enabled = true)
 }
 
 // One result of a run, in full. A final run's results never change.
-export function useResult(runId: string, nodeId: string, finished: boolean) {
+export function useResult(runId: string, nodeId: string, finished: boolean, enabled = true) {
   const client = useQueryClient();
   return useQuery<ResultDetail>({
+    enabled,
     ...runRead<ResultDetail>(client, runId, ['result', nodeId], finished),
     queryFn: ({ signal }) =>
       unwrap(

@@ -6,35 +6,18 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { Change, HistoryGridProps, Outcome } from '../contract';
+import type { HistoryGridProps, Outcome } from '../contract';
 import { markRects } from '../Dotline/Dotline';
+import { CHANGES, isChange } from '../lib/changes';
 import { cx } from '../lib/cx';
 import { fmtCount, plural } from '../lib/format';
-import { useOverflowFocus, useUid } from '../lib/hooks';
+import { useOverflowFocus, useUid, useWidth } from '../lib/hooks';
 import { isFailing } from '../lib/outcomes';
 import { visibleText } from '../lib/visible';
 import { NodeId } from '../NodeId/NodeId';
 
-type HistoryRun = HistoryGridProps['runs'][number] & {
-  /** The run's result of this test; a cell whose run has one opens it. */
-  href?: string;
-};
+type HistoryRun = HistoryGridProps['runs'][number];
 type HistoryRowData = HistoryGridProps['rows'][number];
-
-export interface PortedHistoryGridProps extends HistoryGridProps {
-  runs: HistoryRun[];
-  /** Follows a run's href, in place of loading it as a new page. */
-  onOpen?: (href: string) => void;
-}
-
-const CHANGE_WORDS: Record<Change, string> = {
-  'new-failure': 'new failure',
-  'still-failing': 'still failing',
-  fixed: 'fixed',
-  'new-test': 'new test',
-  removed: 'removed',
-  'not-reached': 'not reached',
-};
 
 interface Note {
   kind: 'none' | 'failing' | 'flaky' | 'passing';
@@ -100,15 +83,18 @@ function HistoryRow(p: {
   row: HistoryRowData;
   runs: HistoryRun[];
   W: number;
+  pitch: number;
+  mark: number;
+  height: number;
   stacked: boolean;
-  onOpen?: (href: string) => void;
+  onOpen?: HistoryGridProps['onOpen'];
 }) {
   const { row, runs, W } = p;
   const outs = row.outcomes || [];
   const chg = row.changes || [];
-  const pitch = 10;
-  const w = 8;
-  const H = 16;
+  const pitch = p.pitch || 10;
+  const w = p.mark || 8;
+  const H = p.height || 16;
   const n = outs.length;
   const [cur, setCur] = useState(-1);
   const noteId = useUid('dl-hnote');
@@ -118,7 +104,16 @@ function HistoryRow(p: {
   outs.forEach((o, i) => {
     const shape = o
       ? markRects(o, i * pitch, w, H, 'c', chg[i])
-      : [<rect key="n" className="dl-m--none" x={i * pitch + 3} y={H - 4} width={2} height={2} />];
+      : [
+          <rect
+            key="n"
+            className="dl-m--none"
+            x={i * pitch + Math.floor(w / 2) - 1}
+            y={H - 4}
+            width={2}
+            height={2}
+          />,
+        ];
     // biome-ignore lint/suspicious/noArrayIndexKey: a cell's place is its run, oldest first.
     marks.push(<g key={`g${i}`}>{shape}</g>);
   });
@@ -137,20 +132,21 @@ function HistoryRow(p: {
   function at(i: number): string {
     const run = runs[i];
     const change = chg[i];
-    const c = outs[i] && change ? `, ${CHANGE_WORDS[change]}` : '';
-    return `${run?.label || `run ${i + 1}`}${run?.detail ? ` (${run.detail})` : ''}: ${
+    const c = outs[i] && isChange(change) ? `, ${CHANGES[change].word}` : '';
+    return `${run?.label || `run ${i + 1}`}${run?.detail ? ` (${visibleText(run.detail)})` : ''}: ${
       outs[i] || 'not in this run'
     }${c}`;
   }
   function move(i: number) {
     if (n) setCur(Math.max(0, Math.min(n - 1, i)));
   }
-  // A run that carries its result's address opens it: the pointer's cell, or the cursor's on Enter.
-  const opens = runs.some((r) => r.href);
+  // A run that carries the address of this test's result in it opens there: the pointer's cell, or the cursor's on Enter.
+  const opens = runs.some((r) => r?.href);
   function open(i: number) {
-    const href = runs[i]?.href;
-    if (!href || i < 0 || i >= n) return;
-    if (p.onOpen) p.onOpen(href);
+    const run = runs[i];
+    const href = run?.href;
+    if (!run || !href || i < 0 || i >= n) return;
+    if (p.onOpen) p.onOpen(href, run);
     else window.location.assign(href);
   }
   function onKey(e: KeyboardEvent<SVGSVGElement>) {
@@ -195,7 +191,7 @@ function HistoryRow(p: {
         width={W}
         height={H}
         viewBox={`0 0 ${W} ${H}`}
-        className="dl-hgrid__marks"
+        className={cx('dl-hgrid__marks', opens && 'dl-hgrid__marks--opens')}
         tabIndex={n ? 0 : undefined}
         role={n ? 'slider' : 'img'}
         aria-label={`History of ${row.nodeid ? visibleText(row.nodeid) : 'this test'}`}
@@ -244,13 +240,30 @@ function HistoryRow(p: {
   );
 }
 
-export function HistoryGrid(p: PortedHistoryGridProps) {
+export function HistoryGrid(p: HistoryGridProps) {
   const runs = p.runs || [];
   const rows = p.rows || [];
   const stacked = !!p.stacked;
-  const W = Math.max(runs.length * 10 - 2, 8);
+  // fill: a test's own page gives its runs the panel's width, larger marks for fewer runs, so the history
+  // is the loudest thing on the page. Elsewhere a run takes 10px.
+  const [width, measure] = useWidth();
+  const fill = !!p.fill && stacked;
+  const pitch =
+    fill && width && runs.length
+      ? Math.max(10, Math.min(28, Math.floor((width + 4) / runs.length)))
+      : 10;
+  const mark = pitch >= 16 ? pitch - 4 : pitch - 2;
+  const tall = pitch >= 16 ? 24 : 16;
+  const W = Math.max(runs.length * pitch - (pitch - mark), 8);
   const wrap = useRef<HTMLDivElement | null>(null);
   const over = useOverflowFocus(wrap);
+  // The first and last run's labels sit under the ends of the marks. With too few runs to hold both
+  // apart, the axis names none: the readout names each run, and the span is said in words.
+  const first = runs.length ? String(runs[0]?.label || '') : '';
+  const last = runs.length > 1 ? String(runs[runs.length - 1]?.label || '') : '';
+  const fits = W >= (first.length + last.length) * 7.2 + 12;
+  const span =
+    runs.length === 1 ? 'the only run' : `${plural(runs.length, 'run', 'runs')}, oldest to newest`;
   return (
     <div
       ref={wrap}
@@ -259,19 +272,29 @@ export function HistoryGrid(p: PortedHistoryGridProps) {
       role={over ? 'region' : undefined}
       aria-label={over ? 'Test history' : undefined}
     >
+      {fill ? <div ref={measure} className="dl-hgrid__measure" aria-hidden="true" /> : null}
       <div className={cx('dl-hgrid', stacked && 'dl-hgrid--stacked')}>
         {stacked ? null : (
           <div className="dl-hgrid__axis">
             <span>{rows.length === 1 ? 'test' : plural(rows.length, 'test', 'tests')}</span>
           </div>
         )}
-        <div className="dl-hgrid__axis" style={{ width: W }}>
-          <span>{runs.length ? runs[0]?.label : ''}</span>
-          <span>{runs.length > 1 ? runs[runs.length - 1]?.label : ''}</span>
-        </div>
+        {fits ? (
+          <div className="dl-hgrid__axis" style={{ width: W }}>
+            <span>{first}</span>
+            <span>{last}</span>
+          </div>
+        ) : (
+          <div
+            className="dl-hgrid__axis dl-hgrid__axis--words"
+            style={stacked ? undefined : { width: W }}
+          >
+            {stacked ? <span>{span}</span> : null}
+          </div>
+        )}
         {stacked ? null : (
           <div className="dl-hgrid__axis">
-            <span>{`${plural(runs.length, 'run', 'runs')}, oldest to newest`}</span>
+            <span>{span}</span>
           </div>
         )}
         {rows.map((row, r) => (
@@ -281,6 +304,9 @@ export function HistoryGrid(p: PortedHistoryGridProps) {
             row={row}
             runs={runs}
             W={W}
+            pitch={pitch}
+            mark={mark}
+            height={tall}
             stacked={stacked}
             onOpen={p.onOpen}
           />

@@ -6,6 +6,7 @@ Key and value pairs in two mono columns: session metadata, a plugin's facts, a v
 - A missing value is `—` with *Not recorded* on hover. Never guess one.
 - `source` tags where a value came from when it matters: `--vantage-metadata`, a plugin name.
 - Consumer provides: `items` of `{key, value, source}` in the order they were recorded.
+- Keys and values are recorded text: a character that prints nothing or reorders text shows as its code point (see `NodeId`).
 
 ## Port notes
 

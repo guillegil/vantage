@@ -1349,10 +1349,11 @@ next version. Each component is a typed export with the design system's
 markup, classes, words, aria and behaviour, beside its README copied
 verbatim with the port's notes after it; `contract.test-d.ts`, checked by
 `tsc`, assigns each to the type `contract.d.ts` declares, so a prop that
-drifts fails `typecheck`. Only what the screens use is ported, and nothing
-that shows what the server does not store. Components never fetch. The few
-rules the port adds sit in `port.css`, loaded after `dotline.css`, each
-named in the port notes of the component that uses it.
+drifts fails `typecheck`. What the screens use is ported, with the
+components those draw on, and `Tabs` and `MenuButton` ahead of the screens
+that will use them; no screen shows what the server does not store.
+Components never fetch. The port adds no styles of its own: `dotline.css`
+styles everything it shows.
 
 **The tokens are CSS made on the fly** by `build/dotline-tokens.ts`, a Vite
 plugin that resolves `virtual:dotline-tokens.css` to a name beside
@@ -1390,13 +1391,77 @@ carries its character of `changes`, which is null until the run is
 compared, so a pending run or one with nothing to compare with draws plain
 marks. A compared run's list row carries its new failures and fixes from
 its `comparison.counts`, and a history strip each entry's `change`.
-`baselineLine` words what the run page says it was compared with from the
-run's `comparison`, its presentation and its own branch and commit, and
-`earlier` how much sooner the baseline started, from the two start
-times. It returns each recorded branch and commit as a part of its own
-(the commit cut to seven characters by code point), which the page sets in
-a `<bdi>` through `visible`, so neither a right-to-left name nor a
+`baselineNote` gives the design system's `BaselineNote` its props from a
+run's detail: its `state` (`compared`, `none`, `pending` while it runs,
+`abandoned`), the `baseline`'s label, address, id and branch, `earlier`,
+how many seconds sooner the baseline started, from the two start times,
+and, when the comparison fell back from the run's own branch, why
+(`fallback`: the branch it has, a detached HEAD at its commit, no branch,
+or no repository). `BaselineNote` words the sentence, cuts the commit to
+seven characters by code point, and sets each recorded branch and commit
+in a `<bdi>` through `visible`, so neither a right-to-left name nor a
 character that reorders text moves the words around it.
+
+**The run page** is the design system's triage view, `ChangeQueue` beside
+the selected test, paged by the server. The queue is given each group's
+total (`queueTotals`: `comparison.counts`, or failed plus error for a run
+not compared) and the rows read so far, and asks for more through
+`onMore`. A run still recording lists results that arrived after its
+detail was read, so its failures' total, and the whole run's, is never
+fewer than the list holds, and while the list has more to read, one more
+than that, so the queue still asks for its next page; a list read past
+its count reads the run's detail again (`useRereadRun`), once for each
+page past it, so the counts catch up; and asking for more of a list
+wholly read reads it again. A group is read from `/changes?change=`, 200
+at a time (`useChanges`), only once its total is not zero, the removed
+tests only once their group is opened or the address names a test the
+run has no result for; a run with no baseline reads its failures from
+`/results?outcome=failed&outcome=error`, and the whole-run view reads
+`/results` with its outcome filter, each 200 at a time. *Try again* on a
+list whose reading afresh failed reads it from its first page; on one
+whose next page failed, that page. Like every read of
+a run, each is keyed by whether the run was final. Every page of new
+failures is read before the rerun button under the baseline sentence is
+offered, since it names every one. A row's change, earlier outcome and
+streak come from `/changes`; a test from the whole run, or one the address
+names that no loaded row holds, takes them from `/result`, never from the
+line's change characters, which hold nothing for a test the run lacks. The
+page opens on the first row of the first group with a total, once that
+group's first page is read, and selects nothing until then, so no later
+group's test that arrived sooner is shown or copied. The selection starts
+as the address's `node_id`: a changed test it names has its group read
+page by page until the group holds it, and the queue opens the group and
+shows rows down to it; an unchanged one is shown with no row selected,
+its cursor on the line from `/result`'s `position`; for one `/result` has
+no result for, the removed and not-reached groups are read whole, the
+removed opened, and only a test neither holds gets a notice while the
+page opens on the queue's first row; should a read of either fail, the
+detail says the page could not finish checking, in place of its loading
+line, until the failed read's *Try again* resumes the search. The
+selection is the page's own state, set with `flushSync` so a key pressed
+straight after a move acts on the test it moved to, and the address
+follows it: each rewrite replaces
+the address, so Back leaves the run, at most every 350 ms, since browsers
+refuse a page that replaces its address too often (Safari past 100 times
+in 10 s, Firefox past 200) and a held key moves 25 times a second. A
+refused rewrite rejects the router's promise, which the page catches,
+trying again two seconds later; the selection moved regardless. A rewrite
+still waiting is written before the page is left, by Enter, by the
+history strip or by a link click (a capturing listener on the document,
+ahead of the client's link routing), so Back comes to the test chosen
+last; a navigation that changes the address all the same, as Back between
+two of the run's addresses, moves the selection. A rewrite lands only on
+the page it was chosen on. A page left stays mounted, its timer armed and
+its keys live, until the next one has rendered, and a relative rewrite
+would then replace the next page's address, so each rewrite first checks
+that the data router (`UNSAFE_DataRouterContext`) is still on the run's
+path and not on its way elsewhere; and Back or Forward, which move the
+address before anything can be written, drop a rewrite still waiting,
+from a `popstate` listener that runs in the router's own task, so
+Forward comes back to the test written last. Each rewrite carries
+`SAME_PAGE` as its state, which `usePage` takes as staying on the page,
+leaving focus where it is; every other navigation, Back included, focuses
+the page's heading.
 
 **Links** are the design system's plain `<a href>`, which keep middle-click
 and copying the address. One click listener on the document routes a plain
@@ -1407,17 +1472,35 @@ built files, without a reload.
 `build/no-html-sinks.grit` refuses `innerHTML`, `outerHTML`,
 `insertAdjacentHTML` and `document.write`, `dangerouslySetInnerHTML` is an
 error, and the page policy's Trusted Types make any such sink throw.
-Recorded text is also shown as it is: `NodeId`, `Evidence` (its body and a
-string `meta`, which may name a recorded path or exception type), the run
-page's first line of each failure, its baseline sentence's branches and
-commit, and both pages' interrupt reason print each bidirectional control,
-invisible format character, Hangul filler, variation selector, C0 or C1
-control (tab and line breaks aside) and U+FFFD as its code point in a
-marked box (`ds/lib/visible.tsx`). Where recorded text becomes a plain
-string -- the window's title, the history slider's name, its readout's
-branch -- `visibleText` writes it as `⟨U+202E⟩`. So a right-to-left
-override can never make a node id or a traceback read as something else;
-*Copy* still copies the text as recorded.
+Recorded text is also shown as it is: the design system's `visible`
+(`ds/lib/visible.tsx`) prints each bidirectional control, invisible format
+character, Hangul filler, variation selector, C0 or C1 control (tab and
+line breaks aside), lone surrogate and U+FFFD as its code point in a marked
+box. `NodeId`, `Evidence` (its body and a string `meta`, which may name a
+recorded path or exception type), `CommitRef`, `MetaList` and `RunStatus`'s
+recorded reason use it, and so does `BaselineNote` for the branches and
+commit it names. Where recorded
+text becomes a plain string -- a tooltip, the window's title, the history
+slider's name and readout, the triage detail's accessible name --
+`visibleText` writes it as `⟨U+202E⟩`. So a right-to-left override can
+never make a node id or a traceback read as something else; *Copy* still
+copies the text as recorded. A rerun command (`RerunButton`'s
+`rerunCommand`, which the queue's `c` uses too) is the exception, since
+it is pasted into a shell: in a node id holding a control character or
+one `visible` marks, each run of such characters is written `$'…'`, as
+their UTF-8 bytes in octal escapes, and every other run in plain single
+quotes, so the command shows and copies only what a terminal prints. A
+`$'…'` part holds nothing but escapes, so a shell without `$'…'`, as
+dash, reads it as a `$` and quoted text and the quoting stays in step:
+one argument, never a command; the unit tests run hostile node ids
+through bash, dash and each other shell the machine has. A node id
+starting with `-` or `@` is given as `./…`, so pytest never reads it as
+an option or as a file of arguments. The file for `pytest @file` starts
+with a `--` line, so no line is an option, not even one a Latin-1
+locale's reading splits out of a node id at a 0x85 byte; it gives node
+ids the same way, and leaves out one holding a line break, which pytest
+would split. Since an option typed after `@file` lands after its `--`,
+the hint beside the button reads `pytest [options] @file`.
 
 ### Build, packaging and CI
 

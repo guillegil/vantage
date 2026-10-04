@@ -2,11 +2,12 @@
 // Tokens first, then the design system's own stylesheet, verbatim.
 import 'virtual:dotline-tokens.css';
 import './dotline.css';
-// Then the few rules the port adds, each named in a component's port notes.
-import './port.css';
 
 export { AppBar } from './AppBar/AppBar';
+export { BaselineNote } from './BaselineNote/BaselineNote';
 export { Button } from './Button/Button';
+export { ChangeBadge } from './ChangeBadge/ChangeBadge';
+export { ChangeQueue } from './ChangeQueue/ChangeQueue';
 export { Command } from './Command/Command';
 export { CommitRef } from './CommitRef/CommitRef';
 export type * from './contract';
@@ -45,11 +46,14 @@ export { PhaseTimeline } from './PhaseTimeline/PhaseTimeline';
 export { PinButton } from './PinButton/PinButton';
 export { ProjectSwitcher } from './ProjectSwitcher/ProjectSwitcher';
 export { RecordingGuide } from './RecordingGuide/RecordingGuide';
+export { RerunButton } from './RerunButton/RerunButton';
 export { RetentionTag } from './RetentionTag/RetentionTag';
 export { RoleBadge } from './RoleBadge/RoleBadge';
 export { RunList } from './RunList/RunList';
 export { RunStatus } from './RunStatus/RunStatus';
+export { SegmentedControl } from './SegmentedControl/SegmentedControl';
 export { SummaryLine } from './SummaryLine/SummaryLine';
+export { Tabs } from './Tabs/Tabs';
 export { Time } from './Time/Time';
 export { Tooltip } from './Tooltip/Tooltip';
 export { UserChip } from './UserChip/UserChip';

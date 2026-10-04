@@ -46,3 +46,15 @@ it('shows a bidi control or invisible character as its code point, never obeying
   expect(id.querySelectorAll('.dl-hidden-char')).toHaveLength(2);
   expect(id).toHaveAttribute('title', 'tests/test_a.py::test_x[⟨U+202E⟩evil⟨U+200B⟩]');
 });
+
+it('lets a long id break before its parameters, unless truncated', () => {
+  const { container, rerender } = render(<NodeId value="tests/test_a.py::test_one[a-b]" />);
+  const breaks = () => Array.from(container.querySelectorAll('wbr'));
+  // After the directory, before "::", and before the parameters.
+  expect(breaks()).toHaveLength(3);
+  expect(breaks()[2]?.nextElementSibling).toHaveTextContent('[a-b]');
+  rerender(<NodeId value="test_a.py::test_one[a-b]" />);
+  expect(breaks()).toHaveLength(2);
+  rerender(<NodeId value="tests/test_a.py::test_one[a-b]" truncate />);
+  expect(breaks()).toHaveLength(0);
+});

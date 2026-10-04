@@ -18,7 +18,7 @@ describe('Evidence', () => {
   it('prints a traceback verbatim, marking pytest’s own lines', () => {
     const { container } = render(<Evidence text={TB} meta="call phase" level={2} />);
     expect(screen.getByRole('heading', { level: 2, name: 'Traceback' })).toBeInTheDocument();
-    expect(screen.getByText('call phase')).toBeInTheDocument();
+    expect(screen.getByText('call phase')).toHaveClass('dl-evidence__meta');
     const body = container.querySelector('pre') as HTMLElement;
     expect(body.textContent).toBe(TB);
     expect(body).toHaveAttribute('dir', 'ltr');

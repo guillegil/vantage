@@ -2,6 +2,10 @@ import AxeBuilder from '@axe-core/playwright';
 import type { Page } from '@playwright/test';
 import { ALICE, allow, CLOSED, expect, OPEN, signedIn, test } from './fixtures';
 
+const RLO = String.fromCodePoint(0x202e);
+const IMG = '<img src=x onerror=window.__pwned=1>';
+const SCRIPT = '</script><script>window.__pwned=1</script>';
+
 const PAGE_POLICY =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
 
@@ -11,16 +15,47 @@ async function firstRun(page: Page, base: string): Promise<string> {
   return id ?? '';
 }
 
-test('hostile names and failure text stay text', async ({ page, watch }) => {
+test('hostile names and failure text stay text', async ({ page, context, watch }) => {
   allow(watch, OPEN());
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: OPEN() });
   const id = await firstRun(page, OPEN());
   await page.goto(`${OPEN()}/runs/${id}`);
-  const all = page.locator('section', { has: page.getByRole('heading', { name: 'All results' }) });
-  await expect(all).toContainText('[<img src=x onerror=window.__pwned=1>]');
-  const notPassing = page.locator('section', {
-    has: page.getByRole('heading', { name: 'Not passing' }),
+  const queue = page.locator('.dl-queue');
+  // Failure text, in the evidence beside a test the queue holds.
+  await queue.getByRole('option').filter({ hasText: 'suite.py::test_hostile_output' }).click();
+  await expect(
+    page.getByRole('region', { name: 'Selected test: suite.py::test_hostile_output' }),
+  ).toContainText(SCRIPT);
+  // Hostile node ids, in the whole run and as the selected test, its rerun quoted for a shell.
+  await queue.getByRole('button', { name: /^All \d+ results$/ }).click();
+  const hostile = queue
+    .getByRole('option')
+    .filter({ hasText: `suite.py::test_hostile_id[${IMG}]` });
+  await hostile.click();
+  const detail = page.getByRole('region', {
+    name: `Selected test: suite.py::test_hostile_id[${IMG}]`,
   });
-  await expect(notPassing).toContainText('</script><script>window.__pwned=1</script>');
+  await expect(detail.getByRole('heading', { level: 2 })).toHaveText(
+    `suite.py::test_hostile_id[${IMG}]`,
+  );
+  await expect(detail.locator('.dl-triage__cmd')).toContainText(
+    `pytest 'suite.py::test_hostile_id[${IMG}]'`,
+  );
+  // A character that reorders text is shown as its code point, not obeyed.
+  const reordered = queue.getByRole('option').filter({ hasText: 'gnp.exe' });
+  await expect(reordered).toContainText('suite.py::test_hostile_id[U+202Egnp.exe]');
+  expect(await reordered.textContent()).not.toContain(RLO);
+  // Its rerun command carries the character as escaped bytes, so what shows is what copies.
+  await reordered.click();
+  const escaped = "pytest 'suite.py::test_hostile_id['$'\\342\\200\\256''gnp.exe]'";
+  const cmd = page.locator('.dl-triage__cmd');
+  await expect(cmd.locator('.dl-cmd__text [data-copy-text]')).toHaveText(escaped);
+  expect(await cmd.textContent()).not.toContain(RLO);
+  await page.keyboard.press('c');
+  const foot = queue.locator('.dl-queue__foot');
+  await expect(foot).toHaveText(`Copied ${escaped}`);
+  expect(await foot.textContent()).not.toContain(RLO);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(escaped);
   await expect(page.locator('main img')).toHaveCount(0);
   expect(
     await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned),
@@ -55,8 +90,14 @@ for (const scheme of ['light', 'dark'] as const) {
     await expect(page.getByRole('listitem').first()).toContainText('passed');
     expect(await serious()).toEqual([]);
     await page.goto(`${OPEN()}/runs/${id}`);
-    await expect(page.getByRole('heading', { name: 'All results' })).toBeVisible();
-    await expect(page.locator('table').last()).toContainText('test_passes');
+    await expect(
+      page.getByRole('region', { name: 'Selected test: suite.py::test_assert_fails' }),
+    ).toContainText('expected 3.3V, got 3.38V');
+    expect(await serious()).toEqual([]);
+    await page.getByRole('button', { name: /^All \d+ results$/ }).click();
+    await expect(
+      page.getByRole('option').filter({ hasText: 'suite.py::test_passes_again' }),
+    ).toBeVisible();
     expect(await serious()).toEqual([]);
   });
 }

@@ -17,3 +17,19 @@ it('says when no commit was recorded', () => {
     'no commit recorded',
   );
 });
+
+it('shows a recorded branch, sha and subject with their hidden characters as code points', () => {
+  const rlo = String.fromCodePoint(0x202e);
+  const { container } = render(
+    <CommitRef branch={`main${rlo}`} sha={`😀${rlo}a1b2c3d4`} subject={`Fix${rlo} it`} />,
+  );
+  expect(screen.getByTitle(`Branch main⟨U+202E⟩`)).toHaveTextContent('mainU+202E');
+  // Seven characters by code point: the emoji is never cut in two.
+  expect(screen.getByTitle(`Commit 😀⟨U+202E⟩a1b2c3d4`)).toHaveTextContent('😀U+202Ea1b2c');
+  const subject = container.querySelector('.dl-commit__subject');
+  expect(subject?.tagName).toBe('BDI');
+  expect(subject).toHaveAttribute('title', 'Fix⟨U+202E⟩ it');
+  expect(subject).toHaveTextContent('FixU+202E it');
+  expect(container.querySelectorAll('.dl-hidden-char')).toHaveLength(3);
+  expect(container.textContent).not.toContain(rlo);
+});

@@ -14,7 +14,7 @@ A project's runs as rows: pin, state and id, who and when, the dotline and count
 - Put the list in a flush `Panel`, with a `Pager` under it.
 - Consumer provides `runs` (see `RunItem` in the types), `now`, and `onPin` where pins exist. With no runs it shows a plain empty state; pass `empty` with an `EmptyState` holding a `RecordingGuide` so a project's first run gets the exact command.
 
-**Ahead of the server.** The read API does not serve visibility, pins, retention or change yet; the props below are the component's own contract, for the server to fill once it does.
+**Ahead of the server.** The read API does not serve visibility, pins or retention yet; the props below are the component's own contract, for the server to fill once it does.
 
 ## Port notes
 

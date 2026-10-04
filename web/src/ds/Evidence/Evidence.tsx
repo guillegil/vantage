@@ -8,6 +8,8 @@ import { visible } from '../lib/visible';
 
 export function evidenceLines(text: string | null | undefined, kind: string): ReactNode {
   const lines = String(text || '').split('\n');
+  // A character that prints nothing or reorders text shows as its code point, so a traceback never
+  // reads as something it does not say. Copy still copies the text as recorded.
   if (kind !== 'traceback') return visible(lines.join('\n'));
   return lines.map((ln, i) => {
     // pytest's own marks: "E" lines explain the failure, ">" is the failing source line, "path.py:N:" locates it.
@@ -21,7 +23,8 @@ export function evidenceLines(text: string | null | undefined, kind: string): Re
     return (
       // biome-ignore lint/suspicious/noArrayIndexKey: a line's place in the text is its identity.
       <span key={i} className={cls}>
-        {visible(ln + (i < lines.length - 1 ? '\n' : ''))}
+        {visible(ln)}
+        {i < lines.length - 1 ? '\n' : null}
       </span>
     );
   });
@@ -38,7 +41,11 @@ export function Evidence(p: EvidenceProps) {
     <section className={cx('dl-evidence', p.className)} data-copy-scope="">
       <div className="dl-evidence__head">
         {createElement(`h${level}`, { className: 'dl-evidence__title' }, title)}
-        {p.meta ? <span>{typeof p.meta === 'string' ? visible(p.meta) : p.meta}</span> : null}
+        {p.meta ? (
+          <span className="dl-evidence__meta">
+            {typeof p.meta === 'string' ? visible(p.meta) : p.meta}
+          </span>
+        ) : null}
         {p.actions || null}
         {p.controls === false ? null : (
           <span className="dl-evidence__tools">

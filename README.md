@@ -753,24 +753,63 @@ project you had open last, or of `default`.
   pytest printed it, heads the list. A project with no runs yet shows the
   exact `pytest` command that records one into it on this server.
 - **A run**: its status (and why, when it was interrupted or abandoned), its
-  commit and subject, who recorded it, when it started and finished, pytest's
-  closing line, the line of every result with its change marks, what it was
-  compared with, what did not pass (failed, error,
-  xpassed) with the first line of each failure, every result in order, and
-  its metadata. What it was compared with is one line: *Compared with
-  1adf29af on main, 42 min earlier*, the baseline linking to its run, and
-  starting *No earlier complete run on feat/x*, *No branch recorded
-  (detached HEAD at 4b8f6a3)* or *Recorded outside a git repository* when
-  it fell back to the project's latest complete run; or *Nothing to compare
-  with yet.*, *Compared with its baseline once the session ends.* while it
-  runs, and *Not compared: no end was recorded.* when it was abandoned. A
-  run with an exit status never changes, so what the page read of it once
+  commit and subject, who recorded it, when it started and finished, the
+  line of every result with its change marks over pytest's closing line,
+  what it was compared with, the queue of what changed beside the test
+  chosen in it, and, closed under them, its metadata. What it was compared
+  with is one line: *Compared with 1adf29af on main, 42 min earlier*, the
+  baseline linking to its run, and starting *No earlier complete run on
+  feat/x*, *No branch recorded (detached HEAD at 4b8f6a3)* or *Recorded
+  outside a git repository* when it fell back to the project's latest
+  complete run; or *Nothing to compare with yet.*, *Compared with its
+  baseline once the session ends.* while it runs, and *Not compared: no
+  end was recorded.* when it was abandoned. A compared run with new
+  failures ends that line with a button copying the `pytest` command that
+  reruns them all (past 20, it downloads their node ids as
+  `new-failures.txt` for `pytest [options] @new-failures.txt` instead;
+  the file starts with a `--` line, so any options go before
+  `@new-failures.txt`, as the button's hint shows, and it leaves out, and
+  says so, a node id holding a line break, which pytest would read as
+  two).
+  - **The queue** groups the tests that changed in the order to work
+    through them: new failures, still failing (with how many runs in a row
+    and since which), fixed, new tests, then the removed tests, closed until
+    opened, or, in a run that stopped before its end, the tests it did not
+    reach. It says when nothing but what was already failing changed. A
+    run with nothing to compare with, or not compared yet, lists its
+    failures (failed and error) instead. *All N results* lists every
+    result of the run in the order pytest reported it, filtered by
+    outcome. Long lists show their first 50 tests (200, of every result)
+    and more on request; the filter box narrows either list by node id,
+    among the tests loaded so far.
+  - **The chosen test**, the queue's first when the page opens (its first
+    new failure, if it has one, once it has arrived): its outcome, how it
+    changed and against which run, its latest runs in the project with a
+    link to its full history, the command that reruns it, a link to its
+    result page, and, for a failure, everything recorded about why, as on
+    its result page.
+  - **Keys**, while no text field, menu or dialog has focus: `j` and `k`
+    move through the queue, `c` copies the chosen test's rerun command and
+    `/` goes to the filter. Once the queue has focus, the arrow keys, Home
+    and End move too, and Enter opens the chosen test's result page -- its
+    result in the baseline, for a test this run lacks. In a narrow window
+    the queue and the chosen test take turns, and Enter shows the test.
+  - The chosen test is in the address (`/runs/<id>?node_id=...`), so the
+    address can be shared; moving through the queue does not add to the
+    browser's history, so Back leaves the run, and while a key held down
+    moves it the address follows a moment behind. An address naming a
+    test the queue holds opens on it, its group opened and shown down to
+    it, a removed or not-reached test included; one naming a test that did
+    not change shows it with nothing in the queue chosen; one naming a
+    test neither the run nor its baseline holds says so and opens on the
+    queue's first test.
+
+  A run with an exit status never changes, so what the page read of it once
   it had one is kept; an abandoned one is read again, since `vantage push`
   may still deliver its end, and a run seen to get its exit status is read
-  afresh, its marks with it. Failure text shows only for runs recorded with
-  `--vantage-failure-text`. Under pytest-xdist the workers' results
-  interleave in the line, as they were reported. Each result opens its own
-  page.
+  afresh, its marks and its changes with it. Failure text shows only for
+  runs recorded with `--vantage-failure-text`. Under pytest-xdist the
+  workers' results interleave in the line, as they were reported.
 - **A result**: the test's node id and outcome, with the run's status,
   commit and who recorded it; everything recorded about why it did not pass,
   each verbatim in a block of its own -- the traceback (marked with the phase
@@ -789,8 +828,18 @@ project you had open last, or of `default`.
   result may also have run with output capture off (`-s`).
   A character that reorders or hides text, such as a right-to-left override,
   a zero-width space, or the U+FFFD the server stores for U+0000, shows as
-  its code point (`U+202E`) in node ids and failure text, so neither reads as
-  something else.
+  its code point (`U+202E`) in node ids, failure text, branches, commit
+  subjects, metadata and interrupt reasons, so none reads as something
+  else. A rerun command writes each run of such characters, and of every
+  control character, as escaped bytes in `$'…'`, and the rest of the node
+  id in plain single quotes (`'…['$'\342\200\256''gnp.exe]'`), so what it
+  shows is what it copies and nothing in it acts as it is pasted, and
+  gives a node id starting with `-` or `@` as `./…`, so pytest never reads
+  one as an option or a file of arguments. bash, zsh, ksh and busybox's
+  ash read `$'…'`; a shell that does not, as dash, Debian's and Ubuntu's
+  `/bin/sh`, reads a `$` and the escapes as text, since a `$'…'` part
+  never holds a quote: one argument naming a test that is not there, and
+  nothing else run.
 - **A test's history** in a project, newest first, fifty at a time: each
   run's outcome, commit, start and duration, each opening that run's
   result, under the same line of marks, change marks included, and

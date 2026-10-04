@@ -31,6 +31,7 @@ export function NodeId(p: NodeIdProps) {
   const n = parseNodeId(v);
   const head: ReactNode[] = [];
   const tail: ReactNode[] = [];
+  // A character that prints nothing or reorders text shows as its code point, so one id never reads as another.
   if (n.dir) head.push(<span key="d">{p.truncate ? '…/' : visible(n.dir)}</span>);
   // Unwrapped, a long id breaks after its directory and before "::" rather than inside a name.
   if (n.dir && !p.truncate) head.push(<wbr key="dw" />);
@@ -40,8 +41,13 @@ export function NodeId(p: NodeIdProps) {
     </span>,
   );
   n.mids.forEach((m, i) => {
-    // biome-ignore lint/suspicious/noArrayIndexKey: the classes of one node id, in order.
-    head.push(<span key={`m${i}`}>{visible(`::${m}`)}</span>);
+    head.push(
+      // biome-ignore lint/suspicious/noArrayIndexKey: the classes of one node id, in order.
+      <span key={`m${i}`}>
+        ::
+        {visible(m)}
+      </span>,
+    );
   });
   if (n.fn) {
     if (!p.truncate) tail.push(<wbr key="sw" />);
@@ -52,6 +58,7 @@ export function NodeId(p: NodeIdProps) {
       </span>,
     );
   }
+  if (n.param && !p.truncate) tail.push(<wbr key="pw" />);
   if (n.param) tail.push(<span key="pa">{visible(n.param)}</span>);
   const props = {
     className: cx(

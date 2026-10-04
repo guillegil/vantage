@@ -20,7 +20,14 @@ describe('Icon', () => {
     const { container } = render(<Icon name="lock" />);
     expect(container.querySelectorAll('rect')).toHaveLength(1);
     expect(container.querySelectorAll('path')).toHaveLength(1);
-    expect(Object.keys(ICONS)).toHaveLength(43);
+    expect(Object.keys(ICONS)).toHaveLength(55);
+  });
+
+  it('has the glyphs of a sortable header and the account menu, and no longer dice or target', () => {
+    expect(ICONS.chevrons).toEqual(['M5 6.5l3-3 3 3', 'M5 9.5l3 3 3-3']);
+    expect(ICONS.shield).toHaveLength(1);
+    expect(Object.hasOwn(ICONS, 'dice')).toBe(false);
+    expect(Object.hasOwn(ICONS, 'target')).toBe(false);
   });
 
   it('mirrors directional glyphs only', () => {

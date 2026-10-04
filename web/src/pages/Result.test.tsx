@@ -437,9 +437,9 @@ describe('a result', () => {
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(
       'tests/test_a.py::test_x[U+202Egnp.exe]',
     );
-    expect(await screen.findByText(/^KeyboardInterrupt/)).toHaveTextContent(
-      'KeyboardInterrupt U+202Etpurretni',
-    );
+    const reason = await screen.findByText(/^KeyboardInterrupt/);
+    expect(reason).toHaveTextContent('KeyboardInterrupt U+202Etpurretni');
+    expect(reason).toHaveClass('dl-status__reason');
     const shown = `tests/test_a.py::test_x[⟨U+202E⟩gnp.exe]`;
     const slider = await screen.findByRole('slider', { name: `History of ${shown}` });
     expect(slider).toHaveAttribute('aria-valuetext', '0123abcd (x⟨U+202E⟩ at 7aa1c5d): failed');

@@ -7,6 +7,7 @@ The branch and commit a run was made from, as git printed them, with a `dirty` t
 - `dirty` is a `warning` tag, because results from an uncommitted tree may not reproduce from the sha.
 - A commit subject is optional and truncates with its full text on hover.
 - When the plugin found no repository, it says *no commit recorded*. Never leave the cell blank.
+- Branch, sha and subject are shown as recorded: a character that prints nothing or reorders text shows as its code point, boxed in `warning`, and is written `⟨U+202E⟩` in the tooltip.
 
 ## Port notes
 

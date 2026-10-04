@@ -1,5 +1,8 @@
+import { cleanup, render } from '@testing-library/react';
+import { createElement } from 'react';
 import { describe, expect, it } from 'vitest';
 import type {
+  ChangeItem,
   HistoryEntry,
   Project,
   ResultDetail,
@@ -8,12 +11,12 @@ import type {
   RunListItem,
   RunMetadata,
 } from '../api/queries';
+import { BaselineNote } from '../ds';
 import {
-  type BaselineWords,
-  baselineLine,
+  baselineNote,
   CHANGE,
+  changeRow,
   dotlineLabel,
-  earlier,
   failingPhase,
   historyHref,
   historyRow,
@@ -21,13 +24,15 @@ import {
   KEPT,
   lineResults,
   metaItems,
-  NOT_RECORDED,
   outcomesToResults,
   projectRef,
+  queueTotals,
+  resultChange,
+  resultDetailRow,
   resultEvidence,
   resultHref,
   resultPhases,
-  resultRow,
+  resultQueueRow,
   runHead,
   runItem,
 } from './index';
@@ -193,7 +198,7 @@ describe('changes', () => {
   });
 });
 
-describe('baselineLine', () => {
+describe('baselineNote', () => {
   const RUN: RunDetail = {
     ...ITEM,
     started_at: '2026-09-27T09:00:00Z',
@@ -206,92 +211,286 @@ describe('baselineLine', () => {
     },
   };
   const VCS = ITEM.vcs as NonNullable<RunListItem['vcs']>;
-  const project = (vcs: RunDetail['vcs'], branch: string | null = 'main') => ({
+  const project = (vcs: RunDetail['vcs'], branch: string | null = 'main'): RunDetail => ({
     ...RUN,
     vcs,
     comparison: {
-      state: 'project' as const,
+      state: 'project',
       baseline: { id: OTHER_BASE, started_at: '2026-09-27T06:00:00Z', branch },
       counts: CHANGE_COUNTS,
     },
   });
-  // Each recorded name in braces, the baseline's label in brackets.
-  const words = (w: BaselineWords) =>
-    w.map((p) => (typeof p === 'string' ? p : `{${p.recorded}}`)).join('');
-  const said = (line: ReturnType<typeof baselineLine>) =>
-    `${words(line.lead)}${line.baseline ? `[${line.baseline.label}]` : ''}${words(line.tail)}`;
+  const PENDING: RunDetail = {
+    ...RUN,
+    exit_status: null,
+    finished_at: null,
+    comparison: { state: 'pending', baseline: null, counts: null },
+  };
+  // The sentence BaselineNote prints from what the adapter gives it.
+  function said(detail: RunDetail): string {
+    const { container } = render(createElement(BaselineNote, baselineNote(detail)));
+    const text = container.textContent ?? '';
+    cleanup();
+    return text;
+  }
 
-  it('names the baseline on the run’s own branch, and how much earlier it started', () => {
-    const line = baselineLine(RUN);
-    expect(line.baseline).toEqual({ id: BASE, label: '1adf29af', href: `/runs/${BASE}` });
-    expect(said(line)).toBe('Compared with [1adf29af] on {main}, 42 min earlier');
+  it('names the baseline on the run’s own branch, linking to it, and how much earlier it started', () => {
+    expect(baselineNote(RUN)).toEqual({
+      state: 'compared',
+      baseline: { label: '1adf29af', href: `/runs/${BASE}`, id: BASE, branch: 'main' },
+      earlier: 2520,
+    });
+    expect(said(RUN)).toBe('Compared with 1adf29af on main, 42 min earlier');
   });
 
-  it('says why it fell back to the project’s latest complete run', () => {
-    expect(said(baselineLine(project({ ...VCS, branch: 'feat/uart-dma' })))).toBe(
-      'No earlier complete run on {feat/uart-dma}; compared with [0b77e4f2] on {main}, 3 h earlier',
+  it('says why it fell back to the project’s latest complete run, from what the run recorded', () => {
+    const branch = project({ ...VCS, branch: 'feat/uart-dma' });
+    expect(baselineNote(branch).fallback).toEqual({ reason: 'branch', branch: 'feat/uart-dma' });
+    expect(said(branch)).toBe(
+      'No earlier complete run on feat/uart-dma; compared with 0b77e4f2 on main, 3 h earlier',
     );
-    expect(said(baselineLine(project({ ...VCS, branch: null, commit: '4b8f6a3c2d' })))).toBe(
-      'No branch recorded (detached HEAD at {4b8f6a3}); compared with [0b77e4f2] on {main}, 3 h earlier',
+    // The whole commit: the note itself prints its first 7 characters.
+    const detached = project({ ...VCS, branch: null, commit: '4b8f6a3c2d' });
+    expect(baselineNote(detached).fallback).toEqual({ reason: 'detached', commit: '4b8f6a3c2d' });
+    expect(said(detached)).toBe(
+      'No branch recorded (detached HEAD at 4b8f6a3); compared with 0b77e4f2 on main, 3 h earlier',
     );
-    expect(said(baselineLine(project(null)))).toBe(
-      'Recorded outside a git repository; compared with [0b77e4f2] on {main}, 3 h earlier',
+    const bare = project({ ...VCS, branch: null, commit: null });
+    expect(baselineNote(bare).fallback).toEqual({ reason: 'no-branch' });
+    expect(said(bare)).toBe('No branch recorded; compared with 0b77e4f2 on main, 3 h earlier');
+    const outside = project(null);
+    expect(baselineNote(outside).fallback).toEqual({ reason: 'no-git' });
+    expect(said(outside)).toBe(
+      'Recorded outside a git repository; compared with 0b77e4f2 on main, 3 h earlier',
     );
-    expect(said(baselineLine(project({ ...VCS, branch: null, commit: null })))).toBe(
-      'No branch recorded; compared with [0b77e4f2] on {main}, 3 h earlier',
-    );
+  });
+
+  it('gives no fallback when the baseline is on the run’s own branch', () => {
+    expect(baselineNote(RUN)).not.toHaveProperty('fallback');
   });
 
   it('names no branch for a baseline that recorded none', () => {
-    expect(said(baselineLine(project({ ...VCS, branch: 'feat/uart-dma' }, null)))).toBe(
-      'No earlier complete run on {feat/uart-dma}; compared with [0b77e4f2], 3 h earlier',
+    const run = project({ ...VCS, branch: 'feat/uart-dma' }, null);
+    expect(baselineNote(run).baseline?.branch).toBeNull();
+    expect(said(run)).toBe(
+      'No earlier complete run on feat/uart-dma; compared with 0b77e4f2, 3 h earlier',
     );
   });
 
-  it('keeps each recorded branch and commit apart from the words, as recorded', () => {
+  it('hands each recorded branch and commit over as recorded', () => {
     const rlo = String.fromCodePoint(0x202e);
-    expect(said(baselineLine(project({ ...VCS, branch: `x${rlo}` }, `y${rlo}`)))).toBe(
-      `No earlier complete run on {x${rlo}}; compared with [0b77e4f2] on {y${rlo}}, 3 h earlier`,
-    );
-    expect(said(baselineLine(project({ ...VCS, branch: null, commit: `${rlo}ab12cd99` })))).toBe(
-      `No branch recorded (detached HEAD at {${rlo}ab12cd}); compared with [0b77e4f2] on {main}, 3 h earlier`,
-    );
+    const run = project({ ...VCS, branch: `x${rlo}` }, `y${rlo}`);
+    expect(baselineNote(run).fallback).toEqual({ reason: 'branch', branch: `x${rlo}` });
+    expect(baselineNote(run).baseline?.branch).toBe(`y${rlo}`);
   });
 
-  it('shortens a recorded commit by character, never splitting one', () => {
-    const face = String.fromCodePoint(0x1f600);
-    const line = baselineLine(project({ ...VCS, branch: null, commit: `abcdef${face}99` }));
-    expect(line.lead).toContainEqual({ recorded: `abcdef${face}` });
+  it('says there is nothing to compare with', () => {
+    const none: RunDetail = { ...RUN, comparison: { state: 'none', baseline: null, counts: null } };
+    expect(baselineNote(none)).toEqual({ state: 'none' });
+    expect(said(none)).toBe('Nothing to compare with yet.');
   });
 
-  it('says there is nothing to compare with, or when a pending run is compared', () => {
-    const none = { ...RUN, comparison: { state: 'none' as const, baseline: null, counts: null } };
-    expect(baselineLine(none)).toEqual({
-      lead: ['Nothing to compare with yet.'],
-      baseline: null,
-      tail: [],
-    });
-    const pending = {
+  it('says a running run is compared once it ends, and an abandoned one was not', () => {
+    const running: RunDetail = { ...PENDING, presentation: 'running' };
+    expect(baselineNote(running)).toEqual({ state: 'pending' });
+    expect(said(running)).toBe('Compared with its baseline once the session ends.');
+    const abandoned: RunDetail = { ...PENDING, presentation: 'abandoned' };
+    expect(baselineNote(abandoned)).toEqual({ state: 'abandoned' });
+    expect(said(abandoned)).toBe('Not compared: no end was recorded.');
+  });
+
+  it('measures how much earlier in seconds, from the two start times', () => {
+    const at = (started: string): RunDetail => ({
       ...RUN,
-      exit_status: null,
-      finished_at: null,
-      comparison: { state: 'pending' as const, baseline: null, counts: null },
-    };
-    expect(said(baselineLine({ ...pending, presentation: 'running' }))).toBe(
-      'Compared with its baseline once the session ends.',
+      comparison: {
+        ...RUN.comparison,
+        baseline: { id: BASE, started_at: started, branch: 'main' },
+      },
+    });
+    expect(baselineNote(at('2026-09-27T09:00:00Z')).earlier).toBe(0);
+    expect(baselineNote(at('2026-09-27T08:59:59.100Z')).earlier).toBeCloseTo(0.9);
+    expect(baselineNote(at('2026-09-25T09:00:00Z')).earlier).toBe(172_800);
+    expect(said(at('2026-09-27T09:00:00Z'))).toBe(
+      'Compared with 1adf29af on main, under 1 s earlier',
     );
-    expect(said(baselineLine({ ...pending, presentation: 'abandoned' }))).toBe(
-      'Not compared: no end was recorded.',
-    );
+    expect(said(at('2026-09-25T09:00:00Z'))).toBe('Compared with 1adf29af on main, 2 d earlier');
+    expect(baselineNote(at('not a time'))).not.toHaveProperty('earlier');
+  });
+});
+
+const RESULT_ITEM: ResultItem = {
+  node_id: 'tests/test_a.py::test_one',
+  file_path: 'tests/test_a.py',
+  class_name: null,
+  function_name: 'test_one',
+  param_id: null,
+  outcome: 'failed',
+  duration: 0.25,
+  started_at: null,
+  finished_at: null,
+  setup_outcome: null,
+  call_outcome: null,
+  teardown_outcome: null,
+  setup_duration: null,
+  call_duration: null,
+  teardown_duration: null,
+  worker_id: null,
+  failure: {
+    failure_type: 'AssertionError',
+    failure_message: 'AssertionError: expected 3.3V\nassert 3.38 == 3.3',
+    failure_message_truncated: false,
+    failure_path: null,
+    failure_lineno: null,
+    skip_reason: null,
+    xfail_reason: null,
+  },
+};
+
+describe('the run page’s queue', () => {
+  const COMPARED: RunDetail = {
+    ...ITEM,
+    interrupt_reason: null,
+    project: 'firmware',
+    comparison: {
+      state: 'branch',
+      baseline: { id: BASE, started_at: '2026-09-27T08:18:00Z', branch: 'main' },
+      counts: CHANGE_COUNTS,
+    },
+  };
+  const NODE = 'tests/power/test_rails.py::test_rail_under_load[max_load]';
+  const CHANGED: ChangeItem = {
+    node_id: NODE,
+    file_path: 'tests/power/test_rails.py',
+    class_name: null,
+    function_name: 'test_rail_under_load',
+    param_id: 'max_load',
+    change: 'still_failing',
+    outcome: 'failed',
+    was: 'failed',
+    duration: 6.2,
+    position: 41,
+    streak: { runs: 4, since: '1ad93e491ad93e491ad93e491ad93e49' },
+  };
+
+  it('counts each change of a compared run, as the design system spells them', () => {
+    expect(queueTotals(COMPARED)).toEqual({
+      'new-failure': 2,
+      'still-failing': 3,
+      fixed: 1,
+      'new-test': 4,
+      removed: 1,
+      'not-reached': 0,
+    });
   });
 
-  it('measures how much earlier from the two start times', () => {
-    expect(earlier('2026-09-27T09:00:00Z', '2026-09-27T09:00:00Z')).toBe('under 1 s');
-    expect(earlier('2026-09-27T09:00:00Z', '2026-09-27T09:00:00.900Z')).toBe('under 1 s');
-    expect(earlier('2026-09-27T09:00:00Z', '2026-09-27T09:00:12.600Z')).toBe('12 s');
-    expect(earlier('2026-09-27T09:00:00Z', '2026-09-27T09:42:59Z')).toBe('42 min');
-    expect(earlier('2026-09-27T06:00:00Z', '2026-09-27T09:59:00Z')).toBe('3 h');
-    expect(earlier('2026-09-25T09:00:00Z', '2026-09-27T09:00:00Z')).toBe('2 d');
+  it('counts the failures of a run not compared: failed and error', () => {
+    for (const state of ['none', 'pending'] as const) {
+      expect(
+        queueTotals({ ...COMPARED, comparison: { state, baseline: null, counts: null } }),
+      ).toEqual({ failures: 3 });
+    }
+  });
+
+  it('never counts fewer failures than were listed after the detail was read', () => {
+    const pending: RunDetail = {
+      ...COMPARED,
+      comparison: { state: 'pending', baseline: null, counts: null },
+    };
+    expect(queueTotals(pending, 5)).toEqual({ failures: 5 });
+    expect(queueTotals(pending, 2)).toEqual({ failures: 3 });
+    // A list with more to read holds more than it loaded, so its next page can be asked for.
+    expect(queueTotals(pending, 3, true)).toEqual({ failures: 4 });
+    expect(queueTotals(pending, 200, true)).toEqual({ failures: 201 });
+    expect(queueTotals(pending, 2, true)).toEqual({ failures: 3 });
+  });
+
+  it('maps a changed test onto a row, naming the streak’s first run by its label', () => {
+    expect(changeRow(CHANGED, ID, BASE)).toEqual({
+      nodeid: NODE,
+      outcome: 'failed',
+      seconds: 6.2,
+      change: 'still-failing',
+      was: 'failed',
+      streak: { runs: 4, since: '1ad93e49' },
+      href: resultHref(ID, NODE),
+      position: 41,
+      changeKnown: true,
+    });
+    const fresh = changeRow(
+      { ...CHANGED, change: 'new_failure', was: null, streak: null },
+      ID,
+      BASE,
+    );
+    expect(fresh).not.toHaveProperty('streak');
+    expect(fresh).toMatchObject({ change: 'new-failure', was: null });
+  });
+
+  it('leads a test the run lacks to its result in the baseline', () => {
+    const gone = changeRow(
+      {
+        ...CHANGED,
+        change: 'removed',
+        outcome: null,
+        duration: null,
+        position: null,
+        streak: null,
+      },
+      ID,
+      BASE,
+    );
+    expect(gone).toMatchObject({
+      outcome: null,
+      change: 'removed',
+      position: null,
+      href: resultHref(BASE, NODE),
+    });
+  });
+
+  it('maps a listed result onto a row, which knows its change only where the run has none', () => {
+    const item = { ...RESULT_ITEM, node_id: NODE, outcome: 'failed' as const, duration: 6.2 };
+    expect(resultQueueRow(item, ID, { position: 7, compared: false })).toEqual({
+      nodeid: NODE,
+      outcome: 'failed',
+      seconds: 6.2,
+      href: resultHref(ID, NODE),
+      position: 7,
+      changeKnown: true,
+    });
+    expect(resultQueueRow(item, ID, { position: null, compared: true })).toMatchObject({
+      position: null,
+      changeKnown: false,
+    });
+  });
+
+  it('reads a result’s change from /result, all null when it did not change', () => {
+    const changed: ResultDetail = {
+      ...DETAIL,
+      node_id: NODE,
+      position: 41,
+      change: 'still_failing',
+      was: 'failed',
+      streak: { runs: 3, since: BASE },
+    };
+    expect(resultChange(changed)).toEqual({
+      change: 'still-failing',
+      was: 'failed',
+      streak: { runs: 3, since: '1adf29af' },
+    });
+    expect(resultChange({ ...changed, change: null, was: null, streak: null })).toEqual({
+      change: null,
+      was: null,
+    });
+    expect(resultDetailRow(changed, ID)).toEqual({
+      nodeid: NODE,
+      outcome: DETAIL.outcome,
+      seconds: DETAIL.duration,
+      href: resultHref(ID, NODE),
+      position: 41,
+      changeKnown: true,
+      change: 'still-failing',
+      was: 'failed',
+      streak: { runs: 3, since: '1adf29af' },
+    });
   });
 });
 
@@ -346,8 +545,12 @@ describe('runHead', () => {
   it('builds the status, the commit with its subject, and the times', () => {
     const head = runHead(DETAIL);
     expect(head.label).toBe('0123abcd');
-    expect(head.status).toEqual({ state: 'interrupted', exitStatus: 2, explain: true });
-    expect(head.reason).toBe('KeyboardInterrupt');
+    expect(head.status).toEqual({
+      state: 'interrupted',
+      exitStatus: 2,
+      explain: true,
+      reason: 'KeyboardInterrupt',
+    });
     expect(head.commit).toEqual({
       branch: 'main',
       sha: '7f3a2c1e9b0d',
@@ -367,7 +570,7 @@ describe('runHead', () => {
       interrupted: false,
     });
     expect(head.commit).toEqual({});
-    expect(head.reason).toBeNull();
+    expect(head.status).not.toHaveProperty('reason');
     expect(head.seconds).toBeUndefined();
     expect(head.running).toBe(true);
   });
@@ -401,70 +604,6 @@ it('explains a declared key that has no value', () => {
     { key: 'rig', value: 'bench-02' },
     { key: 'os', value: null, source: 'file not read' },
   ]);
-});
-
-describe('resultRow', () => {
-  const RESULT: ResultItem = {
-    node_id: 'tests/test_a.py::test_one',
-    file_path: 'tests/test_a.py',
-    class_name: null,
-    function_name: 'test_one',
-    param_id: null,
-    outcome: 'failed',
-    duration: 0.25,
-    started_at: null,
-    finished_at: null,
-    setup_outcome: null,
-    call_outcome: null,
-    teardown_outcome: null,
-    setup_duration: null,
-    call_duration: null,
-    teardown_duration: null,
-    worker_id: null,
-    failure: {
-      failure_type: 'AssertionError',
-      failure_message: 'AssertionError: expected 3.3V\nassert 3.38 == 3.3',
-      failure_message_truncated: false,
-      failure_path: null,
-      failure_lineno: null,
-      skip_reason: null,
-      xfail_reason: null,
-    },
-  };
-
-  it('takes the first line of the failure message', () => {
-    expect(resultRow(RESULT, 0, ID)).toEqual({
-      key: '0:tests/test_a.py::test_one',
-      nodeId: 'tests/test_a.py::test_one',
-      href: `/runs/${ID}/result?node_id=tests%2Ftest_a.py%3A%3Atest_one`,
-      outcome: 'failed',
-      message: 'AssertionError: expected 3.3V',
-      seconds: 0.25,
-    });
-  });
-
-  it('says failure text was not recorded when it was not', () => {
-    const row = resultRow({ ...RESULT, outcome: 'error', failure: null }, 1, ID);
-    expect(row.message).toBe(NOT_RECORDED);
-  });
-
-  it('gives a skip its reason, and a pass nothing', () => {
-    const skipped = resultRow(
-      {
-        ...RESULT,
-        outcome: 'skipped',
-        failure: {
-          ...(RESULT.failure as NonNullable<ResultItem['failure']>),
-          failure_message: null,
-          skip_reason: 'no rig',
-        },
-      },
-      2,
-      ID,
-    );
-    expect(skipped.message).toBe('no rig');
-    expect(resultRow({ ...RESULT, outcome: 'passed', failure: null }, 3, ID).message).toBeNull();
-  });
 });
 
 describe('addresses', () => {
@@ -730,7 +869,7 @@ describe('history', () => {
     expect(only({ branch: null, commit: null })).toBeUndefined();
   });
 
-  it('writes out a hidden character in a branch name, since the readout is plain text', () => {
+  it('hands a branch name over as recorded, for the grid to write out', () => {
     const vcs = ENTRIES[0]?.vcs as NonNullable<HistoryEntry['vcs']>;
     const [run] = historyStrip(
       [
@@ -741,7 +880,7 @@ describe('history', () => {
       ],
       NODE,
     ).runs;
-    expect(run?.detail).toBe('x⟨U+202E⟩ at 7aa1c5d');
+    expect(run?.detail).toBe(`x${String.fromCodePoint(0x202e)} at 7aa1c5d`);
   });
 
   it('maps an entry onto a row of the history table', () => {
