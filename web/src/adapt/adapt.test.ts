@@ -346,8 +346,12 @@ describe('runHead', () => {
   it('builds the status, the commit with its subject, and the times', () => {
     const head = runHead(DETAIL);
     expect(head.label).toBe('0123abcd');
-    expect(head.status).toEqual({ state: 'interrupted', exitStatus: 2, explain: true });
-    expect(head.reason).toBe('KeyboardInterrupt');
+    expect(head.status).toEqual({
+      state: 'interrupted',
+      exitStatus: 2,
+      explain: true,
+      reason: 'KeyboardInterrupt',
+    });
     expect(head.commit).toEqual({
       branch: 'main',
       sha: '7f3a2c1e9b0d',
@@ -367,7 +371,7 @@ describe('runHead', () => {
       interrupted: false,
     });
     expect(head.commit).toEqual({});
-    expect(head.reason).toBeNull();
+    expect(head.status).not.toHaveProperty('reason');
     expect(head.seconds).toBeUndefined();
     expect(head.running).toBe(true);
   });
@@ -730,7 +734,7 @@ describe('history', () => {
     expect(only({ branch: null, commit: null })).toBeUndefined();
   });
 
-  it('writes out a hidden character in a branch name, since the readout is plain text', () => {
+  it('hands a branch name over as recorded, for the grid to write out', () => {
     const vcs = ENTRIES[0]?.vcs as NonNullable<HistoryEntry['vcs']>;
     const [run] = historyStrip(
       [
@@ -741,7 +745,7 @@ describe('history', () => {
       ],
       NODE,
     ).runs;
-    expect(run?.detail).toBe('x⟨U+202E⟩ at 7aa1c5d');
+    expect(run?.detail).toBe(`x${String.fromCodePoint(0x202e)} at 7aa1c5d`);
   });
 
   it('maps an entry onto a row of the history table', () => {

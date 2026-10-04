@@ -789,8 +789,9 @@ project you had open last, or of `default`.
   result may also have run with output capture off (`-s`).
   A character that reorders or hides text, such as a right-to-left override,
   a zero-width space, or the U+FFFD the server stores for U+0000, shows as
-  its code point (`U+202E`) in node ids and failure text, so neither reads as
-  something else.
+  its code point (`U+202E`) in node ids, failure text, branches, commit
+  subjects, metadata and interrupt reasons, so none reads as something
+  else.
 - **A test's history** in a project, newest first, fifty at a time: each
   run's outcome, commit, start and duration, each opening that run's
   result, under the same line of marks, change marks included, and

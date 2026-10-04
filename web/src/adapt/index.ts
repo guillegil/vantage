@@ -26,7 +26,7 @@ import type {
   RunState,
   RunStatusProps,
 } from '../ds';
-import { describeCounts, fmtCount, isOutcome, plural, visibleText } from '../ds';
+import { describeCounts, fmtCount, isOutcome, plural } from '../ds';
 
 // Lists and headings print a run by the first 8 characters of its id.
 export function runLabel(id: string): string {
@@ -240,7 +240,6 @@ export function projectRef(project: Project): ProjectRef {
 export interface RunHead {
   label: string;
   status: RunStatusProps;
-  reason: string | null;
   commit: CommitRefProps;
   recordedBy: string | null;
   startedAt: string;
@@ -255,6 +254,9 @@ export function runHead(detail: RunDetail): RunHead {
     explain: true,
   };
   if (detail.exit_status != null) status.exitStatus = detail.exit_status;
+  // What the report said stopped it, which the status prints after its own words.
+  if (detail.presentation === 'interrupted' && detail.interrupt_reason)
+    status.reason = detail.interrupt_reason;
   const commit: CommitRefProps = {};
   if (detail.vcs) {
     if (detail.vcs.branch) commit.branch = detail.vcs.branch;
@@ -265,7 +267,6 @@ export function runHead(detail: RunDetail): RunHead {
   return {
     label: runLabel(detail.id),
     status,
-    reason: detail.presentation === 'interrupted' ? detail.interrupt_reason : null,
     commit,
     recordedBy: detail.recorded_by,
     startedAt: detail.started_at,
@@ -502,10 +503,9 @@ export function resultPhases(detail: ResultDetail): PhaseTimelineProps['phases']
 }
 
 // The branch and commit a run was made at, as the history readout names it: main at 7aa1c5d.
-// The readout is a sentence of plain text, so a bidi control in a recorded branch name is
-// written out rather than left to reorder the outcome it names.
+// As recorded: the grid writes out a hidden character in it.
 function commitDetail(vcs: HistoryEntry['vcs']): string | undefined {
-  const branch = vcs?.branch ? visibleText(vcs.branch) : null;
+  const branch = vcs?.branch || null;
   const sha = vcs?.commit ? vcs.commit.slice(0, 7) : null;
   if (branch && sha) return `${branch} at ${sha}`;
   return branch ?? sha ?? undefined;

@@ -32,6 +32,37 @@ describe('AppBar', () => {
     expect(screen.queryByRole('menu')).toBeNull();
   });
 
+  it('separates the account menu’s items where asked, and marks the current page', async () => {
+    render(
+      <AppBar
+        search={false}
+        user={{ name: 'alice' }}
+        account={{
+          items: [
+            { label: 'Account', icon: 'user', onSelect: () => {}, current: true },
+            { label: 'Administration', icon: 'shield', onSelect: () => {} },
+            { separator: true },
+            { label: 'Sign out', icon: 'log-out', onSelect: () => {} },
+          ],
+        }}
+      />,
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Account: alice' }));
+    const menu = screen.getByRole('menu', { name: 'Account' });
+    // One under the note, one asked for.
+    expect(menu.querySelectorAll('[role="separator"]')).toHaveLength(2);
+    expect(screen.getAllByRole('menuitem').map((b) => b.textContent)).toEqual([
+      'Account',
+      'Administration',
+      'Sign out',
+    ]);
+    expect(screen.getByRole('menuitem', { name: 'Account' })).toHaveAttribute(
+      'aria-current',
+      'true',
+    );
+    expect(screen.getByRole('menuitem', { name: 'Sign out' })).not.toHaveAttribute('aria-current');
+  });
+
   it('closes the account menu on Escape, back on its button', async () => {
     render(<AppBar search={false} user={{ name: 'alice' }} account={{ items: [] }} />);
     const button = screen.getByRole('button', { name: 'Account: alice' });

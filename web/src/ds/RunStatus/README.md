@@ -16,7 +16,9 @@ A run's state in a mark and words; a finished run also shows pytest's exit statu
 - The tooltip explains `interrupted` and `abandoned` in the server's terms. A single test longer than the grace period can read as abandoned while it still runs; the wording "no contact within the grace period" keeps that honest.
 - The reason is always part of the accessible name, not only the tooltip. `explain` prints it as well, for a run page's head.
 - `compact` keeps only the mark and moves the words to the tooltip and screen readers; run rows use it for finished runs.
+- `reason` is what the report said stopped the session, as recorded (*KeyboardInterrupt*, *Interrupted: 1 error during collection*). It prints in mono after the words, joins the accessible name, and shows hidden characters as their code points.
 
 ## Port notes
 
 - Ported one to one: markup, `dl-` classes, words, aria and behaviour. `window.Dotline` and `createElement` become a typed TSX export, checked against `contract.d.ts` by `contract.test-d.ts`.
+- The client passes an interrupted run's `interrupt_reason` as `reason`; an abandoned run has none.

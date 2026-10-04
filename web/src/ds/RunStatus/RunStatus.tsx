@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { RunStatusProps } from '../contract';
 import { cx } from '../lib/cx';
+import { visible, visibleText } from '../lib/visible';
 
 // pytest's exit statuses, as a finished run shows them.
 const EXIT: Record<number, [string, string | null, string]> = {
@@ -44,16 +45,17 @@ export function RunStatus(p: RunStatusProps) {
   }
   const full = words + (exit ? ` · ${exit}` : '') + (note ? ` · ${note}` : '');
   const explained = reason && p.explain;
+  // What the report said stopped it, as recorded: pytest's own words, such as KeyboardInterrupt.
+  const said = p.reason != null && p.reason !== '' ? String(p.reason) : null;
+  const whole =
+    full + (reason ? `: ${reason}` : '') + (said ? `. Recorded reason: ${visibleText(said)}` : '');
   return (
-    <span
-      className={cx('dl-status', explained && 'dl-status--explain', p.className)}
-      title={reason ? `${full}: ${reason}` : full}
-    >
+    <span className={cx('dl-status', explained && 'dl-status--explain', p.className)} title={whole}>
       <span className="dl-status__ind" aria-hidden="true">
         {ind}
       </span>
       {p.compact ? (
-        <span className="dl-sr">{full + (reason ? `: ${reason}` : '')}</span>
+        <span className="dl-sr">{whole}</span>
       ) : (
         <>
           <span>{words}</span>
@@ -61,10 +63,16 @@ export function RunStatus(p: RunStatusProps) {
           {note ? <span className="dl-status__note">{note}</span> : null}
           {reason ? (
             explained ? (
-              <span className="dl-status__note">{reason}</span>
+              <span className="dl-status__note">{reason + (said ? ':' : '')}</span>
             ) : (
               <span className="dl-sr">{`: ${reason}`}</span>
             )
+          ) : null}
+          {said ? (
+            <span className="dl-status__reason" dir="ltr">
+              <span className="dl-sr">Recorded reason: </span>
+              {visible(said)}
+            </span>
           ) : null}
         </>
       )}

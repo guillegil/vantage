@@ -296,7 +296,6 @@ function RunView({ runId }: { runId: string }) {
     sub = (
       <div className="dl-pagehead__sub">
         <RunStatus {...head.status} />
-        {head.reason ? <span>{visible(head.reason)}</span> : null}
         <CommitRef {...head.commit} />
         {head.recordedBy ? (
           <UserChip name={head.recordedBy} you={head.recordedBy === session.user?.name} size="sm" />

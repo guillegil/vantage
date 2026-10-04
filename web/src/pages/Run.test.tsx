@@ -136,6 +136,12 @@ it('shows a hidden character in why the run was interrupted as its code point', 
   renderAt(`/runs/${ID}`);
   const reason = await screen.findByText(/^KeyboardInterrupt/);
   expect(reason).toHaveTextContent('KeyboardInterrupt U+202Etpurretni');
+  // The status prints it, and names it in its tooltip.
+  expect(reason).toHaveClass('dl-status__reason');
+  expect(reason.closest('.dl-status')).toHaveAttribute(
+    'title',
+    'interrupted: a report arrived saying the session was stopped. Recorded reason: KeyboardInterrupt ⟨U+202E⟩tpurretni',
+  );
   expect(reason.closest('.dl-pagehead__sub')?.textContent).not.toContain(RLO);
 });
 

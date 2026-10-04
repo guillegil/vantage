@@ -3,18 +3,14 @@ import type { PagerProps } from '../contract';
 import { cx } from '../lib/cx';
 import { fmtCount, plural } from '../lib/format';
 
-export interface PortedPagerProps extends PagerProps {
-  /** The order the shown items are in, said before "More exist". Default "newest first". */
-  order?: string;
-}
-
-export function Pager(p: PortedPagerProps) {
+export function Pager(p: PagerProps) {
   const noun = p.noun || 'runs';
   const one = p.nounOne || noun.replace(/s$/, '');
   const size = p.pageSize || 50;
   const shown = p.shown || 0;
   let text: string;
   if (!shown && !p.hasMore) text = `No ${noun} match.`;
+  // The order the shown items are in: a run's results come in the order pytest reported them.
   else if (p.hasMore)
     text = `${plural(shown, one, noun)} shown, ${p.order || 'newest first'}. More exist.`;
   else text = shown === 1 ? `The only ${one} is shown.` : `All ${plural(shown, one, noun)} shown.`;

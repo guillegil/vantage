@@ -300,7 +300,6 @@ function ResultView({ runId, nodeId }: { runId: string; nodeId: string }) {
       sub = (
         <div className="dl-pagehead__sub">
           <RunStatus {...head.status} />
-          {head.reason ? <span>{visible(head.reason)}</span> : null}
           <CommitRef {...head.commit} />
           {head.recordedBy ? (
             <UserChip

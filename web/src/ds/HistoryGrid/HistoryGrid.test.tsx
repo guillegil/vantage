@@ -104,8 +104,67 @@ describe('HistoryGrid', () => {
     );
     expect(container.querySelector('.dl-hgrid--stacked')).not.toBeNull();
     expect(container.querySelector('.dl-hgrid__label')).toBeNull();
-    expect(screen.queryByText(/oldest to newest/)).toBeNull();
+    // Too few runs to set two labels apart: the span is said in words, once.
+    expect(screen.getAllByText('4 runs, oldest to newest')).toHaveLength(1);
+    expect(container.querySelector('.dl-hgrid__axis')).toHaveClass('dl-hgrid__axis--words');
     expect(container.querySelector('.dl-hgrid__note')).toHaveTextContent('100% passing');
+  });
+
+  it('puts the first and last labels under the marks where both fit apart', () => {
+    const { container, rerender } = render(
+      <HistoryGrid
+        runs={runsOf(20)}
+        rows={[{ nodeid: NODE, outcomes: Array(20).fill('passed') }]}
+      />,
+    );
+    const axis = container.querySelectorAll('.dl-hgrid__axis')[1] as HTMLElement;
+    expect(axis).not.toHaveClass('dl-hgrid__axis--words');
+    expect(Array.from(axis.children).map((c) => c.textContent)).toEqual(['r0', 'r19']);
+    expect(axis.style.width).toBe('198px');
+    rerender(
+      <HistoryGrid stacked runs={runsOf(1)} rows={[{ nodeid: NODE, outcomes: ['passed'] }]} />,
+    );
+    expect(screen.getByText('the only run')).toBeInTheDocument();
+  });
+
+  it('gives a filled stack the width it has, larger marks for fewer runs', () => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (
+      this: Element,
+    ) {
+      return { width: this.classList.contains('dl-hgrid__measure') ? 196 : 0 } as DOMRect;
+    });
+    const rows = [{ nodeid: NODE, outcomes: ['passed', null, 'failed', 'failed'] as Outcome[] }];
+    const { container, rerender } = render(<HistoryGrid stacked fill runs={RUNS} rows={rows} />);
+    let svg = container.querySelector('svg') as SVGSVGElement;
+    // 28px a run, 24px marks: 4 × 28 − 4.
+    expect(svg).toHaveAttribute('width', '108');
+    expect(svg).toHaveAttribute('height', '24');
+    expect(container.querySelector('.dl-m--none')).toHaveAttribute('x', `${28 + 11}`);
+    // Not stacked, fill does nothing: 10px a run.
+    rerender(<HistoryGrid fill runs={RUNS} rows={rows} />);
+    svg = container.querySelector('svg') as SVGSVGElement;
+    expect(svg).toHaveAttribute('width', '38');
+    expect(svg).toHaveAttribute('height', '16');
+    expect(container.querySelector('.dl-hgrid__measure')).toBeNull();
+    expect(container.querySelector('.dl-m--none')).toHaveAttribute('x', '13');
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('writes out a hidden character in a run’s detail in the readout', () => {
+    const runs = RUNS.map((r) => ({ ...r, detail: `main${String.fromCodePoint(0x202e)}` }));
+    render(<HistoryGrid runs={runs} rows={[{ nodeid: NODE, outcomes: ['passed'] }]} />);
+    expect(screen.getByRole('slider')).toHaveAttribute(
+      'aria-valuetext',
+      '1a9e0c4d (main⟨U+202E⟩): passed',
+    );
   });
 
   it('writes out a hidden character in the node id it names the slider by', () => {
@@ -151,15 +210,17 @@ describe('HistoryGrid', () => {
     );
     const slider = screen.getByRole('slider');
     expect(slider).toHaveAttribute('aria-keyshortcuts', 'Enter');
+    expect(slider).toHaveClass('dl-hgrid__marks--opens');
     slider.getBoundingClientRect = () => ({ left: 0, width: 38 }) as DOMRect;
     fireEvent.click(slider, { clientX: 12 });
-    expect(onOpen).toHaveBeenLastCalledWith('/runs/1aa1c200/result');
+    // The address, and the run it belongs to.
+    expect(onOpen).toHaveBeenLastCalledWith('/runs/1aa1c200/result', runs[1]);
     fireEvent.focus(slider);
     fireEvent.keyDown(slider, { key: 'Enter' });
-    expect(onOpen).toHaveBeenLastCalledWith('/runs/7f3a2c1e/result');
+    expect(onOpen).toHaveBeenLastCalledWith('/runs/7f3a2c1e/result', runs[3]);
     fireEvent.keyDown(slider, { key: 'Home' });
     fireEvent.keyDown(slider, { key: 'Enter' });
-    expect(onOpen).toHaveBeenLastCalledWith('/runs/1a9e0c4d/result');
+    expect(onOpen).toHaveBeenLastCalledWith('/runs/1a9e0c4d/result', runs[0]);
     expect(onOpen).toHaveBeenCalledTimes(3);
   });
 
@@ -173,6 +234,7 @@ describe('HistoryGrid', () => {
       />,
     );
     const slider = screen.getByRole('slider');
+    expect(slider).not.toHaveClass('dl-hgrid__marks--opens');
     fireEvent.focus(slider);
     fireEvent.keyDown(slider, { key: 'Enter' });
     expect(onOpen).not.toHaveBeenCalled();

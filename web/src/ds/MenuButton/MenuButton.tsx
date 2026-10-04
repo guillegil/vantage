@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react';
 import type { MenuButtonProps } from '../contract';
 import { Icon } from '../Icon/Icon';
 import { cx } from '../lib/cx';
@@ -10,6 +11,43 @@ export function MenuButton(p: MenuButtonProps) {
   const m = useMenu({ defaultOpen: p.defaultOpen });
   const items = p.items || [];
   const iconOnly = p.children == null;
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  // The menu is fixed to the viewport beside its button, so a table or panel that scrolls or clips never
+  // cuts it off. It opens below the button, or above it where there is no room, and closes on scroll.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: placed each time it opens, as the design system does.
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    const b = m.btn.current;
+    if (!m.open || !el || !b) return undefined;
+    el.style.position = 'fixed';
+    el.style.insetInlineStart = 'auto';
+    el.style.insetInlineEnd = 'auto';
+    el.style.left = '0px';
+    el.style.top = '0px';
+    // Where 0,0 lands is the containing block's origin, which a transformed ancestor can move.
+    const o = el.getBoundingClientRect();
+    const r = b.getBoundingClientRect();
+    const w = el.offsetWidth;
+    const ht = el.offsetHeight;
+    const rtl = getComputedStyle(el).direction === 'rtl';
+    const toStart = p.align === 'start';
+    let left = toStart !== rtl ? r.left : r.right - w;
+    left = Math.max(8, Math.min(window.innerWidth - w - 8, left));
+    let top = r.bottom + 4;
+    if (top + ht > window.innerHeight - 8 && r.top - ht - 4 >= 8) top = r.top - ht - 4;
+    el.style.left = `${left - o.left}px`;
+    el.style.top = `${top - o.top}px`;
+    function onScroll(e: Event) {
+      const t = e.target;
+      if (!(t instanceof Node && t.nodeType === 1 && el?.contains(t))) m.set(false);
+    }
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', onScroll);
+    return () => {
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, [m.open]);
   const btn = (
     <button
       ref={m.btn}
@@ -41,6 +79,7 @@ export function MenuButton(p: MenuButtonProps) {
       )}
       {m.open ? (
         <div
+          ref={menuRef}
           className={cx('dl-menu', p.align === 'start' ? null : 'dl-menu--end', 'dl-menu--actions')}
           role="menu"
           aria-label={p.label}

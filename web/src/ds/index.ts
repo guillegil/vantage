@@ -2,8 +2,6 @@
 // Tokens first, then the design system's own stylesheet, verbatim.
 import 'virtual:dotline-tokens.css';
 import './dotline.css';
-// Then the few rules the port adds, each named in a component's port notes.
-import './port.css';
 
 export { AppBar } from './AppBar/AppBar';
 export { Button } from './Button/Button';

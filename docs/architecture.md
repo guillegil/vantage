@@ -1350,9 +1350,8 @@ markup, classes, words, aria and behaviour, beside its README copied
 verbatim with the port's notes after it; `contract.test-d.ts`, checked by
 `tsc`, assigns each to the type `contract.d.ts` declares, so a prop that
 drifts fails `typecheck`. Only what the screens use is ported, and nothing
-that shows what the server does not store. Components never fetch. The few
-rules the port adds sit in `port.css`, loaded after `dotline.css`, each
-named in the port notes of the component that uses it.
+that shows what the server does not store. Components never fetch. The
+port adds no styles of its own: `dotline.css` styles everything it shows.
 
 **The tokens are CSS made on the fly** by `build/dotline-tokens.ts`, a Vite
 plugin that resolves `virtual:dotline-tokens.css` to a name beside
@@ -1407,17 +1406,18 @@ built files, without a reload.
 `build/no-html-sinks.grit` refuses `innerHTML`, `outerHTML`,
 `insertAdjacentHTML` and `document.write`, `dangerouslySetInnerHTML` is an
 error, and the page policy's Trusted Types make any such sink throw.
-Recorded text is also shown as it is: `NodeId`, `Evidence` (its body and a
-string `meta`, which may name a recorded path or exception type), the run
-page's first line of each failure, its baseline sentence's branches and
-commit, and both pages' interrupt reason print each bidirectional control,
-invisible format character, Hangul filler, variation selector, C0 or C1
-control (tab and line breaks aside) and U+FFFD as its code point in a
-marked box (`ds/lib/visible.tsx`). Where recorded text becomes a plain
-string -- the window's title, the history slider's name, its readout's
-branch -- `visibleText` writes it as `⟨U+202E⟩`. So a right-to-left
-override can never make a node id or a traceback read as something else;
-*Copy* still copies the text as recorded.
+Recorded text is also shown as it is: the design system's `visible`
+(`ds/lib/visible.tsx`) prints each bidirectional control, invisible format
+character, Hangul filler, variation selector, C0 or C1 control (tab and
+line breaks aside), lone surrogate and U+FFFD as its code point in a marked
+box. `NodeId`, `Evidence` (its body and a string `meta`, which may name a
+recorded path or exception type), `CommitRef`, `MetaList` and `RunStatus`'s
+recorded reason use it, and so do the run page's first line of each
+failure and its baseline sentence's branches and commit. Where recorded
+text becomes a plain string -- a tooltip, the window's title, the history
+slider's name and readout -- `visibleText` writes it as `⟨U+202E⟩`. So a
+right-to-left override can never make a node id or a traceback read as
+something else; *Copy* still copies the text as recorded.
 
 ### Build, packaging and CI
 

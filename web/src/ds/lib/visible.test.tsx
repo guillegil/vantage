@@ -1,6 +1,6 @@
 import { render } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import { isHidden, visible, visibleText } from './visible';
+import { firstChars, isHidden, visible, visibleText } from './visible';
 
 const ZWSP = String.fromCodePoint(0x200b);
 const RLO = String.fromCodePoint(0x202e);
@@ -28,6 +28,16 @@ describe('visible', () => {
   it('counts characters beyond the basic plane whole', () => {
     const { container } = render(<span>{visible('x\u{E0041}y😀')}</span>);
     expect(container.textContent).toBe('xU+E0041y😀');
+  });
+
+  it('shows a lone surrogate as its code point, a pair as the character it makes', () => {
+    const { container } = render(<span>{visible('a\ud83db\ude00c😀')}</span>);
+    expect(container.textContent).toBe('aU+D83DbU+DE00c😀');
+    expect(container.querySelector('.dl-hidden-char')).toHaveAttribute(
+      'title',
+      'U+D83D lone surrogate',
+    );
+    expect(visibleText('x\udfffy')).toBe('x⟨U+DFFF⟩y');
   });
 
   it('writes them out for an attribute', () => {
@@ -64,5 +74,13 @@ describe('visible', () => {
   it('never hides tab, line feed or carriage return', () => {
     expect([0x09, 0x0a, 0x0d].some(isHidden)).toBe(false);
     expect([0x00, 0x1b, 0x7f, 0x85, 0x061c, 0x2069, 0xfeff].every(isHidden)).toBe(true);
+  });
+});
+
+describe('firstChars', () => {
+  it('cuts by code point, so a character is never split in two', () => {
+    expect(firstChars('😀😀😀abc', 2)).toBe('😀😀');
+    expect(firstChars('7aa1c5d2e9', 7)).toBe('7aa1c5d');
+    expect(firstChars('ab', 7)).toBe('ab');
   });
 });

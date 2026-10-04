@@ -2,11 +2,10 @@ import type { ReactNode } from 'react';
 
 // Characters that print nothing or reorder the text around them: bidirectional
 // controls, zero-width and other invisible format characters, the Hangul
-// fillers, the combining grapheme joiner and the variation selectors, C0 and
-// C1 controls other than tab, line feed and carriage return, and U+FFFD, which
-// the server stores where a report carried U+0000 or a lone surrogate.
-// Recorded text shows each as its code point, so what a test printed can
-// never read as something else.
+// fillers, the combining grapheme joiner, the variation selectors, C0 and C1
+// controls other than tab and line breaks, lone surrogates, and U+FFFD, which
+// the server stores where a report held U+0000. Recorded text shows each as
+// its code point, so what a test printed can never read as something else.
 const NAMES = new Map<number, string>([
   [0x00ad, 'soft hyphen'],
   [0x034f, 'combining grapheme joiner'],
@@ -49,6 +48,7 @@ export function isHidden(cp: number): boolean {
     (cp >= 0xe0000 && cp <= 0xe007f) ||
     (cp >= 0xfe00 && cp <= 0xfe0f) ||
     (cp >= 0xe0100 && cp <= 0xe01ef) ||
+    (cp >= 0xd800 && cp <= 0xdfff) ||
     cp === 0x00ad ||
     cp === 0x034f ||
     cp === 0x061c ||
@@ -65,6 +65,7 @@ export function isHidden(cp: number): boolean {
 function nameOf(cp: number): string | undefined {
   if (cp >= 0xfe00 && cp <= 0xfe0f) return `variation selector-${cp - 0xfe00 + 1}`;
   if (cp >= 0xe0100 && cp <= 0xe01ef) return `variation selector-${cp - 0xe0100 + 17}`;
+  if (cp >= 0xd800 && cp <= 0xdfff) return 'lone surrogate';
   return NAMES.get(cp);
 }
 
@@ -72,8 +73,10 @@ export function codePoint(cp: number): string {
   return `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
 }
 
-// The text with each hidden character as its code point in a marked span; a
-// string alone when there is none, so ordinary text renders as it always has.
+// Recorded text for the page: each hidden character as its code point in a
+// marked box; the string itself when there is none, so ordinary text renders
+// as it always has. Iterating a string goes by code point, a pair of
+// surrogates counting as one and a lone one as itself.
 export function visible(text: string): ReactNode {
   let plain = '';
   let out: ReactNode[] | null = null;
@@ -103,13 +106,24 @@ export function visible(text: string): ReactNode {
   return out;
 }
 
-// The same, for an attribute such as a tooltip: each hidden character as
-// ⟨U+202E⟩.
+// The same for an attribute, a tooltip or an accessible name: each hidden
+// character as ⟨U+202E⟩.
 export function visibleText(text: string): string {
   let out = '';
   for (const ch of text) {
     const cp = ch.codePointAt(0) ?? 0;
     out += isHidden(cp) ? `⟨${codePoint(cp)}⟩` : ch;
+  }
+  return out;
+}
+
+// The first n characters by code point, so a character is never cut in two.
+export function firstChars(s: string, n: number): string {
+  let out = '';
+  let k = 0;
+  for (const ch of s) {
+    if (k++ >= n) break;
+    out += ch;
   }
   return out;
 }

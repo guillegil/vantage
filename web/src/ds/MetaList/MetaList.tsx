@@ -1,5 +1,6 @@
 import type { MetaListProps } from '../contract';
 import { cx } from '../lib/cx';
+import { visible } from '../lib/visible';
 
 export function MetaList(p: MetaListProps) {
   const items = p.items || [];
@@ -12,7 +13,7 @@ export function MetaList(p: MetaListProps) {
         return [
           // biome-ignore lint/suspicious/noArrayIndexKey: a key may repeat across sources, so its place is its identity.
           <dt key={`k${i}`}>
-            {it.key}
+            {visible(it.key)}
             {it.source ? <span className="dl-tag">{it.source}</span> : null}
           </dt>,
           // biome-ignore lint/suspicious/noArrayIndexKey: paired with the term above.
@@ -22,7 +23,7 @@ export function MetaList(p: MetaListProps) {
                 —
               </span>
             ) : (
-              String(it.value)
+              visible(String(it.value))
             )}
           </dd>,
         ];

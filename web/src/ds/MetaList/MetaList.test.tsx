@@ -22,3 +22,14 @@ it('says when there is none', () => {
   render(<MetaList items={[]} emptyText="This run reported no metadata" />);
   expect(screen.getByText('This run reported no metadata')).toBeInTheDocument();
 });
+
+it('shows hidden characters in a recorded key and value as code points', () => {
+  const zwsp = String.fromCodePoint(0x200b);
+  const { container } = render(
+    <MetaList items={[{ key: `rig${zwsp}`, value: `bench${zwsp}02` }]} />,
+  );
+  expect(container.querySelector('dt')).toHaveTextContent('rigU+200B');
+  expect(container.querySelector('dd')).toHaveTextContent('benchU+200B02');
+  expect(container.querySelectorAll('.dl-hidden-char')).toHaveLength(2);
+  expect(container.textContent).not.toContain(zwsp);
+});

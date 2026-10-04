@@ -40,12 +40,22 @@ function AccountMenu(p: AccountMenuProps) {
             {p.account.note != null ? p.account.note : p.user.name}
           </div>
           {items.length ? <div className="dl-menu__sep" role="separator" /> : null}
-          {items.map((it, i) =>
-            menuItem(i, it.icon, it.label, null, () => {
-              m.set(false);
-              if (it.onSelect) it.onSelect();
-            }),
-          )}
+          {items.map((it, i) => {
+            if ('separator' in it)
+              // biome-ignore lint/suspicious/noArrayIndexKey: the items are a fixed list.
+              return <div key={i} className="dl-menu__sep" role="separator" />;
+            return menuItem(
+              i,
+              it.icon,
+              it.label,
+              null,
+              () => {
+                m.set(false);
+                if (it.onSelect) it.onSelect();
+              },
+              it.current,
+            );
+          })}
         </div>
       ) : null}
     </div>
