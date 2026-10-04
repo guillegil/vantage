@@ -1,6 +1,21 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { flushSync } from 'react-dom';
-import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router';
+import {
+  UNSAFE_DataRouterContext,
+  useLocation,
+  useNavigate,
+  useOutletContext,
+  useParams,
+  useSearchParams,
+} from 'react-router';
 import {
   baselineNote,
   CHANGE,
@@ -31,6 +46,7 @@ import {
   useFailures,
   useQueueResults,
   useRecentHistory,
+  useRereadRun,
   useResult,
   useRun,
   useRunMetadata,
@@ -183,7 +199,9 @@ function useQueue(detail: RunDetail) {
       page.items.map((item) => resultQueueRow(item, runId, { position: null, compared: false })),
     );
   }, [compared, runId, baselineId, nfData, sfData, fxData, ntData, rmData, nrData, failuresData]);
-  const totals = queueTotals(detail, compared ? 0 : rows.length);
+  const totals = compared
+    ? queueTotals(detail)
+    : queueTotals(detail, rows.length, failures.hasNextPage);
   // The queue opens on its first group's first test, the first new failure if any, once that
   // group's first page is read: never on a later group's test that happened to arrive sooner.
   // Until then it selects nothing.
@@ -207,6 +225,24 @@ function useQueue(detail: RunDetail) {
     if (read.isFetching) loading.push(group);
   }
   if (whole.isFetching) loading.push('all');
+
+  // A run still recording may list more of its results than its detail counted when it was read:
+  // the whole run counts at least what it listed, and while it has more to read, one more than
+  // that, so its next page can be asked for.
+  const c = detail.counts;
+  const total = c.passed + c.failed + c.error + c.skipped + c.xfailed + c.xpassed;
+  const listed = wholeRows.length + (whole.hasNextPage ? 1 : 0);
+  const wholeTotal = outcome === 'all' ? Math.max(total, listed) : total;
+  const wholeCounts = outcome === 'all' ? c : { ...c, [outcome]: Math.max(c[outcome], listed) };
+  // A list past what the detail counted says the detail is older than the results: it is read
+  // again, once for each page read past it, so the counts catch up with what the run holds.
+  const failuresPast = !compared && (totals.failures ?? 0) > failing;
+  const wholePast = outcome === 'all' ? wholeTotal > total : wholeCounts[outcome] > c[outcome];
+  const past = !final && (failuresPast || wholePast) ? `${rows.length} ${listed} ${outcome}` : null;
+  const reread = useRereadRun(runId);
+  useEffect(() => {
+    if (past !== null) reread();
+  }, [past, reread]);
 
   function onMore(group: QueueGroup | 'all') {
     if (group === 'all') {
@@ -244,6 +280,8 @@ function useQueue(detail: RunDetail) {
     first,
     openRemoved,
     wholeRows,
+    wholeTotal,
+    wholeCounts,
     loading,
     onMore,
     outcome,
@@ -285,6 +323,13 @@ function useAddressed(detail: RunDetail, queue: Queue, wanted: string | null) {
   const whole = (read: PagedRead | null) => !!read?.data && !read.hasNextPage;
   const missing =
     lacks && (!seekRemoved || whole(removed)) && (!seekNotReached || whole(notReached));
+  // A read of either that failed, and is not being tried again, stops the search short of an
+  // answer.
+  const stopped = (read: PagedRead | null) => !!read?.isError && !read.isFetching;
+  const seekFailed =
+    lacks &&
+    !missing &&
+    ((seekRemoved && stopped(removed)) || (seekNotReached && stopped(notReached)));
   let group: QueueGroup | null = null;
   if (found) {
     if (queue.compared) group = found.change ? CHANGE[found.change] : null;
@@ -304,7 +349,7 @@ function useAddressed(detail: RunDetail, queue: Queue, wanted: string | null) {
       extra = { nodeid: wanted, outcome: null, change: null };
     }
   }
-  return { byNode, entry, extra, missing };
+  return { byNode, entry, extra, missing, seekFailed };
 }
 
 // One test of the run, as the queue's detail shows it: its id, its outcome and change, its latest
@@ -313,12 +358,15 @@ function TriageDetail({
   detail,
   nodeId,
   entry,
+  seekFailed,
   context,
   leave,
 }: {
   detail: RunDetail;
   nodeId: string;
   entry: TriageRow | undefined;
+  // Whether looking for it among the tests the run lacks stopped on a failed read.
+  seekFailed: boolean;
   context: ChangeQueueDetailContext;
   leave: (path: string) => void;
 }) {
@@ -337,9 +385,13 @@ function TriageDetail({
   let evidence: ReactNode = null;
   if (!entry || isFailing(outcome)) {
     // A test with no row and no result here is one the page is still looking for among those the
-    // run lacks.
+    // run lacks, unless a read it needed failed, which the page's notice offers to try again.
     if (readFailed && !entry && isApiError(result.error, 404))
-      evidence = <Loading>Loading the test…</Loading>;
+      evidence = seekFailed ? (
+        <p className="dl-caption">Could not finish checking whether this run has this test.</p>
+      ) : (
+        <Loading>Loading the test…</Loading>
+      );
     else if (readFailed)
       evidence = isApiError(result.error, 401) ? null : (
         <FailureNotice
@@ -434,10 +486,14 @@ function TestHistory({
 // follows it, so a shared link or Back opens on it. Each rewrite replaces the address, so Back
 // leaves the run rather than walking every move, at most every ADDRESS_GAP ms; a navigation that
 // changes the address all the same, as Back between two of the run's addresses, moves the
-// selection.
+// selection. A rewrite lands only on the page it was chosen on: a page left stays mounted until the
+// next one has rendered, and a relative rewrite from it would land on the next one's address.
 function useSelection() {
   const [search] = useSearchParams();
+  const { pathname } = useLocation();
   const navigate = useNavigate();
+  // The router, whose location moves as soon as a page is left, before this one unmounts.
+  const router = useContext(UNSAFE_DataRouterContext)?.router;
   const addressed = search.get('node_id');
   const [chosen, setChosen] = useState(addressed);
   const current = useRef(search);
@@ -448,6 +504,9 @@ function useSelection() {
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const last = useRef(Number.NEGATIVE_INFINITY);
   const live = useRef(true);
+  // How many times Back or Forward has moved the address, so a refused rewrite tries again only
+  // where it was made.
+  const moved = useRef(0);
 
   useEffect(() => {
     current.current = search;
@@ -459,6 +518,18 @@ function useSelection() {
       clearTimeout(timer.current);
     };
   }, []);
+  // Back and Forward move the address in the same task as the router's own listener, before any
+  // timer can fire: a choice still waiting is dropped, never written over where they went.
+  useEffect(() => {
+    const drop = () => {
+      moved.current += 1;
+      want.current = null;
+      clearTimeout(timer.current);
+      timer.current = undefined;
+    };
+    window.addEventListener('popstate', drop);
+    return () => window.removeEventListener('popstate', drop);
+  }, []);
   useEffect(() => {
     if (addressed === wrote.current) return;
     wrote.current = addressed;
@@ -468,24 +539,35 @@ function useSelection() {
     setChosen(addressed);
   }, [addressed]);
 
+  // Whether the router is still on this page, and not on its way to another.
+  const here = useCallback(() => {
+    if (!router) return true;
+    const { location, navigation } = router.state;
+    return (
+      location.pathname === pathname && (navigation.location?.pathname ?? pathname) === pathname
+    );
+  }, [router, pathname]);
+
   const write = useCallback(() => {
     const node = want.current;
     clearTimeout(timer.current);
     timer.current = undefined;
     if (node === null || !live.current) return;
     want.current = null;
+    if (!here()) return;
     wrote.current = node;
     last.current = Date.now();
+    const at = moved.current;
     const next = new URLSearchParams(current.current);
     next.set('node_id', node);
     // A browser past its limit refuses the rewrite, and the navigation's promise says so: the
     // selection is the page's own, so it stays where it moved, and the address is written later.
     Promise.resolve(navigate(`?${next}`, { replace: true, state: SAME_PAGE })).catch(() => {
-      if (!live.current || want.current !== null) return;
+      if (!live.current || want.current !== null || moved.current !== at) return;
       want.current = node;
       timer.current = setTimeout(write, ADDRESS_RETRY);
     });
-  }, [navigate]);
+  }, [navigate, here]);
 
   // Applied at once rather than as a transition, so the next key -- c straight after j -- acts on
   // the test it moved to.
@@ -636,11 +718,6 @@ function RunBody({ detail }: { detail: RunDetail }) {
 
   const failedRead = queue.failed[0];
   const results: QueueResult[] = addressed.extra ? [addressed.extra, ...queue.rows] : queue.rows;
-  // A run still recording may list more of its results than its detail counted when it was read.
-  const listed = queue.wholeRows.length;
-  const allTotal = queue.outcome === 'all' ? Math.max(total, listed) : total;
-  const allCounts =
-    queue.outcome === 'all' ? c : { ...c, [queue.outcome]: Math.max(c[queue.outcome], listed) };
   const metaCount = metadata.data?.items.length;
   return (
     <>
@@ -673,14 +750,14 @@ function RunBody({ detail }: { detail: RunDetail }) {
           baseline={baseline ? { label: runLabel(baseline.id), href: runHref(baseline.id) } : null}
           baselineNote={pendingNote(detail)}
           interrupted={!!comparison.counts?.not_reached}
-          total={allTotal}
+          total={queue.wholeTotal}
           running={head.running}
           shortcuts
           totals={queue.totals}
           onMore={queue.onMore}
           loading={queue.loading}
           allResults={queue.wholeRows}
-          outcomeCounts={allCounts}
+          outcomeCounts={queue.wholeCounts}
           outcome={queue.outcome}
           onOutcome={queue.setOutcome}
           selected={selected}
@@ -694,6 +771,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
                 addressed.byNode.get(r.nodeid) ??
                 (r.nodeid === wanted ? addressed.entry : undefined)
               }
+              seekFailed={r.nodeid === wanted && addressed.seekFailed}
               context={context}
               leave={leave}
             />

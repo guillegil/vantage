@@ -398,6 +398,10 @@ describe('the run page’s queue', () => {
     };
     expect(queueTotals(pending, 5)).toEqual({ failures: 5 });
     expect(queueTotals(pending, 2)).toEqual({ failures: 3 });
+    // A list with more to read holds more than it loaded, so its next page can be asked for.
+    expect(queueTotals(pending, 3, true)).toEqual({ failures: 4 });
+    expect(queueTotals(pending, 200, true)).toEqual({ failures: 201 });
+    expect(queueTotals(pending, 2, true)).toEqual({ failures: 3 });
   });
 
   it('maps a changed test onto a row, naming the streak’s first run by its label', () => {

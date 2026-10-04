@@ -22,23 +22,32 @@ function escapeBytes(ch: string): string {
   ).join('');
 }
 
-// A node id quoted for a POSIX shell only where it needs it: brackets, spaces and quotes do. One
-// holding a control or hidden character is written $'...', each such character as escaped bytes,
-// so the command carries none: nothing in it acts as it is pasted, and what shows is what copies.
+// A node id quoted for a POSIX shell only where it needs it: brackets, spaces and quotes do. A run
+// of control or hidden characters is written $'...' holding nothing but their bytes as octal
+// escapes, and every other run goes in plain single quotes, so the command carries none of them:
+// nothing in it acts as it is pasted, and what shows is what copies. A $'...' run holds no quote,
+// so a shell that does not read $'...', as dash, takes it as a $ and a quoted string of escapes, a
+// test that is not there, and the quoting around it stays in step.
 export function shellQuote(v: string): string {
   const s = String(v);
   if (/^[A-Za-z0-9_./:=@%+,-]+$/.test(s)) return s;
-  let unsafe = false;
-  for (const ch of s) if (isUnsafe(ch.codePointAt(0) ?? 0)) unsafe = true;
-  if (!unsafe) return `'${s.replace(/'/g, "'\\''")}'`;
   let out = '';
+  let run = '';
+  let escaped = false;
+  const close = () => {
+    if (run) out += escaped ? `$'${run}'` : `'${run.replace(/'/g, "'\\''")}'`;
+    run = '';
+  };
   for (const ch of s) {
-    const cp = ch.codePointAt(0) ?? 0;
-    if (isUnsafe(cp)) out += escapeBytes(ch);
-    else if (ch === '\\' || ch === "'") out += `\\${ch}`;
-    else out += ch;
+    const unsafe = isUnsafe(ch.codePointAt(0) ?? 0);
+    if (unsafe !== escaped) {
+      close();
+      escaped = unsafe;
+    }
+    run += unsafe ? escapeBytes(ch) : ch;
   }
-  return `$'${out}'`;
+  close();
+  return out || "''";
 }
 
 // A node id as an argument pytest reads as a test: pytest takes a word starting with - as an
@@ -61,8 +70,10 @@ function hasLineBreak(id: string): boolean {
 }
 
 // The file for pytest @file, one argument a line. It opens with --, so no line is ever an option,
-// and gives each node id as pytestArg does, since pytest reads a line starting with @ as another
-// file before -- applies; a node id holding a line break is left out, and counted.
+// not even one that a Latin-1 locale's reading splits out of a node id at a 0x85 byte, and gives
+// each node id as pytestArg does, since pytest reads a line starting with @ as another file before
+// -- applies; a node id holding a line break is left out, and counted. An option typed after
+// @file comes after that --, so the hint puts options before it.
 export function rerunFile(ids: string[]): { text: string; kept: number; left: number } {
   const kept = ids.filter((id) => !hasLineBreak(id));
   return {
@@ -103,7 +114,7 @@ export function RerunButton(p: RerunButtonProps) {
               {`Download ${plural(listed.kept, 'node id', 'node ids')}`}
             </Button>
             <span className="dl-rerun__hint">
-              then run <code>{`pytest @${file}`}</code>
+              then run <code>{`pytest [options] @${file}`}</code>
             </span>
           </>
         ) : null}

@@ -217,15 +217,17 @@ export function baselineNote(detail: RunDetail): BaselineNoteFacts {
   return facts;
 }
 
-// How many tests each queue group holds on the server: the six changes of a compared run, or the
-// failures of one with nothing to compare with yet, or not compared yet.
-// Each group's total, from the run's detail. A run not compared may still be recording, so its
-// failures listed after its detail was read can outnumber what the detail counted: the total is
-// never fewer than the `loaded` failures.
-export function queueTotals(detail: RunDetail, loaded = 0): QueueTotals {
+// How many tests each queue group holds on the server, from the run's detail: the six changes of a
+// compared run, or the failures of one with nothing to compare with yet, or not compared yet. A run
+// not compared may still be recording, so its failures listed after its detail was read can
+// outnumber what the detail counted: the total is never fewer than the `loaded` failures, and
+// while their list has `more` to read, one more than that, so its next page can be asked for.
+export function queueTotals(detail: RunDetail, loaded = 0, more = false): QueueTotals {
   const comparison = detail.comparison;
   if (!isCompared(comparison))
-    return { failures: Math.max(detail.counts.failed + detail.counts.error, loaded) };
+    return {
+      failures: Math.max(detail.counts.failed + detail.counts.error, loaded + (more ? 1 : 0)),
+    };
   const totals: QueueTotals = {};
   for (const [word, change] of Object.entries(CHANGE) as [ChangeWord, Change][]) {
     totals[change] = comparison.counts[word];

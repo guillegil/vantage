@@ -1408,11 +1408,14 @@ total (`queueTotals`: `comparison.counts`, or failed plus error for a run
 not compared) and the rows read so far, and asks for more through
 `onMore`. A run still recording lists results that arrived after its
 detail was read, so its failures' total, and the whole run's, is never
-fewer than the list holds, and asking for more of a list wholly read reads
-it again. A group is read from `/changes?change=`, 200 at a time
-(`useChanges`), only once its total is not zero, the removed tests only
-once their group is opened or the address names a test the run has no
-result for; a run with no baseline reads its failures from
+fewer than the list holds, and while the list has more to read, one more
+than that, so the queue still asks for its next page; a list read past
+its count reads the run's detail again (`useRereadRun`), once for each
+page past it, so the counts catch up; and asking for more of a list
+wholly read reads it again. A group is read from `/changes?change=`, 200
+at a time (`useChanges`), only once its total is not zero, the removed
+tests only once their group is opened or the address names a test the
+run has no result for; a run with no baseline reads its failures from
 `/results?outcome=failed&outcome=error`, and the whole-run view reads
 `/results` with its outcome filter, each 200 at a time. *Try again* on a
 list whose reading afresh failed reads it from its first page; on one
@@ -1432,9 +1435,12 @@ shows rows down to it; an unchanged one is shown with no row selected,
 its cursor on the line from `/result`'s `position`; for one `/result` has
 no result for, the removed and not-reached groups are read whole, the
 removed opened, and only a test neither holds gets a notice while the
-page opens on the queue's first row. The selection is the page's own
-state, set with `flushSync` so a key pressed straight after a move acts on
-the test it moved to, and the address follows it: each rewrite replaces
+page opens on the queue's first row; should a read of either fail, the
+detail says the page could not finish checking, in place of its loading
+line, until the failed read's *Try again* resumes the search. The
+selection is the page's own state, set with `flushSync` so a key pressed
+straight after a move acts on the test it moved to, and the address
+follows it: each rewrite replaces
 the address, so Back leaves the run, at most every 350 ms, since browsers
 refuse a page that replaces its address too often (Safari past 100 times
 in 10 s, Firefox past 200) and a held key moves 25 times a second. A
@@ -1444,7 +1450,15 @@ still waiting is written before the page is left, by Enter, by the
 history strip or by a link click (a capturing listener on the document,
 ahead of the client's link routing), so Back comes to the test chosen
 last; a navigation that changes the address all the same, as Back between
-two of the run's addresses, moves the selection. Each rewrite carries
+two of the run's addresses, moves the selection. A rewrite lands only on
+the page it was chosen on. A page left stays mounted, its timer armed and
+its keys live, until the next one has rendered, and a relative rewrite
+would then replace the next page's address, so each rewrite first checks
+that the data router (`UNSAFE_DataRouterContext`) is still on the run's
+path and not on its way elsewhere; and Back or Forward, which move the
+address before anything can be written, drop a rewrite still waiting,
+from a `popstate` listener that runs in the router's own task, so
+Forward comes back to the test written last. Each rewrite carries
 `SAME_PAGE` as its state, which `usePage` takes as staying on the page,
 leaving focus where it is; every other navigation, Back included, focuses
 the page's heading.
@@ -1472,13 +1486,21 @@ slider's name and readout, the triage detail's accessible name --
 never make a node id or a traceback read as something else; *Copy* still
 copies the text as recorded. A rerun command (`RerunButton`'s
 `rerunCommand`, which the queue's `c` uses too) is the exception, since
-it is pasted into a shell: a node id holding a control character or one
-`visible` marks is written `$'…'`, each such character as its UTF-8
-bytes in octal escapes, so the command shows and copies only what a
-terminal prints, and a node id starting with `-` or `@` is given as `./…`,
-so pytest never reads it as an option or as a file of arguments. The file
-for `pytest @file` starts with a `--` line, gives node ids the same way,
-and leaves out one holding a line break, which pytest would split.
+it is pasted into a shell: in a node id holding a control character or
+one `visible` marks, each run of such characters is written `$'…'`, as
+their UTF-8 bytes in octal escapes, and every other run in plain single
+quotes, so the command shows and copies only what a terminal prints. A
+`$'…'` part holds nothing but escapes, so a shell without `$'…'`, as
+dash, reads it as a `$` and quoted text and the quoting stays in step:
+one argument, never a command; the unit tests run hostile node ids
+through bash, dash and each other shell the machine has. A node id
+starting with `-` or `@` is given as `./…`, so pytest never reads it as
+an option or as a file of arguments. The file for `pytest @file` starts
+with a `--` line, so no line is an option, not even one a Latin-1
+locale's reading splits out of a node id at a 0x85 byte; it gives node
+ids the same way, and leaves out one holding a line break, which pytest
+would split. Since an option typed after `@file` lands after its `--`,
+the hint beside the button reads `pytest [options] @file`.
 
 ### Build, packaging and CI
 

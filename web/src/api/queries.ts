@@ -11,6 +11,7 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
+import { useCallback } from 'react';
 import { ApiError, api, isApiError, type Schemas, unwrap } from './client';
 
 export type Session = Schemas['SessionResponse'];
@@ -153,6 +154,15 @@ export function useRun(runId: string, enabled = true) {
       ),
     staleTime: (query) => (isFinal(query.state.data) ? Number.POSITIVE_INFINITY : LIST_STALE),
   });
+}
+
+// Reads a run's detail again, alone: a list of a run still recording can hold results that arrived
+// after its detail was read, and its counts then catch up.
+export function useRereadRun(runId: string): () => void {
+  const client = useQueryClient();
+  return useCallback(() => {
+    void client.invalidateQueries({ queryKey: ['run', runId], exact: true });
+  }, [client, runId]);
 }
 
 function outcomesQuery(client: QueryClient, runId: string, finished: boolean) {

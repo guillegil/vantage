@@ -766,10 +766,11 @@ project you had open last, or of `default`.
   end was recorded.* when it was abandoned. A compared run with new
   failures ends that line with a button copying the `pytest` command that
   reruns them all (past 20, it downloads their node ids as
-  `new-failures.txt` for `pytest @new-failures.txt` instead; the file
-  starts with a `--` line, so any options go before `@new-failures.txt`,
-  and it leaves out, and says so, a node id holding a line break, which
-  pytest would read as two).
+  `new-failures.txt` for `pytest [options] @new-failures.txt` instead;
+  the file starts with a `--` line, so any options go before
+  `@new-failures.txt`, as the button's hint shows, and it leaves out, and
+  says so, a node id holding a line break, which pytest would read as
+  two).
   - **The queue** groups the tests that changed in the order to work
     through them: new failures, still failing (with how many runs in a row
     and since which), fixed, new tests, then the removed tests, closed until
@@ -829,12 +830,16 @@ project you had open last, or of `default`.
   a zero-width space, or the U+FFFD the server stores for U+0000, shows as
   its code point (`U+202E`) in node ids, failure text, branches, commit
   subjects, metadata and interrupt reasons, so none reads as something
-  else. A rerun command writes such a character, and every control
-  character, as escaped bytes in `$'…'` (`$'…[\342\200\256gnp.exe]'`), so
-  what it shows is what it copies and nothing in it acts as it is pasted,
-  and gives a node id starting with `-` or `@` as `./…`, so pytest never
-  reads one as an option or a file of arguments. bash, zsh and ksh read
-  `$'…'`; a shell that does not takes it as a test that is not there.
+  else. A rerun command writes each run of such characters, and of every
+  control character, as escaped bytes in `$'…'`, and the rest of the node
+  id in plain single quotes (`'…['$'\342\200\256''gnp.exe]'`), so what it
+  shows is what it copies and nothing in it acts as it is pasted, and
+  gives a node id starting with `-` or `@` as `./…`, so pytest never reads
+  one as an option or a file of arguments. bash, zsh, ksh and busybox's
+  ash read `$'…'`; a shell that does not, as dash, Debian's and Ubuntu's
+  `/bin/sh`, reads a `$` and the escapes as text, since a `$'…'` part
+  never holds a quote: one argument naming a test that is not there, and
+  nothing else run.
 - **A test's history** in a project, newest first, fifty at a time: each
   run's outcome, commit, start and duration, each opening that run's
   result, under the same line of marks, change marks included, and

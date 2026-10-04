@@ -514,6 +514,52 @@ describe('the queue', () => {
     expect(await selectedHeading()).toHaveTextContent(NF1);
   });
 
+  it('never writes a move still waiting into the address of the page it went to', async () => {
+    serve(TRIAGE);
+    const user = userEvent.setup();
+    const { router } = renderAt(`/runs/${ID}`);
+    await selectedHeading();
+    await group(/^Still failing/);
+    // The clock stands still, so the second move waits a whole gap to be written.
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    await user.keyboard('j');
+    await waitFor(() =>
+      expect(router.state.location.search).toBe(`?node_id=${encodeURIComponent(NF2)}`),
+    );
+    await user.keyboard('j');
+    expect(await selectedHeading()).toHaveTextContent(SF);
+    const navigate = vi.spyOn(router, 'navigate');
+    // The router is on the other run at once, and the page it left stays mounted until the next
+    // has rendered: here, until act() ends, past the gap.
+    await act(async () => {
+      await router.navigate(`/runs/${OTHER}`);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    });
+    expect(router.state.location.pathname).toBe(`/runs/${OTHER}`);
+    expect(router.state.location.search).toBe('');
+    expect(navigate).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a move still waiting when Back or Forward moves the address', async () => {
+    serve(TRIAGE);
+    const user = userEvent.setup();
+    const { router } = renderAt(`/runs/${ID}`);
+    await selectedHeading();
+    await group(/^Still failing/);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now());
+    await user.keyboard('j');
+    await waitFor(() =>
+      expect(router.state.location.search).toBe(`?node_id=${encodeURIComponent(NF2)}`),
+    );
+    await user.keyboard('j');
+    const navigate = vi.spyOn(router, 'navigate');
+    // As a browser's Back does, in the task that moves the address, before any timer can fire.
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 600)));
+    expect(navigate).not.toHaveBeenCalled();
+    expect(router.state.location.search).toBe(`?node_id=${encodeURIComponent(NF2)}`);
+  });
+
   it('copies the selected test’s rerun command with c', async () => {
     serve(TRIAGE);
     const user = userEvent.setup();
@@ -609,7 +655,7 @@ describe('the queue', () => {
 
   it('shows and copies a rerun command holding no hidden character', async () => {
     const odd = `tests/test_x.py::test_hostile[${RLO}gnp.exe]`;
-    const shown = `pytest $'tests/test_x.py::test_hostile[\\342\\200\\256gnp.exe]'`;
+    const shown = `pytest 'tests/test_x.py::test_hostile['$'\\342\\200\\256''gnp.exe]'`;
     serve({ results: [{ node: odd, outcome: 'failed', change: 'new_failure', was: 'passed' }] });
     const user = userEvent.setup();
     renderAt(`/runs/${ID}`);
@@ -818,7 +864,7 @@ describe('the rerun of the new failures', () => {
         'aria-busy',
       ),
     );
-    expect(screen.getByText('pytest @new-failures.txt')).toBeInTheDocument();
+    expect(screen.getByText('pytest [options] @new-failures.txt')).toBeInTheDocument();
   });
 });
 
@@ -998,6 +1044,35 @@ describe('an address naming a test', () => {
     expect(within(detailRegion()).queryByText('Loading the result…')).toBeNull();
   });
 
+  it('says when a failed read stopped it looking for a test the run may lack', async () => {
+    let broken = true;
+    serve(TRIAGE, (_m, path, query) =>
+      broken && path === `/runs/${ID}/changes` && query.get('change') === 'removed'
+        ? refuse(500, 'internal_error', 'No.')
+        : undefined,
+    );
+    const user = userEvent.setup();
+    const wanted = 'tests/test_x.py::test_typo';
+    renderAt(`/runs/${ID}?node_id=${encodeURIComponent(wanted)}`);
+    expect(await selectedHeading()).toHaveTextContent(wanted);
+    const notice = await screen.findByText('The server answered 500', {}, { timeout: 4000 });
+    const detail = detailRegion();
+    expect(
+      await within(detail).findByText('Could not finish checking whether this run has this test.'),
+    ).toBeInTheDocument();
+    expect(within(detail).queryByRole('status')).toBeNull();
+    expect(screen.queryByText(/^This run has no result for/)).toBeNull();
+    // Tried again, the search finishes.
+    broken = false;
+    await user.click(
+      within(notice.closest('.dl-notice') as HTMLElement).getByRole('button', {
+        name: 'Try again',
+      }),
+    );
+    expect(await screen.findByText(/^This run has no result for/)).toBeInTheDocument();
+    expect(await selectedHeading()).toHaveTextContent(NF1);
+  });
+
   it('says the run has no result for a test it lacks, and opens on the first new failure', async () => {
     serve(TRIAGE);
     const wanted = `tests/test_x.py::test_${RLO}gone`;
@@ -1108,6 +1183,83 @@ describe('states', () => {
     const failures = await group(/^Failures/);
     await waitFor(() => expect(within(failures).getAllByRole('option')).toHaveLength(3));
     expect(reads).toBe(2);
+  });
+
+  it('offers the rest of a list its detail counted too few of', async () => {
+    const world: World = {
+      results: many('tests/test_load.py::test_burst', 250, { outcome: 'failed' }),
+      state: 'pending',
+      // Read when the run had recorded 150 failures, and never read fresher here.
+      run: {
+        presentation: 'running',
+        counts: { passed: 0, failed: 150, error: 0, skipped: 0, xfailed: 0, xpassed: 0 },
+      },
+    };
+    const calls = serve(world);
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    const failures = await group(/^Failures/);
+    await waitFor(() =>
+      expect(calls).toContain(
+        `GET /runs/${ID}/results?limit=200&offset=0&outcome=failed&outcome=error`,
+      ),
+    );
+    // A full first page with more to read: the group holds more than it loaded.
+    await waitFor(() =>
+      expect(document.querySelector('.dl-queue__ghead')).toHaveTextContent('Failures201'),
+    );
+    while (screen.queryByRole('button', { name: /^Show/ })) {
+      await user.click(screen.getByRole('button', { name: /^Show/ }));
+      await waitFor(() =>
+        expect(within(failures).queryByRole('status', { name: /Loading/ })).toBeNull(),
+      );
+    }
+    expect(calls).toContain(
+      `GET /runs/${ID}/results?limit=200&offset=200&outcome=failed&outcome=error`,
+    );
+    await waitFor(() => expect(within(failures).getAllByRole('option')).toHaveLength(250));
+    expect(document.querySelector('.dl-queue__ghead')).toHaveTextContent('Failures250');
+    // So does the whole run.
+    await user.click(screen.getByRole('button', { name: 'All 150 results' }));
+    await waitFor(() =>
+      expect(document.querySelector('.dl-queue__title')).toHaveTextContent('201 results'),
+    );
+    await user.click(screen.getByRole('button', { name: 'Show 1 more' }));
+    await waitFor(() => expect(calls).toContain(`GET /runs/${ID}/results?limit=200&offset=200`));
+    await waitFor(() =>
+      expect(document.querySelector('.dl-queue__title')).toHaveTextContent('250 results'),
+    );
+    expect(
+      within(screen.getByRole('listbox', { name: 'Results' })).getAllByRole('option'),
+    ).toHaveLength(250);
+  });
+
+  it('reads the detail again when a list outgrows it, so its counts catch up', async () => {
+    const world: World = {
+      results: many('tests/test_load.py::test_step', 450, { outcome: 'passed' }),
+      state: 'pending',
+      run: { presentation: 'running' },
+    };
+    let reads = 0;
+    const calls = serve(world, (_m, path) => {
+      if (path !== `/runs/${ID}`) return undefined;
+      reads += 1;
+      // The first read was made when the run had recorded 150 results.
+      if (reads > 1) return undefined;
+      return json(200, {
+        ...runOf(world),
+        counts: { passed: 150, failed: 0, error: 0, skipped: 0, xfailed: 0, xpassed: 0 },
+      });
+    });
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    await user.click(await screen.findByRole('button', { name: 'All 150 results' }));
+    await waitFor(() =>
+      expect(document.querySelector('.dl-queue__title')).toHaveTextContent('450 results'),
+    );
+    expect(reads).toBe(2);
+    await user.click(screen.getByRole('button', { name: 'Show 200 more' }));
+    await waitFor(() => expect(calls).toContain(`GET /runs/${ID}/results?limit=200&offset=200`));
   });
 
   it('tries again a list it failed to read afresh', async () => {

@@ -47,7 +47,7 @@ test('hostile names and failure text stay text', async ({ page, context, watch }
   expect(await reordered.textContent()).not.toContain(RLO);
   // Its rerun command carries the character as escaped bytes, so what shows is what copies.
   await reordered.click();
-  const escaped = "pytest $'suite.py::test_hostile_id[\\342\\200\\256gnp.exe]'";
+  const escaped = "pytest 'suite.py::test_hostile_id['$'\\342\\200\\256''gnp.exe]'";
   const cmd = page.locator('.dl-triage__cmd');
   await expect(cmd.locator('.dl-cmd__text [data-copy-text]')).toHaveText(escaped);
   expect(await cmd.textContent()).not.toContain(RLO);
