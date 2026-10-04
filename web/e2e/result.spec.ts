@@ -39,8 +39,11 @@ test('a failing result opens from its run, with its evidence and its history', a
   allow(watch, OPEN());
   const [newest, older] = await runs(page);
   await page.locator('.dl-run__id').first().click();
-  await section(page, 'Not passing')
-    .getByRole('link', { name: 'suite.py::test_assert_fails' })
+  // From the run's queue: the test, then its result page.
+  await page.getByRole('option').filter({ hasText: 'suite.py::test_assert_fails' }).click();
+  await page
+    .getByRole('region', { name: 'Selected test: suite.py::test_assert_fails' })
+    .getByRole('link', { name: 'Open result page' })
     .click();
   await expect(page).toHaveURL(resultOf(newest, 'suite.py::test_assert_fails'));
   await expect(page.getByRole('heading', { level: 1 })).toHaveText('suite.py::test_assert_fails');

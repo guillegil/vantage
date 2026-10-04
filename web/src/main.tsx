@@ -1,7 +1,8 @@
 import { QueryClientProvider } from '@tanstack/react-query';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { RouterProvider } from 'react-router';
+// The DOM build of the provider, which applies a navigation asked for with flushSync at once.
+import { RouterProvider } from 'react-router/dom';
 import './ds';
 import './app/app.css';
 import { createQueryClient } from './app/queryClient';

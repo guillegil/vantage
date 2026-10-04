@@ -43,7 +43,8 @@ export function ChangeGlyph(p: { change: Change; outcome?: Outcome | null }) {
 
 // The sentence after a change's name, for a detail head: "New failure: passed in 1adf29af".
 function changeDetail(p: ChangeBadgeProps): ReactNode[] | null {
-  const base = p.baseline ? <code>{p.baseline}</code> : null;
+  // Keyed: React 19 warns of an unkeyed element even through Children.toArray.
+  const base = p.baseline ? <code key="b">{p.baseline}</code> : null;
   switch (p.change) {
     case 'new-failure':
       return p.was ? [`${p.was} in `, base] : ['not in ', base, '; its first run failed'];

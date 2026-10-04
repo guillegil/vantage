@@ -24,7 +24,7 @@ test('a run shows its counts and one mark per result', async ({ page, watch }) =
   await expect(row.locator('svg[role="img"] rect:not(.dl-dotline__base)')).toHaveCount(11);
 });
 
-test('opening a run moves within the page, and the run lists what did not pass', async ({
+test('opening a run moves within the page, and its queue reaches every result', async ({
   page,
   watch,
 }) => {
@@ -35,17 +35,42 @@ test('opening a run moves within the page, and the run lists what did not pass',
   });
   const link = page.locator('.dl-run__id').first();
   const id = await link.getAttribute('title');
+  const older = (await page.locator('.dl-run__id').nth(1).getAttribute('title')) ?? '';
   await link.click();
   await expect(page).toHaveURL(`${OPEN()}/runs/${id}`);
   expect(await page.evaluate(() => (window as unknown as { __marker?: number }).__marker)).toBe(1);
-  const notPassing = page.locator('section', {
-    has: page.getByRole('heading', { name: 'Not passing' }),
-  });
-  await expect(notPassing).toContainText('test_assert_fails');
-  await expect(notPassing).toContainText('expected 3.3V, got 3.38V');
-  await expect(notPassing).toContainText('test_fixture_errors');
-  await expect(notPassing).toContainText('test_unexpected_pass');
-  await expect(notPassing).not.toContainText('test_passes');
+  // The suite failed the same tests both times: nothing changed, and these still fail.
+  const queue = page.locator('.dl-queue');
+  await expect(queue.locator('.dl-queue__title')).toHaveText(`Changed since ${older.slice(0, 8)}`);
+  await expect(queue.locator('.dl-queue__note')).toHaveText(
+    `Nothing changed since ${older.slice(0, 8)}.`,
+  );
+  await expect(
+    queue.getByRole('listbox', { name: /^Still failing/ }).getByRole('option'),
+  ).toHaveText([
+    /suite\.py::test_assert_fails/,
+    /suite\.py::test_fixture_errors/,
+    /suite\.py::test_hostile_output/,
+  ]);
+  // The first is selected, with its failure beside it.
+  const detail = page.getByRole('region', { name: 'Selected test: suite.py::test_assert_fails' });
+  await expect(detail).toContainText('expected 3.3V, got 3.38V');
+  await expect(detail).toContainText(`Still failing: 2 runs, since ${older.slice(0, 8)}`);
+  // The whole run, in the order pytest reported it, filtered by the server.
+  await queue.getByRole('button', { name: 'All 10 results' }).click();
+  await expect(queue.locator('.dl-queue__title')).toHaveText('10 results');
+  const all = queue.getByRole('listbox', { name: 'Results' }).getByRole('option');
+  await expect(all).toHaveCount(10);
+  await expect(all.first()).toContainText('suite.py::test_passes');
+  await queue.getByRole('radio', { name: 'xpassed 1' }).click();
+  await expect(all).toHaveText([/suite\.py::test_unexpected_pass/]);
+  await all.first().click();
+  await expect(page).toHaveURL(
+    `${OPEN()}/runs/${id}?node_id=${encodeURIComponent('suite.py::test_unexpected_pass')}`,
+  );
+  await expect(
+    page.getByRole('region', { name: 'Selected test: suite.py::test_unexpected_pass' }),
+  ).toContainText('xpassed');
 });
 
 test('a deep link reloads, and sign-in is not a page on an open server', async ({

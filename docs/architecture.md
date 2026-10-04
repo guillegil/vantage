@@ -1349,9 +1349,11 @@ next version. Each component is a typed export with the design system's
 markup, classes, words, aria and behaviour, beside its README copied
 verbatim with the port's notes after it; `contract.test-d.ts`, checked by
 `tsc`, assigns each to the type `contract.d.ts` declares, so a prop that
-drifts fails `typecheck`. Only what the screens use is ported, and nothing
-that shows what the server does not store. Components never fetch. The
-port adds no styles of its own: `dotline.css` styles everything it shows.
+drifts fails `typecheck`. What the screens use is ported, with the
+components those draw on, and `Tabs` and `MenuButton` ahead of the screens
+that will use them; no screen shows what the server does not store.
+Components never fetch. The port adds no styles of its own: `dotline.css`
+styles everything it shows.
 
 **The tokens are CSS made on the fly** by `build/dotline-tokens.ts`, a Vite
 plugin that resolves `virtual:dotline-tokens.css` to a name beside
@@ -1389,13 +1391,43 @@ carries its character of `changes`, which is null until the run is
 compared, so a pending run or one with nothing to compare with draws plain
 marks. A compared run's list row carries its new failures and fixes from
 its `comparison.counts`, and a history strip each entry's `change`.
-`baselineLine` words what the run page says it was compared with from the
-run's `comparison`, its presentation and its own branch and commit, and
-`earlier` how much sooner the baseline started, from the two start
-times. It returns each recorded branch and commit as a part of its own
-(the commit cut to seven characters by code point), which the page sets in
-a `<bdi>` through `visible`, so neither a right-to-left name nor a
+`baselineNote` gives the design system's `BaselineNote` its props from a
+run's detail: its `state` (`compared`, `none`, `pending` while it runs,
+`abandoned`), the `baseline`'s label, address, id and branch, `earlier`,
+how many seconds sooner the baseline started, from the two start times,
+and, when the comparison fell back from the run's own branch, why
+(`fallback`: the branch it has, a detached HEAD at its commit, no branch,
+or no repository). `BaselineNote` words the sentence, cuts the commit to
+seven characters by code point, and sets each recorded branch and commit
+in a `<bdi>` through `visible`, so neither a right-to-left name nor a
 character that reorders text moves the words around it.
+
+**The run page** is the design system's triage view, `ChangeQueue` beside
+the selected test, paged by the server. The queue is given each group's
+total (`queueTotals`: `comparison.counts`, or failed plus error for a run
+not compared) and the rows read so far, and asks for more through
+`onMore`. A group is read from `/changes?change=`, 200 at a time
+(`useChanges`), only once its total is not zero, the removed tests only
+once their group is opened; a run with no baseline reads its failures from
+`/results?outcome=failed&outcome=error`, and the whole-run view reads
+`/results` with its outcome filter, each 200 at a time. Like every read of
+a run, each is keyed by whether the run was final. Every page of new
+failures is read before the rerun button under the baseline sentence is
+offered, since it names every one. A row's change, earlier outcome and
+streak come from `/changes`; a test from the whole run, or one the address
+names that no loaded row holds, takes them from `/result`, never from the
+line's change characters, which hold nothing for a test the run lacks. The
+selection is the address's `node_id`: a changed test it names has its
+group read page by page until the group holds it, an unchanged one is
+shown with no row selected, its cursor on the line from `/result`'s
+`position`, and one the run lacks gets a notice while the page opens on
+the queue's first row. Each selection replaces the address, so Back leaves
+the run, and is applied with `flushSync`, which only the DOM build's
+`RouterProvider` (`react-router/dom`) carries out, so a key pressed
+straight after a move acts on the test it moved to. That replacement
+carries `SAME_PAGE` as its state, which `usePage` takes as staying on the
+page, leaving focus where it is; every other navigation, Back included,
+focuses the page's heading.
 
 **Links** are the design system's plain `<a href>`, which keep middle-click
 and copying the address. One click listener on the document routes a plain
@@ -1412,8 +1444,8 @@ character, Hangul filler, variation selector, C0 or C1 control (tab and
 line breaks aside), lone surrogate and U+FFFD as its code point in a marked
 box. `NodeId`, `Evidence` (its body and a string `meta`, which may name a
 recorded path or exception type), `CommitRef`, `MetaList` and `RunStatus`'s
-recorded reason use it, and so do the run page's first line of each
-failure and its baseline sentence's branches and commit. Where recorded
+recorded reason use it, and so does `BaselineNote` for the branches and
+commit it names. Where recorded
 text becomes a plain string -- a tooltip, the window's title, the history
 slider's name and readout -- `visibleText` writes it as `⟨U+202E⟩`. So a
 right-to-left override can never make a node id or a traceback read as

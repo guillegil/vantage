@@ -2,6 +2,7 @@
 // system's props. Pure functions, so each mapping is tested on its own.
 
 import type {
+  ChangeItem,
   ChangeWord,
   HistoryEntry,
   Project,
@@ -13,6 +14,7 @@ import type {
   RunOutcomes,
 } from '../api/queries';
 import type {
+  BaselineNoteProps,
   Change,
   CommitRefProps,
   HistoryGridProps,
@@ -21,6 +23,8 @@ import type {
   OutcomeCounts,
   PhaseTimelineProps,
   ProjectRef,
+  QueueResult,
+  QueueTotals,
   ResultLike,
   RunItem,
   RunState,
@@ -104,7 +108,7 @@ export function lineResults(outcomes: string, changes: string | null): ResultLik
 }
 
 // Whether a run was compared: then, and only then, the API gives its baseline and counts.
-function compared(
+export function isCompared(
   comparison: RunListItem['comparison'],
 ): comparison is RunListItem['comparison'] & {
   baseline: NonNullable<RunListItem['comparison']['baseline']>;
@@ -149,7 +153,7 @@ export function runItem(
   }
   if (outcomes !== undefined) run.results = lineResults(outcomes.outcomes, outcomes.changes);
   const comparison = item.comparison;
-  if (compared(comparison)) {
+  if (isCompared(comparison)) {
     run.changes = {
       newFailures: comparison.counts.new_failure,
       fixed: comparison.counts.fixed,
@@ -175,61 +179,130 @@ export function dotlineLabel(
   }${running ? ', still running' : ''}`;
 }
 
-// How much earlier `from` started than `to`, in the words a run list's times use: "42 min",
-// "3 h", "2 d". Two start times, since a baseline is chosen by when it started.
-export function earlier(from: string, to: string): string {
-  const s = Math.floor((Date.parse(to) - Date.parse(from)) / 1000);
-  if (!Number.isFinite(s) || s < 1) return 'under 1 s';
-  if (s < 60) return `${s} s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h} h`;
-  return `${fmtCount(Math.floor(h / 24))} d`;
-}
+// What BaselineNote says of a run: whether it was compared, with which run and how much earlier
+// that one started, in seconds, and why the baseline is the project's latest complete run rather
+// than one on this run's branch. Two start times, since a baseline is chosen by when it started.
+export type BaselineNoteFacts = Pick<
+  BaselineNoteProps,
+  'state' | 'baseline' | 'earlier' | 'fallback'
+>;
 
-// The run page's line saying what the run was compared with: the words before the
-// baseline's label, the baseline (null when there is none), and the words after it.
-// A recorded branch or commit is its own part, as recorded: the page sets it apart
-// from the words around it, so neither its direction nor a character that reorders
-// text reaches them, and shows its hidden characters.
-export type BaselineWords = (string | { recorded: string })[];
-
-export interface BaselineLine {
-  lead: BaselineWords;
-  baseline: { id: string; label: string; href: string } | null;
-  tail: BaselineWords;
-}
-
-export function baselineLine(detail: RunDetail): BaselineLine {
+export function baselineNote(detail: RunDetail): BaselineNoteFacts {
   const comparison = detail.comparison;
-  if (!compared(comparison)) {
-    let lead: string;
-    if (comparison.state === 'none') lead = 'Nothing to compare with yet.';
-    else if (detail.presentation === 'running')
-      lead = 'Compared with its baseline once the session ends.';
-    else lead = 'Not compared: no end was recorded.';
-    return { lead: [lead], baseline: null, tail: [] };
+  if (!isCompared(comparison)) {
+    if (comparison.state === 'none') return { state: 'none' };
+    // Pending: a running run is compared once its session ends; any other has no end recorded.
+    return { state: detail.presentation === 'running' ? 'pending' : 'abandoned' };
   }
   const base = comparison.baseline;
-  let lead: BaselineWords = ['Compared with '];
+  const facts: BaselineNoteFacts = {
+    state: 'compared',
+    baseline: {
+      label: runLabel(base.id),
+      href: runHref(base.id),
+      id: base.id,
+      branch: base.branch,
+    },
+  };
+  const s = (Date.parse(detail.started_at) - Date.parse(base.started_at)) / 1000;
+  if (Number.isFinite(s)) facts.earlier = s;
   if (comparison.state === 'project') {
     // Why it fell back to the project's latest complete run, from what this run recorded.
     const vcs = detail.vcs;
-    if (vcs?.branch) lead = ['No earlier complete run on ', { recorded: vcs.branch }];
-    else if (vcs?.commit) {
-      // By code point, so a character is never split in two.
-      const sha = [...vcs.commit].slice(0, 7).join('');
-      lead = ['No branch recorded (detached HEAD at ', { recorded: sha }, ')'];
-    } else if (vcs) lead = ['No branch recorded'];
-    else lead = ['Recorded outside a git repository'];
-    lead.push('; compared with ');
+    if (vcs?.branch) facts.fallback = { reason: 'branch', branch: vcs.branch };
+    else if (vcs?.commit) facts.fallback = { reason: 'detached', commit: vcs.commit };
+    else if (vcs) facts.fallback = { reason: 'no-branch' };
+    else facts.fallback = { reason: 'no-git' };
   }
-  const on: BaselineWords = base.branch ? [' on ', { recorded: base.branch }] : [];
+  return facts;
+}
+
+// How many tests each queue group holds on the server: the six changes of a compared run, or the
+// failures of one with nothing to compare with yet, or not compared yet.
+export function queueTotals(detail: RunDetail): QueueTotals {
+  const comparison = detail.comparison;
+  if (!isCompared(comparison)) return { failures: detail.counts.failed + detail.counts.error };
+  const totals: QueueTotals = {};
+  for (const [word, change] of Object.entries(CHANGE) as [ChangeWord, Change][]) {
+    totals[change] = comparison.counts[word];
+  }
+  return totals;
+}
+
+// A row of the run page's queue, with what the page keeps beside it.
+export interface TriageRow extends QueueResult {
+  // Its index in the run's stored order, its mark in the run's line: null for a test the run
+  // lacks, and for a row read from a filtered list, which does not say.
+  position: number | null;
+  // Whether the row says how the test changed: a row from /changes does, and so does any row of a
+  // run that was not compared, which has no changes. A whole-run row of a compared run does not,
+  // and its detail asks /result.
+  changeKnown: boolean;
+}
+
+function streakOf(streak: ChangeItem['streak']): QueueResult['streak'] | undefined {
+  // The first run of the streak, as lists print a run: its label.
+  return streak ? { runs: streak.runs, since: runLabel(streak.since) } : undefined;
+}
+
+// A changed test, as /runs/{id}/changes answers it. A test the run lacks has no result in it, so
+// its address is its result in the baseline.
+export function changeRow(item: ChangeItem, runId: string, baselineId: string): TriageRow {
+  const row: TriageRow = {
+    nodeid: item.node_id,
+    outcome: item.outcome,
+    seconds: item.duration,
+    change: CHANGE[item.change],
+    was: item.was,
+    href: resultHref(item.outcome === null ? baselineId : runId, item.node_id),
+    position: item.position,
+    changeKnown: true,
+  };
+  const streak = streakOf(item.streak);
+  if (streak) row.streak = streak;
+  return row;
+}
+
+// A result as /runs/{id}/results lists it: a failure of a run with no baseline, or a row of the
+// whole-run view. Its position is known only from an unfiltered page, whose index it is.
+export function resultQueueRow(
+  item: ResultItem,
+  runId: string,
+  { position, compared }: { position: number | null; compared: boolean },
+): TriageRow {
   return {
-    lead,
-    baseline: { id: base.id, label: runLabel(base.id), href: runHref(base.id) },
-    tail: [...on, `, ${earlier(base.started_at, detail.started_at)} earlier`],
+    nodeid: item.node_id,
+    outcome: item.outcome,
+    seconds: item.duration,
+    href: resultHref(runId, item.node_id),
+    position,
+    changeKnown: !compared,
+  };
+}
+
+// How a result changed against its run's baseline, as /runs/{id}/result says: all null when it
+// did not change, and while the run is not compared.
+export function resultChange(result: ResultDetail): Pick<QueueResult, 'change' | 'was' | 'streak'> {
+  const out: Pick<QueueResult, 'change' | 'was' | 'streak'> = {
+    change: result.change ? CHANGE[result.change] : null,
+    was: result.was,
+  };
+  const streak = streakOf(result.streak);
+  if (streak) out.streak = streak;
+  return out;
+}
+
+// A test the address names that no loaded row holds, from /runs/{id}/result: shown as a result,
+// with what /result says of its change.
+export function resultDetailRow(result: ResultDetail, runId: string): TriageRow {
+  return {
+    nodeid: result.node_id,
+    outcome: result.outcome,
+    seconds: result.duration,
+    href: resultHref(runId, result.node_id),
+    position: result.position,
+    changeKnown: true,
+    ...resultChange(result),
   };
 }
 
@@ -294,43 +367,6 @@ export function metaItems(metadata: RunMetadata): MetaListProps['items'] {
           source: MISSING[item.status] ?? item.status,
         },
   );
-}
-
-export const NOT_RECORDED = 'Failure text was not recorded; run with --vantage-failure-text';
-
-export interface ResultRow {
-  key: string;
-  nodeId: string;
-  href: string;
-  outcome: Outcome;
-  message: string | null;
-  seconds: number | null;
-}
-
-function firstLine(text: string | null | undefined): string | null {
-  if (!text) return null;
-  const line = text.split('\n').find((l) => l.trim() !== '');
-  return line ?? null;
-}
-
-export function resultRow(item: ResultItem, index: number, runId: string): ResultRow {
-  const failure = item.failure;
-  let message: string | null = null;
-  if (item.outcome === 'failed' || item.outcome === 'error') {
-    message = firstLine(failure?.failure_message) ?? NOT_RECORDED;
-  } else if (item.outcome === 'skipped') {
-    message = firstLine(failure?.skip_reason);
-  } else if (item.outcome === 'xfailed' || item.outcome === 'xpassed') {
-    message = firstLine(failure?.xfail_reason);
-  }
-  return {
-    key: `${index}:${item.node_id}`,
-    nodeId: item.node_id,
-    href: resultHref(runId, item.node_id),
-    outcome: item.outcome,
-    message,
-    seconds: item.duration,
-  };
 }
 
 // What failure text may hold, said wherever it is shown.
