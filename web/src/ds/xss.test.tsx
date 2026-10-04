@@ -6,6 +6,8 @@ import type { ReactElement } from 'react';
 import { describe, expect, it } from 'vitest';
 import {
   AppBar,
+  BaselineNote,
+  ChangeBadge,
   Command,
   CommitRef,
   DataTable,
@@ -18,7 +20,10 @@ import {
   Panel,
   PhaseTimeline,
   RecordingGuide,
+  RerunButton,
   RunList,
+  SegmentedControl,
+  Tabs,
   UserChip,
 } from './index';
 
@@ -63,6 +68,33 @@ function cases(s: string): [string, ReactElement][] {
       />,
     ],
     ['PhaseTimeline', <PhaseTimeline key="ph" phases={[{ name: s, seconds: 1 }]} />],
+    [
+      'BaselineNote',
+      <BaselineNote
+        key="b"
+        baseline={{ label: s, id: s, href: '/r', branch: s }}
+        fallback={{ reason: 'branch', branch: s }}
+      />,
+    ],
+    [
+      'BaselineNote detached',
+      <BaselineNote
+        key="bd"
+        baseline={{ label: s, branch: s }}
+        fallback={{ reason: 'detached', commit: s }}
+      />,
+    ],
+    [
+      'ChangeBadge',
+      <ChangeBadge key="cb" change="still-failing" streak={{ runs: 2, since: s }} detail />,
+    ],
+    ['RerunButton', <RerunButton key="rb" nodeids={[`t.py::t[${s}]`]} />],
+    ['RerunButton command', <RerunButton key="rc" nodeids={['t.py::t']} command={s} />],
+    ['Tabs', <Tabs key="t" label={s} tabs={[{ id: 'a', label: s, plugin: s, panel: s }]} />],
+    [
+      'SegmentedControl',
+      <SegmentedControl key="sc" label={s} options={[{ value: s, label: s }]} />,
+    ],
     ['RecordingGuide', <RecordingGuide key="r" project={s} server={s} />],
     [
       'DataTable',

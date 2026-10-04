@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtBytes, fmtNumber, fmtValue } from './format';
+import { capital, fmtBytes, fmtEarlier, fmtNumber, fmtValue } from './format';
 
 describe('fmtValue', () => {
   it('prints a value as its format says, with its unit', () => {
@@ -34,4 +34,27 @@ describe('fmtBytes and fmtNumber', () => {
     expect(fmtNumber(2)).toBe('2');
     expect(fmtNumber(null)).toBe('—');
   });
+});
+
+describe('fmtEarlier', () => {
+  it('says how much earlier in the words a run list uses for times', () => {
+    expect(fmtEarlier(42)).toBe('42 s');
+    expect(fmtEarlier(59.9)).toBe('59 s');
+    expect(fmtEarlier(60)).toBe('1 min');
+    expect(fmtEarlier(2520)).toBe('42 min');
+    expect(fmtEarlier(10840)).toBe('3 h');
+    expect(fmtEarlier(86399)).toBe('23 h');
+    expect(fmtEarlier(190000)).toBe('2 d');
+    expect(fmtEarlier(1500 * 86400)).toBe('1,500 d');
+  });
+
+  it('says under 1 s for less than a second, and for no value', () => {
+    for (const v of [0.4, 0, -3, null, undefined, Number.NaN, Number.POSITIVE_INFINITY])
+      expect(fmtEarlier(v)).toBe('under 1 s');
+  });
+});
+
+it('capitalises the first letter alone', () => {
+  expect(capital('new failure')).toBe('New failure');
+  expect(capital('')).toBe('');
 });

@@ -6,8 +6,9 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { Change, HistoryGridProps, Outcome } from '../contract';
+import type { HistoryGridProps, Outcome } from '../contract';
 import { markRects } from '../Dotline/Dotline';
+import { CHANGES, isChange } from '../lib/changes';
 import { cx } from '../lib/cx';
 import { fmtCount, plural } from '../lib/format';
 import { useOverflowFocus, useUid, useWidth } from '../lib/hooks';
@@ -17,15 +18,6 @@ import { NodeId } from '../NodeId/NodeId';
 
 type HistoryRun = HistoryGridProps['runs'][number];
 type HistoryRowData = HistoryGridProps['rows'][number];
-
-const CHANGE_WORDS: Record<Change, string> = {
-  'new-failure': 'new failure',
-  'still-failing': 'still failing',
-  fixed: 'fixed',
-  'new-test': 'new test',
-  removed: 'removed',
-  'not-reached': 'not reached',
-};
 
 interface Note {
   kind: 'none' | 'failing' | 'flaky' | 'passing';
@@ -140,7 +132,7 @@ function HistoryRow(p: {
   function at(i: number): string {
     const run = runs[i];
     const change = chg[i];
-    const c = outs[i] && change ? `, ${CHANGE_WORDS[change]}` : '';
+    const c = outs[i] && isChange(change) ? `, ${CHANGES[change].word}` : '';
     return `${run?.label || `run ${i + 1}`}${run?.detail ? ` (${visibleText(run.detail)})` : ''}: ${
       outs[i] || 'not in this run'
     }${c}`;

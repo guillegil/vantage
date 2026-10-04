@@ -4,7 +4,9 @@
 import type * as Contract from './contract';
 import {
   AppBar,
+  BaselineNote,
   Button,
+  ChangeBadge,
   Command,
   CommitRef,
   DataTable,
@@ -27,11 +29,14 @@ import {
   PinButton,
   ProjectSwitcher,
   RecordingGuide,
+  RerunButton,
   RetentionTag,
   RoleBadge,
   RunList,
   RunStatus,
+  SegmentedControl,
   SummaryLine,
+  Tabs,
   Time,
   Tooltip,
   UserChip,
@@ -42,7 +47,9 @@ import {
 export const ported: {
   [K in
     | 'AppBar'
+    | 'BaselineNote'
     | 'Button'
+    | 'ChangeBadge'
     | 'Command'
     | 'CommitRef'
     | 'DataTable'
@@ -65,11 +72,14 @@ export const ported: {
     | 'PinButton'
     | 'ProjectSwitcher'
     | 'RecordingGuide'
+    | 'RerunButton'
     | 'RetentionTag'
     | 'RoleBadge'
     | 'RunList'
     | 'RunStatus'
+    | 'SegmentedControl'
     | 'SummaryLine'
+    | 'Tabs'
     | 'Time'
     | 'Tooltip'
     | 'UserChip'
@@ -77,7 +87,9 @@ export const ported: {
     | 'Wordmark']: (typeof Contract)[K];
 } = {
   AppBar,
+  BaselineNote,
   Button,
+  ChangeBadge,
   Command,
   CommitRef,
   DataTable,
@@ -100,11 +112,14 @@ export const ported: {
   PinButton,
   ProjectSwitcher,
   RecordingGuide,
+  RerunButton,
   RetentionTag,
   RoleBadge,
   RunList,
   RunStatus,
+  SegmentedControl,
   SummaryLine,
+  Tabs,
   Time,
   Tooltip,
   UserChip,

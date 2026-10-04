@@ -70,6 +70,23 @@ export function fmtRelative(v: string | Date | null | undefined, now?: string | 
   return fmtAbsolute(v).slice(0, 10);
 }
 
+// How much earlier one run started than another, in the words a run list's times use.
+export function fmtEarlier(s: number | null | undefined): string {
+  if (s == null || !Number.isFinite(s) || s < 1) return 'under 1 s';
+  const t = Math.floor(s);
+  if (t < 60) return `${t} s`;
+  const m = Math.floor(t / 60);
+  if (m < 60) return `${m} min`;
+  const hr = Math.floor(m / 60);
+  if (hr < 24) return `${hr} h`;
+  return `${fmtCount(Math.floor(hr / 24))} d`;
+}
+
+// A word or phrase with its first letter in capitals: "new failure" heads a sentence as "New failure".
+export function capital(t: string): string {
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+
 // Bytes the IEC way, as exports print them: 512 B, 12.3 KiB, 184 MiB.
 export function fmtBytes(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n < 0) return '—';
