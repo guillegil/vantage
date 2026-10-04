@@ -391,6 +391,15 @@ describe('the run page’s queue', () => {
     }
   });
 
+  it('never counts fewer failures than were listed after the detail was read', () => {
+    const pending: RunDetail = {
+      ...COMPARED,
+      comparison: { state: 'pending', baseline: null, counts: null },
+    };
+    expect(queueTotals(pending, 5)).toEqual({ failures: 5 });
+    expect(queueTotals(pending, 2)).toEqual({ failures: 3 });
+  });
+
   it('maps a changed test onto a row, naming the streak’s first run by its label', () => {
     expect(changeRow(CHANGED, ID, BASE)).toEqual({
       nodeid: NODE,

@@ -276,6 +276,18 @@ describe('selection', () => {
     expect(selectedId()).toBe(NF);
   });
 
+  it('names the detail by its node id, hidden characters written as code points', () => {
+    const odd = `test_x.py::test_${String.fromCodePoint(0x202e)}gnp.exe`;
+    queue({
+      results: [{ nodeid: odd, outcome: 'failed', change: 'new-failure', was: 'passed' }],
+      missing: [],
+      renderDetail: detail,
+    });
+    expect(
+      screen.getByRole('region', { name: 'Selected test: test_x.py::test_⟨U+202E⟩gnp.exe' }),
+    ).toBeInTheDocument();
+  });
+
   it('asks the detail to say so when the selected test is not among the rows', () => {
     queue({ selected: 'test_x.py::test_not_loaded', renderDetail: detail });
     expect(selectedId()).toBeNull();
@@ -778,6 +790,69 @@ describe('paged by the server', () => {
       fireEvent.keyDown(row, { key: 'c' });
     });
     expect(writeText).not.toHaveBeenCalled();
+  });
+
+  it('brings a selection loaded past its group’s rows into view, and moves on from it', () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    try {
+      const nf = rows('test_nf.py::test_many', 68, { change: 'new-failure', was: 'passed' });
+      const onSelect = vi.fn();
+      const wanted = nf[55]?.nodeid as string;
+      const { container } = render(
+        <ChangeQueue
+          results={nf}
+          totals={{ 'new-failure': 68 }}
+          baseline={BASE}
+          selected={wanted}
+          onSelect={onSelect}
+          renderDetail={detail}
+        />,
+      );
+      // The group shows its rows down to it, as Show 18 more would, and it is the selected row.
+      expect(screen.getAllByRole('option')).toHaveLength(68);
+      expect(selectedId()).toBe(wanted);
+      expect(container).not.toHaveTextContent('not shown');
+      expect(scroll).toHaveBeenCalledWith({ block: 'nearest' });
+      expect(scroll.mock.contexts.at(-1)).toBe(option(wanted));
+      fireEvent.keyDown(screen.getByRole('listbox'), { key: 'j' });
+      expect(onSelect).toHaveBeenLastCalledWith(
+        expect.objectContaining({ nodeid: nf[56]?.nodeid }),
+      );
+    } finally {
+      Reflect.deleteProperty(Element.prototype, 'scrollIntoView');
+    }
+  });
+
+  it('brings a selection that arrives later into view, a step at a time', () => {
+    const sf = rows('test_sf.py::test_v', 260, { change: 'still-failing', was: 'failed' });
+    const wanted = sf[230]?.nodeid as string;
+    const props = { totals: { 'still-failing': 260 }, baseline: BASE, selected: wanted };
+    const { rerender } = render(<ChangeQueue results={sf.slice(0, 200)} {...props} />);
+    expect(screen.getAllByRole('option')).toHaveLength(50);
+    expect(selectedId()).toBeNull();
+    rerender(<ChangeQueue results={sf} {...props} />);
+    // 50, then 200 more, the step Show more takes.
+    expect(screen.getAllByRole('option')).toHaveLength(250);
+    expect(selectedId()).toBe(wanted);
+  });
+
+  it('opens a closed group holding the selection, once', () => {
+    const { container } = render(
+      <ChangeQueue
+        results={[...P_NF, ...P_REMOVED]}
+        totals={{ 'new-failure': 3, removed: 12 }}
+        baseline={BASE}
+        selected={P_REMOVED[4]?.nodeid}
+      />,
+    );
+    const toggle = screen.getByRole('button', { name: /^Removed tests/ });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(selectedId()).toBe(P_REMOVED[4]?.nodeid);
+    // Closed again by hand, it stays closed.
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(within(container).getAllByRole('option')).toHaveLength(3);
   });
 
   it('calls the missing tests Not reached when only those are counted', () => {

@@ -2,8 +2,7 @@
 // signed in on a closed server, and each test answers what its page asks.
 import { QueryClientProvider } from '@tanstack/react-query';
 import { render } from '@testing-library/react';
-import { createMemoryRouter } from 'react-router';
-import { RouterProvider } from 'react-router/dom';
+import { createMemoryRouter, RouterProvider } from 'react-router';
 import { vi } from 'vitest';
 import { createQueryClient } from '../app/queryClient';
 import { routes } from '../app/router';

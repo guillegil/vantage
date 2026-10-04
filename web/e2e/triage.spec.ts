@@ -331,6 +331,17 @@ test('a compared run’s page opens on its first new failure and works down its 
   await page.keyboard.press('c');
   await expect(queue.locator('.dl-queue__foot')).toHaveText(`Copied pytest ${node('test_breaks')}`);
   await expect.poll(() => clipboard(page)).toBe(`pytest ${node('test_breaks')}`);
+  // c straight after j, with nothing run between them, copies the test j moved to.
+  await page.evaluate(() => {
+    for (const key of ['j', 'c'])
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+  });
+  await expect(queue.locator('.dl-queue__foot')).toHaveText(
+    `Copied pytest ${node('test_arrives_failing')}`,
+  );
+  await expect.poll(() => clipboard(page)).toBe(`pytest ${node('test_arrives_failing')}`);
+  await page.keyboard.press('k');
+  await expect(page).toHaveURL(runAt(runs.second, 'test_breaks'));
 
   // Enter opens its result page; Back comes to the test it left, its heading focused.
   await queue.getByRole('option', { selected: true }).focus();
@@ -350,6 +361,16 @@ test('a compared run’s page opens on its first new failure and works down its 
   await expect(gone).toContainText(`passed in ${a}, not collected in this run`);
   await gone.click();
   await expect(page).toHaveURL(runAt(runs.second, 'test_goes_away'));
+  // The address it wrote opens on it again, its closed group opened, as a shared link would.
+  await page.reload();
+  await expect(detail.getByRole('heading', { level: 2 })).toHaveText(node('test_goes_away'));
+  await expect(queue.getByRole('option', { selected: true })).toContainText('test_goes_away');
+  await expect(queue.getByRole('button', { name: /^Removed tests/ })).toHaveAttribute(
+    'aria-expanded',
+    'true',
+  );
+  await expect(page.getByText(/^This run has no result for/)).toHaveCount(0);
+  await queue.getByRole('option', { selected: true }).focus();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(
     `${CLOSED()}/runs/${runs.first}/result?node_id=${encodeURIComponent(node('test_goes_away'))}`,
@@ -371,6 +392,11 @@ test('a run’s address selects the test it names, changed or not', async ({ pag
   await expect(detail.getByRole('heading', { level: 2 })).toHaveText(node('test_gets_fixed'));
   await expect(detail.locator('.dl-badge--passed')).toHaveText('passed');
   await expect(queue.getByRole('option', { selected: true })).toHaveCount(0);
+  // One the run never reached is among its not-reached tests.
+  await page.goto(runAt(runs.stopped, 'test_after_the_stop'));
+  await expect(detail.getByRole('heading', { level: 2 })).toHaveText(node('test_after_the_stop'));
+  await expect(queue.getByRole('option', { selected: true })).toContainText('test_after_the_stop');
+  await expect(page.getByText(/^This run has no result for/)).toHaveCount(0);
   // One the run lacks is said so, and the page opens on its first change.
   await page.goto(runAt(runs.first, 'test_arrives'));
   await expect(page.getByText(`This run has no result for ${node('test_arrives')}`)).toBeVisible();

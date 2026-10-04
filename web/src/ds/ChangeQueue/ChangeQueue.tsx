@@ -15,6 +15,7 @@ import { cx } from '../lib/cx';
 import { fmtCount, fmtSeconds, plural } from '../lib/format';
 import { useBand, useUid } from '../lib/hooks';
 import { countOutcomes, isFailing, isOutcome, PYTEST_ORDER } from '../lib/outcomes';
+import { visibleText } from '../lib/visible';
 import { NodeId } from '../NodeId/NodeId';
 import { OutcomeMark } from '../OutcomeMark/OutcomeMark';
 import { rerunCommand } from '../RerunButton/RerunButton';
@@ -105,6 +106,9 @@ export function ChangeQueue(p: ChangeQueueProps) {
   const focusDetail = useRef(false);
   const keyRef = useRef<((e: globalThis.KeyboardEvent) => void) | null>(null);
   const lastSel = useRef<string | null | undefined>(undefined);
+  // The last selection brought into view, and how many times showing it opened or grew a group.
+  const [revealed, setRevealed] = useState<{ key: string | null; n: number }>({ key: null, n: 0 });
+  const lastReveal = useRef(0);
 
   // A missing test (removed or not reached) has no outcome here; paged, it comes with the other rows.
   function isGone(r: { change?: Change | null }) {
@@ -226,6 +230,26 @@ export function ChangeQueue(p: ChangeQueueProps) {
   }
   const selKey = p.selected != null ? p.selected : selOwn != null ? selOwn : seq[0]?.key;
   const cur = selKey != null ? (byKey.get(selKey) ?? null) : null;
+  // A selection loaded past the rows its group shows, or in a closed group, as when an address
+  // names it, is brought into view once: the group opens and shows rows, a step at a time, down to
+  // it, as Show more would.
+  if (selKey != null && selKey !== revealed.key) {
+    const g = groups.find((x) => x.matched.some((r) => r.key === selKey));
+    if (g) {
+      const i = g.matched.findIndex((r) => r.key === selKey);
+      const limit = more[g.key] ?? (g.key === 'all' ? allStep : pageSize);
+      const grow = i >= limit;
+      if (g.collapsed) setOpened({ ...opened, [g.key]: true });
+      if (grow) {
+        setMore({
+          ...more,
+          [g.key]:
+            g.step === Infinity ? g.total : limit + Math.ceil((i + 1 - limit) / g.step) * g.step,
+        });
+      }
+      setRevealed({ key: selKey, n: revealed.n + (g.collapsed || grow ? 1 : 0) });
+    }
+  }
   let at = -1;
   seq.forEach((r, i) => {
     if (r.key === selKey) at = i;
@@ -289,11 +313,12 @@ export function ChangeQueue(p: ChangeQueueProps) {
       focusDetail.current = false;
       detailRef.current.focus();
     }
-    // The selected row stays in view as the selection moves, whoever moved it; the first render
-    // leaves the page where it is.
-    if (lastSel.current !== selKey) {
-      const first = lastSel.current === undefined;
+    // The selected row stays in view as the selection moves, whoever moved it, and once a group
+    // opens or grows to show it; the first render leaves the page where it is.
+    if (lastSel.current !== selKey || lastReveal.current !== revealed.n) {
+      const first = lastSel.current === undefined && lastReveal.current === revealed.n;
       lastSel.current = selKey;
+      lastReveal.current = revealed.n;
       const sel = first
         ? null
         : listRef.current?.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
@@ -701,7 +726,7 @@ export function ChangeQueue(p: ChangeQueueProps) {
       className="dl-queue__detail"
       tabIndex={-1}
       role="region"
-      aria-label={cur ? `Selected test: ${cur.nodeid}` : 'Selected test'}
+      aria-label={cur ? `Selected test: ${visibleText(cur.nodeid)}` : 'Selected test'}
       hidden={band === 'single' && pane === 'queue' ? true : undefined}
     >
       {band === 'single' ? (

@@ -1,10 +1,12 @@
-import { type ReactNode, useEffect, useMemo, useState } from 'react';
-import { useOutletContext, useParams, useSearchParams } from 'react-router';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
+import { useNavigate, useOutletContext, useParams, useSearchParams } from 'react-router';
 import {
   baselineNote,
   CHANGE,
   changeRow,
   dotlineLabel,
+  historyHref,
   historyStrip,
   isCompared,
   lineResults,
@@ -39,6 +41,7 @@ import { SAME_PAGE, usePage } from '../app/page';
 import {
   BaselineNote,
   Button,
+  type Change,
   ChangeBadge,
   ChangeQueue,
   type ChangeQueueDetailContext,
@@ -70,6 +73,19 @@ import { NotFoundPage } from './NotFound';
 
 const RUN_ID = /^[0-9a-f]{32}$/;
 
+// A node id no row holds, for a selection that names none: no store holds U+0000.
+const NONE = '\u0000';
+
+// The groups the queue can open on, in its order: removed tests are closed until opened.
+const LEAD: QueueGroup[] = ['new-failure', 'still-failing', 'fixed', 'new-test', 'not-reached'];
+
+// How long the address waits between rewrites. Browsers refuse a page that replaces its address
+// too often (Safari past 100 times in 10 s, Firefox past 200), and a key held down moves the
+// selection up to 25 times a second.
+const ADDRESS_GAP = 350;
+// How long it waits after a browser refused a rewrite all the same.
+const ADDRESS_RETRY = 2000;
+
 function Loading({ children = 'Loading…' }: { children?: string }) {
   return (
     <p className="dl-caption" role="status">
@@ -90,14 +106,19 @@ interface PagedRead {
   isFetching: boolean;
   hasNextPage: boolean;
   isFetchingNextPage: boolean;
+  isFetchNextPageError: boolean;
   fetchNextPage: () => Promise<unknown>;
   refetch: () => Promise<unknown>;
 }
 
-// The next page of a list, or, when not even its first page was read, the first again.
+// The next page of a list. A list never read, or whose reading again failed -- not its next page --
+// is read again from its first; so is one wholly read when more is asked of it, as a run still
+// recording has more than when its list was read.
 function readMore(read: PagedRead): void {
-  if (!read.data) void read.refetch();
-  else if (read.hasNextPage && !read.isFetchingNextPage) void read.fetchNextPage();
+  if (!read.data || (read.isError && !read.isFetchNextPageError)) void read.refetch();
+  else if (read.hasNextPage) {
+    if (!read.isFetchingNextPage) void read.fetchNextPage();
+  } else if (!read.isFetching) void read.refetch();
 }
 
 // Reads every page of a list, one after another, until there are no more or one fails.
@@ -118,9 +139,10 @@ function useQueue(detail: RunDetail) {
   const counts = compared ? comparison.counts : null;
   const baselineId = compared ? comparison.baseline.id : '';
   const failing = detail.counts.failed + detail.counts.error;
-  // Removed tests are closed until opened, so they are read once opened; the whole run, once
-  // its view is.
+  // Removed tests are closed until opened, so they are read once opened, or once the address
+  // names a test the run has no result for; the whole run, once its view is.
   const [removedOpened, setRemovedOpened] = useState(false);
+  const openRemoved = useCallback(() => setRemovedOpened(true), []);
   const [wholeOpened, setWholeOpened] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | 'all'>('all');
   const newFailure = useChanges(runId, 'new_failure', final, !!counts?.new_failure);
@@ -161,6 +183,14 @@ function useQueue(detail: RunDetail) {
       page.items.map((item) => resultQueueRow(item, runId, { position: null, compared: false })),
     );
   }, [compared, runId, baselineId, nfData, sfData, fxData, ntData, rmData, nrData, failuresData]);
+  const totals = queueTotals(detail, compared ? 0 : rows.length);
+  // The queue opens on its first group's first test, the first new failure if any, once that
+  // group's first page is read: never on a later group's test that happened to arrive sooner.
+  // Until then it selects nothing.
+  const lead = (compared ? LEAD : (['failures'] as QueueGroup[])).find((g) => !!totals[g]);
+  const first = lead
+    ? ((compared ? rows.find((r) => r.change === lead) : rows[0])?.nodeid ?? NONE)
+    : undefined;
   // An unfiltered page of the whole run is in stored order, so each row's index is its position.
   const wholeRows = useMemo<TriageRow[]>(
     () =>
@@ -210,6 +240,9 @@ function useQueue(detail: RunDetail) {
     compared,
     groups,
     rows,
+    totals,
+    first,
+    openRemoved,
     wholeRows,
     loading,
     onMore,
@@ -224,7 +257,9 @@ type Queue = ReturnType<typeof useQueue>;
 
 // The test the address names, when no loaded row holds it: /result says whether it changed. A
 // changed test's group is read page by page until it holds the test; one that did not change is
-// shown as a result with no change, outside every group; one the run lacks is not shown at all.
+// shown as a result with no change, outside every group. One the run has no result for may be one
+// its baseline holds, removed or not reached, so those groups are read whole, the removed tests
+// opened, before the page says the run lacks it.
 function useAddressed(detail: RunDetail, queue: Queue, wanted: string | null) {
   const byNode = useMemo(() => {
     const map = new Map<string, TriageRow>();
@@ -236,7 +271,20 @@ function useAddressed(detail: RunDetail, queue: Queue, wanted: string | null) {
   const held = wanted !== null && byNode.has(wanted);
   const lookup = useResult(detail.id, wanted ?? '', isFinal(detail), wanted !== null && !held);
   const found = !held && wanted !== null ? lookup.data : undefined;
-  const missing = !held && wanted !== null && isApiError(lookup.error, 404);
+  const lacks = !held && wanted !== null && isApiError(lookup.error, 404);
+  const seekRemoved = lacks && !!queue.totals.removed;
+  const seekNotReached = lacks && !!queue.totals['not-reached'];
+  const { openRemoved } = queue;
+  useEffect(() => {
+    if (seekRemoved) openRemoved();
+  }, [seekRemoved, openRemoved]);
+  const removed = queue.groups.removed ?? null;
+  const notReached = queue.groups['not-reached'] ?? null;
+  useEveryPage(seekRemoved ? removed : null);
+  useEveryPage(seekNotReached ? notReached : null);
+  const whole = (read: PagedRead | null) => !!read?.data && !read.hasNextPage;
+  const missing =
+    lacks && (!seekRemoved || whole(removed)) && (!seekNotReached || whole(notReached));
   let group: QueueGroup | null = null;
   if (found) {
     if (queue.compared) group = found.change ? CHANGE[found.change] : null;
@@ -266,11 +314,13 @@ function TriageDetail({
   nodeId,
   entry,
   context,
+  leave,
 }: {
   detail: RunDetail;
   nodeId: string;
   entry: TriageRow | undefined;
   context: ChangeQueueDetailContext;
+  leave: (path: string) => void;
 }) {
   // /result is read for a test not loaded yet, for a change its row does not say, and for a
   // failure's evidence; a test the run lacks has no result in it.
@@ -286,7 +336,11 @@ function TriageDetail({
   const readFailed = result.isError && !(isApiError(result.error, 401) && result.data);
   let evidence: ReactNode = null;
   if (!entry || isFailing(outcome)) {
-    if (readFailed)
+    // A test with no row and no result here is one the page is still looking for among those the
+    // run lacks.
+    if (readFailed && !entry && isApiError(result.error, 404))
+      evidence = <Loading>Loading the test…</Loading>;
+    else if (readFailed)
       evidence = isApiError(result.error, 401) ? null : (
         <FailureNotice
           error={result.error}
@@ -317,7 +371,7 @@ function TriageDetail({
             />
           ) : null}
         </div>
-        <TestHistory project={detail.project} nodeId={nodeId} note={!noted} />
+        <TestHistory project={detail.project} nodeId={nodeId} note={!noted} leave={leave} />
       </div>
       {context.command ? (
         <div className="dl-triage__cmd">
@@ -335,18 +389,21 @@ function TriageDetail({
   );
 }
 
-// The test across its project's latest runs, so since when is read without a click.
+// The test across its project's latest runs, so since when is read without a click. Each run
+// opens its result; the strip is a slider, so the history page, which lists each as a link, is
+// linked beside it.
 function TestHistory({
   project,
   nodeId,
   note,
+  leave,
 }: {
   project: string;
   nodeId: string;
   note: boolean;
+  leave: (path: string) => void;
 }) {
   const recent = useRecentHistory(project, nodeId);
-  const go = useGo();
   if (recent.isError && !(isApiError(recent.error, 401) && recent.data)) {
     return isApiError(recent.error, 401) ? null : (
       <FailureNotice error={recent.error} retry={() => recent.refetch()} busy={recent.isFetching} />
@@ -357,13 +414,99 @@ function TestHistory({
     return <p className="dl-caption">{`No run of ${project} has reported this test.`}</p>;
   const strip = historyStrip(recent.data.items, nodeId);
   return (
-    <HistoryGrid
-      stacked
-      runs={strip.runs}
-      rows={[{ nodeid: nodeId, outcomes: strip.outcomes, changes: strip.changes, note }]}
-      onOpen={go}
-    />
+    <>
+      <HistoryGrid
+        stacked
+        runs={strip.runs}
+        rows={[{ nodeid: nodeId, outcomes: strip.outcomes, changes: strip.changes, note }]}
+        onOpen={leave}
+      />
+      <p className="dl-caption">
+        <a className="dl-link" href={historyHref(project, nodeId)}>
+          Full history
+        </a>
+      </p>
+    </>
   );
+}
+
+// The selected test: the page's own state, which moves at once, and the address's node_id, which
+// follows it, so a shared link or Back opens on it. Each rewrite replaces the address, so Back
+// leaves the run rather than walking every move, at most every ADDRESS_GAP ms; a navigation that
+// changes the address all the same, as Back between two of the run's addresses, moves the
+// selection.
+function useSelection() {
+  const [search] = useSearchParams();
+  const navigate = useNavigate();
+  const addressed = search.get('node_id');
+  const [chosen, setChosen] = useState(addressed);
+  const current = useRef(search);
+  // The node id last written to the address, or found there.
+  const wrote = useRef(addressed);
+  // A choice still to be written, its timer, and when the address was last written.
+  const want = useRef<string | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const last = useRef(Number.NEGATIVE_INFINITY);
+  const live = useRef(true);
+
+  useEffect(() => {
+    current.current = search;
+  });
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+      clearTimeout(timer.current);
+    };
+  }, []);
+  useEffect(() => {
+    if (addressed === wrote.current) return;
+    wrote.current = addressed;
+    want.current = null;
+    clearTimeout(timer.current);
+    timer.current = undefined;
+    setChosen(addressed);
+  }, [addressed]);
+
+  const write = useCallback(() => {
+    const node = want.current;
+    clearTimeout(timer.current);
+    timer.current = undefined;
+    if (node === null || !live.current) return;
+    want.current = null;
+    wrote.current = node;
+    last.current = Date.now();
+    const next = new URLSearchParams(current.current);
+    next.set('node_id', node);
+    // A browser past its limit refuses the rewrite, and the navigation's promise says so: the
+    // selection is the page's own, so it stays where it moved, and the address is written later.
+    Promise.resolve(navigate(`?${next}`, { replace: true, state: SAME_PAGE })).catch(() => {
+      if (!live.current || want.current !== null) return;
+      want.current = node;
+      timer.current = setTimeout(write, ADDRESS_RETRY);
+    });
+  }, [navigate]);
+
+  // Applied at once rather than as a transition, so the next key -- c straight after j -- acts on
+  // the test it moved to.
+  const choose = useCallback(
+    (node: string) => {
+      flushSync(() => setChosen(node));
+      want.current = node;
+      if (timer.current !== undefined) return;
+      const wait = last.current + ADDRESS_GAP - Date.now();
+      if (wait <= 0) write();
+      else timer.current = setTimeout(write, wait);
+    },
+    [write],
+  );
+
+  // Writes a choice still waiting, before the page is left, so Back comes to it.
+  const flush = useCallback(() => {
+    if (want.current !== null) write();
+  }, [write]);
+
+  return { chosen, choose, flush };
 }
 
 // The queue's words when the run has no baseline yet; the line above it says why.
@@ -378,21 +521,19 @@ function RunBody({ detail }: { detail: RunDetail }) {
   const head = runHead(detail);
   const finished = isFinal(detail);
   const go = useGo();
-  const [search, setSearch] = useSearchParams();
+  const selection = useSelection();
   const outcomes = useRunOutcomes(detail.id, finished);
   const metadata = useRunMetadata(detail.id, finished);
   const queue = useQueue(detail);
-  const wanted = search.get('node_id');
+  const wanted = selection.chosen;
   const addressed = useAddressed(detail, queue, wanted);
   const c = detail.counts;
   const total = c.passed + c.failed + c.error + c.skipped + c.xfailed + c.xpassed;
   const comparison = detail.comparison;
   const baseline = isCompared(comparison) ? comparison.baseline : null;
 
-  // With nothing in the address, the queue opens on its first row, the first new failure if any:
-  // a removed test is closed until opened, so it is never the first.
-  const first = queue.rows.find((r) => r.change !== 'removed')?.nodeid;
-  const selected = wanted !== null && !addressed.missing ? wanted : first;
+  // With nothing in the address, the queue opens on its first test.
+  const selected = wanted !== null && !addressed.missing ? wanted : queue.first;
   const selectedEntry =
     selected === undefined
       ? undefined
@@ -406,23 +547,28 @@ function RunBody({ detail }: { detail: RunDetail }) {
   const place = useResult(detail.id, selected ?? '', finished, placeUnknown);
   const cursor = selectedEntry?.position ?? (placeUnknown ? place.data?.position : undefined);
 
-  // Each selection replaces the address, so Back leaves the run rather than walking every move.
-  // It is applied at once rather than as a transition, so the next key -- c straight after j --
-  // acts on the test it moved to.
+  // Leaving the page writes the selection still waiting first, so Back comes to it.
+  const { flush, choose } = selection;
+  const leave = useCallback(
+    (path: string) => {
+      flush();
+      go(path);
+    },
+    [flush, go],
+  );
+  useEffect(() => {
+    // Before the client follows a link, as Open result page.
+    document.addEventListener('click', flush, true);
+    return () => document.removeEventListener('click', flush, true);
+  }, [flush]);
   function onSelect(r: { nodeid: string }) {
-    setSearch(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        next.set('node_id', r.nodeid);
-        return next;
-      },
-      { replace: true, state: SAME_PAGE, flushSync: true },
-    );
+    choose(r.nodeid);
   }
-  // A test the run lacks has no result here: its result in the baseline is the one to open.
-  function onOpen(r: { nodeid: string; outcome?: Outcome | null }) {
-    if (!r.outcome && baseline) go(resultHref(baseline.id, r.nodeid));
-    else go(resultHref(detail.id, r.nodeid));
+  // A test the run lacks has no result here: its result in the baseline is the one to open. Any
+  // other is opened here, a test whose row has not arrived yet included.
+  function onOpen(r: { nodeid: string; change?: Change | null }) {
+    const lacked = r.change === 'removed' || r.change === 'not-reached';
+    leave(resultHref(lacked && baseline ? baseline.id : detail.id, r.nodeid));
   }
 
   const list = outcomes.data ? lineResults(outcomes.data.outcomes, outcomes.data.changes) : null;
@@ -490,6 +636,11 @@ function RunBody({ detail }: { detail: RunDetail }) {
 
   const failedRead = queue.failed[0];
   const results: QueueResult[] = addressed.extra ? [addressed.extra, ...queue.rows] : queue.rows;
+  // A run still recording may list more of its results than its detail counted when it was read.
+  const listed = queue.wholeRows.length;
+  const allTotal = queue.outcome === 'all' ? Math.max(total, listed) : total;
+  const allCounts =
+    queue.outcome === 'all' ? c : { ...c, [queue.outcome]: Math.max(c[queue.outcome], listed) };
   const metaCount = metadata.data?.items.length;
   return (
     <>
@@ -522,14 +673,14 @@ function RunBody({ detail }: { detail: RunDetail }) {
           baseline={baseline ? { label: runLabel(baseline.id), href: runHref(baseline.id) } : null}
           baselineNote={pendingNote(detail)}
           interrupted={!!comparison.counts?.not_reached}
-          total={total}
+          total={allTotal}
           running={head.running}
           shortcuts
-          totals={queueTotals(detail)}
+          totals={queue.totals}
           onMore={queue.onMore}
           loading={queue.loading}
           allResults={queue.wholeRows}
-          outcomeCounts={c}
+          outcomeCounts={allCounts}
           outcome={queue.outcome}
           onOutcome={queue.setOutcome}
           selected={selected}
@@ -544,6 +695,7 @@ function RunBody({ detail }: { detail: RunDetail }) {
                 (r.nodeid === wanted ? addressed.entry : undefined)
               }
               context={context}
+              leave={leave}
             />
           )}
         />

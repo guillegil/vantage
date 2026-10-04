@@ -10,4 +10,4 @@ The foot of a cursor-paged list: how many are shown, whether more exist, and a b
 ## Port notes
 
 - Ported one to one: markup, `dl-` classes, words, aria and behaviour. `window.Dotline` and `createElement` become a typed TSX export, checked against `contract.d.ts` by `contract.test-d.ts`.
-- The run page passes `order` *in the order pytest reported them* under a run's results; the runs list and a test's history keep the default, *newest first*.
+- No page passes `order` today: the runs list and a test's history keep the default, *newest first*, and the run page pages its results inside `ChangeQueue`.

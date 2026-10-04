@@ -18,5 +18,5 @@ Tests down, runs across, oldest to newest: the vantage view that answers *since 
 ## Port notes
 
 - Ported one to one: markup, `dl-` classes, words, aria and behaviour. `window.Dotline` and `createElement` become a typed TSX export, checked against `contract.d.ts` by `contract.test-d.ts`.
-- The client gives each run its `href`, the address of the run's result of this test, and follows it with `onOpen` in its router. The history page lists each run as a link, and the result page's strip links to it, so the grid is never the only way to a result. The client passes no `fill`.
+- The client gives each run its `href`, the address of the run's result of this test, and follows it with `onOpen` in its router. The history page lists each run as a link, and the result page's strip and the run page's strip in the selected test's detail each link to it (*Full history*), so the grid is never the only way to a result. The client passes no `fill`.
 - A row's `changes` come from each history entry's `change`, against that entry's own run's baseline.

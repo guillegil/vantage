@@ -253,6 +253,8 @@ function answer(w: World, before?: Handler): Handler {
     }
     if (path === '/projects/firmware/tests/history') {
       const r = w.results.find((x) => x.node === query.get('node_id'));
+      // A test the run lacks ran in its baseline.
+      const g = (w.gone ?? []).find((x) => x.node === query.get('node_id'));
       const items = r
         ? [
             {
@@ -265,7 +267,19 @@ function answer(w: World, before?: Handler): Handler {
               change: r.change ?? null,
             },
           ]
-        : [];
+        : g?.was
+          ? [
+              {
+                run_id: BASE,
+                started_at: '2026-09-27T08:18:00Z',
+                finished_at: '2026-09-27T08:18:05Z',
+                outcome: g.was,
+                duration: 0.25,
+                vcs: null,
+                change: null,
+              },
+            ]
+          : [];
       return json(200, { items, has_more: false, next_cursor: null });
     }
     return undefined;
@@ -377,6 +391,32 @@ describe('the queue', () => {
     await waitFor(() => expect(cursorAt()).toBe(4 - 1.5));
   });
 
+  it('opens on the first new failure once it arrives, never on a later group’s test', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const calls = serve(TRIAGE, (method, path, query, request) => {
+      if (path !== `/runs/${ID}/changes` || query.get('change') !== 'new_failure') return undefined;
+      return held.then(() => answer(TRIAGE)(method, path, query, request) as Response);
+    });
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    await group(/^Still failing/);
+    await group(/^Fixed/);
+    // Nothing is chosen while the first group is on its way, so c copies nothing.
+    expect(selectedOption()).toBeNull();
+    expect(detailRegion()).toHaveTextContent('Choose a test to see its evidence.');
+    fireEvent.keyDown(document.body, { key: 'c' });
+    expect(screen.queryByText(/^Copied/)).toBeNull();
+    expect(calls).not.toContain(`GET /runs/${ID}/result?node_id=${encodeURIComponent(SF)}`);
+    await act(async () => release());
+    expect(await selectedHeading()).toHaveTextContent(NF1);
+    expect(selectedOption()).toHaveTextContent('test_framing_at_921600');
+    await user.keyboard('c');
+    expect(await screen.findByText(/^Copied/)).toHaveTextContent(`Copied pytest ${NF1}`);
+  });
+
   it('moves with j and k, writing the address in place, and keeps focus where it is', async () => {
     serve(TRIAGE);
     const user = userEvent.setup();
@@ -417,6 +457,61 @@ describe('the queue', () => {
     document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
     expect(selectedOption()).toHaveTextContent('test_rail_ripple');
     errors.mockRestore();
+  });
+
+  it('moves at once however fast it moves, writing the address at a measured pace', async () => {
+    serve(TRIAGE);
+    const { router } = renderAt(`/runs/${ID}`);
+    await selectedHeading();
+    await group(/^New tests/);
+    const replaced = vi.spyOn(router, 'navigate');
+    // A browser past its limit refuses the first rewrite outright.
+    replaced.mockImplementationOnce(() =>
+      Promise.reject(
+        new DOMException('Too many calls to Location or History APIs', 'SecurityError'),
+      ),
+    );
+    for (let i = 0; i < 4; i++) {
+      document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', bubbles: true }));
+    }
+    // Each press moved the selection, refused rewrite or not.
+    expect(selectedOption()).toHaveTextContent('test_settle_time');
+    expect(await selectedHeading()).toHaveTextContent(NT);
+    // Four moves, two rewrites: the first, refused, then the last once the pace allows.
+    await waitFor(() =>
+      expect(router.state.location.search).toBe(`?node_id=${encodeURIComponent(NT)}`),
+    );
+    expect(replaced).toHaveBeenCalledTimes(2);
+    expect(router.state.historyAction).toBe('REPLACE');
+  });
+
+  it('writes a move still waiting into the address before it opens a result', async () => {
+    serve(TRIAGE);
+    const user = userEvent.setup();
+    const { router } = renderAt(`/runs/${ID}`);
+    await selectedHeading();
+    await group(/^New tests/);
+    await user.keyboard('j');
+    await user.keyboard('j');
+    await user.keyboard('j');
+    await user.click(within(detailRegion()).getByRole('link', { name: 'Open result page' }));
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/runs/${ID}/result`));
+    expect(router.state.location.search).toBe(`?node_id=${encodeURIComponent(FX)}`);
+    await act(() => router.navigate(-1));
+    await waitFor(() =>
+      expect(router.state.location.search).toBe(`?node_id=${encodeURIComponent(FX)}`),
+    );
+    expect(await selectedHeading()).toHaveTextContent(FX);
+  });
+
+  it('follows the address when a navigation changes it', async () => {
+    serve(TRIAGE);
+    const { router } = renderAt(`/runs/${ID}`);
+    await selectedHeading();
+    await act(() => router.navigate(`/runs/${ID}?node_id=${encodeURIComponent(FX)}`));
+    expect(await selectedHeading()).toHaveTextContent(FX);
+    await act(() => router.navigate(-1));
+    expect(await selectedHeading()).toHaveTextContent(NF1);
   });
 
   it('copies the selected test’s rerun command with c', async () => {
@@ -481,6 +576,73 @@ describe('the queue', () => {
     expect(detail).toHaveTextContent(`E AssertionError: ${NF1} broke`);
   });
 
+  it('keeps the strip’s note for screen readers for a test still failing', async () => {
+    serve(TRIAGE);
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    await selectedHeading();
+    await user.click(await screen.findByRole('option', { name: /test_rail_under_load/ }));
+    expect(await selectedHeading()).toHaveTextContent(SF);
+    const detail = detailRegion();
+    await waitFor(() => expect(detail.querySelector('.dl-hgrid__note')).not.toBeNull());
+    expect(detail.querySelector('.dl-hgrid__note')).toHaveClass('dl-sr');
+  });
+
+  it('links the test’s full history beside its strip, a removed test’s too', async () => {
+    serve(TRIAGE);
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    await selectedHeading();
+    expect(
+      await within(detailRegion()).findByRole('link', { name: 'Full history' }),
+    ).toHaveAttribute('href', `/p/firmware/tests/history?node_id=${encodeURIComponent(NF1)}`);
+    await user.click(screen.getByRole('button', { name: /Removed tests/ }));
+    await user.click(await screen.findByRole('option', { name: /test_framing_at_4800/ }));
+    expect(await selectedHeading()).toHaveTextContent(GONE);
+    // The slider is not the only way to its runs' results: the history page lists each as a link.
+    expect(await within(detailRegion()).findByRole('slider')).toBeInTheDocument();
+    expect(within(detailRegion()).getByRole('link', { name: 'Full history' })).toHaveAttribute(
+      'href',
+      `/p/firmware/tests/history?node_id=${encodeURIComponent(GONE)}`,
+    );
+  });
+
+  it('shows and copies a rerun command holding no hidden character', async () => {
+    const odd = `tests/test_x.py::test_hostile[${RLO}gnp.exe]`;
+    const shown = `pytest $'tests/test_x.py::test_hostile[\\342\\200\\256gnp.exe]'`;
+    serve({ results: [{ node: odd, outcome: 'failed', change: 'new_failure', was: 'passed' }] });
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    expect(await selectedHeading()).toHaveTextContent(
+      'tests/test_x.py::test_hostile[U+202Egnp.exe]',
+    );
+    const detail = detailRegion();
+    expect(detail).toHaveAccessibleName(
+      'Selected test: tests/test_x.py::test_hostile[⟨U+202E⟩gnp.exe]',
+    );
+    const cmd = detail.querySelector('.dl-triage__cmd') as HTMLElement;
+    expect(cmd.querySelector('.dl-cmd__text')).toHaveTextContent(shown);
+    expect(cmd.querySelector('.dl-rerun__tip')).toHaveTextContent(shown);
+    expect(cmd.textContent).not.toContain(RLO);
+    await user.keyboard('c');
+    await waitFor(async () => expect(await navigator.clipboard.readText()).toBe(shown));
+    const foot = document.querySelector('.dl-queue__foot') as HTMLElement;
+    expect(foot).toHaveTextContent(`Copied ${shown}`);
+    expect(foot.textContent).not.toContain(RLO);
+  });
+
+  it('never lets a node id read as an option in its rerun command', async () => {
+    const odd = '--basetemp=.git';
+    serve({ results: [{ node: odd, outcome: 'failed', change: 'new_failure', was: 'passed' }] });
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    expect(await selectedHeading()).toHaveTextContent(odd);
+    await user.keyboard('c');
+    await waitFor(async () =>
+      expect(await navigator.clipboard.readText()).toBe('pytest ./--basetemp=.git'),
+    );
+  });
+
   it('shows a fixed test without evidence, its change from its row', async () => {
     const calls = serve(TRIAGE);
     const user = userEvent.setup();
@@ -531,8 +693,41 @@ describe('the queue', () => {
     );
     expect(await within(detailRegion()).findByText(/3 runs/)).toBeInTheDocument();
     expect(detailRegion()).toHaveTextContent('Still failing: 3 runs, since 1ad93e49');
-    // Its place comes from its index in the unfiltered whole run.
-    expect(cursorAt()).not.toBeNull();
+    // Its place comes from its index in the unfiltered whole run, across its pages: 251 results
+    // on a 320px line are 4 to a mark.
+    await waitFor(() => expect(cursorAt()).toBe(Math.floor(220 / 4) * 4 - 1.5));
+  });
+
+  it('places a row of the whole run filtered by outcome where /result says', async () => {
+    const X1 = 'tests/test_x.py::test_lucky_one';
+    const X2 = 'tests/test_x.py::test_lucky_two';
+    const world: World = {
+      results: [
+        { node: PASS, outcome: 'passed' },
+        { node: NF1, outcome: 'failed', change: 'new_failure', was: 'passed' },
+        { node: 'tests/test_p.py::test_two', outcome: 'passed' },
+        { node: X1, outcome: 'xpassed' },
+        { node: 'tests/test_p.py::test_four', outcome: 'passed' },
+        { node: X2, outcome: 'xpassed' },
+        { node: 'tests/test_p.py::test_six', outcome: 'passed' },
+      ],
+    };
+    const calls = serve(world);
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    await selectedHeading();
+    await user.click(screen.getByRole('button', { name: 'All 7 results' }));
+    await user.click(await screen.findByRole('radio', { name: 'xpassed 2' }));
+    await waitFor(() =>
+      expect(calls).toContain(`GET /runs/${ID}/results?limit=200&offset=0&outcome=xpassed`),
+    );
+    const all = await screen.findByRole('listbox', { name: 'Results' });
+    await user.click(await within(all).findByRole('option', { name: /test_lucky_two/ }));
+    // Its index in the filtered list is not its place in the run; /result's position is.
+    await waitFor(() =>
+      expect(calls).toContain(`GET /runs/${ID}/result?node_id=${encodeURIComponent(X2)}`),
+    );
+    await waitFor(() => expect(cursorAt()).toBe(5 * 4 - 1.5));
   });
 
   it('puts the metadata under the queue, closed, titled with its key count', async () => {
@@ -562,6 +757,27 @@ describe('the rerun of the new failures', () => {
     await user.click(button);
     await waitFor(async () =>
       expect(await navigator.clipboard.readText()).toBe(`pytest ${NF1} ${NF2}`),
+    );
+  });
+
+  it('shows the button busy until the few new failures are read', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    serve(TRIAGE, (method, path, query, request) => {
+      if (path !== `/runs/${ID}/changes` || query.get('change') !== 'new_failure') return undefined;
+      return held.then(() => answer(TRIAGE)(method, path, query, request) as Response);
+    });
+    renderAt(`/runs/${ID}`);
+    const busy = await screen.findByRole('button', { name: /Copy rerun of 2 new failures/ });
+    expect(busy).toHaveAttribute('aria-busy', 'true');
+    expect(busy.closest('.dl-runhead__base')).not.toBeNull();
+    await act(async () => release());
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Copy rerun of 2 new failures/ }),
+      ).not.toHaveAttribute('aria-busy'),
     );
   });
 
@@ -628,11 +844,110 @@ describe('an address naming a test', () => {
       expect(calls).toContain(`GET /runs/${ID}/changes?change=still_failing&limit=200&offset=200`),
     );
     expect(detailRegion()).toHaveTextContent('Still failing: 4 runs, since 1ad93e49');
-    // Loaded, it is past the rows the group shows; shown, it is the selected row.
-    expect(selectedOption()).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Show 200 more' }));
+    // Loaded past the rows its group shows, the group shows rows down to it, and j goes on from it.
     await waitFor(() => expect(selectedOption()).toHaveTextContent('test_still[230]'));
     expect(router.state.location.search).toBe(`?node_id=${encodeURIComponent(late)}`);
+    await user.keyboard('j');
+    expect(selectedOption()).toHaveTextContent('test_still[231]');
+    await waitFor(() =>
+      expect(router.state.location.search).toBe(
+        `?node_id=${encodeURIComponent('tests/test_a.py::test_still[231]')}`,
+      ),
+    );
+  });
+
+  it('reads a failure’s list page by page until it holds the test, in a run not compared', async () => {
+    const world: World = {
+      results: [
+        { node: PASS, outcome: 'passed' },
+        ...many('tests/test_a.py::test_bad', 250, { outcome: 'failed' }),
+      ],
+      state: 'none',
+    };
+    const late = 'tests/test_a.py::test_bad[230]';
+    const calls = serve(world);
+    renderAt(`/runs/${ID}?node_id=${encodeURIComponent(late)}`);
+    expect(await selectedHeading()).toHaveTextContent(late);
+    await waitFor(() =>
+      expect(calls).toContain(
+        `GET /runs/${ID}/results?limit=200&offset=200&outcome=failed&outcome=error`,
+      ),
+    );
+    await waitFor(() => expect(selectedOption()).toHaveTextContent('test_bad[230]'));
+    expect(screen.getByRole('listbox', { name: /^Failures/ })).toContainElement(
+      selectedOption() as HTMLElement,
+    );
+  });
+
+  it('selects a removed test the address names, opening its group', async () => {
+    const calls = serve(TRIAGE);
+    renderAt(`/runs/${ID}?node_id=${encodeURIComponent(GONE)}`);
+    expect(await selectedHeading()).toHaveTextContent(GONE);
+    await waitFor(() => expect(selectedOption()).toHaveTextContent('test_framing_at_4800'));
+    expect(calls).toContain(`GET /runs/${ID}/changes?change=removed&limit=200&offset=0`);
+    expect(screen.getByRole('button', { name: /Removed tests/ })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+    expect(detailRegion()).toHaveTextContent(
+      'Removed: passed in 1adf29af, not collected in this run',
+    );
+    expect(screen.queryByText(/^This run has no result for/)).toBeNull();
+  });
+
+  it('selects a not-reached test the address names, past its group’s first page', async () => {
+    const gone = Array.from({ length: 250 }, (_, i) => ({
+      node: `tests/test_r.py::test_late[${String(i).padStart(3, '0')}]`,
+      was: 'passed' as const,
+    }));
+    const wanted = 'tests/test_r.py::test_late[230]';
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const world: World = {
+      results: TRIAGE.results,
+      gone,
+      missing: 'not_reached',
+      run: {
+        interrupted: true,
+        interrupt_reason: 'KeyboardInterrupt',
+        presentation: 'interrupted',
+      },
+    };
+    const calls = serve(world, (method, path, query, request) => {
+      if (path !== `/runs/${ID}/changes` || query.get('change') !== 'not_reached') return undefined;
+      return held.then(() => answer(world)(method, path, query, request) as Response);
+    });
+    renderAt(`/runs/${ID}?node_id=${encodeURIComponent(wanted)}`);
+    // /result has no result for it, yet until its group is read the page says nothing of that.
+    await waitFor(() =>
+      expect(calls).toContain(`GET /runs/${ID}/result?node_id=${encodeURIComponent(wanted)}`),
+    );
+    expect(await selectedHeading()).toHaveTextContent(wanted);
+    expect(await within(detailRegion()).findByText('Loading the test…')).toBeInTheDocument();
+    expect(screen.queryByText(/^This run has no result for/)).toBeNull();
+    await act(async () => release());
+    await waitFor(() =>
+      expect(calls).toContain(`GET /runs/${ID}/changes?change=not_reached&limit=200&offset=200`),
+    );
+    await waitFor(() => expect(selectedOption()).toHaveTextContent('test_late[230]'));
+    expect(detailRegion()).toHaveTextContent('Not reached: passed in 1adf29af');
+    expect(screen.queryByText(/^This run has no result for/)).toBeNull();
+  });
+
+  it('opens this run’s result with Enter for a test whose row has not arrived yet', async () => {
+    serve(TRIAGE, (_m, path, query) =>
+      path === `/runs/${ID}/result` && query.get('node_id') === PASS
+        ? new Promise<Response>(() => undefined)
+        : undefined,
+    );
+    const { router } = renderAt(`/runs/${ID}?node_id=${encodeURIComponent(PASS)}`);
+    expect(await selectedHeading()).toHaveTextContent(PASS);
+    const listbox = await group(/^New failures/);
+    fireEvent.keyDown(listbox, { key: 'Enter' });
+    await waitFor(() => expect(router.state.location.pathname).toBe(`/runs/${ID}/result`));
+    expect(router.state.location.search).toBe(`?node_id=${encodeURIComponent(PASS)}`);
   });
 
   it('shows a test that did not change as a result, with no row selected', async () => {
@@ -729,6 +1044,106 @@ describe('states', () => {
     expect(await group(/^Failures/)).toBeInTheDocument();
     expect(await selectedHeading()).toHaveTextContent(NF1);
     expect(screen.getByText('1 failure so far')).toBeInTheDocument();
+  });
+
+  it('counts the failures listed after its detail was read, never fewer', async () => {
+    serve({
+      results: [
+        { node: PASS, outcome: 'passed' },
+        { node: NF1, outcome: 'failed' },
+        { node: NF2, outcome: 'failed' },
+        { node: SF, outcome: 'error' },
+      ],
+      state: 'pending',
+      // Read before the last two failures arrived.
+      run: {
+        presentation: 'running',
+        counts: { passed: 1, failed: 1, error: 0, skipped: 0, xfailed: 0, xpassed: 0 },
+      },
+    });
+    renderAt(`/runs/${ID}`);
+    const failures = await group(/^Failures/);
+    await waitFor(() => expect(within(failures).getAllByRole('option')).toHaveLength(3));
+    expect(document.querySelector('.dl-queue__ghead')).toHaveTextContent('Failures3');
+    expect(screen.queryByText(/not shown/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Show/ })).toBeNull();
+    expect(screen.getByText('3 failures so far')).toBeInTheDocument();
+    // So does the whole run, filtered or not.
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'All 2 results' }));
+    const all = await screen.findByRole('listbox', { name: 'Results' });
+    await waitFor(() => expect(within(all).getAllByRole('option')).toHaveLength(4));
+    expect(document.querySelector('.dl-queue__title')).toHaveTextContent('4 results');
+    expect(screen.queryByText(/not shown/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Show/ })).toBeNull();
+    await user.click(screen.getByRole('radio', { name: 'failed 1' }));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole('listbox', { name: 'Results' })).getAllByRole('option'),
+      ).toHaveLength(2),
+    );
+    expect(screen.queryByText(/not shown/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /^Show/ })).toBeNull();
+  });
+
+  it('reads a list again when its total says there is more than it read', async () => {
+    const world: World = {
+      results: [
+        { node: NF1, outcome: 'failed' },
+        { node: NF2, outcome: 'failed' },
+        { node: SF, outcome: 'error' },
+      ],
+      state: 'pending',
+      run: { presentation: 'running' },
+    };
+    // Its first answer was read before the last two failures arrived, as a list kept from earlier.
+    let reads = 0;
+    serve(world, (_m, path) => {
+      if (path !== `/runs/${ID}/results` || reads++ > 0) return undefined;
+      return json(200, { items: [], has_more: false });
+    });
+    const user = userEvent.setup();
+    renderAt(`/runs/${ID}`);
+    await user.click(await screen.findByRole('button', { name: 'Show 3' }));
+    const failures = await group(/^Failures/);
+    await waitFor(() => expect(within(failures).getAllByRole('option')).toHaveLength(3));
+    expect(reads).toBe(2);
+  });
+
+  it('tries again a list it failed to read afresh', async () => {
+    let broken = false;
+    const calls = serve(
+      {
+        results: [
+          { node: NF1, outcome: 'error' },
+          { node: PASS, outcome: 'passed' },
+        ],
+        state: 'pending',
+      },
+      (_m, path) =>
+        broken && path === `/runs/${ID}/results` ? refuse(500, 'internal_error', 'No.') : undefined,
+    );
+    const user = userEvent.setup();
+    const { queryClient } = renderAt(`/runs/${ID}`);
+    expect(await selectedHeading()).toHaveTextContent(NF1);
+    broken = true;
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ['run', ID, 'results'] });
+    });
+    const notice = await screen.findByText('The server answered 500', {}, { timeout: 4000 });
+    // What it read before stays.
+    expect(await group(/^Failures/)).toBeInTheDocument();
+    broken = false;
+    const before = calls.filter((c) => c.startsWith(`GET /runs/${ID}/results`)).length;
+    await user.click(
+      within(notice.closest('.dl-notice') as HTMLElement).getByRole('button', {
+        name: 'Try again',
+      }),
+    );
+    await waitFor(() => expect(screen.queryByText('The server answered 500')).toBeNull(), {
+      timeout: 4000,
+    });
+    expect(calls.filter((c) => c.startsWith(`GET /runs/${ID}/results`)).length).toBe(before + 1);
   });
 
   it('lists the failures of an abandoned run, which was not compared', async () => {

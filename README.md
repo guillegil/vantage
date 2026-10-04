@@ -766,7 +766,10 @@ project you had open last, or of `default`.
   end was recorded.* when it was abandoned. A compared run with new
   failures ends that line with a button copying the `pytest` command that
   reruns them all (past 20, it downloads their node ids as
-  `new-failures.txt` for `pytest @new-failures.txt` instead).
+  `new-failures.txt` for `pytest @new-failures.txt` instead; the file
+  starts with a `--` line, so any options go before `@new-failures.txt`,
+  and it leaves out, and says so, a node id holding a line break, which
+  pytest would read as two).
   - **The queue** groups the tests that changed in the order to work
     through them: new failures, still failing (with how many runs in a row
     and since which), fixed, new tests, then the removed tests, closed until
@@ -779,10 +782,11 @@ project you had open last, or of `default`.
     and more on request; the filter box narrows either list by node id,
     among the tests loaded so far.
   - **The chosen test**, the queue's first when the page opens (its first
-    new failure, if it has one): its outcome, how it changed and against
-    which run, its latest runs in the project, the command that reruns it,
-    a link to its result page, and, for a failure, everything recorded
-    about why, as on its result page.
+    new failure, if it has one, once it has arrived): its outcome, how it
+    changed and against which run, its latest runs in the project with a
+    link to its full history, the command that reruns it, a link to its
+    result page, and, for a failure, everything recorded about why, as on
+    its result page.
   - **Keys**, while no text field, menu or dialog has focus: `j` and `k`
     move through the queue, `c` copies the chosen test's rerun command and
     `/` goes to the filter. Once the queue has focus, the arrow keys, Home
@@ -791,10 +795,13 @@ project you had open last, or of `default`.
     the queue and the chosen test take turns, and Enter shows the test.
   - The chosen test is in the address (`/runs/<id>?node_id=...`), so the
     address can be shared; moving through the queue does not add to the
-    browser's history, so Back leaves the run. An address naming a test
-    that did not change shows it with nothing in the queue chosen; one
-    naming a test the run does not hold says so and opens on the queue's
-    first test.
+    browser's history, so Back leaves the run, and while a key held down
+    moves it the address follows a moment behind. An address naming a
+    test the queue holds opens on it, its group opened and shown down to
+    it, a removed or not-reached test included; one naming a test that did
+    not change shows it with nothing in the queue chosen; one naming a
+    test neither the run nor its baseline holds says so and opens on the
+    queue's first test.
 
   A run with an exit status never changes, so what the page read of it once
   it had one is kept; an abandoned one is read again, since `vantage push`
@@ -822,7 +829,12 @@ project you had open last, or of `default`.
   a zero-width space, or the U+FFFD the server stores for U+0000, shows as
   its code point (`U+202E`) in node ids, failure text, branches, commit
   subjects, metadata and interrupt reasons, so none reads as something
-  else.
+  else. A rerun command writes such a character, and every control
+  character, as escaped bytes in `$'…'` (`$'…[\342\200\256gnp.exe]'`), so
+  what it shows is what it copies and nothing in it acts as it is pasted,
+  and gives a node id starting with `-` or `@` as `./…`, so pytest never
+  reads one as an option or a file of arguments. bash, zsh and ksh read
+  `$'…'`; a shell that does not takes it as a test that is not there.
 - **A test's history** in a project, newest first, fifty at a time: each
   run's outcome, commit, start and duration, each opening that run's
   result, under the same line of marks, change marks included, and

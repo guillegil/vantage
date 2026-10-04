@@ -1406,28 +1406,48 @@ character that reorders text moves the words around it.
 the selected test, paged by the server. The queue is given each group's
 total (`queueTotals`: `comparison.counts`, or failed plus error for a run
 not compared) and the rows read so far, and asks for more through
-`onMore`. A group is read from `/changes?change=`, 200 at a time
+`onMore`. A run still recording lists results that arrived after its
+detail was read, so its failures' total, and the whole run's, is never
+fewer than the list holds, and asking for more of a list wholly read reads
+it again. A group is read from `/changes?change=`, 200 at a time
 (`useChanges`), only once its total is not zero, the removed tests only
-once their group is opened; a run with no baseline reads its failures from
+once their group is opened or the address names a test the run has no
+result for; a run with no baseline reads its failures from
 `/results?outcome=failed&outcome=error`, and the whole-run view reads
-`/results` with its outcome filter, each 200 at a time. Like every read of
+`/results` with its outcome filter, each 200 at a time. *Try again* on a
+list whose reading afresh failed reads it from its first page; on one
+whose next page failed, that page. Like every read of
 a run, each is keyed by whether the run was final. Every page of new
 failures is read before the rerun button under the baseline sentence is
 offered, since it names every one. A row's change, earlier outcome and
 streak come from `/changes`; a test from the whole run, or one the address
 names that no loaded row holds, takes them from `/result`, never from the
 line's change characters, which hold nothing for a test the run lacks. The
-selection is the address's `node_id`: a changed test it names has its
-group read page by page until the group holds it, an unchanged one is
-shown with no row selected, its cursor on the line from `/result`'s
-`position`, and one the run lacks gets a notice while the page opens on
-the queue's first row. Each selection replaces the address, so Back leaves
-the run, and is applied with `flushSync`, which only the DOM build's
-`RouterProvider` (`react-router/dom`) carries out, so a key pressed
-straight after a move acts on the test it moved to. That replacement
-carries `SAME_PAGE` as its state, which `usePage` takes as staying on the
-page, leaving focus where it is; every other navigation, Back included,
-focuses the page's heading.
+page opens on the first row of the first group with a total, once that
+group's first page is read, and selects nothing until then, so no later
+group's test that arrived sooner is shown or copied. The selection starts
+as the address's `node_id`: a changed test it names has its group read
+page by page until the group holds it, and the queue opens the group and
+shows rows down to it; an unchanged one is shown with no row selected,
+its cursor on the line from `/result`'s `position`; for one `/result` has
+no result for, the removed and not-reached groups are read whole, the
+removed opened, and only a test neither holds gets a notice while the
+page opens on the queue's first row. The selection is the page's own
+state, set with `flushSync` so a key pressed straight after a move acts on
+the test it moved to, and the address follows it: each rewrite replaces
+the address, so Back leaves the run, at most every 350 ms, since browsers
+refuse a page that replaces its address too often (Safari past 100 times
+in 10 s, Firefox past 200) and a held key moves 25 times a second. A
+refused rewrite rejects the router's promise, which the page catches,
+trying again two seconds later; the selection moved regardless. A rewrite
+still waiting is written before the page is left, by Enter, by the
+history strip or by a link click (a capturing listener on the document,
+ahead of the client's link routing), so Back comes to the test chosen
+last; a navigation that changes the address all the same, as Back between
+two of the run's addresses, moves the selection. Each rewrite carries
+`SAME_PAGE` as its state, which `usePage` takes as staying on the page,
+leaving focus where it is; every other navigation, Back included, focuses
+the page's heading.
 
 **Links** are the design system's plain `<a href>`, which keep middle-click
 and copying the address. One click listener on the document routes a plain
@@ -1447,9 +1467,18 @@ recorded path or exception type), `CommitRef`, `MetaList` and `RunStatus`'s
 recorded reason use it, and so does `BaselineNote` for the branches and
 commit it names. Where recorded
 text becomes a plain string -- a tooltip, the window's title, the history
-slider's name and readout -- `visibleText` writes it as `⟨U+202E⟩`. So a
-right-to-left override can never make a node id or a traceback read as
-something else; *Copy* still copies the text as recorded.
+slider's name and readout, the triage detail's accessible name --
+`visibleText` writes it as `⟨U+202E⟩`. So a right-to-left override can
+never make a node id or a traceback read as something else; *Copy* still
+copies the text as recorded. A rerun command (`RerunButton`'s
+`rerunCommand`, which the queue's `c` uses too) is the exception, since
+it is pasted into a shell: a node id holding a control character or one
+`visible` marks is written `$'…'`, each such character as its UTF-8
+bytes in octal escapes, so the command shows and copies only what a
+terminal prints, and a node id starting with `-` or `@` is given as `./…`,
+so pytest never reads it as an option or as a file of arguments. The file
+for `pytest @file` starts with a `--` line, gives node ids the same way,
+and leaves out one holding a line break, which pytest would split.
 
 ### Build, packaging and CI
 
